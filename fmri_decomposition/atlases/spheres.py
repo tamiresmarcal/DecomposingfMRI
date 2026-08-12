@@ -17,8 +17,24 @@ from .registry import AtlasSpec
 
 REQUIRED_CSV_COLUMNS = {"network", "x", "y", "z"}
 
+#: Filename of the coordinate table shipped with the package.
+BUNDLED_CSV = "mni_space_of_networks.csv"
 
-def load_coordinate_table(csv_path: str | Path) -> pd.DataFrame:
+
+def bundled_csv_path() -> Path:
+    """Path to the packaged coordinate table.
+
+    Unlike Harvard-Oxford and Yeo, this atlas has no fetcher behind it -- the
+    CSV *is* the parcellation. Shipping it as package data is what lets
+    `get_atlas("networks")` work from the name alone, like the other two.
+    """
+    from importlib.resources import files
+
+    return Path(str(files("fmri_decomposition.atlases") / "data" / BUNDLED_CSV))
+
+
+def load_coordinate_table(csv_path: str | Path | None = None) -> pd.DataFrame:
+    csv_path = bundled_csv_path() if csv_path is None else Path(csv_path)
     df = pd.read_csv(csv_path)
     df.columns = [c.strip() for c in df.columns]
     missing = REQUIRED_CSV_COLUMNS - set(df.columns)
@@ -31,7 +47,8 @@ def load_coordinate_table(csv_path: str | Path) -> pd.DataFrame:
     return df
 
 
-def coordinate_networks(csv_path: str | Path, aggregate: str = "network",
+def coordinate_networks(csv_path: str | Path | None = None,
+                        aggregate: str = "network",
                         radius_mm: float = 5.0) -> AtlasSpec:
     """Build a sphere atlas from a coordinate table.
 
@@ -42,7 +59,8 @@ def coordinate_networks(csv_path: str | Path, aggregate: str = "network",
     """
     if aggregate not in ("network", "node"):
         raise ValueError(f"aggregate must be 'network' or 'node', got {aggregate!r}")
-    df = load_coordinate_table(csv_path)
+    resolved = bundled_csv_path() if csv_path is None else Path(csv_path)
+    df = load_coordinate_table(resolved)
     seeds = df[["x", "y", "z"]].to_numpy(dtype=float)
 
     if aggregate == "network":
@@ -57,6 +75,14 @@ def coordinate_networks(csv_path: str | Path, aggregate: str = "network",
                 if "name" in df.columns else n)
             for n in networks
         }
+        # Provenance travels with the atlas. The description column carries the
+        # citation each network was defined from; dropping it here would mean a
+        # reader of meta/atlas-networks_labels.csv has no way back to the source.
+        desc = {
+            n: (str(df.loc[df["network"] == n, "description"].iloc[0])
+                if "description" in df.columns else "")
+            for n in networks
+        }
         table = pd.DataFrame(
             {
                 "index": np.arange(1, len(networks) + 1),
@@ -68,6 +94,7 @@ def coordinate_networks(csv_path: str | Path, aggregate: str = "network",
                 "network": networks,
                 "n_seeds": [int((seed_group == i).sum()) for i in range(len(networks))],
                 "full_name": [full[n] for n in networks],
+                "description": [desc[n] for n in networks],
             }
         )
         name = "networks"
@@ -84,6 +111,10 @@ def coordinate_networks(csv_path: str | Path, aggregate: str = "network",
                 "y": seeds[:, 1],
                 "z": seeds[:, 2],
                 "network": df["network"].to_numpy(),
+                "full_name": (df["name"].to_numpy() if "name" in df.columns
+                              else df["network"].to_numpy()),
+                "description": (df["description"].astype(str).to_numpy()
+                                if "description" in df.columns else ""),
             }
         )
         name = "networks_nodes"
@@ -96,9 +127,17 @@ def coordinate_networks(csv_path: str | Path, aggregate: str = "network",
         seed_group=seed_group,
         radius_mm=radius_mm,
         provenance={
-            "source_csv": str(csv_path),
+            "source_csv": str(resolved),
+            "bundled": csv_path is None,
             "aggregate": aggregate,
             "radius_mm": radius_mm,
             "n_seeds": int(len(df)),
+            "n_networks": int(df["network"].nunique()),
+            # The coordinates are MNI peaks from the source publications. The
+            # template caveat bites hardest here: a 5 mm sphere is small enough
+            # that the few-mm NLin6/NLin2009c offset matters, and many of these
+            # seeds sit in subcortex where the offset is largest.
+            "coordinate_space": "MNI",
+            "template_mismatch_accepted": True,
         },
     )
