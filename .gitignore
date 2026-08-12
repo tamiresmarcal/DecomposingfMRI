@@ -6,6 +6,17 @@ __pycache__/
 # C extensions
 *.so
 
+# Specific files from this project
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.fixture/
+.nilearn_data/
+slurm_logs/
+outputs/
+
 # Distribution / packaging
 .Python
 build/
