@@ -28,6 +28,11 @@ fmri-decomp = "fmri_decomposition.cli:main"
 [tool.setuptools.packages.find]
 include = ["fmri_decomposition*"]
 
+[tool.setuptools.package-data]
+# The coordinate atlas has no fetcher: the CSV is the parcellation, so it must
+# survive installation or get_atlas("networks") breaks off a checkout.
+"fmri_decomposition.atlases" = ["data/*.csv"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"

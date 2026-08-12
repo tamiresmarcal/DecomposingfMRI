@@ -96,6 +96,25 @@ df = read_shard(path)      # one leaf, partition keys restored as columns
 Every file also carries `cohort`, `task`, `sub`, `atlas` in its parquet
 key-value metadata, so a shard opened by hand is still self-identifying.
 
+### The coordinate atlas ships with the package
+
+`atlases/data/mni_space_of_networks.csv` is package data, not a test file:
+Harvard-Oxford and Yeo are fetched by nilearn from a name, but this atlas has no
+fetcher — the CSV *is* the parcellation. Bundling it is what lets it satisfy the
+same registry contract as the other two:
+
+```python
+get_atlas("networks")                    # 14 networks, 91 edges
+get_atlas("networks_nodes")              # 254 nodes, 32,131 edges -> packed storage
+get_atlas("networks", csv_path=my_csv)   # override with your own coordinates
+```
+
+The `description` column (the citation each network was defined from) is carried
+through to `meta/atlas-networks_labels.csv` rather than dropped at load, so the
+outputs stay traceable to their source. Note the template caveat applies most
+sharply here: a 5 mm sphere is small enough that the few-mm NLin6/NLin2009c
+offset matters, and many seeds sit in subcortex where it is largest.
+
 ### Reading it
 
 ```python
