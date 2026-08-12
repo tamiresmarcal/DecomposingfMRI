@@ -4,7 +4,9 @@ import pytest
 
 from fmri_decomposition.atlases.labels import SUB_DROP, plan_harvard_oxford_merge
 from fmri_decomposition.atlases.registry import AtlasSpec, clean_name, get_atlas
-from fmri_decomposition.atlases.spheres import coordinate_networks
+from fmri_decomposition.atlases.spheres import (bundled_csv_path,
+                                                 coordinate_networks,
+                                                 load_coordinate_table)
 
 nib = pytest.importorskip("nibabel")
 
@@ -155,17 +157,44 @@ class TestSpheres:
         assert spec.n_nodes == 3
         assert spec.labels["hemi"].tolist() == ["L", "R", "B"]
 
-    def test_real_coordinate_file_gives_14_networks_and_254_nodes(self):
-        import pathlib
+    def test_bundled_csv_is_installed_and_readable(self):
+        """The atlas ships with the package; no path argument required."""
+        assert bundled_csv_path().exists()
+        assert len(load_coordinate_table()) == 254
 
-        csv = pathlib.Path(__file__).parent / "data" / "mni_space_of_networks.csv"
-        if not csv.exists():
-            pytest.skip("real coordinate CSV not vendored into tests/data")
-        net = coordinate_networks(csv, aggregate="network")
-        node = coordinate_networks(csv, aggregate="node")
+    def test_bundled_atlas_gives_14_networks_and_254_nodes(self):
+        net = coordinate_networks()                       # no csv_path
+        node = coordinate_networks(aggregate="node")
         assert net.n_nodes == 14 and net.n_edges == 91
         assert node.n_nodes == 254
         assert node.n_edges == 32_131
+
+    def test_registry_resolves_networks_from_the_name_alone(self):
+        """The whole point of bundling: same contract as harvardoxford and yeo7."""
+        spec = get_atlas("networks")
+        assert spec.n_nodes == 14
+        assert spec.provenance["bundled"] is True
+        assert spec.provenance["n_networks"] == 14
+
+    def test_node_level_crosses_the_packed_edge_threshold(self):
+        from fmri_decomposition.io import edge_storage_mode
+
+        assert edge_storage_mode(coordinate_networks(aggregate="node").n_edges) == "list"
+
+    def test_description_survives_into_the_label_table(self, tmp_path):
+        """Provenance must reach meta/atlas-networks_labels.csv, not stop at load."""
+        spec = coordinate_networks()
+        assert "description" in spec.labels.columns
+        tbl = pd.read_csv(spec.write_labels(tmp_path / "atlas-networks_labels.csv"))
+        assert {"full_name", "description", "n_seeds"} <= set(tbl.columns)
+        am = tbl.loc[tbl["name"] == "AM", "description"].iloc[0]
+        assert "Spreng" in am and len(am) > 50
+
+    def test_coordinate_space_is_recorded(self):
+        """A 5 mm sphere is small enough that the template offset matters."""
+        prov = coordinate_networks().provenance
+        assert prov["coordinate_space"] == "MNI"
+        assert prov["radius_mm"] == 5.0
 
     def test_aggregate_must_be_valid(self, tmp_path):
         csv = tmp_path / "c.csv"
