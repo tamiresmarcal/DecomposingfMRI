@@ -1,0 +1,97 @@
+# Real-subjects config for ds002837 -- the Naturalistic Neuroimaging Database
+# (NNDb v2.0), 86 subjects each watching one of 10 full-length films.
+# https://openneuro.org/datasets/ds002837  /  https://github.com/OpenNeuroDatasets/ds002837
+#
+# Facts baked in below were confirmed against the dataset repo and its README,
+# not guessed:
+#   - TR = 1.0 s (4x multiband, Aliko et al. 2021, Sci Data)
+#   - derivatives/sub-*/func/ has ONE file per subject per task already --
+#     afni_proc.py concatenates that subject's 2-6 runs into one 4D volume, so
+#     there is no run-01/02/03 entity left to discover. That also means
+#     stimulus_time_s == time_s (t * TR) is correct as-is: `identity` timing,
+#     not an assumption we're settling for.
+#   - "*_bold_no_blur_no_censor.nii.gz" is the variant to use for ROI/parcel
+#     analysis: the dataset README says explicitly the *blurred* variant
+#     "should not be used for ROI-based analyses", and *_no_censor keeps
+#     censored frames in place (zeros are not removed) so this pipeline's own
+#     censor_glob + dilate_tr does the scrubbing, on the same footing as the
+#     synthetic fixture in run_tests.sh.
+#   - nuisance regression (motion, polort 2 detrend, 0.01-1 Hz bandpass) is
+#     already baked into that residual file by afni_proc.py -- hence
+#     filtering.already_applied and confounds.strategy: none below.
+#   - the censor file lives in a sibling `regressors/` dir, not next to the
+#     bold file in `func/` -- see confounds.censor_glob's `../regressors/...`.
+#
+# What you MUST still do before this validates cleanly:
+#   1. Set derivatives_root below to wherever you put the dataset's
+#      `derivatives/` directory on disk.
+#   2. Point `participants` at config/ds002837_participants.csv (already
+#      generated from the dataset's own participants.tsv sub-1..86 -> task
+#      mapping) -- or your own copy if you're tracking exclusions.
+#   3. Decide whether the guessed `mask_glob` (an EPI-space brain mask under
+#      anat/) is actually the mask you want -- process_run raises loudly on a
+#      shape mismatch, so a wrong guess here fails fast rather than silently.
+
+cohort: ds002837
+tr: 1.0
+derivatives_root: /path/to/ds002837/derivatives   # TODO: point at real data
+output_root: /path/to/ds002837/outputs            # TODO: pick a real output dir
+space: MNI152NLin2009cAsym   # AFNI's MNI152_2009_template_SSW -- see README's
+                             # template caveat for the sphere-based "networks" atlas
+participants: config/ds002837_participants.csv
+
+atlases: [harvardoxford, yeo7, networks]
+
+discovery:
+  backend: glob
+  bold_glob: "sub-*/func/sub-*_task-*_bold_no_blur_no_censor.nii.gz"
+  mask_glob: "../anat/sub-{sub}_t1w_mask_epi_anat.nii.gz"
+  # Start with one movie -- 20 subjects, matches the README's own example.
+  # Broaden to all ten once this runs clean:
+  #   [500daysofsummer, citizenfour, theusualsuspects, pulpfiction,
+  #    theshawshankredemption, theprestige, backtothefuture, split,
+  #    littlemisssunshine, 12yearsaslave]
+  include_tasks: [500daysofsummer]
+
+confounds:
+  format: none              # nuisance regression already applied upstream
+  strategy: none
+  censor_glob: "../regressors/sub-*_task-*_censored_timepoints.1D"
+  dilate_tr: 1
+
+filtering:
+  already_applied: true     # afni_proc.py: -regress_polort 2 -regress_bandpass 0.01 1
+  bandpass: [0.01, 1.0]
+  detrend: false
+  standardize: false
+
+runs:
+  mode: concat               # matches the on-disk reality: 1 file per sub/task already
+
+trim:
+  column: null                # no extra-scan-time column in participants.tsv
+
+stimulus:
+  # Left empty on purpose: NNDb runs are not identical length across subjects
+  # (2-6 runs each, "stopped in 40-50 min intervals"), and this pipeline
+  # already has a real fallback for that -- dfc.py uses each file's own
+  # observed duration when no fixed value is configured here. That means:
+  #   - `fmri-decomp validate` will report ONE warning ("no stimulus duration
+  #     for task '500daysofsummer'") -- expected, not a bug.
+  #   - `fmri-decomp extract` needs --no-strict on this cohort as a result
+  #     (see run instructions below).
+  #   - `fmri-decomp dfc` needs nothing extra; it derives duration per file.
+  durations_s: {}
+  timing_source: identity
+  unit_of_analysis: run
+
+windows:
+  sizes_s: [30, 60, 120, 300]
+  n_overlaps: 5
+  drop_incomplete: true
+
+# --- how to run --------------------------------------------------------
+#   fmri-decomp validate config/ds002837.yaml
+#   fmri-decomp extract  config/ds002837.yaml --n-jobs 4 --no-strict
+#   fmri-decomp dfc      config/ds002837.yaml --n-jobs 4
+#   fmri-decomp diagnose config/ds002837.yaml
