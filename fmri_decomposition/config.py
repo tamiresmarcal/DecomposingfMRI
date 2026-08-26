@@ -33,10 +33,31 @@ class DiscoveryConfig:
 @dataclass
 class ConfoundsConfig:
     format: str = "none"                  # none | afni_1D | fmriprep_tsv
-    strategy: str = "none"                # none | 24hmp | custom column list
+    strategy: str = "none"                # none | 24hmp | custom (use `columns`)
     columns: list[str] = field(default_factory=list)
+    confounds_glob: str | None = None     # fMRIPrep *_desc-confounds_timeseries.tsv
     censor_glob: str | None = None        # AFNI censored_timepoints.1D
     dilate_tr: int = 1                    # addendum §3: dilate censor mask by +/-1 TR
+    # Frame censoring derived from a confounds column rather than a censor file.
+    # AFNI-preprocessed cohorts ship an explicit 1D censor; fMRIPrep ones do not
+    # -- they ship framewise displacement and leave the threshold to the user.
+    # Without this, an fMRIPrep cohort silently gets no censoring at all, which
+    # is precisely the zero-filling bias stage 3 is built to avoid.
+    fd_column: str = "framewise_displacement"
+    fd_threshold: float | None = None     # mm; None disables FD-based censoring
+
+    def __post_init__(self) -> None:
+        if self.strategy not in ("none", "24hmp", "custom"):
+            raise ConfigError(
+                f"confounds.strategy must be 'none', '24hmp' or 'custom', got "
+                f"{self.strategy!r}"
+            )
+        if self.strategy == "custom" and not self.columns:
+            raise ConfigError("confounds.strategy='custom' requires confounds.columns")
+        if self.fd_threshold is not None and self.fd_threshold <= 0:
+            raise ConfigError(
+                f"confounds.fd_threshold must be positive, got {self.fd_threshold!r}"
+            )
 
 
 @dataclass

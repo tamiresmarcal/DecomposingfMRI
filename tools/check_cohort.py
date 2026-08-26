@@ -66,14 +66,14 @@ def _load(cfg_path: str):
 
 
 def _refs(cfg):
-    from fmri_decomposition.cli import _attach_censor
+    from fmri_decomposition.cli import _attach_censor, _attach_confounds
     from fmri_decomposition.cohort import (attach_participants, discover_runs,
                                            load_participants)
 
     refs = discover_runs(cfg)
     if cfg.participants is not None and Path(cfg.participants).exists():
         refs = attach_participants(refs, load_participants(cfg), cfg)
-    return _attach_censor(cfg, refs)
+    return _attach_confounds(cfg, _attach_censor(cfg, refs))
 
 
 def _atlases(cfg):
