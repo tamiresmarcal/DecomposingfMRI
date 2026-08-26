@@ -91,28 +91,19 @@ windows:
   drop_incomplete: true
 
 # --- participants CSV -------------------------------------------------
-# The loader requires: participant_id, sub, cohort, task, excluded,
-# exclusion_reason -- one row per (sub, task) pair you intend to analyse.
-# CNeuroMod has 6 subjects and many episodes, so generate it rather than
-# typing it. With derivatives_root set, this writes a CSV covering exactly
-# what discovery finds:
+# Not shipped with the repo, deliberately: unlike ds002837 (where each of the
+# 86 subjects watched exactly one film, a published constant), which CNeuroMod
+# episodes exist is a property of YOUR copy of an incrementally released
+# dataset. Generate it from what discovery actually finds:
 #
-#   python - <<'PY'
-#   import csv
-#   from fmri_decomposition.config import load_config
-#   from fmri_decomposition.cohort import discover_runs
-#   cfg = load_config("config/cneuromod_friends.yaml")
-#   rows = {(r.sub, r.task) for r in discover_runs(cfg)}
-#   with open("config/cneuromod_participants.csv", "w", newline="") as fh:
-#       w = csv.writer(fh)
-#       w.writerow(["participant_id","sub","cohort","task","excluded","exclusion_reason"])
-#       for sub, task in sorted(rows):
-#           w.writerow([f"sub-{sub}", sub, "cneuromod", task, False, ""])
-#   PY
+#   python tools/make_participants.py config/cneuromod_friends.yaml \
+#       -o config/cneuromod_friends_participants.csv
 #
-# Note this records everything on disk as analysable. Real exclusions must be
-# edited in by hand -- and RECORDED as excluded=True with a reason, never by
-# deleting the row, or the validator cannot tell curation from an oversight.
+# Then set `participants:` above to that ABSOLUTE path.
+#
+# Every generated row is excluded=False. Edit real exclusions in by hand as
+# excluded=True WITH a reason -- never by deleting the row, or the validator
+# can no longer tell a curation decision from an oversight.
 
 # --- how to run -------------------------------------------------------
 #   python tools/check_cohort.py config/cneuromod_friends.yaml
