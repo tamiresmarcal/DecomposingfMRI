@@ -3,9 +3,16 @@
 #
 # Facts checked against the CNeuroMod docs rather than assumed:
 #   - TR = 1.49 s (3T Siemens Prisma Fit).
-#   - fMRIPrep layout is sub-*/ses-*/func/, and the volumetric outputs carry
-#     space-MNI152NLin2009cAsym with desc-preproc_bold / desc-brain_mask, plus
-#     a desc-confounds_timeseries.tsv sidecar per run.
+#   - The derivatives are a SEPARATE datalad dataset, not a subdirectory of
+#     `friends`: install courtois-neuromod/friends.fmriprep alongside it. The
+#     docs' phrasing ("under the folder of each dataset ... derivatives/
+#     fmriprep") describes the logical layout, not how it is distributed --
+#     `friends` itself declares only a `stimuli` subdataset.
+#   - Inside friends.fmriprep, sub-01..sub-06 sit at the REPO ROOT, so
+#     derivatives_root points at that clone directly. Layout below it is
+#     sub-*/ses-*/func/, with space-MNI152NLin2009cAsym desc-preproc_bold /
+#     desc-brain_mask and a desc-confounds_timeseries.tsv sidecar per run.
+#     Verified against sub-01/ses-001/func in the published repo.
 #   - friends is one task per episode segment: task-s01e01a, s01e01b, ...
 #     A subject watches many episodes across many sessions, so unlike
 #     ds002837 this cohort really does use both `ses` and `task`.
@@ -35,7 +42,7 @@
 
 cohort: cneuromod
 tr: 1.49
-derivatives_root: /path/to/cneuromod/friends/derivatives/fmriprep   # TODO
+derivatives_root: /path/to/cohorts/cneuromod/friends.fmriprep       # TODO
 output_root: /path/to/cneuromod/outputs                             # TODO
 space: MNI152NLin2009cAsym
 participants: null      # TODO: path to a participants CSV, or leave null
