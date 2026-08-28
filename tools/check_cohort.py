@@ -214,32 +214,44 @@ def check_outputs(cfg, atlas_names) -> bool:
         if not files:
             print(f"[{WARN}] atlas {atlas!r}: no shards under {root} -- run `extract` first")
             continue
-        t = pq.read_table(files[0])
-        df = t.to_pandas()
+        # ParquetFile reads the file's OWN schema. pq.read_table() and the
+        # dataset API may ADD hive partition keys as columns on some pyarrow
+        # versions, which would make this check report a leak that is not in
+        # the file at all -- the opposite of what it exists to catch.
+        pf = pq.ParquetFile(files[0])
+        schema = pf.schema_arrow
+        file_cols = list(schema.names)
+        df = pf.read().to_pandas()
         print(f"  atlas {atlas!r}: {len(files)} shard(s); first has "
-              f"{len(df)} rows x {len(df.columns)} cols")
+              f"{len(df)} rows x {len(file_cols)} cols")
 
-        missing = [c for c in META_COLUMNS if c not in df.columns]
+        missing = [c for c in META_COLUMNS if c not in file_cols]
         if missing:
             print(f"[{BAD}]   missing contract column(s): {missing}")
             ok = False
         else:
             print(f"[{OK}]   all {len(META_COLUMNS)} contract columns present")
 
-        leaked = [k for k in PARTITION_KEYS["activation"] if k in df.columns]
+        leaked = [k for k in PARTITION_KEYS["activation"] if k in file_cols]
         if leaked:
-            print(f"[{BAD}]   partition key(s) duplicated as columns: {leaked}")
-            print("        pyarrow infers sub=01 as int32, which destroys "
-                  "leading zeros and Cam-CAN ids like CC110033.")
+            print(f"[{BAD}]   partition key(s) written into the file as columns: "
+                  f"{leaked}")
+            print("        pyarrow reads sub=01 as int32, which collides with the "
+                  "string column and destroys leading zeros and ids like CC110033.")
             ok = False
         else:
             print(f"[{OK}]   partition keys carried by the path only")
+            inferred = [k for k in PARTITION_KEYS["activation"]
+                        if k in pq.read_table(files[0]).schema.names]
+            if inferred:
+                print(f"           (this pyarrow adds {inferred} at READ time from "
+                      f"the path -- expected, and not stored in the file)")
 
         stray = list(Path(root).rglob("*.tmp.*"))
         if stray:
             print(f"[{WARN}]   {len(stray)} stray .tmp file(s) from killed workers")
 
-        meta = {k.decode(): v.decode() for k, v in (t.schema.metadata or {}).items()}
+        meta = {k.decode(): v.decode() for k, v in (schema.metadata or {}).items()}
         for key in ("atlas", "cohort", "task", "sub", "tr"):
             if key not in meta:
                 print(f"[{WARN}]   shard metadata missing {key!r}")
@@ -248,7 +260,7 @@ def check_outputs(cfg, atlas_names) -> bool:
                   f"{cfg.tr} -- outputs are stale")
             ok = False
 
-        nan_cols = [c for c in df.columns if c not in META_COLUMNS
+        nan_cols = [c for c in file_cols if c in df.columns and c not in META_COLUMNS
                     and df[c].dtype.kind == "f" and df[c].isna().all()]
         if nan_cols:
             print(f"[{WARN}]   {len(nan_cols)} all-NaN parcel column(s) "
