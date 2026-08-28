@@ -19,9 +19,26 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p slurm_logs
 
 echo "== validating config and cohort before burning any core-hours"
-VALIDATE_OUT="$(python -m fmri_decomposition.cli validate "$CONFIG")" || {
-  echo "$VALIDATE_OUT"; exit 1; }
-echo "$VALIDATE_OUT"
+EXTRA_EXTRACT=()
+if VALIDATE_OUT="$(python -m fmri_decomposition.cli validate "$CONFIG" 2>&1)"; then
+  echo "$VALIDATE_OUT"
+else
+  # Exit 1 from `validate` means it found problems, not that it crashed. The
+  # commonest is "no stimulus duration for task X", which is expected on every
+  # cohort whose runs differ in length -- dfc.py falls back to each file's own
+  # observed duration. That must not abort the chain; it must switch extract to
+  # --no-strict, which is exactly what a human would do by hand.
+  echo "$VALIDATE_OUT"
+  echo
+  echo "   validate reported problem(s) above."
+  echo "   Adding --no-strict to stage 2 so they warn instead of aborting."
+  echo "   Read them first: --no-strict is right for a missing stimulus"
+  echo "   duration, and WRONG for a participants/disk mismatch you did not"
+  echo "   intend."
+  read -r -p "   continue with --no-strict? [y/N] " reply
+  [[ "$reply" == [yY]* ]] || { echo "   aborted."; exit 1; }
+  EXTRA_EXTRACT=(--no-strict)
+fi
 
 # ---------------------------------------------------------------- sizing ---
 # The unit of stage-2 work is one (bold file x atlas) pair, so the job count is
@@ -54,7 +71,7 @@ fi
 
 echo "== stage 2: ${N_EXTRACT} array task(s)"
 EXTRACT_ID=$(sbatch --parsable --array=0-$((N_EXTRACT - 1)) \
-  "$HERE/01_extract.sbatch" "$CONFIG")
+  "$HERE/01_extract.sbatch" "$CONFIG" ${EXTRA_EXTRACT[@]+"${EXTRA_EXTRACT[@]}"})
 echo "   jobid ${EXTRACT_ID}"
 
 echo "== finalize stage 2 (manifest merge + diagnostics + ISC gate)"

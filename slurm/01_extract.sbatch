@@ -21,7 +21,14 @@
 
 set -euo pipefail
 
-CONFIG="${1:?usage: sbatch 01_extract.sbatch <config.yaml>}"
+CONFIG="${1:?usage: sbatch 01_extract.sbatch <config.yaml> [extra cli args]}"
+shift || true
+# Anything after the config is forwarded to `fmri-decomp extract`. The one you
+# will almost always need is --no-strict: a cohort with no fixed
+# stimulus.durations_s (ds002837 and cneuromod both, since run lengths differ
+# per subject) reports a validation problem, and strict mode makes that fatal.
+# Without it the whole array dies on the first line of every task.
+EXTRA=("$@")
 
 # --cpus-per-task, not --ntasks. joblib/loky forks inside ONE task and can only
 # see that task's cores; --ntasks=30 asks the scheduler for 30 independent tasks
@@ -36,7 +43,20 @@ export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 
 # Keep the atlas cache off $HOME: it is small-file heavy and quota-limited.
+# Compute nodes have no outbound network, so the atlases MUST already be
+# cached or every task dies on a fetch timeout. Prefer an existing cache over
+# a path that merely looks tidy.
+if [[ -z "${NILEARN_DATA:-}" ]]; then
+  for _c in "$HOME/nilearn_data" "${SCRATCH:-}/nilearn_data" "$PWD/nilearn_data"; do
+    [[ -d "$_c" ]] && { NILEARN_DATA="$_c"; break; }
+  done
+fi
 export NILEARN_DATA="${NILEARN_DATA:-${SCRATCH:-$PWD}/nilearn_data}"
+if [[ ! -d "$NILEARN_DATA" ]]; then
+  echo "WARNING: no atlas cache at $NILEARN_DATA -- built-in atlases are fetched" >&2
+  echo "         over the network, which compute nodes usually cannot reach." >&2
+  echo "         Pre-fetch on a login node first. See README." >&2
+fi
 
 SHARD_INDEX="${SLURM_ARRAY_TASK_ID:-0}"
 SHARD_COUNT="${SLURM_ARRAY_TASK_COUNT:-1}"
@@ -48,16 +68,24 @@ echo "config=${CONFIG}"
 # (Alliance wheels are prebuilt and faster than conda); the container path is
 # kept for parity with the legacy pipeline.
 if [[ -n "${FMRIDECOMP_SIF:-}" ]]; then
-  module load apptainer/1.3.5
-  RUN=(apptainer exec "${FMRIDECOMP_SIF}" python)
+  # No version pin: clusters retire apptainer releases, and a pinned load that
+  # no longer exists fails every array task at once.
+  module load apptainer 2>/dev/null || module load apptainer/1.3.5
+  # Binds are NOT optional. A container sees only what is bound into it, so
+  # without these the compute node reports "no such file" for data and outputs
+  # that plainly exist on the login node. FMRIDECOMP_BINDS can add more.
+  BINDS="${FMRIDECOMP_BINDS:-/project,/scratch,/home}"
+  RUN=(apptainer exec --bind "${BINDS}" --pwd "${PWD}" "${FMRIDECOMP_SIF}" python)
 else
   module load python/3.11 scipy-stack
   source "${FMRIDECOMP_VENV:-$HOME/venvs/fmridecomp}/bin/activate"
   RUN=(python)
 fi
 
+echo "extra args: ${EXTRA[*]:-(none)}"
 "${RUN[@]}" -m fmri_decomposition.cli extract "${CONFIG}" \
     --shard "${SHARD_INDEX}/${SHARD_COUNT}" \
-    --n-jobs "${N_JOBS}"
+    --n-jobs "${N_JOBS}" \
+    ${EXTRA[@]+"${EXTRA[@]}"}
 
 echo "shard ${SHARD_INDEX} done"
