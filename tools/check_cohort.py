@@ -142,11 +142,25 @@ def check_tr(cfg, refs, limit: int | None) -> bool:
 
     bad, unset, checked = [], [], 0
     for r in subset:
+        bold = Path(r.bold)
+        if bold.is_symlink() and not bold.exists():
+            # A datalad/git-annex pointer whose content was never fetched.
+            # Distinguishing this from a genuinely missing file matters: the
+            # fix is `datalad get <path>`, not a config correction.
+            print(f"[{BAD}] {bold.name}")
+            print(f"        is an unresolved git-annex symlink -- the file is "
+                  f"registered but its content is not downloaded.")
+            print(f"        Fix (outside the container, where datalad lives):")
+            print(f"          cd {bold.parents[3]}")
+            print(f"          datalad get {bold.relative_to(bold.parents[3])}")
+            print(f"        Or restrict this check to the runs you have fetched, "
+                  f"e.g. --limit 2.")
+            return False
         try:
-            hdr = nib.load(str(r.bold)).header
+            hdr = nib.load(str(bold)).header
             hdr_tr = float(hdr.get_zooms()[3])
         except Exception as exc:                                  # noqa: BLE001
-            print(f"[{BAD}] cannot read header for {Path(r.bold).name}: "
+            print(f"[{BAD}] cannot read header for {bold.name}: "
                   f"{type(exc).__name__}: {exc}")
             return False
         checked += 1
