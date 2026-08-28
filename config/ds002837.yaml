@@ -22,23 +22,27 @@
 #   - the censor file lives in a sibling `regressors/` dir, not next to the
 #     bold file in `func/` -- see confounds.censor_glob's `../regressors/...`.
 #
-# What you MUST still do before this validates cleanly:
-#   1. Set derivatives_root below to wherever you put the dataset's
-#      `derivatives/` directory on disk.
-#   2. Point `participants` at config/ds002837_participants.csv (already
-#      generated from the dataset's own participants.tsv sub-1..86 -> task
-#      mapping) -- or your own copy if you're tracking exclusions.
-#   3. Decide whether the guessed `mask_glob` (an EPI-space brain mask under
-#      anat/) is actually the mask you want -- process_run raises loudly on a
-#      shape mismatch, so a wrong guess here fails fast rather than silently.
+# PATHS ARE ABSOLUTE AND SITE-SPECIFIC (Alliance/nibi, rpp-aevans-ab). They
+# are committed rather than left as placeholders so the config works straight
+# out of a clone on that cluster; anywhere else, the three paths below are the
+# only lines that need changing.
+#
+# Verified against the real data (2026-08): discovery finds 20 subjects for
+# 500daysofsummer, mask_glob matches sub-*/anat/sub-*_t1w_mask_epi_anat.nii.gz,
+# and censor_glob matches the sibling regressors/ directory.
+#
+# Note on the TR check: NNDb omits RepetitionTime from its task JSON, and the
+# NIfTI headers carry a bare 1.0 -- which is also nibabel's unset default. So
+# `check_cohort.py` WARNS rather than confirming here, by design. The 1.0s is
+# from the paper, not from the files.
 
 cohort: ds002837
 tr: 1.0
-derivatives_root: /path/to/ds002837/derivatives   # TODO: point at real data
-output_root: /path/to/ds002837/outputs            # TODO: pick a real output dir
+derivatives_root: /project/6008063/tamires/cohorts/ds002837/derivatives
+output_root: /project/6008063/tamires/DecomposingfMRI/outputs
 space: MNI152NLin2009cAsym   # AFNI's MNI152_2009_template_SSW -- see README's
                              # template caveat for the sphere-based "networks" atlas
-participants: config/ds002837_participants.csv
+participants: /project/6008063/tamires/DecomposingfMRI/config/ds002837_participants.csv
 
 atlases: [harvardoxford, yeo7, networks]
 

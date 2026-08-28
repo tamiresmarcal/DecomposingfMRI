@@ -33,19 +33,31 @@
 # uncleaned timeseries, which is the failure mode this comment exists to
 # prevent.
 #
-# TODO before running:
-#   1. derivatives_root -> your fmriprep output dir (ABSOLUTE path).
-#   2. output_root      -> ABSOLUTE path.
-#   3. Write a participants CSV (see the note at the bottom) and point
-#      `participants` at it, or delete the key to skip the join entirely.
-#   4. Decide include_tasks -- the default below is two episodes, for a pilot.
+# PATHS ARE ABSOLUTE AND SITE-SPECIFIC (Alliance/nibi, rpp-aevans-ab), and
+# committed rather than left as placeholders. Elsewhere, change the three
+# paths below and nothing else.
+#
+# derivatives_root points at the friends.fmriprep clone, whose sub-01..06 sit
+# at its ROOT -- it is a sibling datalad dataset, not a subdirectory of
+# `friends`. Content is fetched per file: `datalad get <path>` from OUTSIDE
+# the container (datalad is not in the image). An unfetched file is a dangling
+# annex symlink, which check_cohort.py names explicitly.
+#
+# include_tasks is one episode, for a pilot. Verified against the real data
+# (2026-08): both sub-01 and sub-02 have s01e02a under ses-001, the TR check
+# genuinely confirms 1.49s from the headers, and leaves land as
+# task=s01e02a/sub=01/ses-001.parquet.
+#
+# output_root is deliberately the SAME as every other cohort's: the `cohort=`
+# key separates them inside one tree, which is what makes "one atlas, one
+# window size, every cohort" a single directory to read.
 
 cohort: cneuromod
 tr: 1.49
-derivatives_root: /path/to/cohorts/cneuromod/friends.fmriprep       # TODO
-output_root: /path/to/cneuromod/outputs                             # TODO
+derivatives_root: /project/6008063/tamires/cohorts/cneuromod/friends.fmriprep
+output_root: /project/6008063/tamires/DecomposingfMRI/outputs
 space: MNI152NLin2009cAsym
-participants: null      # TODO: path to a participants CSV, or leave null
+participants: /project/6008063/tamires/DecomposingfMRI/config/cneuromod_friends_participants.csv
 
 atlases: [harvardoxford, yeo7, networks]
 
@@ -55,7 +67,7 @@ discovery:
   bold_glob: "sub-*/ses-*/func/sub-*_task-*_space-MNI152NLin2009cAsym_desc-preproc_bold.nii.gz"
   mask_glob: "sub-{sub}_*task-{task}_*space-MNI152NLin2009cAsym_desc-brain_mask.nii.gz"
   # Start small. Broaden once a pilot runs clean.
-  include_tasks: [s01e01a, s01e01b]
+  include_tasks: [s01e02a]
 
 confounds:
   format: fmriprep_tsv
