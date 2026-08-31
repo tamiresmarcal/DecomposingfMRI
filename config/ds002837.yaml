@@ -27,9 +27,10 @@
 # out of a clone on that cluster; anywhere else, the three paths below are the
 # only lines that need changing.
 #
-# Verified against the real data (2026-08): discovery finds 20 subjects for
-# 500daysofsummer, mask_glob matches sub-*/anat/sub-*_t1w_mask_epi_anat.nii.gz,
-# and censor_glob matches the sibling regressors/ directory.
+# Verified against the real data (2026-08): mask_glob matches
+# sub-*/anat/sub-*_t1w_mask_epi_anat.nii.gz, and discovery finds all 86
+# subjects across the 10 films (20 of them for 500daysofsummer, which is what
+# the first pilot ran on).
 #
 # Note on the TR check: NNDb omits RepetitionTime from its task JSON, and the
 # NIfTI headers carry a bare 1.0 -- which is also nibabel's unset default. So
@@ -50,12 +51,21 @@ discovery:
   backend: glob
   bold_glob: "sub-*/func/sub-*_task-*_bold_no_blur_no_censor.nii.gz"
   mask_glob: "../anat/sub-{sub}_t1w_mask_epi_anat.nii.gz"
-  # Start with one movie -- 20 subjects, matches the README's own example.
-  # Broaden to all ten once this runs clean:
-  #   [500daysofsummer, citizenfour, theusualsuspects, pulpfiction,
-  #    theshawshankredemption, theprestige, backtothefuture, split,
-  #    littlemisssunshine, 12yearsaslave]
-  include_tasks: [500daysofsummer]
+  # Empty = no filter = all 10 films, all 86 subjects. exclude_tasks below
+  # still applies, but none of its entries (localizer/retinotopy/rest) exist in
+  # this dataset, so nothing is dropped.
+  #
+  # Each subject watched exactly ONE film, so "all subjects" and "all films"
+  # are the same switch. Subject counts per film: 500daysofsummer 20,
+  # citizenfour 18, the other eight 6 each.
+  #
+  # To go back to a single film for a quick test:
+  #   include_tasks: [500daysofsummer]
+  #
+  # Note the films differ a lot in length -- Pulp Fiction is ~154 min against
+  # 500 Days' ~95 -- so per-file extract time varies by about 2x. Budget
+  # walltime for the long ones, or resubmit: finished shards are skipped.
+  include_tasks: []
 
 confounds:
   format: none              # nuisance regression already applied upstream
