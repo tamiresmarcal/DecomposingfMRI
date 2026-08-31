@@ -81,11 +81,31 @@ class AtlasSpec:
         return [f"{cols[i]}__{cols[j]}" for i, j in zip(iu, ju)]
 
     def write_labels(self, path: str | Path) -> Path:
+        """Write the label table, atomically.
+
+        This file is shared: it describes the atlas, not the cohort, so every
+        cohort and every array task would write identical content to the same
+        path. `cmd_extract` normally lets only shard 0 do it, but that guard is
+        per-invocation -- two cohorts extracting at once each have a shard 0.
+
+        Write-then-rename makes the collision harmless instead of relying on
+        the guard: a reader sees either the old file or a complete new one,
+        never a half-written CSV. The temp name carries the pid so two writers
+        cannot share it.
+        """
+        import os
+
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         out = self.labels.copy()
         out["column"] = self.columns
-        out.to_csv(path, index=False)
+        tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+        try:
+            out.to_csv(tmp, index=False)
+            os.replace(tmp, path)          # atomic within a filesystem
+        finally:
+            if tmp.exists():
+                tmp.unlink()
         return path
 
     # ----------------------------------------------------- membership ---

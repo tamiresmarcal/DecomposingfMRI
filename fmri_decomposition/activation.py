@@ -36,6 +36,13 @@ ENTITY_COLUMNS = ["cohort", "sub", "ses", "task", "run", "acq", "run_key"]
 
 TIME_CHUNK = 64   # volumes loaded at once; bounds peak memory on 4D files
 
+# Friston-24: six rigid-body parameters, their temporal derivatives, and the
+# squares of both. These are fMRIPrep's column names -- an AFNI cohort names
+# them differently, which is why the strategy is only honoured for fmriprep_tsv.
+HMP_6 = ["trans_x", "trans_y", "trans_z", "rot_x", "rot_y", "rot_z"]
+HMP_24 = [f"{b}{suffix}" for b in HMP_6
+          for suffix in ("", "_derivative1", "_power2", "_derivative1_power2")]
+
 
 @dataclass
 class RunRef:
@@ -203,7 +210,34 @@ def _good_frames(ref: RunRef, cfg: CohortConfig, n_tr: int) -> np.ndarray:
         from .timing import load_afni_censor
 
         return load_afni_censor(str(ref.censor), n_tr, cfg.confounds.dilate_tr)
+    if cfg.confounds.fd_threshold is not None and ref.confounds is not None:
+        return _fd_censor(ref, cfg, n_tr)
     return censor_mask(n_tr, dilate_tr=0)
+
+
+def _fd_censor(ref: RunRef, cfg: CohortConfig, n_tr: int) -> np.ndarray:
+    """good_frame from a framewise-displacement column, for fMRIPrep cohorts.
+
+    fMRIPrep leaves FD's first sample undefined (there is no preceding volume
+    to difference against). It is treated as good rather than dropped: NaN is
+    "unknown", and censoring frame 0 of every run on that basis would be a
+    systematic bias, not a conservative choice.
+    """
+    df = pd.read_csv(ref.confounds, sep="\t")
+    col = cfg.confounds.fd_column
+    if col not in df.columns:
+        raise ValueError(
+            f"{Path(ref.confounds).name} has no {col!r} column; set "
+            f"confounds.fd_column or clear confounds.fd_threshold"
+        )
+    fd = df[col].to_numpy(dtype=float)
+    if fd.size != n_tr:
+        raise ValueError(
+            f"{Path(ref.confounds).name} has {fd.size} rows but the bold file has "
+            f"{n_tr} volumes"
+        )
+    good = ~(fd > float(cfg.confounds.fd_threshold))     # NaN -> kept
+    return censor_mask(n_tr, good=good, dilate_tr=cfg.confounds.dilate_tr)
 
 
 def _trim_mask(ref: RunRef, cfg: CohortConfig, axis: TimeAxis, n_tr: int):
@@ -234,7 +268,19 @@ def load_confounds(path: Path, cfg: CohortConfig, n_tr: int) -> np.ndarray:
         arr = np.loadtxt(path)
     elif fmt == "fmriprep_tsv":
         df = pd.read_csv(path, sep="\t")
-        cols = cfg.confounds.columns or list(df.columns)
+        if cfg.confounds.columns:
+            cols = list(cfg.confounds.columns)
+        elif cfg.confounds.strategy == "24hmp":
+            cols = HMP_24
+        else:
+            cols = list(df.columns)
+        missing = [c for c in cols if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"{path.name} is missing {len(missing)} requested confound "
+                f"column(s): {missing[:6]}. Available example columns: "
+                f"{list(df.columns)[:6]}"
+            )
         arr = df[cols].to_numpy()
     else:
         raise ValueError(f"unsupported confounds format {fmt!r}")

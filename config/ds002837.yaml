@@ -1,0 +1,142 @@
+# Real-subjects config for ds002837 -- the Naturalistic Neuroimaging Database
+# (NNDb v2.0), 86 subjects each watching one of 10 full-length films.
+# https://openneuro.org/datasets/ds002837  /  https://github.com/OpenNeuroDatasets/ds002837
+#
+# Facts baked in below were confirmed against the dataset repo and its README,
+# not guessed:
+#   - TR = 1.0 s (4x multiband, Aliko et al. 2021, Sci Data)
+#   - derivatives/sub-*/func/ has ONE file per subject per task already --
+#     afni_proc.py concatenates that subject's 2-6 runs into one 4D volume, so
+#     there is no run-01/02/03 entity left to discover. That also means
+#     stimulus_time_s == time_s (t * TR) is correct as-is: `identity` timing,
+#     not an assumption we're settling for.
+#   - "*_bold_no_blur_no_censor.nii.gz" is the variant to use for ROI/parcel
+#     analysis: the dataset README says explicitly the *blurred* variant
+#     "should not be used for ROI-based analyses", and *_no_censor keeps
+#     censored frames in place (zeros are not removed) so this pipeline's own
+#     censor_glob + dilate_tr does the scrubbing, on the same footing as the
+#     synthetic fixture in run_tests.sh.
+#   - nuisance regression (motion, polort 2 detrend, 0.01-1 Hz bandpass) is
+#     already baked into that residual file by afni_proc.py -- hence
+#     filtering.already_applied and confounds.strategy: none below.
+#   - the censor file lives in a sibling `regressors/` dir, not next to the
+#     bold file in `func/` -- see confounds.censor_glob's `../regressors/...`.
+#
+# PATHS ARE ABSOLUTE AND SITE-SPECIFIC (Alliance/nibi, rpp-aevans-ab). They
+# are committed rather than left as placeholders so the config works straight
+# out of a clone on that cluster; anywhere else, the three paths below are the
+# only lines that need changing.
+#
+# Verified against the real data (2026-08): mask_glob matches
+# sub-*/anat/sub-*_t1w_mask_epi_anat.nii.gz, and discovery finds all 86
+# subjects across the 10 films (20 of them for 500daysofsummer, which is what
+# the first pilot ran on).
+#
+# Note on the TR check: NNDb omits RepetitionTime from its task JSON, and the
+# NIfTI headers carry a bare 1.0 -- which is also nibabel's unset default. So
+# `check_cohort.py` WARNS rather than confirming here, by design. The 1.0s is
+# from the paper, not from the files.
+
+cohort: ds002837
+tr: 1.0
+derivatives_root: /project/6008063/tamires/cohorts/ds002837/derivatives
+output_root: /project/6008063/tamires/DecomposingfMRI/outputs
+space: MNI152NLin2009cAsym   # AFNI's MNI152_2009_template_SSW -- see README's
+                             # template caveat for the sphere-based "networks" atlas
+participants: /project/6008063/tamires/DecomposingfMRI/config/ds002837_participants.csv
+
+atlases: [harvardoxford, yeo7, networks]
+
+discovery:
+  backend: glob
+  bold_glob: "sub-*/func/sub-*_task-*_bold_no_blur_no_censor.nii.gz"
+  mask_glob: "../anat/sub-{sub}_t1w_mask_epi_anat.nii.gz"
+  # Empty = no filter = all 10 films, all 86 subjects. exclude_tasks below
+  # still applies, but none of its entries (localizer/retinotopy/rest) exist in
+  # this dataset, so nothing is dropped.
+  #
+  # Each subject watched exactly ONE film, so "all subjects" and "all films"
+  # are the same switch. Subject counts per film: 500daysofsummer 20,
+  # citizenfour 18, the other eight 6 each.
+  #
+  # To go back to a single film for a quick test:
+  #   include_tasks: [500daysofsummer]
+  #
+  # Note the films differ a lot in length -- Pulp Fiction is ~154 min against
+  # 500 Days' ~95 -- so per-file extract time varies by about 2x. Budget
+  # walltime for the long ones, or resubmit: finished shards are skipped.
+  include_tasks: []
+
+confounds:
+  format: none              # nuisance regression already applied upstream
+  strategy: none
+  # censor_glob is DISABLED. This is a data finding, not an oversight.
+  #
+  # NNDb's regressors and its derivative images sit on DIFFERENT timelines,
+  # measured across all 20 subjects of 500daysofsummer (2026-08):
+  #
+  #   * censored_timepoints.1D and polort_bandpass_vent_wm_motion.1D both have
+  #     length  sum(raw run volumes) - 8 * n_runs  -- exact for 20/20 subjects.
+  #     That is the acquisition timeline after afni_proc.py drops 8 TRs per run
+  #     for T1 equilibration, so it varies per subject (5469..5476).
+  #   * every derivative BOLD is exactly 5470 volumes regardless of run
+  #     structure -- a length standardised to the stimulus, which is what makes
+  #     stimulus_time_s comparable across subjects.
+  #
+  # The offset between them is not recoverable from the files: sum(raw) - bold
+  # ranges 15..28 with no pattern, and sub-1 (5465) and sub-15 (5469) have
+  # FEWER censor entries than the BOLD has volumes, so no trim or shift maps
+  # one onto the other. The _censor BOLD variant is also 5470 with zero
+  # all-zero volumes, so no mask is recoverable from the imaging data either.
+  #
+  # Applying the file anyway would label frames with their neighbours' verdict
+  # -- silently, and worst exactly where censoring matters most. An all-true
+  # good_frame is visible in the output and honest about what was not done.
+  #
+  # Consequence: good_frame is all true, and n_tr_effective == n_tr_available.
+  # Motion is NOT removed. For 15 of 20 subjects the AFNI file would have
+  # censored <2% of frames, but sub-12 (14.0%), sub-11 (9.9%) and sub-7 (5.2%)
+  # carry real motion that now goes into the correlations. Consider excluding
+  # those in participants.csv rather than pretending they are clean.
+  #
+  # To resolve properly: ask the NNDb authors for the trim that produced the
+  # 5470-volume derivative from the post-tcat series.
+  censor_glob: null
+  dilate_tr: 1
+
+filtering:
+  already_applied: true     # afni_proc.py: -regress_polort 2 -regress_bandpass 0.01 1
+  bandpass: [0.01, 1.0]
+  detrend: false
+  standardize: false
+
+runs:
+  mode: concat               # matches the on-disk reality: 1 file per sub/task already
+
+trim:
+  column: null                # no extra-scan-time column in participants.tsv
+
+stimulus:
+  # Left empty on purpose: NNDb runs are not identical length across subjects
+  # (2-6 runs each, "stopped in 40-50 min intervals"), and this pipeline
+  # already has a real fallback for that -- dfc.py uses each file's own
+  # observed duration when no fixed value is configured here. That means:
+  #   - `fmri-decomp validate` will report ONE warning ("no stimulus duration
+  #     for task '500daysofsummer'") -- expected, not a bug.
+  #   - `fmri-decomp extract` needs --no-strict on this cohort as a result
+  #     (see run instructions below).
+  #   - `fmri-decomp dfc` needs nothing extra; it derives duration per file.
+  durations_s: {}
+  timing_source: identity
+  unit_of_analysis: run
+
+windows:
+  sizes_s: [30, 60, 120, 300]
+  n_overlaps: 5
+  drop_incomplete: true
+
+# --- how to run --------------------------------------------------------
+#   fmri-decomp validate config/ds002837.yaml
+#   fmri-decomp extract  config/ds002837.yaml --n-jobs 4 --no-strict
+#   fmri-decomp dfc      config/ds002837.yaml --n-jobs 4
+#   fmri-decomp diagnose config/ds002837.yaml

@@ -1,0 +1,134 @@
+# CNeuroMod (Courtois NeuroMod) -- friends, fMRIPrep derivatives.
+# https://docs.cneuromod.ca  /  https://github.com/courtois-neuromod
+#
+# Facts checked against the CNeuroMod docs rather than assumed:
+#   - TR = 1.49 s (3T Siemens Prisma Fit).
+#   - The derivatives are a SEPARATE datalad dataset, not a subdirectory of
+#     `friends`: install courtois-neuromod/friends.fmriprep alongside it. The
+#     docs' phrasing ("under the folder of each dataset ... derivatives/
+#     fmriprep") describes the logical layout, not how it is distributed --
+#     `friends` itself declares only a `stimuli` subdataset.
+#   - Inside friends.fmriprep, sub-01..sub-06 sit at the REPO ROOT, so
+#     derivatives_root points at that clone directly. Layout below it is
+#     sub-*/ses-*/func/, with space-MNI152NLin2009cAsym desc-preproc_bold /
+#     desc-brain_mask and a desc-confounds_timeseries.tsv sidecar per run.
+#     Verified against sub-01/ses-001/func in the published repo.
+#   - friends is one task per episode segment: task-s01e01a, s01e01b, ...
+#     A subject watches many episodes across many sessions, so unlike
+#     ds002837 this cohort really does use both `ses` and `task`.
+#
+# THE IMPORTANT DIFFERENCE FROM ds002837
+# --------------------------------------
+# ds002837's derivatives are afni_proc.py residuals: motion regression,
+# detrending and bandpass are already baked in, and an explicit censor .1D
+# ships alongside. NONE of that is true here. fMRIPrep returns preprocessed
+# BOLD with confounds left as a *table* for you to apply. So this config must
+# do three things that ds002837's does not:
+#
+#   1. regress motion    -> confounds.strategy: 24hmp (Friston-24)
+#   2. band-pass          -> filtering.already_applied: false
+#   3. censor by FD       -> confounds.fd_threshold, since there is no .1D
+#
+# Leaving any of the three off does not fail -- it silently produces
+# uncleaned timeseries, which is the failure mode this comment exists to
+# prevent.
+#
+# PATHS ARE ABSOLUTE AND SITE-SPECIFIC (Alliance/nibi, rpp-aevans-ab), and
+# committed rather than left as placeholders. Elsewhere, change the three
+# paths below and nothing else.
+#
+# derivatives_root points at the friends.fmriprep clone, whose sub-01..06 sit
+# at its ROOT -- it is a sibling datalad dataset, not a subdirectory of
+# `friends`. Content is fetched per file: `datalad get <path>` from OUTSIDE
+# the container (datalad is not in the image). An unfetched file is a dangling
+# annex symlink, which check_cohort.py names explicitly.
+#
+# include_tasks is one episode, for a pilot. Verified against the real data
+# (2026-08): both sub-01 and sub-02 have s01e02a under ses-001, the TR check
+# genuinely confirms 1.49s from the headers, and leaves land as
+# task=s01e02a/sub=01/ses-001.parquet.
+#
+# output_root is deliberately the SAME as every other cohort's: the `cohort=`
+# key separates them inside one tree, which is what makes "one atlas, one
+# window size, every cohort" a single directory to read.
+
+cohort: cneuromod
+tr: 1.49
+derivatives_root: /project/6008063/tamires/cohorts/cneuromod/friends.fmriprep
+output_root: /project/6008063/tamires/DecomposingfMRI/outputs
+space: MNI152NLin2009cAsym
+participants: /project/6008063/tamires/DecomposingfMRI/config/cneuromod_friends_participants.csv
+
+atlases: [harvardoxford, yeo7, networks]
+
+discovery:
+  backend: glob
+  # ses-* is a real directory level here, unlike ds002837.
+  bold_glob: "sub-*/ses-*/func/sub-*_task-*_space-MNI152NLin2009cAsym_desc-preproc_bold.nii.gz"
+  mask_glob: "sub-{sub}_*task-{task}_*space-MNI152NLin2009cAsym_desc-brain_mask.nii.gz"
+  # Start small. Broaden once a pilot runs clean.
+  include_tasks: [s01e02a]
+
+confounds:
+  format: fmriprep_tsv
+  strategy: 24hmp          # 6 motion params + derivatives + squares
+  confounds_glob: "sub-*_task-*_desc-confounds_timeseries.tsv"
+  # No censor .1D exists for fMRIPrep output, so frames are censored on
+  # framewise displacement instead. 0.5 mm is a common threshold, not a law --
+  # it is a choice you are making, so it is written down here explicitly.
+  fd_column: framewise_displacement
+  fd_threshold: 0.5
+  dilate_tr: 1
+
+filtering:
+  already_applied: false   # fMRIPrep does NOT filter; this is the key flip
+  bandpass: [0.01, 0.1]    # narrower than ds002837's 0.01-1.0: that upper
+                           # bound came from AFNI's own preprocessing, whereas
+                           # here we are choosing the band ourselves
+  detrend: true
+  standardize: false       # correlation is invariant to it
+
+runs:
+  mode: concat
+
+trim:
+  column: null
+
+stimulus:
+  # Empty for the same reason as ds002837: episode segments differ in length,
+  # and dfc.py falls back to each file's observed duration. Expect one
+  # validation warning per task, and pass --no-strict to extract.
+  durations_s: {}
+  timing_source: identity
+  unit_of_analysis: run
+
+windows:
+  # A friends segment is ~482 TR x 1.49 s = 718 s, so 300 s does fit -- it just
+  # yields few windows: stride is 300/5 = 60 s, giving floor((718-300)/60)+1 = 7
+  # windows per run, against ~12 at 120 s and ~65 at 30 s. Kept so every cohort
+  # is analysed on the same window grid; drop it here if 7 windows per run is
+  # too few for what you are testing.
+  sizes_s: [30, 60, 120, 300]
+  n_overlaps: 5
+  drop_incomplete: true
+
+# --- participants CSV -------------------------------------------------
+# Not shipped with the repo, deliberately: unlike ds002837 (where each of the
+# 86 subjects watched exactly one film, a published constant), which CNeuroMod
+# episodes exist is a property of YOUR copy of an incrementally released
+# dataset. Generate it from what discovery actually finds:
+#
+#   python tools/make_participants.py config/cneuromod_friends.yaml \
+#       -o config/cneuromod_friends_participants.csv
+#
+# Then set `participants:` above to that ABSOLUTE path.
+#
+# Every generated row is excluded=False. Edit real exclusions in by hand as
+# excluded=True WITH a reason -- never by deleting the row, or the validator
+# can no longer tell a curation decision from an oversight.
+
+# --- how to run -------------------------------------------------------
+#   python tools/check_cohort.py config/cneuromod_friends.yaml
+#   fmri-decomp extract  config/cneuromod_friends.yaml --n-jobs 4 --no-strict --limit 2
+#   python tools/check_cohort.py config/cneuromod_friends.yaml --checks outputs,parallel --limit 2
+#   fmri-decomp dfc      config/cneuromod_friends.yaml --n-jobs 4

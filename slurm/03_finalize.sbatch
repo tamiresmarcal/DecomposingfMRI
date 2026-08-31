@@ -22,11 +22,30 @@ CONFIG="${1:?usage: sbatch 03_finalize.sbatch <config.yaml> <activation|dfc>}"
 STAGE="${2:?stage must be 'activation' or 'dfc'}"
 
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+# Compute nodes have no outbound network, so the atlases MUST already be
+# cached or every task dies on a fetch timeout. Prefer an existing cache over
+# a path that merely looks tidy.
+if [[ -z "${NILEARN_DATA:-}" ]]; then
+  for _c in "$HOME/nilearn_data" "${SCRATCH:-}/nilearn_data" "$PWD/nilearn_data"; do
+    [[ -d "$_c" ]] && { NILEARN_DATA="$_c"; break; }
+  done
+fi
 export NILEARN_DATA="${NILEARN_DATA:-${SCRATCH:-$PWD}/nilearn_data}"
+if [[ ! -d "$NILEARN_DATA" ]]; then
+  echo "WARNING: no atlas cache at $NILEARN_DATA -- built-in atlases are fetched" >&2
+  echo "         over the network, which compute nodes usually cannot reach." >&2
+  echo "         Pre-fetch on a login node first. See README." >&2
+fi
 
 if [[ -n "${FMRIDECOMP_SIF:-}" ]]; then
-  module load apptainer/1.3.5
-  RUN=(apptainer exec "${FMRIDECOMP_SIF}" python)
+  # No version pin: clusters retire apptainer releases, and a pinned load that
+  # no longer exists fails every array task at once.
+  module load apptainer 2>/dev/null || module load apptainer/1.3.5
+  # Binds are NOT optional. A container sees only what is bound into it, so
+  # without these the compute node reports "no such file" for data and outputs
+  # that plainly exist on the login node. FMRIDECOMP_BINDS can add more.
+  BINDS="${FMRIDECOMP_BINDS:-/project,/scratch,/home}"
+  RUN=(apptainer exec --bind "${BINDS}" --pwd "${PWD}" "${FMRIDECOMP_SIF}" python)
 else
   module load python/3.11 scipy-stack
   source "${FMRIDECOMP_VENV:-$HOME/venvs/fmridecomp}/bin/activate"

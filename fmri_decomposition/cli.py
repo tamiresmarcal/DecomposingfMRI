@@ -67,16 +67,30 @@ def _manifest_name(stage: str, shard) -> str:
     return f"shards/manifest_{stage}_shard-{i:04d}-of-{n:04d}.json"
 
 
-def _attach_censor(cfg, refs):
-    if not cfg.confounds.censor_glob:
+def _attach_sidecar(cfg, refs, glob_pat, attr):
+    """Attach one per-run sidecar file (censor or confounds) to each RunRef."""
+    if not glob_pat:
         return refs
     for ref in refs:
-        hits = sorted(Path(ref.bold).parent.glob(cfg.confounds.censor_glob))
-        stem = f"sub-{ref.sub}_task-{ref.task}"
-        hits = [h for h in hits if h.name.startswith(stem)]
+        hits = sorted(Path(ref.bold).parent.glob(glob_pat))
+        entities = {f"sub-{ref.sub}", f"task-{ref.task}"}
+        for k, v in (("ses", ref.ses), ("run", ref.run), ("acq", ref.acq)):
+            if v:
+                entities.add(f"{k}-{v}")
+        # Every entity this run carries must appear in the sidecar's name, so a
+        # sibling session or run cannot be picked up by accident.
+        hits = [h for h in hits if all(e in h.name for e in entities)]
         if hits:
-            ref.censor = hits[0]
+            setattr(ref, attr, hits[0])
     return refs
+
+
+def _attach_censor(cfg, refs):
+    return _attach_sidecar(cfg, refs, cfg.confounds.censor_glob, "censor")
+
+
+def _attach_confounds(cfg, refs):
+    return _attach_sidecar(cfg, refs, cfg.confounds.confounds_glob, "confounds")
 
 
 # ------------------------------------------------------------- commands ---
@@ -102,7 +116,7 @@ def cmd_extract(args) -> int:
 
     cfg = _load(args.config)
     refs, _ = _refs(cfg, strict=not args.no_strict)
-    refs = _attach_censor(cfg, refs)
+    refs = _attach_confounds(cfg, _attach_censor(cfg, refs))
     atlases = _atlases(cfg)
     if args.limit:
         refs = refs[: args.limit]
