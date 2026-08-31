@@ -91,6 +91,18 @@ mkdir -p "$WORK" "$OUT_ROOT" slurm_logs
 export MPLCONFIGDIR="$WORK/.mplconfig"
 mkdir -p "$MPLCONFIGDIR"
 
+# sbatch exports the submitting shell's environment by default, so a
+# virtualenv that was active at submit time follows the job onto the compute
+# node and sits in front of the module's interpreter on PATH. The venv used to
+# fetch templates on the login node (see 00_) is the likely culprit. Drop it:
+# nothing here should run out of a user venv.
+if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+  echo "note: dropping inherited virtualenv from PATH: $VIRTUAL_ENV"
+  PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "$VIRTUAL_ENV/bin" | paste -sd:)
+  export PATH
+  unset VIRTUAL_ENV PYTHONHOME
+fi
+
 module load StdEnv/2023 fmriprep/25.1.1
 
 # fMRIPrep wants megabytes, and wants slightly less than the allocation: if it
