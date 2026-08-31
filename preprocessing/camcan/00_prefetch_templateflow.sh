@@ -57,16 +57,41 @@ except ImportError:
 #                          not skull-stripping.
 #   MNI152NLin6Asym     -- used internally by several fMRIPrep steps even when
 #                          you never ask for it as an output space.
+failed = []
 for template in ("MNI152NLin2009cAsym", "OASIS30ANTs", "MNI152NLin6Asym"):
     print(f"fetching {template} ...", flush=True)
-    tf.get(template)
+    got = tf.get(template)
+    # tf.get returns [] rather than raising when it matches nothing, so an
+    # empty result here is a silent no-op that would look like success.
+    if not got:
+        failed.append(template)
 
-print("\nOK -- TemplateFlow cache populated at", os.environ.get("TEMPLATEFLOW_HOME"))
+if failed:
+    sys.exit("\nFAILED to fetch: " + ", ".join(failed))
+
+print("\nfetched, now verifying real files landed on disk ...")
 PY
+
+# Verify DATA, not directory structure. TemplateFlow writes the whole tpl-*
+# skeleton on import and downloads lazily, so `ls` showing tpl-MNI152... proves
+# nothing. 02_fmriprep.sbatch applies the same test before it will submit.
+if ! find "$TEMPLATEFLOW_HOME/tpl-MNI152NLin2009cAsym" \
+        -name '*_T1w.nii.gz' -size +1M -print -quit 2>/dev/null | grep -q .; then
+  echo >&2
+  echo "ERROR: the tpl-* directories exist but hold no image data." >&2
+  echo "       This is the lazy-download skeleton, not a usable cache." >&2
+  echo "       Check the fetch output above for network or proxy errors." >&2
+  exit 1
+fi
 
 echo
 echo "Contents:"
 ls -1 "$TEMPLATEFLOW_HOME" | head -20
+echo
+echo "Largest files (proof the data is really here):"
+find "$TEMPLATEFLOW_HOME" -name '*.nii.gz' -size +1M -printf '%10s  %p\n' \
+  2>/dev/null | sort -rn | head -5
+echo
 du -sh "$TEMPLATEFLOW_HOME"
 
 cat <<MSG

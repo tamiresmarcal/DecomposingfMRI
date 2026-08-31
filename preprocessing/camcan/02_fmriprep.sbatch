@@ -55,9 +55,18 @@ export FS_LICENSE
 # does not fail fast, it HANGS on an HTTP timeout and dies hours in. Same trap
 # as NILEARN_DATA in slurm/01_extract.sbatch.
 export TEMPLATEFLOW_HOME="${TEMPLATEFLOW_HOME:-/project/6008063/tamires/templateflow}"
-if [[ ! -d "$TEMPLATEFLOW_HOME/tpl-MNI152NLin2009cAsym" ]]; then
-  echo "ERROR: TemplateFlow cache looks empty at $TEMPLATEFLOW_HOME" >&2
-  echo "       Run 00_prefetch_templateflow.sh on a LOGIN node first." >&2
+# Check for a real IMAGE, not just the directory. TemplateFlow lays down the
+# whole tpl-* skeleton on first import and downloads the actual files lazily,
+# so `-d tpl-MNI152NLin2009cAsym` passes on a cache that contains no data at
+# all -- and then the job hangs on the download this guard exists to prevent.
+if ! find "$TEMPLATEFLOW_HOME/tpl-MNI152NLin2009cAsym" \
+        -name '*_T1w.nii.gz' -size +1M -print -quit 2>/dev/null | grep -q .; then
+  echo "ERROR: no downloaded template images under $TEMPLATEFLOW_HOME" >&2
+  echo "       (the tpl-* directories may exist -- TemplateFlow creates the" >&2
+  echo "        skeleton on import and fetches files lazily. What is missing" >&2
+  echo "        is the data.)" >&2
+  echo "       Run 00_prefetch_templateflow.sh on a LOGIN node, and check it" >&2
+  echo "       reports a size of several GB at the end." >&2
   exit 1
 fi
 
