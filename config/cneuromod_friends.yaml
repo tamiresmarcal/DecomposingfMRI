@@ -103,9 +103,12 @@ stimulus:
   unit_of_analysis: run
 
 windows:
-  # 300 s is dropped: a friends segment runs ~12 min, so a 300 s window with
-  # 5 overlaps yields very few windows per run. Add it back for movie10.
-  sizes_s: [30, 60, 120]
+  # A friends segment is ~482 TR x 1.49 s = 718 s, so 300 s does fit -- it just
+  # yields few windows: stride is 300/5 = 60 s, giving floor((718-300)/60)+1 = 7
+  # windows per run, against ~12 at 120 s and ~65 at 30 s. Kept so every cohort
+  # is analysed on the same window grid; drop it here if 7 windows per run is
+  # too few for what you are testing.
+  sizes_s: [30, 60, 120, 300]
   n_overlaps: 5
   drop_incomplete: true
 
