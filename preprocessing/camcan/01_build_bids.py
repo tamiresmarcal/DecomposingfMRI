@@ -139,6 +139,35 @@ def build(subs: list[str], bidssep: Path, out: Path, force: bool) -> None:
         for name in _echo_names(sub):
             link(func_root / s / "func" / name, out / s / "func" / name, force)
 
+    # subjects.txt and skipped_subjects.tsv are OUR bookkeeping, not BIDS. The
+    # validator rejects any file it does not recognise (NOT_INCLUDED), which is
+    # a hard error -- fMRIPrep runs bids-validator before it does anything and
+    # refuses to start when it fails. .bidsignore is the spec's own mechanism
+    # for this, so the files can stay next to the data they describe.
+    #
+    # Keeping them here rather than dropping --skip-bids-validation is
+    # deliberate: validation is worth having. It is what confirmed this tree
+    # holds 10 subjects, one session and task Movie.
+    (out / ".bidsignore").write_text("subjects.txt\nskipped_subjects.tsv\n")
+
+    # BIDS wants a README. Only a warning, not an error, but a dataset that
+    # cannot say what it is invites exactly the confusion this whole directory
+    # exists to resolve.
+    (out / "README").write_text(
+        "Cam-CAN CC700 movie-watching, assembled as a single BIDS root.\n"
+        "\n"
+        "Symlinks only -- no data is copied. Cam-CAN distributes anatomy and\n"
+        "function as two separate BIDS datasets (BIDSsep/anat and\n"
+        "BIDSsep/func_movie); fMRIPrep needs both under one sub-<label>/.\n"
+        "\n"
+        "Built by preprocessing/camcan/01_build_bids.py in the DecomposingfMRI\n"
+        "repository. Do not edit by hand -- re-run that script instead.\n"
+        "\n"
+        "subjects.txt          subjects included, sorted; the SLURM array\n"
+        "                      indexes into this file.\n"
+        "skipped_subjects.tsv  subjects excluded, with the reason for each.\n"
+    )
+
     # The source dataset_description.json is a blank template -- every field an
     # empty string, BIDSVersion 1.0.1 -- which the validator rejects. This file
     # describes the VIEW we just assembled, so it is ours to write.
