@@ -60,7 +60,38 @@ discovery:
 confounds:
   format: none              # nuisance regression already applied upstream
   strategy: none
-  censor_glob: "../regressors/sub-*_task-*_censored_timepoints.1D"
+  # censor_glob is DISABLED. This is a data finding, not an oversight.
+  #
+  # NNDb's regressors and its derivative images sit on DIFFERENT timelines,
+  # measured across all 20 subjects of 500daysofsummer (2026-08):
+  #
+  #   * censored_timepoints.1D and polort_bandpass_vent_wm_motion.1D both have
+  #     length  sum(raw run volumes) - 8 * n_runs  -- exact for 20/20 subjects.
+  #     That is the acquisition timeline after afni_proc.py drops 8 TRs per run
+  #     for T1 equilibration, so it varies per subject (5469..5476).
+  #   * every derivative BOLD is exactly 5470 volumes regardless of run
+  #     structure -- a length standardised to the stimulus, which is what makes
+  #     stimulus_time_s comparable across subjects.
+  #
+  # The offset between them is not recoverable from the files: sum(raw) - bold
+  # ranges 15..28 with no pattern, and sub-1 (5465) and sub-15 (5469) have
+  # FEWER censor entries than the BOLD has volumes, so no trim or shift maps
+  # one onto the other. The _censor BOLD variant is also 5470 with zero
+  # all-zero volumes, so no mask is recoverable from the imaging data either.
+  #
+  # Applying the file anyway would label frames with their neighbours' verdict
+  # -- silently, and worst exactly where censoring matters most. An all-true
+  # good_frame is visible in the output and honest about what was not done.
+  #
+  # Consequence: good_frame is all true, and n_tr_effective == n_tr_available.
+  # Motion is NOT removed. For 15 of 20 subjects the AFNI file would have
+  # censored <2% of frames, but sub-12 (14.0%), sub-11 (9.9%) and sub-7 (5.2%)
+  # carry real motion that now goes into the correlations. Consider excluding
+  # those in participants.csv rather than pretending they are clean.
+  #
+  # To resolve properly: ask the NNDb authors for the trim that produced the
+  # 5470-volume derivative from the post-tcat series.
+  censor_glob: null
   dilate_tr: 1
 
 filtering:
