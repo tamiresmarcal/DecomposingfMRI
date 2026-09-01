@@ -1,0 +1,227 @@
+# Cam-CAN CC700 -- movie watching (Hitchcock, "Bang! You're Dead", 8 min edit).
+# https://camcan-archive.mrc-cbu.cam.ac.uk/dataaccess/
+#
+# THE DIFFERENCE FROM THE OTHER TWO COHORTS
+# -----------------------------------------
+# ds002837 and cneuromod both arrive preprocessed. Cam-CAN does not. What the
+# archive distributes is RAW five-echo BIDS -- no echo combination, no
+# realignment, no normalisation, no motion parameters. Verified on disk
+# (2026-08): every file under release004/BIDSsep matches *_T1w, *_T2w,
+# *_task-Rest_bold or *_task-Movie_echo-0N_bold, and a search for *preproc*,
+# *space-*, rp_* and *confound* across camcan/, cc700/ and ccfrail/ returns
+# nothing. func_movie/derivatives/ exists but is EMPTY -- the placeholder BIDS
+# conversion creates, never filled. The preprocessed `aamod` tree that
+# Cam-CAN's own analysis scripts read lives on the CBU's internal filesystem
+# and is not part of an external download.
+#
+# So `derivatives_root` below points at output WE produced, with
+# preprocessing/camcan/. That directory is stage 1, deliberately outside
+# fmri_decomposition and not covered by run_tests.sh -- see its README.
+#
+# FACTS CONFIRMED FROM THE FILES, NOT FROM PAPERS
+# -----------------------------------------------
+#   TR 2.47 s          `RepetitionTime: 2.47` in the raw sidecar, and 2.47 in
+#                      the header of the preprocessed image. Unlike ds002837
+#                      (whose real TR of 1.0 is also nibabel's unset default,
+#                      so its check can only warn), 2.47 is a value nibabel
+#                      would never invent. check_cohort.py genuinely CONFIRMS
+#                      here.
+#   193 volumes        = 476.71 s of data. Short: see `windows` below.
+#   5 echoes           TE 9.4 / 21.2 / 33.1 / 44.9 / 56.7 ms, combined by
+#                      fMRIPrep. A T2starmap is written alongside the BOLD.
+#   649 subjects       have the complete echo set. 739 have a T1w; ~90 of
+#                      those never did the movie task.
+#   one run, no ses    unlike cneuromod, filenames carry neither a ses- nor a
+#                      run- entity. Discovery handles that already.
+#
+# Pilot measured on 10 subjects (2026-08, job 20940234, 10/10 COMPLETED):
+# 47.6-56.1 min each on 8 CPUs, ~1 GB of kept output per subject. That puts
+# the full 649 at roughly 4,300 core-hours and ~640 GB.
+#
+# output_root is deliberately the SAME as every other cohort's: the `cohort=`
+# key separates them inside one tree, which is what makes "one atlas, one
+# window size, every cohort" a single directory to read.
+
+cohort: camcan
+tr: 2.47
+derivatives_root: /project/6008063/tamires/cohorts/camcan_fmriprep
+output_root: /project/6008063/tamires/DecomposingfMRI/outputs
+space: MNI152NLin2009cAsym
+participants: /project/6008063/tamires/DecomposingfMRI/config/camcan_movie_participants.csv
+
+atlases: [harvardoxford, yeo7, networks]
+
+discovery:
+  backend: glob
+  # `res-2` IS part of the filename here and is NOT in the cneuromod config,
+  # because we asked fMRIPrep for `MNI152NLin2009cAsym:res-2` explicitly.
+  # Dropping it from the glob would also match nothing else today, but it would
+  # silently start matching a second resolution the day anyone adds one.
+  bold_glob: "sub-*/func/sub-*_task-*_space-MNI152NLin2009cAsym_res-2_desc-preproc_bold.nii.gz"
+  mask_glob: "sub-{sub}_task-{task}_space-MNI152NLin2009cAsym_res-2_desc-brain_mask.nii.gz"
+  # Cam-CAN's TR DIFFERS BY TASK: movie 2.47 s, sensorimotor 1.97 s, and rest
+  # is different again. This config carries ONE `tr:`, so a second task would
+  # silently rescale every time column in the output. The task filter is a
+  # correctness requirement here, not a convenience.
+  #
+  # Rest exists in the archive and is not built by preprocessing/camcan/ --
+  # this pipeline is for naturalistic viewing.
+  include_tasks: [Movie]
+
+confounds:
+  format: fmriprep_tsv
+  strategy: 24hmp          # 6 motion params + derivatives + squares
+  confounds_glob: "sub-*_task-*_desc-confounds_timeseries.tsv"
+  fd_column: framewise_displacement
+  fd_threshold: 0.5
+  dilate_tr: 1
+  # THE ds002837 TRAP DOES NOT APPLY HERE -- checked, not assumed.
+  #
+  # NNDb's censor files and its images sit on different timelines, which is why
+  # censoring is disabled for that cohort. The equivalent check for Cam-CAN:
+  # the confounds table has 194 lines (193 + header) against a BOLD of exactly
+  # 193 volumes, for sub-CC110033. One row per volume, same clock. fMRIPrep
+  # writes the table from the images it just produced, so this is expected --
+  # but ds002837 is the reason it is verified rather than assumed.
+  #
+  # RE-CHECK THIS ACROSS ALL 649 before trusting it globally; the pilot
+  # establishes it for 10.
+  #
+  # ON THE 0.5 mm THRESHOLD -- treat this as provisional.
+  #
+  # 0.5 mm is the common convention and is what cneuromod uses, so the two
+  # fMRIPrep cohorts match. But head motion increases with age, and this is an
+  # 18-88 lifespan cohort. A fixed threshold therefore removes MORE data from
+  # older subjects, which manufactures an age effect out of a QC rule: less
+  # data -> noisier correlations -> apparently more variable connectivity.
+  #
+  # Decide this from the FD distribution across subjects and against age, not
+  # from convention. Whatever you choose, `n_tr_effective` in the output
+  # records what actually survived, per window.
+
+filtering:
+  already_applied: false   # fMRIPrep does NOT filter -- same as cneuromod
+  bandpass: [0.01, 0.1]
+  detrend: true
+  standardize: false       # correlation is invariant to it
+  # MATCHES cneuromod exactly, and deliberately DIFFERS from ds002837.
+  #
+  # ds002837 declares `bandpass: [0.01, 1.0]` with `already_applied: true`, so
+  # no filter is applied by this pipeline at all (activation.py:108). Its TR of
+  # 1.0 puts Nyquist at 0.5 Hz, so that 1.0 upper bound never did anything:
+  # ds002837 effectively retains 0.01-0.5 Hz, five times the band these two
+  # cohorts keep, including cardiac and respiratory aliasing they remove.
+  #
+  # Correlations computed over different frequency content are not comparable.
+  # This is a larger cross-cohort confound than most preprocessing differences.
+  # It is also FIXABLE, and only in one direction: a filter cannot be undone,
+  # but a more restrictive one can always be added on top. Setting ds002837 to
+  # already_applied:false / bandpass:[0.01,0.1] / detrend:false would bring all
+  # three into the same band, config-only, no code change.
+  #
+  # Not done here -- that touches a validated cohort and is a research
+  # decision, not a Cam-CAN one.
+
+runs:
+  mode: concat             # one file per subject already; nothing to concatenate
+
+trim:
+  column: null
+
+stimulus:
+  # EMPTY, PENDING ONE CHECK -- and unlike the other two cohorts, this one can
+  # probably be filled in.
+  #
+  # ds002837 and cneuromod leave this empty because run lengths genuinely vary
+  # per subject. Cam-CAN's movie is a FIXED 8-minute clip with a fixed
+  # 193-volume acquisition, so every subject should be exactly
+  # 193 * 2.47 = 476.71 s. If that holds across all 649, set:
+  #
+  #   durations_s: {Movie: 476.71}
+  #
+  # and this cohort gains something the others do not have: an identical window
+  # grid for every subject, no `--no-strict` needed, and no validation warning.
+  #
+  # Confirm first (in the container), then edit:
+  #   for f in <derivatives_root>/sub-*/func/*res-2_desc-preproc_bold.nii.gz; do
+  #     python -c "import nibabel,sys; print(nibabel.load(sys.argv[1]).shape[3])" $f
+  #   done | sort | uniq -c
+  # One line reading "649 193" means set it. More than one line means do not.
+  durations_s: {}
+  timing_source: identity
+  unit_of_analysis: run
+
+windows:
+  sizes_s: [30, 60, 120, 300]
+  n_overlaps: 5
+  drop_incomplete: true
+  # READ THIS BEFORE COMPARING COHORTS.
+  #
+  # Windows are defined in SECONDS, so a fixed window holds a different number
+  # of samples in each cohort -- and Cam-CAN, with the longest TR, always has
+  # the fewest:
+  #
+  #     window   ds002837   cneuromod   camcan      windows per camcan run
+  #      30 s      30 TR      20 TR     12 TR              75
+  #      60 s      60 TR      40 TR     24 TR              35
+  #     120 s     120 TR      81 TR     49 TR              15
+  #     300 s     300 TR     201 TR    121 TR               3
+  #
+  # In Fisher-z the sampling SD of every edge is 1/sqrt(n-3), so at 30 s that
+  # is 0.192 for ds002837 against 0.333 for Cam-CAN. Cam-CAN's estimates are
+  # ~1.6x noisier at EVERY window size -- which is just sqrt(2.47/1.0), pure
+  # arithmetic, present before any brain is involved.
+  #
+  # Why this matters more than it looks: dFC studies measure the VARIABILITY of
+  # connectivity, and sampling noise inflates variance. Cam-CAN is the ageing
+  # cohort. So "older adults show more variable dynamic connectivity" is
+  # exactly what a longer TR produces on its own.
+  #
+  #   - Age effects WITHIN Cam-CAN are safe: TR is constant there.
+  #   - Cross-cohort contrasts need the noise floor 1/(n-3) accounted for.
+  #     `n_tr_effective` is written per window, so it is known, not estimated.
+  #   - At 30 s Cam-CAN has 12 samples. Treat that window as unusable here
+  #     rather than merely noisy.
+  #
+  # 300 s yields only 3 windows per subject, against 7 for cneuromod and 87 for
+  # ds002837. Kept so every cohort shares one window grid; with 649 subjects
+  # 3 windows each is still ~1,900 windows.
+
+# --- known limitations, recorded so nobody rediscovers them -----------
+#
+# NO FIELDMAPS. Cam-CAN shipped none (no `fmap` directory anywhere in the
+# archive), so distortion correction is ESTIMATED from the T1w with the warp
+# constrained to the phase-encode direction (fMRIPrep --use-syn-sdc). Better
+# than nothing, worse than a measurement. cneuromod HAS fieldmaps, so Cam-CAN
+# is the one cohort without measured correction. Orbitofrontal and anterior
+# temporal parcels are the ones to distrust; the short readout
+# (TotalReadoutTime 0.0105 s, GRAPPA 3) limits how bad it gets.
+#
+# SLICE COVERAGE -- UNRESOLVED. 32 slices x 4.44 mm = 142 mm, which may clip
+# inferior cerebellum. An out-of-coverage parcel yields a meaningless
+# timeseries, NOT an error. Measure it from the brain masks rather than trust
+# the arithmetic, and compare per-parcel coverage against ds002837.
+#
+# NO SURFACES. --fs-no-reconall, because all three atlases here are volumetric.
+# Wanting a surface atlas later means re-running stage 1.
+
+# --- participants CSV -------------------------------------------------
+#   python tools/make_participants.py config/camcan_movie.yaml \
+#       -o config/camcan_movie_participants.csv
+#
+# Worth merging age and sex in afterwards, by hand or by script: they live in
+# cc700/participants.tsv, and for an 18-88 lifespan cohort they are the whole
+# point. Extra columns are carried onto each run, so they reach the output.
+#
+# Every generated row is excluded=False. Edit real exclusions in as
+# excluded=True WITH a reason -- never by deleting the row, or the validator
+# can no longer tell a curation decision from an oversight.
+
+# --- how to run -------------------------------------------------------
+#   python tools/check_cohort.py config/camcan_movie.yaml
+#   fmri-decomp extract  config/camcan_movie.yaml --n-jobs 4 --no-strict --limit 2
+#   python tools/check_cohort.py config/camcan_movie.yaml --checks outputs,parallel --limit 2
+#   fmri-decomp dfc      config/camcan_movie.yaml --n-jobs 4
+#
+# --no-strict is needed only while stimulus.durations_s is empty; fill it in
+# (see above) and it is not.
