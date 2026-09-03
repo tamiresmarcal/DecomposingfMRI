@@ -44,30 +44,49 @@ CAMCAN_BIDSSEP = Path(
     "/project/6008063/tamires/cohorts/camcan/cc700/mri/pipeline/release004/BIDSsep"
 )
 DEFAULT_OUT = Path("/project/6008063/tamires/cohorts/camcan_bids")
+DEFAULT_FUNC_SUBDIR = "func_movie"
+DEFAULT_DATASET_NAME = "Cam-CAN CC700 movie-watching (BIDS view for fMRIPrep)"
 
 N_ECHOES = 5
 TASK = "Movie"
 
 # T2w is optional: fMRIPrep will use one if present to refine the brain mask,
-# and 653 of 739 subjects have one. Its absence is not a reason to skip.
+# and 653 of 739 CC700 subjects have one. Its absence is not a reason to skip.
 ANAT_REQUIRED = ["T1w"]
 ANAT_OPTIONAL = ["T2w"]
 
 
-def _echo_names(sub: str) -> list[str]:
+def _echo_names(sub: str, n_echoes: int) -> list[str]:
     return [
         f"sub-{sub}_task-{TASK}_echo-{i:02d}_bold{ext}"
-        for i in range(1, N_ECHOES + 1)
+        for i in range(1, n_echoes + 1)
         for ext in (".nii.gz", ".json")
     ]
 
 
-def survey(bidssep: Path) -> tuple[list[str], dict[str, str]]:
-    """Return (usable subjects, {subject: reason skipped})."""
-    anat_root, func_root = bidssep / "anat", bidssep / "func_movie"
+def survey(bidssep: Path, func_subdir: str, n_echoes: int) -> tuple[list[str], dict[str, str]]:
+    """Return (usable subjects, {subject: reason skipped}).
+
+    func_subdir is NOT a constant across Cam-CAN releases -- confirmed on disk
+    (2026-08): CC700/release004 names it `func_movie` (lowercase), ccfrail/
+    release002 names the equivalent directory `func_Movie` (capital M). Same
+    `task-Movie` entity inside the filenames either way, just a different
+    parent folder. Pointed at the wrong one, this function does not error --
+    it finds zero subjects under func_root and reports every one of them as
+    "no movie data", which reads as a plausible but wrong finding rather than
+    the config mistake it actually is. That silent-wrong-answer shape is
+    exactly what this project treats as worse than a loud failure, so the
+    directory name is a required argument, not a baked-in assumption.
+    """
+    anat_root, func_root = bidssep / "anat", bidssep / func_subdir
     for d in (anat_root, func_root):
         if not d.is_dir():
-            raise SystemExit(f"not a directory: {d}\nIs --camcan-bidssep correct?")
+            raise SystemExit(
+                f"not a directory: {d}\n"
+                "Is --camcan-bidssep correct? Is --func-subdir the right name "
+                "for THIS release (func_movie for CC700, func_Movie for "
+                "ccfrail -- confirmed different casing on disk)?"
+            )
 
     # Union, so a subject present in only one half is reported rather than
     # invisible. Intersecting here would hide exactly the cases worth seeing.
@@ -83,14 +102,14 @@ def survey(bidssep: Path) -> tuple[list[str], dict[str, str]]:
         missing_anat = [
             s for s in ANAT_REQUIRED if not (adir / f"sub-{sub}_{s}.nii.gz").is_file()
         ]
-        missing_echo = [n for n in _echo_names(sub) if not (fdir / n).is_file()]
+        missing_echo = [n for n in _echo_names(sub, n_echoes) if not (fdir / n).is_file()]
 
         # "no movie at all" and "movie missing an echo" are different findings
-        # and must not share a bucket. On the real archive ~90 subjects have a
-        # T1w but never did the movie task -- that is normal, and reporting it
-        # as "incomplete" would read as data corruption. A subject genuinely
-        # missing one echo of five is rare and worth looking at.
-        no_movie = len(missing_echo) == N_ECHOES * 2
+        # and must not share a bucket. On CC700 ~90 subjects have a T1w but
+        # never did the movie task -- that is normal, and reporting it as
+        # "incomplete" would read as data corruption. A subject genuinely
+        # missing one echo is rare and worth looking at.
+        no_movie = len(missing_echo) == n_echoes * 2
         if missing_anat and no_movie:
             skipped[sub] = "no T1w and no movie"
         elif missing_anat:
@@ -101,7 +120,7 @@ def survey(bidssep: Path) -> tuple[list[str], dict[str, str]]:
             n_nii = sum(1 for n in missing_echo if n.endswith(".nii.gz"))
             skipped[sub] = (
                 f"incomplete movie: {len(missing_echo)} file(s) absent "
-                f"({n_nii} image(s)) of {N_ECHOES * 2}"
+                f"({n_nii} image(s)) of {n_echoes * 2}"
             )
         else:
             usable.append(sub)
@@ -127,8 +146,9 @@ def link(src: Path, dst: Path, force: bool) -> None:
     dst.symlink_to(src)
 
 
-def build(subs: list[str], bidssep: Path, out: Path, force: bool) -> None:
-    anat_root, func_root = bidssep / "anat", bidssep / "func_movie"
+def build(subs: list[str], bidssep: Path, func_subdir: str, n_echoes: int,
+          out: Path, force: bool, dataset_name: str) -> None:
+    anat_root, func_root = bidssep / "anat", bidssep / func_subdir
     for sub in subs:
         s = f"sub-{sub}"
         for suffix in ANAT_REQUIRED + ANAT_OPTIONAL:
@@ -136,7 +156,7 @@ def build(subs: list[str], bidssep: Path, out: Path, force: bool) -> None:
                 src = anat_root / s / "anat" / f"{s}_{suffix}{ext}"
                 if src.is_file():
                     link(src, out / s / "anat" / src.name, force)
-        for name in _echo_names(sub):
+        for name in _echo_names(sub, n_echoes):
             link(func_root / s / "func" / name, out / s / "func" / name, force)
 
     # subjects.txt and skipped_subjects.tsv are OUR bookkeeping, not BIDS. The
@@ -154,11 +174,11 @@ def build(subs: list[str], bidssep: Path, out: Path, force: bool) -> None:
     # cannot say what it is invites exactly the confusion this whole directory
     # exists to resolve.
     (out / "README").write_text(
-        "Cam-CAN CC700 movie-watching, assembled as a single BIDS root.\n"
+        f"{dataset_name}, assembled as a single BIDS root.\n"
         "\n"
-        "Symlinks only -- no data is copied. Cam-CAN distributes anatomy and\n"
-        "function as two separate BIDS datasets (BIDSsep/anat and\n"
-        "BIDSsep/func_movie); fMRIPrep needs both under one sub-<label>/.\n"
+        f"Symlinks only -- no data is copied. Cam-CAN distributes anatomy and\n"
+        f"function as two separate BIDS datasets (BIDSsep/anat and\n"
+        f"BIDSsep/{func_subdir}); fMRIPrep needs both under one sub-<label>/.\n"
         "\n"
         "Built by preprocessing/camcan/01_build_bids.py in the DecomposingfMRI\n"
         "repository. Do not edit by hand -- re-run that script instead.\n"
@@ -174,7 +194,7 @@ def build(subs: list[str], bidssep: Path, out: Path, force: bool) -> None:
     (out / "dataset_description.json").write_text(
         json.dumps(
             {
-                "Name": "Cam-CAN CC700 movie-watching (BIDS view for fMRIPrep)",
+                "Name": dataset_name,
                 "BIDSVersion": "1.8.0",
                 "DatasetType": "raw",
                 "Authors": ["Cam-CAN consortium"],
@@ -231,6 +251,27 @@ def main(argv=None) -> int:
     p.add_argument("--camcan-bidssep", type=Path, default=CAMCAN_BIDSSEP)
     p.add_argument("-o", "--out", type=Path, default=DEFAULT_OUT)
     p.add_argument(
+        "--func-subdir", default=DEFAULT_FUNC_SUBDIR,
+        help=f"name of the movie func/ subdataset under --camcan-bidssep "
+             f"(default {DEFAULT_FUNC_SUBDIR!r} for CC700/release004). "
+             f"CONFIRMED DIFFERENT on ccfrail/release002: func_Movie, capital "
+             f"M. Getting this wrong does not error -- it silently reports "
+             f"every subject as having no movie data.",
+    )
+    p.add_argument(
+        "--n-echoes", type=int, default=N_ECHOES,
+        help=f"echoes per movie run (default {N_ECHOES}, confirmed for "
+             "CC700/release004). Confirm from a sidecar before trusting this "
+             "default for any other release -- protocols are not guaranteed "
+             "identical across Cam-CAN releases.",
+    )
+    p.add_argument(
+        "--dataset-name", default=DEFAULT_DATASET_NAME,
+        help="Name field written into the assembled dataset_description.json "
+             "and README. Change this for any BIDSsep root other than "
+             "CC700/release004 -- the default names CC700 explicitly.",
+    )
+    p.add_argument(
         "--limit",
         type=int,
         help="only the first N usable subjects, for a pilot. Selection is from "
@@ -252,8 +293,10 @@ def main(argv=None) -> int:
     args.camcan_bidssep = args.camcan_bidssep.resolve()
     args.out = args.out.resolve()
 
-    usable, skipped = survey(args.camcan_bidssep)
-    print(f"usable subjects (T1w + all {N_ECHOES} echoes): {len(usable)}")
+    usable, skipped = survey(args.camcan_bidssep, args.func_subdir, args.n_echoes)
+    print(f"BIDSsep root : {args.camcan_bidssep}")
+    print(f"func subdir  : {args.func_subdir}")
+    print(f"usable subjects (T1w + all {args.n_echoes} echoes): {len(usable)}")
     print(f"skipped:                                      {len(skipped)}")
 
     reasons: dict[str, int] = {}
@@ -289,7 +332,8 @@ def main(argv=None) -> int:
         return 1
 
     args.out.mkdir(parents=True, exist_ok=True)
-    build(selected, args.camcan_bidssep, args.out, args.force)
+    build(selected, args.camcan_bidssep, args.func_subdir, args.n_echoes,
+          args.out, args.force, args.dataset_name)
 
     dangling, stale = verify(selected, args.out)
     if stale:
