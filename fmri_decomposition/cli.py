@@ -249,6 +249,60 @@ def _preview_plan(cfg, plan) -> None:
           f"(zstd typically 2-4x smaller)")
 
 
+def _warn_excluded_shards(cfg, plan) -> None:
+    """Say so when stage 3 is about to process a subject marked excluded.
+
+    Stage 3 walks the FILESYSTEM, not participants.csv -- only `validate` and
+    `extract` read that table. So an exclusion written after extraction (which
+    is when it must be written: every QC metric is computed from stage-2
+    output) does not retroactively remove the shards, and stage 3 will happily
+    turn them into DFC.
+
+    This is a warning rather than a filter on purpose, for now: silently
+    dropping shards would make `dfc` depend on a table it has never needed, and
+    changing that is a decision about the pipeline's shape. The honest interim
+    is to make the discrepancy impossible to miss, and to leave the real filter
+    to whoever joins participants.csv at stage 4/5.
+    """
+    if cfg.participants is None:
+        return
+    try:
+        from .cohort import load_participants
+        from .io import parse_hive_keys
+
+        participants = load_participants(cfg)
+    except Exception as exc:                                     # noqa: BLE001
+        print(f"  (could not read participants.csv for the exclusion check: {exc})")
+        return
+
+    excluded = participants.loc[participants["excluded"]]
+    if excluded.empty:
+        return
+    keys = set(zip(excluded["sub"].astype(str), excluded["task"].astype(str)))
+    reasons = {(str(r["sub"]), str(r["task"])): str(r.get("exclusion_reason") or "")
+               for _, r in excluded.iterrows()}
+
+    hits = set()
+    for _, _, _, files in plan:
+        for f in files:
+            k = parse_hive_keys(f)
+            key = (str(k.get("sub")), str(k.get("task")))
+            if key in keys:
+                hits.add(key)
+    if not hits:
+        return
+    print(f"\n  WARNING: {len(hits)} excluded subject(s) still have activation shards, "
+          f"and stage 3 will process them.")
+    print("           `dfc` reads the filesystem, not participants.csv -- the "
+          "exclusion takes")
+    print("           effect only on a fresh `extract`, or when stage 4/5 joins the "
+          "table.")
+    for key in sorted(hits)[:8]:
+        print(f"             sub-{key[0]}/{key[1]}: {reasons.get(key, '') or '(no reason)'}")
+    if len(hits) > 8:
+        print(f"             ... and {len(hits) - 8} more")
+
+
 def cmd_dfc(args) -> int:
     from joblib import Parallel, delayed
 
@@ -268,6 +322,7 @@ def cmd_dfc(args) -> int:
     if args.dry_run:
         print(f"stage 3 DRY RUN: {len(jobs)} shard file(s) would be written")
         _preview_plan(cfg, plan)
+        _warn_excluded_shards(cfg, plan)
         return 0
 
     jobs, shard = _shard(jobs, args.shard)
@@ -275,6 +330,7 @@ def cmd_dfc(args) -> int:
     print(f"stage 3{tag}: {len(jobs)} shard file(s) across window sizes {sizes}")
     if not shard or shard[0] == 0:
         _preview_plan(cfg, plan)
+        _warn_excluded_shards(cfg, plan)
     entries = Parallel(n_jobs=args.n_jobs, backend="loky", verbose=5)(
         delayed(process_activation_file)(f, a, cfg, w, None, args.overwrite, n_ov)
         for f, a, w, n_ov in jobs

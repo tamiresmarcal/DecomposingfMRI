@@ -235,16 +235,71 @@ regressor `.1D` via `confounds.motion_glob` (Power FD computed here, with
 rotations converted on a 50 mm sphere and no differencing across a run
 boundary), or fMRIPrep's own `framewise_displacement` column, read as-is.
 
-`--exclude-mean-fd 0.5` will also write the exclusions, recorded as
-`excluded=True` with the reason `auto:mean_fd>0.5`. Rows carrying that marker
-are the tool's and are recomputed when the threshold moves; a row with a
-hand-written reason is never touched, in either direction.
-
 This is deliberately **subject-level only**. On ds002837 the motion regressors
 are on the acquisition clock and the images on the stimulus clock, 15–28 frames
 apart with no recoverable mapping — which is why `confounds.censor_glob` is
 disabled there and `good_frame` is all true. That misalignment is fatal to
 frame-level censoring and irrelevant to a mean over ~5,470 frames.
+
+### Exclusion criteria
+
+`--qc` adds four more per-subject metrics, read out of the stage-2 parquet
+(`fmri_decomposition/qc.py`). They are chosen to be about four **different**
+failures — a long list of correlated criteria costs sample size while only
+looking rigorous:
+
+| column | catches | rule | source |
+|---|---|---|---|
+| `mean_fd` | head movement | `--exclude-mean-fd 0.5` | motion file (`--fd`) |
+| `best_lag_tr` | wrong stimulus timing | `--exclude-lag-tr 1` | ISC vs. leave-one-out mean |
+| `frac_stimulus_covered` | scan stopped early | `--exclude-stimulus-covered 0.95` | shard length vs. longest of the same film |
+| `frac_parcels_empty` | registration failure | `--exclude-parcels-empty 0.05` | all-NaN parcel columns |
+| `frac_good_frames` | scrubbing survival | `--exclude-good-frames 0.5` | `good_frame` |
+
+`frac_good_frames` is cohort-conditional: it is identically 1.0 on ds002837,
+where censoring is off, and only informative on an fMRIPrep cohort.
+`peak_isc` and `n_isc_subjects` are written but deliberately **not**
+thresholded — no absolute scale, confounded with motion, and with 6 subjects
+per film for 8 of ds002837's 10 films the reference is itself a mean of five.
+
+```bash
+python tools/make_participants.py config/ds002837.yaml \
+    -o config/ds002837_participants.csv --update --fd --qc \
+    --exclude-mean-fd 0.5 --exclude-lag-tr 1 \
+    --exclude-stimulus-covered 0.95 --exclude-parcels-empty 0.05
+```
+
+Every rule writes its own machine-readable marker, joined with `; `:
+
+```
+sub-12,12,ds002837,500daysofsummer,True,auto:mean_fd>0.5; auto:frac_parcels_empty>0.05
+```
+
+Exclusions are **recomputed from the rules in force** on every run, so raising
+a threshold releases the rows it used to catch and dropping a rule releases
+only that rule's rows. A hand-written `exclusion_reason` — or one mixing a
+person's words with a marker — is never touched in either direction. A row
+whose metric is missing is never excluded: no motion file is not evidence of
+good motion. The tool prints per-rule counts and how many subjects fail more
+than one, because "excluded 9" is not interpretable and a set of criteria where
+one does all the work is really one criterion.
+
+#### Exclusions do not reach stage 3 by themselves
+
+`dfc` walks the filesystem; only `validate` and `extract` read
+`participants.csv`. Since every QC metric is computed *from* stage-2 output,
+the exclusion is necessarily written *after* extraction — by which time the
+shards exist and stage 3 will process them. `fmri-decomp dfc` therefore warns
+when it finds shards for excluded subjects. The real filter belongs at stage
+4/5, on the join.
+
+#### ISC is computed per stimulus
+
+`isc_alignment` groups by task. Pooling ds002837's ten films would build a
+"group mean" out of ten unrelated soundtracks, truncate everyone to the
+shortest film, and report a lag against noise — latent while `include_tasks`
+named one film, live once the cohort opened to all ten. A task with fewer than
+3 subjects gets `NaN` and a stated reason rather than being silently dropped.
 
 ### Row contracts
 

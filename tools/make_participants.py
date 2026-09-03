@@ -5,14 +5,16 @@
     python tools/make_participants.py config/cneuromod_friends.yaml \
         -o config/cneuromod_friends_participants.csv
 
-    # add subject-level motion (mean FD) to a table that already exists,
+    # add subject-level motion and QC to a table that already exists,
     # without touching the exclusions someone edited in by hand
     python tools/make_participants.py config/ds002837.yaml \
-        -o config/ds002837_participants.csv --update --fd
+        -o config/ds002837_participants.csv --update --fd --qc
 
-    # ... and let the motion decide the exclusions, recorded with a reason
+    # ... and let the four criteria decide, each recorded with its own reason
     python tools/make_participants.py config/ds002837.yaml \
-        -o config/ds002837_participants.csv --update --fd --exclude-mean-fd 0.5
+        -o config/ds002837_participants.csv --update --fd --qc \
+        --exclude-mean-fd 0.5 --exclude-lag-tr 1 \
+        --exclude-stimulus-covered 0.95 --exclude-parcels-empty 0.05
 
 Why this exists rather than a checked-in file: for a cohort like ds002837 the
 (sub, task) mapping is a published constant, so the CSV can ship with the
@@ -35,19 +37,41 @@ average over moves mean FD by well under a percent. So these columns are for
 excluding subjects and for use as a stage-5 covariate, and for nothing that is
 indexed by frame.
 
+WHAT `--qc` ADDS
+----------------
+Per-subject QC read out of the stage-2 parquet (see fmri_decomposition/qc.py).
+Four criteria, chosen to be about four DIFFERENT failures, because a long list
+of correlated ones costs sample size while only looking rigorous:
+
+    mean_fd                 head movement           (--fd, not --qc)
+    best_lag_tr             wrong stimulus timing
+    frac_stimulus_covered   scan stopped early
+    frac_parcels_empty      registration failure
+
+plus frac_good_frames, which measures scrubbing survival and is meaningful only
+where censoring is on -- it is identically 1.0 on ds002837.
+
 EXCLUSIONS
 ----------
-Without `--exclude-mean-fd`, every generated row is excluded=False and this
-tool never changes an exclusion. Real exclusions are edited in by hand and
-RECORDED as excluded=True with a reason -- never by deleting the row.
-`validate_cohort` treats a run on disk with no table row as a problem
-precisely so that "is this excluded, or did someone forget?" stays answerable.
+With no --exclude-* flag, every generated row is excluded=False and this tool
+never changes an exclusion. Real exclusions are edited in by hand and RECORDED
+as excluded=True with a reason -- never by deleting the row. `validate_cohort`
+treats a run on disk with no table row as a problem precisely so that "is this
+excluded, or did someone forget?" stays answerable.
 
-`--exclude-mean-fd X` is the one exception, and it stays inside that rule: it
-writes excluded=True with the reason `auto:mean_fd>X`. Rows carrying that
-marker are owned by this tool and are recomputed on the next run (so lowering
-the threshold cannot leave a stale exclusion behind); any row with a
-hand-written reason is left exactly as it is, threshold or no threshold.
+The --exclude-* flags stay inside that rule. Each writes a machine-readable
+reason (`auto:mean_fd>0.5`, `auto:abs(best_lag_tr)>1`, ...) and several are
+joined with "; ". Rows whose reason consists only of such markers are owned by
+this tool and are RECOMPUTED from scratch every run, so raising a threshold
+releases the rows it used to catch. A row with a hand-written reason -- or one
+mixing a human's words with a marker -- is left exactly as it is, in both
+directions. A row whose metric is missing is never excluded: no motion file is
+not evidence of good motion.
+
+Nothing here deletes a row, and nothing here deletes a shard. An exclusion
+written after `extract` does not retroactively stop stage 3, which walks the
+filesystem rather than this table -- `fmri-decomp dfc` warns when it finds
+shards for excluded subjects.
 """
 
 from __future__ import annotations
@@ -55,6 +79,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -66,7 +91,7 @@ COLUMNS = ["participant_id", "sub", "cohort", "task", "excluded", "exclusion_rea
 FD_COLUMNS = ["mean_fd", "median_fd", "max_fd", "frac_fd_gt_0p2", "frac_fd_gt_0p5",
               "n_fd_frames", "n_motion_runs", "fd_source", "fd_columns", "fd_note"]
 
-AUTO_PREFIX = "auto:mean_fd>"
+AUTO_PREFIX = "auto:"
 
 
 def _fmt(value) -> str:
@@ -147,36 +172,153 @@ def report_fd(rows: list[dict]) -> None:
               f"{100 * float(r['frac_fd_gt_0p5']):.1f}% of frames")
 
 
-# ------------------------------------------------------------- exclusions ---
-def apply_fd_exclusions(rows: list[dict], threshold: float) -> tuple[int, int]:
-    """Set excluded=True/False for rows this tool owns. Returns (added, cleared).
+def report_qc(rows: list[dict]) -> None:
+    """Print each QC metric's distribution and its worst subjects.
 
-    A row whose exclusion_reason was written by a person is never touched --
-    not to exclude it, and above all not to un-exclude it. The marker is what
-    makes an automatic decision reversible without also making a human one so.
+    Thresholds are meant to be fixed BEFORE this is read -- but the
+    distribution still has to be visible, because a metric whose spread is
+    invisible cannot be sanity-checked. Reported per task where the reference
+    is per task.
     """
-    added = cleared = 0
-    marker = f"{AUTO_PREFIX}{threshold:g}"
+    metrics = [("frac_stimulus_covered", "low", "coverage"),
+               ("frac_parcels_empty", "high", "registration"),
+               ("frac_good_frames", "low", "scrubbing"),
+               ("peak_isc", "low", "stimulus-drivenness"),
+               ("best_lag_tr", "abs", "timing")]
+    print("\n  per-subject QC:")
+    for col, worst, what in metrics:
+        vals = []
+        for r in rows:
+            try:
+                v = float(r.get(col))
+            except (TypeError, ValueError):
+                continue
+            if v == v:
+                vals.append((v, r))
+        if not vals:
+            print(f"    {col:<24} not computed")
+            continue
+        xs = sorted(v for v, _ in vals)
+        mid = xs[len(xs) // 2]
+        if worst == "high":
+            vals.sort(key=lambda t: -t[0])
+        elif worst == "abs":
+            vals.sort(key=lambda t: -abs(t[0]))
+        else:
+            vals.sort(key=lambda t: t[0])
+        tail = ", ".join(f"sub-{r.get('sub')}/{r.get('task')}={v:.3g}"
+                         for v, r in vals[:3])
+        print(f"    {col:<24} n={len(xs):<4} min={xs[0]:.3g} median={mid:.3g} "
+              f"max={xs[-1]:.3g}   [{what}]")
+        print(f"    {'':<24} worst: {tail}")
+
+
+# ------------------------------------------------------------- exclusions ---
+@dataclass
+class Rule:
+    """One automatic exclusion criterion.
+
+    `column` is a participants.csv column, `op` is 'gt' or 'lt', and `abs_`
+    thresholds |value| (which is what a timing lag needs -- lag -12 is as wrong
+    as +12). A row is excluded when the comparison is TRUE.
+    """
+
+    column: str
+    op: str                       # gt | lt
+    threshold: float
+    abs_: bool = False
+
+    @property
+    def marker(self) -> str:
+        col = f"abs({self.column})" if self.abs_ else self.column
+        return f"{AUTO_PREFIX}{col}{'>' if self.op == 'gt' else '<'}{self.threshold:g}"
+
+    def fires(self, row: dict) -> bool:
+        """Missing or unparseable is NEVER a failure.
+
+        No motion file is not evidence of good motion, and an uncomputable ISC
+        is not evidence of a bad subject. A row that cannot be judged is left
+        for a person to judge.
+        """
+        try:
+            v = float(row.get(self.column))
+        except (TypeError, ValueError):
+            return False
+        if v != v:                                        # NaN
+            return False
+        if self.abs_:
+            v = abs(v)
+        return v > self.threshold if self.op == "gt" else v < self.threshold
+
+
+def _is_owned(reason: str) -> bool:
+    """True when every part of the reason was written by this tool.
+
+    A reason mixing a human's words with an auto marker counts as the human's:
+    the safe direction is to leave it alone.
+    """
+    parts = [p.strip() for p in str(reason or "").split(";") if p.strip()]
+    return bool(parts) and all(p.startswith(AUTO_PREFIX) for p in parts)
+
+
+def apply_auto_exclusions(rows: list[dict], rules: list[Rule]) -> dict[str, int]:
+    """Recompute every automatic exclusion from scratch. Returns per-rule counts.
+
+    Recomputing rather than accumulating is what makes a threshold reversible:
+    raise a cutoff and the rows it used to catch are released, because their
+    reason is rebuilt from the rules currently in force. A row whose
+    exclusion_reason a person wrote is never touched -- not to exclude it, and
+    above all not to un-exclude it.
+    """
+    counts = {r.marker: 0 for r in rules}
+    counts["_cleared"] = 0
+    counts["_protected"] = 0
     for row in rows:
         reason = str(row.get("exclusion_reason") or "")
-        owned = reason.startswith(AUTO_PREFIX)
-        if reason and not owned:
+        was_excluded = row.get("excluded") in (True, "True", "true", 1, "1")
+        if reason and not _is_owned(reason):
+            counts["_protected"] += 1
             continue
-        mean_fd = row.get("mean_fd")
-        try:
-            over = mean_fd is not None and float(mean_fd) > threshold
-        except (TypeError, ValueError):
-            over = False
-        if over:
-            if not owned:
-                added += 1        # a marker refresh at a new threshold is not new
+        if reason and not rules:
+            continue                      # owned, but no rules given: leave as-is
+        fired = [r.marker for r in rules if r.fires(row)]
+        for m in fired:
+            counts[m] += 1
+        if fired:
             row["excluded"] = True
-            row["exclusion_reason"] = marker
-        elif owned:
+            row["exclusion_reason"] = "; ".join(fired)
+        else:
             row["excluded"] = False
             row["exclusion_reason"] = ""
-            cleared += 1
-    return added, cleared
+            if was_excluded:
+                counts["_cleared"] += 1
+    return counts
+
+
+def report_exclusions(rows: list[dict], rules: list[Rule], counts: dict) -> None:
+    """Who failed what, and where the criteria overlap.
+
+    The overlap matters: "excluded 9" is not interpretable, and if one
+    criterion accounts for all nine the other four are decoration.
+    """
+    print(f"\n  automatic exclusions ({len(rules)} rule(s)):")
+    for r in rules:
+        print(f"    {counts.get(r.marker, 0):>4}  {r.marker}")
+    if counts.get("_cleared"):
+        print(f"    {counts['_cleared']:>4}  released (no rule fires at these thresholds)")
+    if counts.get("_protected"):
+        print(f"    {counts['_protected']:>4}  left alone (hand-written reason)")
+
+    excluded = [r for r in rows if _is_owned(r.get("exclusion_reason", ""))]
+    if not excluded:
+        return
+    n_multi = sum(1 for r in excluded if ";" in str(r["exclusion_reason"]))
+    print(f"    {len(excluded)} row(s) excluded in total, "
+          f"{n_multi} by more than one rule")
+    for row in excluded[:10]:
+        print(f"      sub-{row.get('sub')}/{row.get('task')}: {row['exclusion_reason']}")
+    if len(excluded) > 10:
+        print(f"      ... and {len(excluded) - 10} more")
 
 
 # ------------------------------------------------------------------- table ---
@@ -217,9 +359,39 @@ def main(argv=None) -> int:
     p.add_argument("--motion-columns", type=int, nargs=6, default=None, metavar="J",
                    help="six 0-based column indices (negatives count from the end) "
                         "when the motion columns cannot be identified from the header")
-    p.add_argument("--exclude-mean-fd", type=float, default=None, metavar="MM",
-                   help="mark rows with mean_fd above this as excluded, with the "
-                        f"reason {AUTO_PREFIX}MM. Hand-written reasons are never touched.")
+    p.add_argument("--qc", action="store_true",
+                   help="add per-subject QC columns from the stage-2 output: "
+                        "frac_good_frames, frac_stimulus_covered, frac_parcels_empty, "
+                        "peak_isc and best_lag_tr (requires `extract` to have run)")
+    p.add_argument("--isc-parcels", nargs="*", default=None,
+                   help="parcel column(s) to seed ISC with; default is an auditory "
+                        "parcel of the QC atlas, or a visual one")
+    p.add_argument("--isc-max-lag-tr", type=int, default=30,
+                   help="lag range searched by ISC, in TRs (default 30)")
+
+    g = p.add_argument_group(
+        "automatic exclusions",
+        "Each writes excluded=True with a machine-readable reason. All of them are "
+        "RECOMPUTED on every run, so raising a threshold releases the rows it used "
+        "to catch; a hand-written exclusion_reason is never touched in either "
+        "direction. A row whose metric is missing is never excluded -- absence of "
+        "evidence is not evidence.")
+    g.add_argument("--exclude-mean-fd", type=float, default=None, metavar="MM",
+                   help="motion: exclude mean_fd > MM (e.g. 0.5)")
+    g.add_argument("--exclude-lag-tr", type=float, default=None, metavar="TR",
+                   help="timing: exclude |best_lag_tr| > TR (e.g. 1). Needs --qc. "
+                        "This one is a correctness failure, not a quality gradient: "
+                        "the subject's stimulus_time_s is wrong.")
+    g.add_argument("--exclude-stimulus-covered", type=float, default=None, metavar="FRAC",
+                   help="coverage: exclude frac_stimulus_covered < FRAC (e.g. 0.95). "
+                        "Needs --qc.")
+    g.add_argument("--exclude-parcels-empty", type=float, default=None, metavar="FRAC",
+                   help="registration: exclude frac_parcels_empty > FRAC (e.g. 0.05). "
+                        "Needs --qc.")
+    g.add_argument("--exclude-good-frames", type=float, default=None, metavar="FRAC",
+                   help="scrubbing: exclude frac_good_frames < FRAC (e.g. 0.5). Needs "
+                        "--qc, and is meaningless on a cohort with censoring disabled, "
+                        "where it is identically 1.0.")
     args = p.parse_args(argv)
 
     out = Path(args.out)
@@ -234,13 +406,35 @@ def main(argv=None) -> int:
         print(f"--update needs an existing {out}; drop the flag to create it.",
               file=sys.stderr)
         return 1
+    rules: list[Rule] = []
+    if args.exclude_mean_fd is not None:
+        rules.append(Rule("mean_fd", "gt", args.exclude_mean_fd))
+    if args.exclude_lag_tr is not None:
+        rules.append(Rule("best_lag_tr", "gt", args.exclude_lag_tr, abs_=True))
+    if args.exclude_stimulus_covered is not None:
+        rules.append(Rule("frac_stimulus_covered", "lt", args.exclude_stimulus_covered))
+    if args.exclude_parcels_empty is not None:
+        rules.append(Rule("frac_parcels_empty", "gt", args.exclude_parcels_empty))
+    if args.exclude_good_frames is not None:
+        rules.append(Rule("frac_good_frames", "lt", args.exclude_good_frames))
+
     if args.exclude_mean_fd is not None and not args.fd:
         print("--exclude-mean-fd needs --fd: there is nothing to threshold otherwise.",
               file=sys.stderr)
         return 1
+    needs_qc = [f"--exclude-{n}" for n, v in (
+        ("lag-tr", args.exclude_lag_tr),
+        ("stimulus-covered", args.exclude_stimulus_covered),
+        ("parcels-empty", args.exclude_parcels_empty),
+        ("good-frames", args.exclude_good_frames)) if v is not None]
+    if needs_qc and not args.qc:
+        print(f"{', '.join(needs_qc)} need(s) --qc: there is nothing to threshold "
+              f"otherwise.", file=sys.stderr)
+        return 1
 
     from fmri_decomposition.config import load_config
     from fmri_decomposition.cohort import discover_runs
+    from fmri_decomposition.atlases.registry import get_atlas
 
     cfg = load_config(args.config)
     if not Path(cfg.derivatives_root).exists():
@@ -293,10 +487,21 @@ def main(argv=None) -> int:
             row.update(fd.get((str(row.get("sub")), str(row.get("task"))), absent))
         columns = columns + [c for c in FD_COLUMNS if c not in columns]
 
-    if args.exclude_mean_fd is not None:
-        n_added, n_cleared = apply_fd_exclusions(rows, args.exclude_mean_fd)
-        print(f"\n  mean_fd > {args.exclude_mean_fd:g} mm: {n_added} row(s) newly "
-              f"excluded, {n_cleared} auto-exclusion(s) cleared")
+    if args.qc:
+        from fmri_decomposition.qc import QC_COLUMNS, SubjectQC, collect_qc
+
+        atlases = [get_atlas(n, **cfg.atlas_params.get(n, {})) for n in cfg.atlases]
+        qc, messages = collect_qc(cfg, atlases, args.isc_parcels, args.isc_max_lag_tr)
+        for m in messages:
+            print(f"  {m}")
+        absent = SubjectQC(qc_note="no activation shard on disk").as_row()
+        for row in rows:
+            row.update(qc.get((str(row.get("sub")), str(row.get("task"))), absent))
+        columns = columns + [c for c in QC_COLUMNS if c not in columns]
+
+    if rules:
+        counts = apply_auto_exclusions(rows, rules)
+        report_exclusions(rows, rules, counts)
 
     write_table(out, rows, columns)
 
@@ -314,7 +519,9 @@ def main(argv=None) -> int:
 
     if args.fd:
         report_fd(rows)
-    if args.exclude_mean_fd is None:
+    if args.qc:
+        report_qc(rows)
+    if not rules:
         print("\n  Exclusions are unchanged. Edit real ones in by hand as "
               "excluded=True WITH a\n  reason -- do not delete rows, or the validator "
               "can no longer tell a curation\n  decision from an oversight.")

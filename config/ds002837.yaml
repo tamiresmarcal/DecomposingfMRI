@@ -213,10 +213,21 @@ windows:
 #   fmri-decomp dfc      config/ds002837.yaml --n-jobs 4
 #   fmri-decomp diagnose config/ds002837.yaml
 #
-# Subject-level motion, alongside the above (reads the regressors, not the
-# NIfTIs, so it is seconds rather than core-hours):
+# Subject-level QC, AFTER extract (every metric is read out of the stage-2
+# parquet; no NIfTI is opened, so it is seconds rather than core-hours):
 #   python tools/make_participants.py config/ds002837.yaml \
-#       -o config/ds002837_participants.csv --update --fd
-# Add --exclude-mean-fd 0.5 to have it write the exclusions too, recorded as
-# excluded=True with the reason `auto:mean_fd>0.5`. Look at the printed
-# distribution first -- the threshold is a choice, not a constant.
+#       -o config/ds002837_participants.csv --update --fd --qc
+#
+# Four criteria, four different failures -- add the thresholds once you have
+# looked at the printed distributions, and fix them before you look if you can:
+#   --exclude-mean-fd 0.5             head movement
+#   --exclude-lag-tr 1                wrong stimulus timing (a correctness bug)
+#   --exclude-stimulus-covered 0.95   scan stopped early
+#   --exclude-parcels-empty 0.05      registration failure
+#
+# --exclude-good-frames is deliberately NOT listed: with censor_glob disabled
+# above, frac_good_frames is identically 1.0 here and would exclude nobody.
+#
+# The exclusion does not reach stage 3 on its own -- `dfc` walks the filesystem,
+# not this table, so it warns about excluded subjects that still have shards.
+# Filter on the participants join at stage 4/5.

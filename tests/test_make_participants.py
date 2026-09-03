@@ -7,6 +7,7 @@ threshold must never be able to overwrite or clear a human decision.
 """
 
 import importlib.util
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,53 +16,113 @@ REPO = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location(
     "make_participants", REPO / "tools" / "make_participants.py")
 mp = importlib.util.module_from_spec(_spec)
+# Registered before exec: @dataclass resolves annotations through
+# sys.modules[cls.__module__], which is None for an unregistered module.
+sys.modules[_spec.name] = mp
 _spec.loader.exec_module(mp)
 
 
-def row(sub, mean_fd=None, excluded=False, reason=""):
-    return {"participant_id": f"sub-{sub}", "sub": sub, "cohort": "c", "task": "t",
-            "excluded": excluded, "exclusion_reason": reason, "mean_fd": mean_fd}
+def row(sub, mean_fd=None, excluded=False, reason="", **extra):
+    r = {"participant_id": f"sub-{sub}", "sub": sub, "cohort": "c", "task": "t",
+         "excluded": excluded, "exclusion_reason": reason, "mean_fd": mean_fd}
+    r.update(extra)
+    return r
 
 
-class TestFdExclusions:
+FD = lambda t=0.5: mp.Rule("mean_fd", "gt", t)                          # noqa: E731
+LAG = lambda t=1: mp.Rule("best_lag_tr", "gt", t, abs_=True)            # noqa: E731
+COV = lambda t=0.95: mp.Rule("frac_stimulus_covered", "lt", t)          # noqa: E731
+EMPTY = lambda t=0.05: mp.Rule("frac_parcels_empty", "gt", t)           # noqa: E731
+
+
+class TestRuleMarkers:
+    """The marker is the contract: it is what makes an auto exclusion
+    recognisable, reversible, and distinguishable from a human's."""
+
+    def test_markers_are_readable_and_carry_the_threshold(self):
+        assert FD(0.5).marker == "auto:mean_fd>0.5"
+        assert COV(0.95).marker == "auto:frac_stimulus_covered<0.95"
+        assert EMPTY(0.05).marker == "auto:frac_parcels_empty>0.05"
+
+    def test_a_lag_rule_thresholds_the_absolute_value(self):
+        """Lag -12 is exactly as wrong as +12."""
+        assert LAG(1).marker == "auto:abs(best_lag_tr)>1"
+        assert LAG(1).fires(row("1", best_lag_tr=-12))
+        assert LAG(1).fires(row("1", best_lag_tr=12))
+        assert not LAG(1).fires(row("1", best_lag_tr=0))
+
+    def test_lt_and_gt_point_the_right_way(self):
+        assert COV(0.95).fires(row("1", frac_stimulus_covered=0.60))
+        assert not COV(0.95).fires(row("1", frac_stimulus_covered=1.0))
+        assert EMPTY(0.05).fires(row("1", frac_parcels_empty=0.30))
+        assert not EMPTY(0.05).fires(row("1", frac_parcels_empty=0.0))
+
+    @pytest.mark.parametrize("value", [None, "", "n/a", float("nan")])
+    def test_a_missing_metric_never_fires(self, value):
+        """Absence of evidence is not evidence: no motion file is not proof of
+        good motion, and an uncomputable ISC is not proof of a bad subject."""
+        assert not FD(0.5).fires(row("1", mean_fd=value))
+
+
+class TestAutoExclusions:
     def test_rows_over_the_threshold_are_excluded_with_a_recorded_reason(self):
         rows = [row("1", 0.1), row("2", 0.8)]
-        added, cleared = mp.apply_fd_exclusions(rows, 0.5)
-        assert (added, cleared) == (1, 0)
+        counts = mp.apply_auto_exclusions(rows, [FD(0.5)])
+        assert counts["auto:mean_fd>0.5"] == 1
         assert rows[0]["excluded"] is False
         assert rows[1]["excluded"] is True
         assert rows[1]["exclusion_reason"] == "auto:mean_fd>0.5"
 
+    def test_several_rules_all_appear_in_the_reason(self):
+        rows = [row("1", 0.9, frac_stimulus_covered=0.5, best_lag_tr=0)]
+        mp.apply_auto_exclusions(rows, [FD(0.5), LAG(1), COV(0.95)])
+        assert rows[0]["exclusion_reason"] == (
+            "auto:mean_fd>0.5; auto:frac_stimulus_covered<0.95")
+
     def test_a_hand_written_exclusion_is_never_touched(self):
         rows = [row("1", 0.1, excluded=True, reason="corrupted run")]
-        mp.apply_fd_exclusions(rows, 0.5)
+        counts = mp.apply_auto_exclusions(rows, [FD(0.5)])
+        assert counts["_protected"] == 1
         assert rows[0]["excluded"] is True
         assert rows[0]["exclusion_reason"] == "corrupted run"
 
-    def test_a_hand_written_exclusion_is_not_re_reasoned_by_the_threshold(self):
-        """Even when the row would also fail on motion, the reason stays theirs."""
+    def test_a_hand_written_exclusion_is_not_re_reasoned_by_a_rule(self):
         rows = [row("1", 9.9, excluded=True, reason="fell asleep, per scan log")]
-        mp.apply_fd_exclusions(rows, 0.5)
+        mp.apply_auto_exclusions(rows, [FD(0.5)])
         assert rows[0]["exclusion_reason"] == "fell asleep, per scan log"
 
-    def test_raising_the_threshold_clears_the_tools_own_exclusions(self):
+    def test_a_reason_mixing_human_and_auto_counts_as_the_humans(self):
+        """The safe direction is to leave it alone."""
+        rows = [row("1", 0.1, excluded=True,
+                    reason="auto:mean_fd>0.5; and the scan log agrees")]
+        mp.apply_auto_exclusions(rows, [FD(5.0)])
+        assert rows[0]["excluded"] is True
+
+    def test_raising_the_threshold_releases_the_rows_it_used_to_catch(self):
         rows = [row("1", 0.8, excluded=True, reason="auto:mean_fd>0.5")]
-        added, cleared = mp.apply_fd_exclusions(rows, 1.0)
-        assert (added, cleared) == (0, 1)
+        counts = mp.apply_auto_exclusions(rows, [FD(1.0)])
+        assert counts["_cleared"] == 1
         assert rows[0]["excluded"] is False
         assert rows[0]["exclusion_reason"] == ""
 
-    def test_moving_the_threshold_rewrites_the_marker_without_double_counting(self):
+    def test_dropping_a_rule_releases_only_that_rules_rows(self):
+        """Exclusions are recomputed from the rules in force, not accumulated."""
+        rows = [row("1", 0.1, frac_stimulus_covered=0.5, excluded=True,
+                    reason="auto:mean_fd>0.5; auto:frac_stimulus_covered<0.95")]
+        mp.apply_auto_exclusions(rows, [COV(0.95)])
+        assert rows[0]["excluded"] is True
+        assert rows[0]["exclusion_reason"] == "auto:frac_stimulus_covered<0.95"
+
+    def test_moving_a_threshold_rewrites_the_marker_in_place(self):
         rows = [row("1", 2.0, excluded=True, reason="auto:mean_fd>0.5")]
-        added, cleared = mp.apply_fd_exclusions(rows, 1.0)
-        assert (added, cleared) == (0, 0), "already excluded; only the marker moved"
+        counts = mp.apply_auto_exclusions(rows, [FD(1.0)])
+        assert counts["_cleared"] == 0
         assert rows[0]["exclusion_reason"] == "auto:mean_fd>1"
 
-    def test_a_row_with_no_mean_fd_is_left_alone(self):
-        """No motion file is not evidence of good motion."""
+    def test_a_row_with_no_metric_is_left_alone(self):
         rows = [row("1", None), row("2", "")]
-        added, cleared = mp.apply_fd_exclusions(rows, 0.5)
-        assert (added, cleared) == (0, 0)
+        counts = mp.apply_auto_exclusions(rows, [FD(0.5)])
+        assert counts["auto:mean_fd>0.5"] == 0
         assert not any(r["excluded"] for r in rows)
 
 
