@@ -135,8 +135,29 @@ class WindowConfig:
     #     by_size:
     #       15: {atlases: [yeo7, networks]}
     by_size: dict[float, WindowSizeSpec] = field(default_factory=dict)
+    # What to do about an (atlas, window size) pair where EVERY window is
+    # rank-deficient -- i.e. the window is shorter than
+    # `min_window_s_for_nodes(atlas.n_nodes, tr)`.
+    #
+    #   warn  say so in the plan and run it anyway (the default, and what this
+    #         pipeline has always done -- Harvard-Oxford at 30 s and 60 s is
+    #         already in this category and has been running).
+    #   skip  do not run the pair at all.
+    #
+    # `skip` is the general form of a `by_size.atlases` restriction: it is
+    # derived from the atlas and the TR, so a window size nobody enumerated is
+    # covered too. It is NOT the default because the two are not the same
+    # question -- rank deficiency makes the correlation MATRIX singular, while
+    # each individual edge is still an ordinary two-variable correlation with
+    # n samples. If you analyse edges one at a time, a rank-deficient window is
+    # noisy, not void; if you invert or decompose the matrix, it is void.
+    rank_policy: str = "warn"             # warn | skip
 
     def __post_init__(self) -> None:
+        if self.rank_policy not in ("warn", "skip"):
+            raise ConfigError(
+                f"windows.rank_policy must be 'warn' or 'skip', got {self.rank_policy!r}"
+            )
         if self.n_overlaps < 1:
             raise ConfigError(f"windows.n_overlaps must be >= 1, got {self.n_overlaps}")
         sizes = {float(w) for w in self.sizes_s}

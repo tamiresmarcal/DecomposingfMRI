@@ -145,18 +145,49 @@ windows:
     15:
       atlases: [yeo7, networks]     # not harvardoxford, and never networks_nodes
       # n_overlaps: 3               # optional: a coarser stride at this aperture
+  # rank_policy: skip               # the derived form of the same idea (below)
 ```
 
 Two independent things make a short window size not portable across atlases,
 both pure arithmetic:
 
 **Rank.** A window is `round(window_s / TR)` samples, and a correlation matrix
-over *p* nodes needs *n − 1 ≥ p*. On ds002837 (TR = 1) that is 15 samples for
-7 nodes (fine), 14 nodes (fine, by exactly one sample) and 111 nodes (not
-remotely). Restricting the size beats filtering `rank_deficient` at stage 4,
-because then the compute is never spent. `fmri-decomp dfc --dry-run` prints the
-warning for any pair where every window would be flagged — including the two
-that are already like that in the default grid, Harvard-Oxford at 30 s and 60 s.
+over *p* nodes is singular unless *n − 1 ≥ p*. Inverting that gives a floor
+that is a property of the atlas and the TR, not a number anyone picked:
+
+```python
+min_window_s_for_nodes(n_nodes, tr)   # == (n_nodes + 0.5) * tr
+```
+
+| atlas | nodes | floor at TR = 1 | at TR = 1.49 |
+|---|---|---|---|
+| `yeo7` | 7 | 7.5 s | 11.2 s |
+| `networks` | 14 | 14.5 s | 20.9 s |
+| `harvardoxford` | 111 | 111.5 s | 166.1 s |
+| `networks_nodes` | 254 | 254.5 s | 379.2 s |
+
+Note the third row: **"short windows are only for the coarse atlases" is the
+right instinct with the wrong constant.** A fixed 30 s rule would still admit
+Harvard-Oxford, which needs 111.5 s — it is already past the line at 30 s and
+60 s in the grid that has been running, and stays there.
+
+Be precise about what rank deficiency costs, because it is easy to overstate:
+nothing comes back NaN. Each of Harvard-Oxford's 6,105 edges is an ordinary
+two-variable correlation over 15 samples and is finite, just very noisy
+(SE ≈ 0.29, so ~6% of edges pass |r| > 0.5 under the null). What is undefined
+is the **matrix** — so it matters if you invert or decompose it, and is merely
+noise if you analyse edges one at a time.
+
+That is why the enforcement is a choice rather than a default:
+
+| | effect |
+|---|---|
+| `rank_policy: warn` (default) | print the floor in the plan, run the pair anyway |
+| `rank_policy: skip` | do not run any (atlas, size) pair below its floor |
+
+`skip` is the general form of a `by_size.atlases` restriction: derived, so a
+window size nobody enumerated is covered too. It would also stop producing
+Harvard-Oxford at 30 s and 60 s, which is an analysis decision, not a cleanup.
 
 **Rows.** Window count goes as `1/stride`, so halving the aperture at fixed
 `n_overlaps` doubles the rows. On a 5,470 s film:
@@ -169,8 +200,11 @@ that are already like that in the default grid, Harvard-Oxford at 30 s and 60 s.
 | 30 | 6 s | 907 | 10× |
 | 15 | 3 s | 1,819 | 21× |
 
-21× the rows is nothing at yeo7's 21 edges and unaffordable at
-`networks_nodes`'s 32,131. Check before launching, not after:
+At yeo7's 21 edges and `networks`' 91 that 21× is ~90 MB uncompressed for all
+86 subjects — nothing. The same grid is ~3.8 GB on `harvardoxford` and ~20 GB
+on `networks_nodes`' 32,131 edges. So the row count is not what makes the
+configured run affordable; it is what keeps it affordable when someone widens
+`atlases:` later. Check before launching, not after:
 
 ```bash
 fmri-decomp dfc config/ds002837.yaml --dry-run

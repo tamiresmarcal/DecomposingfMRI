@@ -163,12 +163,18 @@ _DFC_FIXED_COLUMNS = 16
 def _dfc_plan(cfg, atlases, sizes):
     """(atlas, window_s, n_overlaps) -> the activation shards it applies to.
 
-    The atlas x window grid is not a full cross product. `windows.by_size`
-    restricts a size to the atlases it can support, which is how a 15 s
-    aperture reaches yeo7 and the 14 coordinate networks without also being
-    spent on Harvard-Oxford's 6,105 edges, where 15 samples estimate nothing.
+    The atlas x window grid is not a full cross product. Two filters apply:
+
+      * `windows.by_size[w].atlases` -- an explicit, per-size restriction. This
+        is what keeps the 15 s aperture on yeo7 and the 14 coordinate networks
+        and off Harvard-Oxford's 6,105 edges.
+      * `windows.rank_policy: skip` -- the derived form of the same idea, from
+        `min_window_s_for_nodes(n_nodes, tr)`, so a window size nobody wrote
+        down is covered too. Off by default; see the config for why.
     """
     from .io import activation_root
+    from .windows import (is_rank_deficient, min_window_s_for_nodes,
+                          window_tr_from_seconds)
 
     plan = []
     for atlas in atlases:
@@ -179,6 +185,13 @@ def _dfc_plan(cfg, atlases, sizes):
             continue
         for w in sizes:
             if atlas.name not in cfg.windows.atlases_for(w, [a.name for a in atlases]):
+                continue
+            if (cfg.windows.rank_policy == "skip"
+                    and is_rank_deficient(window_tr_from_seconds(w, cfg.tr), atlas.n_nodes)):
+                print(f"  skipping atlas={atlas.name} window_s={w:g}: "
+                      f"{atlas.n_nodes} nodes need >= "
+                      f"{min_window_s_for_nodes(atlas.n_nodes, cfg.tr):g}s at TR="
+                      f"{cfg.tr:g}  (windows.rank_policy: skip)")
                 continue
             plan.append((atlas, w, cfg.windows.overlaps_for(w), files))
     return plan
@@ -195,8 +208,8 @@ def _preview_plan(cfg, plan) -> None:
     """
     import pyarrow.parquet as pq
 
-    from .windows import (is_rank_deficient, n_windows, stride_seconds,
-                          window_tr_from_seconds)
+    from .windows import (is_rank_deficient, min_window_s_for_nodes, n_windows,
+                          stride_seconds, window_tr_from_seconds)
 
     print("\nplan:")
     total_rows = total_bytes = 0
@@ -220,10 +233,18 @@ def _preview_plan(cfg, plan) -> None:
         print(f"    {len(files):>4} shard(s)  ~{rows:,} row(s) x {atlas.n_edges:,} edge(s) "
               f"  ~{_human_bytes(approx)} uncompressed")
         if is_rank_deficient(n_tr_nominal, atlas.n_nodes):
+            floor_s = min_window_s_for_nodes(atlas.n_nodes, cfg.tr)
             print(f"    WARNING: {n_tr_nominal} sample(s) for {atlas.n_nodes} node(s) -- "
-                  f"every window will be flagged rank_deficient.")
-            print("             Restrict the size if that is not what you meant:")
-            print(f"               windows.by_size: {{{w:g}: {{atlases: [...]}}}}")
+                  f"every window flagged rank_deficient.")
+            print(f"             Edges are still finite (each is a 2-variable r over "
+                  f"{n_tr_nominal} samples, SE ~ {1 / max(n_tr_nominal - 3, 1) ** 0.5:.2f}); "
+                  f"the MATRIX is singular.")
+            print(f"             This atlas needs >= {floor_s:g}s at TR={cfg.tr:g}. "
+                  f"To not run the pair, either:")
+            print(f"               windows.by_size: {{{w:g}: {{atlases: [...]}}}}   "
+                  f"# this size only")
+            print("               windows.rank_policy: skip                 "
+                  "# every size, derived")
     print(f"  TOTAL ~{total_rows:,} row(s), ~{_human_bytes(total_bytes)} uncompressed "
           f"(zstd typically 2-4x smaller)")
 

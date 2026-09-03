@@ -157,11 +157,28 @@ windows:
   # THE 15 s APERTURE IS ATLAS-CONDITIONAL. Two independent reasons, both
   # arithmetic, both about ds002837's TR=1 and ~5,470 s films.
   #
-  # 1. Rank. A 15 s window is 15 samples. That estimates yeo7's 21 edges (7
-  #    nodes) and the coordinate atlas's 91 (14 nodes) badly but honestly; it
-  #    does not estimate Harvard-Oxford's 6,105 (111 nodes) at all. Every
-  #    window would come back rank_deficient, and the compute would be spent
-  #    producing a flag we can predict from the config.
+  # 1. Rank. A 15 s window is 15 samples. Be precise about what that costs,
+  #    because it is easy to overstate: nothing comes back NaN. Every one of
+  #    Harvard-Oxford's 6,105 edges is an ordinary two-variable correlation
+  #    over 15 samples and is finite -- just very noisy (SE ~ 0.29, so ~6% of
+  #    edges exceed |r| = 0.5 under the null). What fails is the MATRIX: with
+  #    n-1 = 14 < 111 it is singular, so anything that inverts or decomposes it
+  #    is undefined, and every window comes back flagged rank_deficient.
+  #
+  #    The floor is derivable rather than a number someone picked --
+  #    `windows.min_window_s_for_nodes(n_nodes, tr)` = (n_nodes + 0.5) * TR:
+  #      yeo7 (7 nodes)          7.5 s
+  #      networks (14 nodes)    14.5 s
+  #      harvardoxford (111)   111.5 s   <- so 30 s and 60 s are ALSO past it
+  #      networks_nodes (254)  254.5 s
+  #
+  #    Note the third line: Harvard-Oxford at 30 s and 60 s has been in this
+  #    category since the grid was written, and is left running. That is the
+  #    reason `windows.rank_policy` defaults to `warn` and not `skip` -- if
+  #    edges are analysed one at a time, a rank-deficient window is noisy, not
+  #    void. Set `rank_policy: skip` to enforce the floor for every window size
+  #    automatically, including ones nobody enumerated here; it would also drop
+  #    harvardoxford at 30 s and 60 s, which is a real analysis decision.
   #
   #    Note `networks` clears the bar by exactly one sample: 15 samples, 14
   #    nodes. That holds only while good_frame stays all-true, which on this
@@ -171,10 +188,14 @@ windows:
   #
   # 2. Rows. Window count goes as 1/stride, so at n_overlaps=5 the stride is
   #    3 s and a 5,470 s film yields 1,819 windows per subject against 87 at
-  #    300 s -- 21x, for all 86 subjects. That is fine at 21 edges (yeo7) and
-  #    at 91 (networks). It is NOT fine at 32,131 edges: `networks_nodes` is
-  #    deliberately absent from `atlases:` above and must stay absent, or the
-  #    atlases restriction below must exclude it. Check before launching:
+  #    300 s -- 21x, for all 86 subjects. Be precise here too: at 21 edges
+  #    (yeo7) and 91 (networks) that is ~90 MB uncompressed for the whole
+  #    cohort, which is nothing. The restriction below is not what makes this
+  #    run affordable; it is what keeps it affordable if someone widens
+  #    `atlases:` later. The same grid on harvardoxford is ~3.8 GB and on
+  #    `networks_nodes` (32,131 edges) ~20 GB. `networks_nodes` is deliberately
+  #    absent from `atlases:` above and must stay absent. Check before
+  #    launching -- the estimate is exact for this cohort, not a rule of thumb:
   #      fmri-decomp dfc config/ds002837.yaml --dry-run
   #
   # If storage is tight, n_overlaps: 3 here cuts the fine-aperture rows by

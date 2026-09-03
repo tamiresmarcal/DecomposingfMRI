@@ -70,6 +70,25 @@ def is_rank_deficient(n_samples: int, n_nodes: int) -> bool:
     return int(n_samples) - 1 < int(n_nodes)
 
 
+def min_window_s_for_nodes(n_nodes: int, tr: float) -> float:
+    """The shortest window at which `n_nodes` is not rank-deficient, in seconds.
+
+    The inverse of `is_rank_deficient` over `window_tr_from_seconds`: a window
+    is `floor(window_s / tr + 0.5)` samples, and non-deficiency needs
+    `n_samples >= n_nodes + 1`, so `window_s >= (n_nodes + 0.5) * tr`.
+
+    This is what makes the restriction general rather than a number somebody
+    typed. "Windows shorter than 30 s are for the coarse atlases" is the right
+    instinct with the wrong constant: at TR=1 Harvard-Oxford's 111 nodes need
+    111.5 s, so 30 s and 60 s are already past the line, and yeo7's 7 nodes are
+    fine at 7.5 s. The threshold is a property of (atlas, TR), and every future
+    window size anyone picks is checked against it without being enumerated.
+    """
+    if tr <= 0:
+        raise ValueError(f"tr must be positive, got {tr}")
+    return (int(n_nodes) + 0.5) * float(tr)
+
+
 def stride_seconds(window_s: float, n_overlaps: int) -> float:
     """Stride in seconds. n_overlaps=5 gives 80% overlap."""
     if n_overlaps < 1:

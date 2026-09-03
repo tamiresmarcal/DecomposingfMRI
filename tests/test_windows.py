@@ -3,7 +3,8 @@ import pytest
 
 from fmri_decomposition.windows import (Window, assign_window_ids,
                                         is_rank_deficient, make_index_windows,
-                                        make_stimulus_grid, n_windows,
+                                        make_stimulus_grid,
+                                        min_window_s_for_nodes, n_windows,
                                         stride_seconds, window_tr_from_seconds)
 
 
@@ -234,3 +235,59 @@ class TestRankDeficiency:
         assert not is_rank_deficient(15, 14)
         assert is_rank_deficient(14, 14)
 
+
+class TestMinWindowForNodes:
+    """The general form of "short windows are only for the coarse atlases".
+
+    The instinct is right and a fixed number of seconds is the wrong shape for
+    it: the threshold is a property of (atlas, TR), not a constant.
+    """
+
+    @pytest.mark.parametrize("n_nodes,tr,expected", [
+        (7, 1.0, 7.5),        # yeo7 on ds002837
+        (14, 1.0, 14.5),      # the coordinate networks
+        (111, 1.0, 111.5),    # Harvard-Oxford -- so 30 s and 60 s are past it
+        (254, 1.0, 254.5),    # networks_nodes
+        (7, 1.49, 11.175),    # the same atlas on CNeuroMod
+        (111, 1.49, 166.135),
+    ])
+    def test_the_floor_is_derived_from_the_atlas_and_the_tr(self, n_nodes, tr, expected):
+        assert min_window_s_for_nodes(n_nodes, tr) == pytest.approx(expected)
+
+    @pytest.mark.parametrize("n_nodes,tr", [(7, 1.0), (14, 1.0), (111, 1.0),
+                                            (14, 1.49), (111, 2.47)])
+    def test_it_is_exactly_the_inverse_of_the_rank_rule(self, n_nodes, tr):
+        floor_s = min_window_s_for_nodes(n_nodes, tr)
+        assert not is_rank_deficient(window_tr_from_seconds(floor_s, tr), n_nodes)
+        assert is_rank_deficient(window_tr_from_seconds(floor_s - tr, tr), n_nodes)
+
+    def test_a_fixed_30s_rule_would_have_been_wrong_in_both_directions(self):
+        """30 s admits Harvard-Oxford, which it should not, and would exclude
+        yeo7 at 15 s, which is fine there."""
+        assert min_window_s_for_nodes(111, 1.0) > 30.0    # 30 s is already too short
+        assert min_window_s_for_nodes(7, 1.0) < 15.0      # 15 s is comfortably enough
+
+
+class TestRankPolicy:
+    def _cfg(self, policy):
+        from fmri_decomposition.config import config_from_dict
+
+        return config_from_dict({
+            "cohort": "c", "tr": 1.0, "derivatives_root": "/d", "output_root": "/o",
+            "atlases": ["harvardoxford", "yeo7"],
+            "windows": {"sizes_s": [15, 30, 300], "rank_policy": policy},
+        })
+
+    def test_warn_is_the_default_so_the_existing_grid_is_unchanged(self):
+        from fmri_decomposition.config import config_from_dict
+
+        cfg = config_from_dict({"cohort": "c", "tr": 1.0, "derivatives_root": "/d",
+                                "output_root": "/o"})
+        assert cfg.windows.rank_policy == "warn"
+
+    def test_only_warn_and_skip_are_accepted(self):
+        from fmri_decomposition.config import ConfigError
+
+        self._cfg("warn"), self._cfg("skip")
+        with pytest.raises(ConfigError, match="rank_policy"):
+            self._cfg("ignore")
