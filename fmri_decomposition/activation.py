@@ -58,6 +58,8 @@ class RunRef:
     acq: str | None = None
     confounds: Path | None = None
     censor: Path | None = None
+    # Subject-level motion QC only; stage 2 never reads it. See motion.py.
+    motion: Path | None = None
     segments: list[RunSegment] = field(default_factory=list)
     timing_source: str = "identity"
     trim_end_s: float | None = None

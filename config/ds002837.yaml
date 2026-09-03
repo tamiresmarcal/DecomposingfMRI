@@ -102,6 +102,25 @@ confounds:
   # To resolve properly: ask the NNDb authors for the trim that produced the
   # 5470-volume derivative from the post-tcat series.
   censor_glob: null
+  # motion_glob is the SALVAGE from that finding, and it is enabled.
+  #
+  # Nothing above says the regressors are wrong -- only that they cannot be
+  # indexed by frame against the images. A subject-level mean does not need to
+  # be: averaging |FD| over ~5,470 frames, a 15..28 frame offset at the ends
+  # moves the mean by well under a percent. It is the same head, the same
+  # session, the same film; only the indexing is broken.
+  #
+  # So the file is read for exactly two purposes, both subject-level:
+  #   1. the exclusion criterion the paragraph above asks for -- without a
+  #      number, "consider excluding sub-12" is not a criterion, it is a wish;
+  #   2. mean_fd as a stage-5 covariate.
+  #
+  # Stages 2 and 3 never open it: it reaches them only as a column in
+  # participants.csv, written by
+  #   python tools/make_participants.py config/ds002837.yaml \
+  #       -o config/ds002837_participants.csv --update --fd
+  # See fmri_decomposition/motion.py for what is and is not claimed.
+  motion_glob: "../regressors/sub-*_task-*_polort_bandpass_vent_wm_motion.1D"
   dilate_tr: 1
 
 filtering:
@@ -131,12 +150,86 @@ stimulus:
   unit_of_analysis: run
 
 windows:
-  sizes_s: [30, 60, 120, 300]
+  sizes_s: [15, 30, 60, 120, 300]
   n_overlaps: 5
   drop_incomplete: true
+
+  # THE 15 s APERTURE IS ATLAS-CONDITIONAL. Two independent reasons, both
+  # arithmetic, both about ds002837's TR=1 and ~5,470 s films.
+  #
+  # 1. Rank. A 15 s window is 15 samples. Be precise about what that costs,
+  #    because it is easy to overstate: nothing comes back NaN. Every one of
+  #    Harvard-Oxford's 6,105 edges is an ordinary two-variable correlation
+  #    over 15 samples and is finite -- just very noisy (SE ~ 0.29, so ~6% of
+  #    edges exceed |r| = 0.5 under the null). What fails is the MATRIX: with
+  #    n-1 = 14 < 111 it is singular, so anything that inverts or decomposes it
+  #    is undefined, and every window comes back flagged rank_deficient.
+  #
+  #    The floor is derivable rather than a number someone picked --
+  #    `windows.min_window_s_for_nodes(n_nodes, tr)` = (n_nodes + 0.5) * TR:
+  #      yeo7 (7 nodes)          7.5 s
+  #      networks (14 nodes)    14.5 s
+  #      harvardoxford (111)   111.5 s   <- so 30 s and 60 s are ALSO past it
+  #      networks_nodes (254)  254.5 s
+  #
+  #    Note the third line: Harvard-Oxford at 30 s and 60 s has been in this
+  #    category since the grid was written, and is left running. That is the
+  #    reason `windows.rank_policy` defaults to `warn` and not `skip` -- if
+  #    edges are analysed one at a time, a rank-deficient window is noisy, not
+  #    void. Set `rank_policy: skip` to enforce the floor for every window size
+  #    automatically, including ones nobody enumerated here; it would also drop
+  #    harvardoxford at 30 s and 60 s, which is a real analysis decision.
+  #
+  #    Note `networks` clears the bar by exactly one sample: 15 samples, 14
+  #    nodes. That holds only while good_frame stays all-true, which on this
+  #    cohort it is (see censor_glob above). If a censor ever becomes
+  #    applicable here, one dropped frame inside a 15 s window flips these to
+  #    rank_deficient -- so filter on `n_tr_effective`, not `n_tr_nominal`.
+  #
+  # 2. Rows. Window count goes as 1/stride, so at n_overlaps=5 the stride is
+  #    3 s and a 5,470 s film yields 1,819 windows per subject against 87 at
+  #    300 s -- 21x, for all 86 subjects. Be precise here too: at 21 edges
+  #    (yeo7) and 91 (networks) that is ~90 MB uncompressed for the whole
+  #    cohort, which is nothing. The restriction below is not what makes this
+  #    run affordable; it is what keeps it affordable if someone widens
+  #    `atlases:` later. The same grid on harvardoxford is ~3.8 GB and on
+  #    `networks_nodes` (32,131 edges) ~20 GB. `networks_nodes` is deliberately
+  #    absent from `atlases:` above and must stay absent. Check before
+  #    launching -- the estimate is exact for this cohort, not a rule of thumb:
+  #      fmri-decomp dfc config/ds002837.yaml --dry-run
+  #
+  # If storage is tight, n_overlaps: 3 here cuts the fine-aperture rows by
+  # ~40% (1,819 -> 1,092 per subject) at the cost of a 5 s stride. Changing it
+  # after a run has written window_s=15 needs --overwrite: the stride is not
+  # part of the output path, only the window size is.
+  by_size:
+    15:
+      atlases: [yeo7, networks]
 
 # --- how to run --------------------------------------------------------
 #   fmri-decomp validate config/ds002837.yaml
 #   fmri-decomp extract  config/ds002837.yaml --n-jobs 4 --no-strict
+#   fmri-decomp dfc      config/ds002837.yaml --dry-run      # rows before compute
 #   fmri-decomp dfc      config/ds002837.yaml --n-jobs 4
 #   fmri-decomp diagnose config/ds002837.yaml
+#
+# Subject-level QC is NOT a separate step: `03_finalize.sbatch` runs
+# `fmri-decomp diagnose` after the extract array, and that writes
+#   outputs/meta/cohorts/cohort=ds002837/participants_qc.csv
+# with one row per (sub, task) and one column block per failure mode:
+#   mean_fd                 head movement          (needs motion_glob above)
+#   best_lag_tr, peak_isc   wrong stimulus timing
+#   frac_stimulus_covered   scan stopped early
+#   frac_parcels_empty      registration failure
+#   frac_good_frames        scrubbing survival -- identically 1.0 here, since
+#                           censor_glob is disabled above
+#
+# NO THRESHOLD IS APPLIED ANYWHERE IN THIS PIPELINE. The QC table is
+# measurement; turning a number into an exclusion is a decision that belongs
+# with the models, where a sensitivity analysis can move a cutoff without
+# re-running any of the above. `participants.csv` carries only curation a
+# person entered by hand ("corrupted run"), and that one IS honoured, at
+# stage 2.
+#
+# Note `dfc` walks the filesystem rather than participants.csv, so it warns
+# about excluded subjects that still have shards rather than skipping them.

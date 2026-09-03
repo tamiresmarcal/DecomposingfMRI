@@ -91,6 +91,9 @@ def lr_correlation_diagnostic(activation_files, atlas: AtlasSpec,
     return out.sort_values("mean_lr_r", ascending=False, ignore_index=True)
 
 
+ISC_MIN_SUBJECTS = 3
+
+
 def isc_alignment(activation_files, parcels=("Heschls_Gyrus_includes_H1_and_H2",),
                   max_lag_tr: int = 30) -> pd.DataFrame:
     """Cross-correlate each subject against the leave-one-out group mean.
@@ -98,25 +101,59 @@ def isc_alignment(activation_files, parcels=("Heschls_Gyrus_includes_H1_and_H2",
     For cohorts with no timing record this is not a validation, it is the only
     way to obtain the offset. Gate stage 3 on it: refuse if median |best_lag|
     exceeds one TR.
+
+    **Grouped by task, always.** The leave-one-out reference is only meaningful
+    among people who saw the SAME stimulus: pooling ds002837's ten films would
+    build a "group mean" out of ten unrelated soundtracks, truncate everyone to
+    the shortest film, and report a lag for each subject against noise. That is
+    not a conservative approximation, it is a different quantity. This was
+    latent while `include_tasks` named a single film and became live when the
+    cohort opened to all ten.
+
+    A task with fewer than ISC_MIN_SUBJECTS subjects gets rows with NaN and a
+    reason rather than being dropped: on ds002837 eight of the ten films have
+    six subjects, so the reference is a mean of five, and `n_subjects` travels
+    with every row so that is visible rather than implied.
     """
-    series, keys = [], []
+    by_task: dict[str, list[tuple[str, np.ndarray]]] = {}
     for path in activation_files:
         df = read_shard(path)
         cols = [c for c in parcels if c in df.columns]
         if not cols:
             continue
         x = df[cols].to_numpy(dtype=float).mean(axis=1)
-        series.append(x)
-        keys.append((str(df["sub"].iloc[0]), str(df["task"].iloc[0])))
-    if len(series) < 3:
-        raise ValueError("ISC needs at least 3 subjects")
+        by_task.setdefault(str(df["task"].iloc[0]), []).append((str(df["sub"].iloc[0]), x))
+    if not by_task:
+        raise ValueError(
+            f"no activation shard carries any of the ISC parcel(s) {list(parcels)}"
+        )
 
-    n = min(len(s) for s in series)
-    X = np.vstack([_z(s[:n]) for s in series])
-    total = X.sum(axis=0)
     rows = []
-    for i, (sub, task) in enumerate(keys):
-        loo = _z((total - X[i]) / (len(series) - 1))
+    for task in sorted(by_task):
+        entries = by_task[task]
+        if len(entries) < ISC_MIN_SUBJECTS:
+            rows += [{"sub": sub, "movie": task, "best_lag_tr": np.nan,
+                      "peak_isc": np.nan, "n_subjects": len(entries),
+                      "isc_note": f"only {len(entries)} subject(s) saw this stimulus; "
+                                  f"ISC needs {ISC_MIN_SUBJECTS}"}
+                     for sub, _ in entries]
+            continue
+        rows += _isc_one_task(task, entries, max_lag_tr)
+    if not any(np.isfinite(r["peak_isc"]) for r in rows):
+        raise ValueError(
+            f"no task has {ISC_MIN_SUBJECTS} or more subjects; ISC is not computable"
+        )
+    return pd.DataFrame(rows)
+
+
+def _isc_one_task(task: str, entries, max_lag_tr: int) -> list[dict]:
+    """One stimulus. Everyone here saw the same thing, so a group mean exists."""
+    n = min(len(x) for _, x in entries)
+    X = np.vstack([_z(x[:n]) for _, x in entries])
+    total = X.sum(axis=0)
+    out = []
+    for i, (sub, _) in enumerate(entries):
+        loo = _z((total - X[i]) / (len(entries) - 1))
         best_lag, best_r = 0, -np.inf
         for lag in range(-max_lag_tr, max_lag_tr + 1):
             a, b = _shift(X[i], lag), loo
@@ -126,15 +163,23 @@ def isc_alignment(activation_files, parcels=("Heschls_Gyrus_includes_H1_and_H2",
             r = float(np.corrcoef(a[ok], b[ok])[0, 1])
             if r > best_r:
                 best_lag, best_r = lag, r
-        rows.append({"sub": sub, "movie": task, "best_lag_tr": best_lag, "peak_isc": best_r})
-    return pd.DataFrame(rows)
+        out.append({"sub": sub, "movie": task, "best_lag_tr": best_lag,
+                    "peak_isc": best_r, "n_subjects": len(entries), "isc_note": ""})
+    return out
 
 
 def isc_gate(isc: pd.DataFrame, max_median_lag_tr: float = 1.0) -> tuple[bool, str]:
-    med = float(np.median(np.abs(isc["best_lag_tr"])))
+    """Cohort-level PASS/FAIL on the median |lag|. Excludes no individual."""
+    lags = np.abs(pd.to_numeric(isc["best_lag_tr"], errors="coerce").to_numpy(dtype=float))
+    lags = lags[np.isfinite(lags)]
+    if lags.size == 0:
+        return False, "no subject has a computable ISC lag"
+    med = float(np.median(lags))
     ok = med <= max_median_lag_tr
-    return ok, (f"median |best_lag| = {med:.2f} TR "
-                f"({'within' if ok else 'exceeds'} the {max_median_lag_tr} TR gate)")
+    n_missing = len(isc) - lags.size
+    tail = f"; {n_missing} row(s) had no computable lag" if n_missing else ""
+    return ok, (f"median |best_lag| = {med:.2f} TR over {lags.size} subject(s) "
+                f"({'within' if ok else 'exceeds'} the {max_median_lag_tr} TR gate){tail}")
 
 
 def coverage_table(activation_files) -> pd.DataFrame:

@@ -33,7 +33,8 @@ from .atlases.registry import AtlasSpec
 from .config import CohortConfig
 from .io import (ManifestEntry, dfc_path, edge_storage_mode, parse_hive_keys,
                  should_skip, write_table_atomic)
-from .windows import Window, make_stimulus_grid, window_tr_from_seconds
+from .windows import (Window, is_rank_deficient, make_stimulus_grid,
+                      window_tr_from_seconds)
 
 QC_COLUMNS = [
     "window_id", "start_tr", "start_s", "stimulus_start_s", "stimulus_end_s",
@@ -89,7 +90,8 @@ class WindowResult:
 
 
 def dfc_for_run(df: pd.DataFrame, atlas: AtlasSpec, cfg: CohortConfig,
-                window_s: float, stimulus_duration_s: float) -> list[WindowResult]:
+                window_s: float, stimulus_duration_s: float,
+                n_overlaps: int | None = None) -> list[WindowResult]:
     """All windows for one run at one window size.
 
     Emission policy is permissive: a window is emitted whenever at least
@@ -97,6 +99,10 @@ def dfc_for_run(df: pd.DataFrame, atlas: AtlasSpec, cfg: CohortConfig,
     later want to exclude it travels with it as a flag. Extraction is the
     expensive irreversible step; flags are free, so changing your mind at stage
     4 must not require re-running stage 3.
+
+    `n_overlaps` defaults to the cohort's, resolved through
+    `windows.by_size` so a fine aperture can carry a coarser stride than the
+    rest of the grid without changing anyone else's window ids.
     """
     cols = atlas.columns
     missing = [c for c in cols if c not in df.columns]
@@ -117,8 +123,10 @@ def dfc_for_run(df: pd.DataFrame, atlas: AtlasSpec, cfg: CohortConfig,
     time_s = df["time_s"].to_numpy(dtype=np.float64) if "time_s" in df else stim
 
     n_nominal = window_tr_from_seconds(window_s, cfg.tr)
+    if n_overlaps is None:
+        n_overlaps = cfg.windows.overlaps_for(window_s)
     grid = make_stimulus_grid(stimulus_duration_s, window_s,
-                              cfg.windows.n_overlaps, cfg.windows.drop_incomplete)
+                              n_overlaps, cfg.windows.drop_incomplete)
 
     results: list[WindowResult] = []
     for w in grid:
@@ -142,7 +150,7 @@ def dfc_for_run(df: pd.DataFrame, atlas: AtlasSpec, cfg: CohortConfig,
             "crosses_run_boundary": bool(np.unique(run_idx[inside]).size > 1),
             "crosses_clip_boundary": bool(clip_idx is not None
                                           and np.unique(clip_idx[inside]).size > 1),
-            "rank_deficient": bool(n_eff - 1 < atlas.n_nodes),
+            "rank_deficient": is_rank_deficient(n_eff, atlas.n_nodes),
         }
         results.append(WindowResult(w, r, qc))
     return results
@@ -150,8 +158,11 @@ def dfc_for_run(df: pd.DataFrame, atlas: AtlasSpec, cfg: CohortConfig,
 
 # ---------------------------------------------------------------- table ---
 def build_dfc_table(results: list[WindowResult], atlas: AtlasSpec, cfg: CohortConfig,
-                    window_s: float, entities: dict) -> pa.Table:
+                    window_s: float, entities: dict,
+                    n_overlaps: int | None = None) -> pa.Table:
     n_edges = atlas.n_edges
+    if n_overlaps is None:
+        n_overlaps = cfg.windows.overlaps_for(window_s)
     mode = edge_storage_mode(n_edges, cfg.windows.edge_column_threshold)
     n_rows = len(results)
 
@@ -191,7 +202,7 @@ def build_dfc_table(results: list[WindowResult], atlas: AtlasSpec, cfg: CohortCo
         b"n_edges": str(n_edges).encode(),
         b"edge_storage": mode.encode(),
         b"window_s": str(window_s).encode(),
-        b"n_overlaps": str(cfg.windows.n_overlaps).encode(),
+        b"n_overlaps": str(n_overlaps).encode(),
         b"tr": str(cfg.tr).encode(),
         b"estimator": b"pearson_pairwise_deletion",
         b"fisher_z_applied": b"false",
@@ -202,9 +213,19 @@ def build_dfc_table(results: list[WindowResult], atlas: AtlasSpec, cfg: CohortCo
 
 def process_activation_file(path: str | Path, atlas: AtlasSpec, cfg: CohortConfig,
                             window_s: float, stimulus_duration_s: float | None = None,
-                            overwrite: bool = False) -> ManifestEntry:
-    """One activation shard + one window size -> one DFC shard."""
+                            overwrite: bool = False,
+                            n_overlaps: int | None = None) -> ManifestEntry:
+    """One activation shard + one window size -> one DFC shard.
+
+    Note that `n_overlaps` is NOT part of the output path -- only `window_s`
+    is. Two runs of the same window size with different strides therefore
+    write to the same leaf, and skip-if-exists will keep the first. Changing
+    a stride means `--overwrite`; the value that actually produced a shard is
+    recorded in its schema metadata.
+    """
     path = Path(path)
+    if n_overlaps is None:
+        n_overlaps = cfg.windows.overlaps_for(window_s)
     try:
         df = pd.read_parquet(path)
         # Partition keys come from the path, which is authoritative; ses/run/acq
@@ -227,7 +248,7 @@ def process_activation_file(path: str | Path, atlas: AtlasSpec, cfg: CohortConfi
             observed = float(df["stimulus_time_s"].max()) + cfg.tr
             stimulus_duration_s = cfg.stimulus_duration_s(ent["task"], fallback=observed)
 
-        results = dfc_for_run(df, atlas, cfg, window_s, stimulus_duration_s)
+        results = dfc_for_run(df, atlas, cfg, window_s, stimulus_duration_s, n_overlaps)
         if not results:
             return ManifestEntry(
                 "dfc", ent["cohort"], atlas.name, ent["task"], ent["sub"], str(out),
@@ -235,7 +256,7 @@ def process_activation_file(path: str | Path, atlas: AtlasSpec, cfg: CohortConfi
                 detail=f"no window of {window_s}s fits in {stimulus_duration_s:.1f}s "
                        "of usable stimulus",
             )
-        table = build_dfc_table(results, atlas, cfg, window_s, ent)
+        table = build_dfc_table(results, atlas, cfg, window_s, ent, n_overlaps)
         write_table_atomic(table, out)
         return ManifestEntry("dfc", ent["cohort"], atlas.name, ent["task"], ent["sub"],
                              str(out), "ok", n_rows=table.num_rows, window_s=window_s)

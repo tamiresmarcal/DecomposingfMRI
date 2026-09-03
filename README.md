@@ -9,8 +9,29 @@ pip install -e ".[test,atlases]"
 ./run_tests.sh                       # unit tests + synthetic end-to-end run
 fmri-decomp validate  config/ds002837.yaml
 fmri-decomp extract   config/ds002837.yaml --n-jobs 8
-fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 30 60 120 300
+fmri-decomp dfc       config/ds002837.yaml --dry-run       # rows before compute
+fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 300
 ```
+
+### The pipeline, end to end
+
+```
+0    fmriprep / afni_proc            outside this repo -- cohorts arrive preprocessed
+1.1  01_extract.sbatch    (array)    NIfTI     -> parcel timeseries
+     03_finalize.sbatch activation   merge manifests + coverage + L-R
+                                     + ISC gate + participants_qc.csv
+1.2  02_dfc.sbatch        (array)    parquet   -> windowed connectivity
+     03_finalize.sbatch dfc          merge manifests
+4    models                          join participants_qc.csv, apply thresholds
+```
+
+`03_finalize` runs twice, taking the stage as an argument. The activation pass
+is where the ISC gate lives, and `--dependency=afterok` on the DFC array is
+what stops stage 3 from running on misaligned data.
+
+There is no separate QC or exclusion step: the metrics are written by the
+activation finalize, and the thresholds that turn them into exclusions live
+with the models.
 
 ---
 
@@ -131,6 +152,142 @@ df = d.to_table(filter=(ds.field("cohort") == "ds002837")).to_pandas()
 # Columnar: selecting QC columns physically reads three columns, not the file.
 qc = d.to_table(columns=["window_id", "n_tr_effective", "frac_good_frames"]).to_pandas()
 ```
+
+### The window grid is atlas-conditional
+
+`windows.sizes_s` is what to run; `windows.by_size` is where, and how:
+
+```yaml
+windows:
+  sizes_s: [15, 30, 60, 120, 300]
+  n_overlaps: 5
+  by_size:
+    15:
+      atlases: [yeo7, networks]     # not harvardoxford, and never networks_nodes
+      # n_overlaps: 3               # optional: a coarser stride at this aperture
+  # rank_policy: skip               # the derived form of the same idea (below)
+```
+
+Two independent things make a short window size not portable across atlases,
+both pure arithmetic:
+
+**Rank.** A window is `round(window_s / TR)` samples, and a correlation matrix
+over *p* nodes is singular unless *n − 1 ≥ p*. Inverting that gives a floor
+that is a property of the atlas and the TR, not a number anyone picked:
+
+```python
+min_window_s_for_nodes(n_nodes, tr)   # == (n_nodes + 0.5) * tr
+```
+
+| atlas | nodes | floor at TR = 1 | at TR = 1.49 |
+|---|---|---|---|
+| `yeo7` | 7 | 7.5 s | 11.2 s |
+| `networks` | 14 | 14.5 s | 20.9 s |
+| `harvardoxford` | 111 | 111.5 s | 166.1 s |
+| `networks_nodes` | 254 | 254.5 s | 379.2 s |
+
+Note the third row: **"short windows are only for the coarse atlases" is the
+right instinct with the wrong constant.** A fixed 30 s rule would still admit
+Harvard-Oxford, which needs 111.5 s — it is already past the line at 30 s and
+60 s in the grid that has been running, and stays there.
+
+Be precise about what rank deficiency costs, because it is easy to overstate:
+nothing comes back NaN. Each of Harvard-Oxford's 6,105 edges is an ordinary
+two-variable correlation over 15 samples and is finite, just very noisy
+(SE ≈ 0.29, so ~6% of edges pass |r| > 0.5 under the null). What is undefined
+is the **matrix** — so it matters if you invert or decompose it, and is merely
+noise if you analyse edges one at a time.
+
+That is why the enforcement is a choice rather than a default:
+
+| | effect |
+|---|---|
+| `rank_policy: warn` (default) | print the floor in the plan, run the pair anyway |
+| `rank_policy: skip` | do not run any (atlas, size) pair below its floor |
+
+`skip` is the general form of a `by_size.atlases` restriction: derived, so a
+window size nobody enumerated is covered too. It would also stop producing
+Harvard-Oxford at 30 s and 60 s, which is an analysis decision, not a cleanup.
+
+**Rows.** Window count goes as `1/stride`, so halving the aperture at fixed
+`n_overlaps` doubles the rows. On a 5,470 s film:
+
+| window_s | stride (n_overlaps=5) | windows/subject | ×300 s |
+|---|---|---|---|
+| 300 | 60 s | 87 | 1× |
+| 120 | 24 s | 223 | 2.6× |
+| 60 | 12 s | 451 | 5.2× |
+| 30 | 6 s | 907 | 10× |
+| 15 | 3 s | 1,819 | 21× |
+
+At yeo7's 21 edges and `networks`' 91 that 21× is ~90 MB uncompressed for all
+86 subjects — nothing. The same grid is ~3.8 GB on `harvardoxford` and ~20 GB
+on `networks_nodes`' 32,131 edges. So the row count is not what makes the
+configured run affordable; it is what keeps it affordable when someone widens
+`atlases:` later. Check before launching, not after:
+
+```bash
+fmri-decomp dfc config/ds002837.yaml --dry-run
+```
+
+which prints per (atlas, window size) the shard count, estimated rows, edge
+count and uncompressed size, from parquet footers only — no table is read.
+`n_overlaps: 3` at the fine aperture cuts its rows by ~40% (1,819 → 1,092).
+The stride is **not** part of the output path, only `window_s` is, so changing
+it for a size that already ran needs `--overwrite`; the value that produced a
+shard is in its schema metadata.
+
+### Subject-level QC, and where exclusion happens
+
+Two files, split by **who owns them**:
+
+| file | owner | carries | acted on |
+|---|---|---|---|
+| `participants.csv` | human | curation — "corrupted run", "consent withdrawn" | stage 2 drops these rows before extraction |
+| `meta/cohorts/cohort=<c>/participants_qc.csv` | pipeline | measurement | **nothing** — thresholds live with the models |
+
+`participants_qc.csv` is written by `fmri-decomp diagnose`, which
+`03_finalize.sbatch` already runs after the extract array. So the metrics
+appear without a separate step, and ISC is computed once for both the gate and
+the table. It is regenerated from scratch every run and must never be
+hand-edited.
+
+One row per `(sub, task)`, one column block per failure mode — chosen to be
+about four **different** things, since a long list of correlated criteria costs
+sample size while only looking rigorous:
+
+| column | catches | how it is measured |
+|---|---|---|
+| `mean_fd` | head movement | Power FD from `confounds.motion_glob`, or fMRIPrep's own column |
+| `best_lag_tr` | wrong stimulus timing | ISC peak lag vs. the leave-one-out mean of the same film |
+| `frac_stimulus_covered` | scan stopped early | shard length ÷ longest scan of the same film |
+| `frac_parcels_empty` | registration failure | all-NaN parcel columns, on the finest atlas with shards |
+| `frac_good_frames` | scrubbing survival | `good_frame` — identically 1.0 where censoring is off |
+
+`peak_isc` is written and deliberately **not** offered as a criterion: no
+absolute scale, confounded with motion, and with 6 subjects per film for 8 of
+ds002837's 10 films the reference is itself a mean of five.
+
+**No threshold appears anywhere in this pipeline.** `mean_fd = 0.52` is a
+measurement — deterministic and reproducible. `0.52 > 0.5 → exclude` is a
+decision, arguable and part of what you are claiming. The first belongs in the
+pipeline; the second belongs with the analysis that rests on it, so a
+sensitivity analysis can move a cutoff without re-running any of this.
+`diagnose` prints each metric's spread and worst subjects so the distribution
+is visible, and stops there.
+
+Since `dfc` walks the filesystem rather than `participants.csv`, it warns when
+it finds shards for excluded subjects instead of skipping them. The real filter
+is the join, at the models.
+
+#### ISC is computed per stimulus
+
+`isc_alignment` groups by task. Pooling ds002837's ten films would build a
+"group mean" out of ten unrelated soundtracks, truncate everyone to the
+shortest film, and report a lag against noise — latent while `include_tasks`
+named one film, live once the cohort opened to all ten. A task with fewer than
+3 subjects gets `NaN` and a stated reason rather than being silently dropped;
+`n_subjects` travels with every row.
 
 ### Row contracts
 

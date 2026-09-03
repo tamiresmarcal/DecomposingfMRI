@@ -93,6 +93,16 @@ def _attach_confounds(cfg, refs):
     return _attach_sidecar(cfg, refs, cfg.confounds.confounds_glob, "confounds")
 
 
+def _attach_motion(cfg, refs):
+    """Motion regressor sidecars, for subject-level QC only (see motion.py).
+
+    Never called by `extract`: nothing in stage 2 or 3 reads this file. It is
+    attached by `qc.motion_qc`, which turns it into mean_fd in
+    participants_qc.csv.
+    """
+    return _attach_sidecar(cfg, refs, cfg.confounds.motion_glob, "motion")
+
+
 # ------------------------------------------------------------- commands ---
 def cmd_validate(args) -> int:
     cfg = _load(args.config)
@@ -138,35 +148,192 @@ def cmd_extract(args) -> int:
     return _report(entries)
 
 
-def cmd_dfc(args) -> int:
-    from joblib import Parallel, delayed
+def _human_bytes(n: float) -> str:
+    for unit, scale in (("GB", 1e9), ("MB", 1e6), ("KB", 1e3)):
+        if n >= scale:
+            return f"{n / scale:.2f} {unit}"
+    return f"{n:.0f} B"
 
-    from .dfc import process_activation_file
-    from .io import activation_root, write_manifest
 
-    cfg = _load(args.config)
-    atlases = _atlases(cfg)
-    sizes = [float(w) for w in (args.window_s or cfg.windows.sizes_s)]
+# window_id, start_tr, start_s, the two stimulus bounds, three n_tr counts,
+# frac_good_frames, three flags, plus ses/run/acq/run_key.
+_DFC_FIXED_COLUMNS = 16
 
-    jobs = []
+
+def _dfc_plan(cfg, atlases, sizes):
+    """(atlas, window_s, n_overlaps) -> the activation shards it applies to.
+
+    The atlas x window grid is not a full cross product. Two filters apply:
+
+      * `windows.by_size[w].atlases` -- an explicit, per-size restriction. This
+        is what keeps the 15 s aperture on yeo7 and the 14 coordinate networks
+        and off Harvard-Oxford's 6,105 edges.
+      * `windows.rank_policy: skip` -- the derived form of the same idea, from
+        `min_window_s_for_nodes(n_nodes, tr)`, so a window size nobody wrote
+        down is covered too. Off by default; see the config for why.
+    """
+    from .io import activation_root
+    from .windows import (is_rank_deficient, min_window_s_for_nodes,
+                          window_tr_from_seconds)
+
+    plan = []
     for atlas in atlases:
         root = activation_root(cfg.output_root, atlas.name, cfg.cohort)
         files = sorted(root.rglob("*.parquet"))
         if not files:
             print(f"  no activation shards for atlas {atlas.name!r} under {root}")
+            continue
+        for w in sizes:
+            if atlas.name not in cfg.windows.atlases_for(w, [a.name for a in atlases]):
+                continue
+            if (cfg.windows.rank_policy == "skip"
+                    and is_rank_deficient(window_tr_from_seconds(w, cfg.tr), atlas.n_nodes)):
+                print(f"  skipping atlas={atlas.name} window_s={w:g}: "
+                      f"{atlas.n_nodes} nodes need >= "
+                      f"{min_window_s_for_nodes(atlas.n_nodes, cfg.tr):g}s at TR="
+                      f"{cfg.tr:g}  (windows.rank_policy: skip)")
+                continue
+            plan.append((atlas, w, cfg.windows.overlaps_for(w), files))
+    return plan
+
+
+def _preview_plan(cfg, plan) -> None:
+    """Print the row and column counts BEFORE any of them are written.
+
+    Window count scales as 1/stride, so shortening the aperture at fixed
+    n_overlaps multiplies the rows: at TR=1 on a 5,470 s film, 300 s gives 87
+    windows per subject and 15 s gives 1,819 -- 21x, for every subject and
+    every atlas the size runs on. That is a decision worth seeing before a
+    filesystem quota makes it for you.
+    """
+    import pyarrow.parquet as pq
+
+    from .windows import (is_rank_deficient, min_window_s_for_nodes, n_windows,
+                          stride_seconds, window_tr_from_seconds)
+
+    print("\nplan:")
+    total_rows = total_bytes = 0
+    for atlas, w, n_ov, files in plan:
+        # Duration per shard from parquet metadata alone -- num_rows is in the
+        # footer, so this reads kilobytes, not the 5,470-row table.
+        rows = 0
         for f in files:
-            for w in sizes:
-                jobs.append((f, atlas, w))
-    if not jobs:
-        print("nothing to do -- run `extract` first")
+            try:
+                n_tr = pq.ParquetFile(f).metadata.num_rows
+            except Exception:                                    # noqa: BLE001
+                continue
+            rows += n_windows(n_tr * cfg.tr, w, n_ov, cfg.windows.drop_incomplete)
+        n_cols = atlas.n_edges + _DFC_FIXED_COLUMNS
+        approx = rows * n_cols * 4          # float32 before compression
+        total_rows += rows
+        total_bytes += approx
+        n_tr_nominal = window_tr_from_seconds(w, cfg.tr)
+        print(f"  atlas={atlas.name:<16} window_s={w:<6g} n_overlaps={n_ov} "
+              f"stride={stride_seconds(w, n_ov):g}s")
+        print(f"    {len(files):>4} shard(s)  ~{rows:,} row(s) x {atlas.n_edges:,} edge(s) "
+              f"  ~{_human_bytes(approx)} uncompressed")
+        if is_rank_deficient(n_tr_nominal, atlas.n_nodes):
+            floor_s = min_window_s_for_nodes(atlas.n_nodes, cfg.tr)
+            print(f"    WARNING: {n_tr_nominal} sample(s) for {atlas.n_nodes} node(s) -- "
+                  f"every window flagged rank_deficient.")
+            print(f"             Edges are still finite (each is a 2-variable r over "
+                  f"{n_tr_nominal} samples, SE ~ {1 / max(n_tr_nominal - 3, 1) ** 0.5:.2f}); "
+                  f"the MATRIX is singular.")
+            print(f"             This atlas needs >= {floor_s:g}s at TR={cfg.tr:g}. "
+                  f"To not run the pair, either:")
+            print(f"               windows.by_size: {{{w:g}: {{atlases: [...]}}}}   "
+                  f"# this size only")
+            print("               windows.rank_policy: skip                 "
+                  "# every size, derived")
+    print(f"  TOTAL ~{total_rows:,} row(s), ~{_human_bytes(total_bytes)} uncompressed "
+          f"(zstd typically 2-4x smaller)")
+
+
+def _warn_excluded_shards(cfg, plan) -> None:
+    """Say so when stage 3 is about to process a subject marked excluded.
+
+    Stage 3 walks the FILESYSTEM, not participants.csv -- only `validate` and
+    `extract` read that table. So an exclusion written after extraction (which
+    is when it must be written: every QC metric is computed from stage-2
+    output) does not retroactively remove the shards, and stage 3 will happily
+    turn them into DFC.
+
+    This is a warning rather than a filter on purpose, for now: silently
+    dropping shards would make `dfc` depend on a table it has never needed, and
+    changing that is a decision about the pipeline's shape. The honest interim
+    is to make the discrepancy impossible to miss, and to leave the real filter
+    to whoever joins participants.csv at stage 4/5.
+    """
+    if cfg.participants is None:
+        return
+    try:
+        from .cohort import load_participants
+        from .io import parse_hive_keys
+
+        participants = load_participants(cfg)
+    except Exception as exc:                                     # noqa: BLE001
+        print(f"  (could not read participants.csv for the exclusion check: {exc})")
+        return
+
+    excluded = participants.loc[participants["excluded"]]
+    if excluded.empty:
+        return
+    keys = set(zip(excluded["sub"].astype(str), excluded["task"].astype(str)))
+    reasons = {(str(r["sub"]), str(r["task"])): str(r.get("exclusion_reason") or "")
+               for _, r in excluded.iterrows()}
+
+    hits = set()
+    for _, _, _, files in plan:
+        for f in files:
+            k = parse_hive_keys(f)
+            key = (str(k.get("sub")), str(k.get("task")))
+            if key in keys:
+                hits.add(key)
+    if not hits:
+        return
+    print(f"\n  WARNING: {len(hits)} excluded subject(s) still have activation shards, "
+          f"and stage 3 will process them.")
+    print("           `dfc` reads the filesystem, not participants.csv -- the "
+          "exclusion takes")
+    print("           effect only on a fresh `extract`, or when stage 4/5 joins the "
+          "table.")
+    for key in sorted(hits)[:8]:
+        print(f"             sub-{key[0]}/{key[1]}: {reasons.get(key, '') or '(no reason)'}")
+    if len(hits) > 8:
+        print(f"             ... and {len(hits) - 8} more")
+
+
+def cmd_dfc(args) -> int:
+    from joblib import Parallel, delayed
+
+    from .dfc import process_activation_file
+    from .io import write_manifest
+
+    cfg = _load(args.config)
+    atlases = _atlases(cfg)
+    sizes = [float(w) for w in (args.window_s or cfg.windows.sizes_s)]
+
+    plan = _dfc_plan(cfg, atlases, sizes)
+    if not plan:
+        print("nothing to do -- run `extract` first, or check windows.by_size")
         return 1
+
+    jobs = [(f, atlas, w, n_ov) for atlas, w, n_ov, files in plan for f in files]
+    if args.dry_run:
+        print(f"stage 3 DRY RUN: {len(jobs)} shard file(s) would be written")
+        _preview_plan(cfg, plan)
+        _warn_excluded_shards(cfg, plan)
+        return 0
 
     jobs, shard = _shard(jobs, args.shard)
     tag = f" [shard {shard[0]}/{shard[1]}]" if shard else ""
     print(f"stage 3{tag}: {len(jobs)} shard file(s) across window sizes {sizes}")
+    if not shard or shard[0] == 0:
+        _preview_plan(cfg, plan)
+        _warn_excluded_shards(cfg, plan)
     entries = Parallel(n_jobs=args.n_jobs, backend="loky", verbose=5)(
-        delayed(process_activation_file)(f, a, cfg, w, None, args.overwrite)
-        for f, a, w in jobs
+        delayed(process_activation_file)(f, a, cfg, w, None, args.overwrite, n_ov)
+        for f, a, w, n_ov in jobs
     )
     write_manifest(cfg.output_root, entries, cfg.to_dict(),
                    name=_manifest_name("dfc", shard), cohort=cfg.cohort)
@@ -174,12 +341,21 @@ def cmd_dfc(args) -> int:
 
 
 def cmd_diagnose(args) -> int:
-    import pandas as pd
+    """Coverage, L-R, ISC, and the per-subject QC table.
 
-    from .validate import (coverage_table, isc_alignment, isc_gate,
-                           lr_correlation_diagnostic, write_diagnostic)
+    `03_finalize.sbatch` runs this after the extract array, which is what makes
+    `participants_qc.csv` appear without a separate step in the chain. It also
+    means ISC is computed once here and reused for both the gate and the QC
+    table, rather than twice.
 
+    Nothing in here thresholds anything. The QC table is measurement; the
+    exclusion decision belongs with the models, where it can be varied without
+    re-running any of this.
+    """
     from .io import activation_root
+    from .qc import collect_qc, qc_frame
+    from .validate import (coverage_table, isc_gate, lr_correlation_diagnostic,
+                           write_diagnostic)
 
     cfg = _load(args.config)
     atlases = _atlases(cfg)
@@ -200,20 +376,62 @@ def cmd_diagnose(args) -> int:
             cohort=cfg.cohort))
         print(lr.head(5).to_string(index=False))
 
-    try:
-        parcels = tuple(args.isc_parcels) if args.isc_parcels else (atlas.columns[0],)
-        isc = isc_alignment(files, parcels=parcels)
-        print("ISC alignment ->", write_diagnostic(
-            isc, cfg.output_root, "isc_alignment.csv", cohort=cfg.cohort))
-        ok, msg = isc_gate(isc, cfg.stimulus.isc_gate_tr)
-        print(("PASS " if ok else "FAIL ") + msg)
-        if not ok:
-            return 2
-    except Exception as exc:                                     # noqa: BLE001
-        print(f"ISC skipped: {type(exc).__name__}: {exc}")
-    with pd.option_context("display.width", 120):
-        pass
-    return 0
+    qc, messages, isc = collect_qc(cfg, atlases, args.isc_parcels, args.isc_max_lag_tr,
+                                   args.motion_order, args.motion_columns)
+    for m in messages:
+        print(f"  {m}")
+    if qc:
+        print("subject QC ->", write_diagnostic(
+            qc_frame(cfg, qc), cfg.output_root, "participants_qc.csv", cohort=cfg.cohort))
+        _report_qc(qc_frame(cfg, qc))
+
+    if isc is None or not len(isc):
+        print("ISC skipped: no alignment could be computed -- the gate is not applied")
+        return 0
+    print("ISC alignment ->", write_diagnostic(
+        isc, cfg.output_root, "isc_alignment.csv", cohort=cfg.cohort))
+    ok, msg = isc_gate(isc, cfg.stimulus.isc_gate_tr)
+    print(("PASS " if ok else "FAIL ") + msg)
+    return 0 if ok else 2
+
+
+# (column, worse direction, what it is about). One line per failure mode.
+_QC_REPORT = [
+    ("mean_fd", "high", "motion"),
+    ("best_lag_tr", "abs", "timing"),
+    ("frac_stimulus_covered", "low", "coverage"),
+    ("frac_good_frames", "low", "scrubbing"),
+    ("frac_parcels_empty", "high", "registration"),
+    ("peak_isc", "low", "stimulus-drivenness"),
+]
+
+
+def _report_qc(df) -> None:
+    """Print each metric's spread and its worst subjects.
+
+    No thresholds, on purpose -- this is the distribution you look at before
+    choosing one at the models, not a verdict. `peak_isc` in particular is
+    reported and never thresholded: it has no absolute scale, is confounded
+    with motion, and on a six-subject film its reference is a mean of five.
+    """
+    import numpy as np
+
+    print("\n  per-subject QC (measurement only -- thresholds live with the models):")
+    for col, worse, what in _QC_REPORT:
+        if col not in df.columns:
+            continue
+        vals = df[[col, "sub", "task"]].dropna(subset=[col])
+        if vals.empty:
+            print(f"    {col:<24} not computed")
+            continue
+        x = vals[col].to_numpy(dtype=float)
+        key = -np.abs(x) if worse == "abs" else (-x if worse == "high" else x)
+        order = np.argsort(key)[:3]
+        worst = ", ".join(f"sub-{vals.iloc[i]['sub']}/{vals.iloc[i]['task']}="
+                          f"{vals.iloc[i][col]:.3g}" for i in order)
+        print(f"    {col:<24} n={len(x):<4} min={x.min():.3g} "
+              f"median={float(np.median(x)):.3g} max={x.max():.3g}   [{what}]")
+        print(f"    {'':<24} worst: {worst}")
 
 
 def cmd_merge_manifests(args) -> int:
@@ -283,14 +501,29 @@ def build_parser() -> argparse.ArgumentParser:
     common(sub.add_parser("dfc", help="stage 3: parcel timeseries -> windowed DFC")).set_defaults(
         func=cmd_dfc)
     sub.choices["dfc"].add_argument("--window-s", type=float, nargs="*", default=None)
+    sub.choices["dfc"].add_argument(
+        "--dry-run", action="store_true",
+        help="print the atlas x window plan with row and size estimates, write nothing")
 
     v = sub.add_parser("validate", help="check config, discovery and participants.csv")
     v.add_argument("config")
     v.set_defaults(func=cmd_validate)
 
-    d = sub.add_parser("diagnose", help="coverage, L-R and ISC alignment artifacts")
+    d = sub.add_parser(
+        "diagnose",
+        help="coverage, L-R, ISC and participants_qc.csv (measurement, no thresholds)")
     d.add_argument("config")
-    d.add_argument("--isc-parcels", nargs="*", default=None)
+    d.add_argument("--isc-parcels", nargs="*", default=None,
+                   help="parcel column(s) to seed ISC with; default is an auditory "
+                        "parcel of the QC atlas, or a visual one")
+    d.add_argument("--isc-max-lag-tr", type=int, default=30,
+                   help="lag range searched by ISC, in TRs (default 30)")
+    d.add_argument("--motion-order", default="afni", choices=["afni", "fsl", "spm"],
+                   help="motion parameter order when the .1D carries no ColumnLabels; "
+                        "afni = rotations first in degrees (default)")
+    d.add_argument("--motion-columns", type=int, nargs=6, default=None, metavar="J",
+                   help="six 0-based column indices (negatives count from the end) "
+                        "when the motion columns cannot be identified from the header")
     d.set_defaults(func=cmd_diagnose)
 
     m = sub.add_parser("merge-manifests", help="consolidate per-array-task manifests")

@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Generate a participants CSV from what discovery actually finds on disk.
+"""Generate or update the participants CSV from what discovery finds on disk.
 
+    # build the table
     python tools/make_participants.py config/cneuromod_friends.yaml \
         -o config/cneuromod_friends_participants.csv
+
+    # add rows for newly released runs, keeping every existing row and every
+    # exclusion someone edited in by hand
+    python tools/make_participants.py config/ds002837.yaml \
+        -o config/ds002837_participants.csv --update
 
 Why this exists rather than a checked-in file: for a cohort like ds002837 the
 (sub, task) mapping is a published constant, so the CSV can ship with the
@@ -10,13 +16,29 @@ repo. For CNeuroMod it is not -- which episodes exist is a property of YOUR
 copy of an incrementally released dataset, so the file has to be built where
 the data is.
 
+THIS FILE IS HUMAN-OWNED, AND CARRIES CURATION ONLY
+---------------------------------------------------
+`participants.csv` records who is in the cohort and who was deliberately
+removed from it, with the reason: "corrupted run", "consent withdrawn",
+"wrong stimulus presented". It is load-bearing at stage 2 -- `attach_participants`
+drops excluded rows before extraction -- and nothing writes it automatically.
+
+QC METRICS ARE NOT HERE. They live in `participants_qc.csv`, written by
+`fmri-decomp diagnose` (which `03_finalize.sbatch` already runs), and the
+thresholds that turn them into exclusions live with the models. The split is
+by ownership: this file is edited by a person and read by the pipeline;
+that one is written by the pipeline and never hand-edited.
+
+    participants.csv       human-owned    curation      -> honoured at stage 2
+    participants_qc.csv    machine-owned  measurement   -> thresholded at the models
+
 IMPORTANT -- what this does NOT do:
 
-Every row is written excluded=False. This tool cannot know which runs you
-mean to drop; it only reports what is on disk. Real exclusions must be edited
-in by hand, and RECORDED as excluded=True with a reason -- never by deleting
-the row. `validate_cohort` treats a run on disk with no table row as a
-problem precisely so that "is this excluded, or did someone forget?" stays
+Every generated row is written excluded=False. This tool cannot know which
+runs you mean to drop; it only reports what is on disk. Real exclusions must
+be edited in by hand, and RECORDED as excluded=True with a reason -- never by
+deleting the row. `validate_cohort` treats a run on disk with no table row as
+a problem precisely so that "is this excluded, or did someone forget?" stays
 answerable. Deleting rows destroys that distinction.
 """
 
@@ -33,21 +55,56 @@ sys.path.insert(0, str(REPO))
 COLUMNS = ["participant_id", "sub", "cohort", "task", "excluded", "exclusion_reason"]
 
 
+def _fmt(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return "" if value != value else f"{value:.6g}"     # NaN -> empty cell
+    return str(value)
+
+
+def read_existing(path: Path) -> tuple[list[dict], list[str]]:
+    with open(path, newline="") as fh:
+        reader = csv.DictReader(fh)
+        return list(reader), list(reader.fieldnames or COLUMNS)
+
+
+def write_table(path: Path, rows: list[dict], columns: list[str]) -> None:
+    """Write then rename, so a killed run cannot leave a half-written table."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=columns, extrasaction="ignore")
+        w.writeheader()
+        for row in rows:
+            w.writerow({c: _fmt(row.get(c)) for c in columns})
+    tmp.replace(path)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("config")
     p.add_argument("-o", "--out", required=True, help="path to write the CSV to")
     p.add_argument("--force", action="store_true",
-                   help="overwrite an existing CSV (refused by default: it may "
-                        "carry exclusions you edited in by hand)")
+                   help="overwrite an existing CSV from scratch (refused by default: "
+                        "it may carry exclusions you edited in by hand)")
+    p.add_argument("--update", action="store_true",
+                   help="read the existing CSV, keep every row, every exclusion and "
+                        "every extra column, and add newly discovered runs")
     args = p.parse_args(argv)
 
     out = Path(args.out)
-    if out.exists() and not args.force:
+    if out.exists() and not (args.force or args.update):
         print(f"refusing to overwrite {out}\n"
               f"  It may contain exclusions you edited by hand, which this tool "
-              f"cannot reproduce.\n  Pass --force if you are sure.", file=sys.stderr)
+              f"cannot reproduce.\n"
+              f"  --update keeps them and adds new rows; --force rebuilds from scratch.",
+              file=sys.stderr)
+        return 1
+    if args.update and not out.exists():
+        print(f"--update needs an existing {out}; drop the flag to create it.",
+              file=sys.stderr)
         return 1
 
     from fmri_decomposition.config import load_config
@@ -69,24 +126,47 @@ def main(argv=None) -> int:
     # same task gets ONE row: the participants table is keyed (sub, task), and
     # attach_participants joins on that pair.
     pairs = sorted({(str(r.sub), r.task) for r in refs})
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(COLUMNS)
-        for sub, task in pairs:
-            w.writerow([f"sub-{sub}", sub, cfg.cohort, task, False, ""])
 
-    subs = sorted({s for s, _ in pairs})
-    tasks = sorted({t for _, t in pairs})
-    print(f"wrote {out}")
-    print(f"  {len(pairs)} row(s): {len(subs)} subject(s) x {len(tasks)} task(s)")
+    columns = list(COLUMNS)
+    if args.update:
+        rows, columns = read_existing(out)
+        for row in rows:
+            row["excluded"] = str(row.get("excluded", "")).strip().lower() in ("true", "1", "yes")
+        known = {(str(r.get("sub")), str(r.get("task"))) for r in rows}
+        added = [pair for pair in pairs if pair not in known]
+        for sub, task in added:
+            rows.append({"participant_id": f"sub-{sub}", "sub": sub, "cohort": cfg.cohort,
+                         "task": task, "excluded": False, "exclusion_reason": ""})
+        stale = sorted(known - set(pairs))
+        print(f"updating {out}: {len(rows) - len(added)} existing row(s), "
+              f"{len(added)} added")
+        if stale:
+            # Kept, not deleted -- for the same reason exclusions are recorded.
+            print(f"  {len(stale)} row(s) in the CSV with no run on disk, kept as-is: "
+                  f"{stale[:5]}")
+    else:
+        rows = [{"participant_id": f"sub-{sub}", "sub": sub, "cohort": cfg.cohort,
+                 "task": task, "excluded": False, "exclusion_reason": ""}
+                for sub, task in pairs]
+
+    write_table(out, rows, columns)
+
+    subs = sorted({str(r.get("sub")) for r in rows})
+    tasks = sorted({str(r.get("task")) for r in rows})
+    n_excluded = sum(1 for r in rows if r.get("excluded") in (True, "True"))
+    print(f"\nwrote {out}")
+    print(f"  {len(rows)} row(s): {len(subs)} subject(s) x {len(tasks)} task(s), "
+          f"{n_excluded} excluded")
     print(f"  runs on disk: {len(refs)}"
           + (f"  ({len(refs) - len(pairs)} extra from multiple ses/run per pair)"
              if len(refs) != len(pairs) else ""))
     print(f"  subjects: {subs[:8]}{' ...' if len(subs) > 8 else ''}")
     print(f"  tasks:    {tasks[:8]}{' ...' if len(tasks) > 8 else ''}")
-    print("\n  All rows are excluded=False. Edit in your real exclusions by hand,")
-    print("  setting excluded=True AND an exclusion_reason -- do not delete rows.")
+    print("\n  Exclusions are unchanged -- nothing here writes one. Edit real ones in")
+    print("  by hand as excluded=True WITH a reason; do not delete rows, or the")
+    print("  validator can no longer tell a curation decision from an oversight.")
+    print("  QC metrics are not here: see participants_qc.csv, written by")
+    print("  `fmri-decomp diagnose`.")
     return 0
 
 
