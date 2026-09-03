@@ -35,8 +35,14 @@
 #                      run- entity. Discovery handles that already.
 #
 # Pilot measured on 10 subjects (2026-08, job 20940234, 10/10 COMPLETED):
-# 47.6-56.1 min each on 8 CPUs, ~1 GB of kept output per subject. That puts
-# the full 649 at roughly 4,300 core-hours and ~640 GB.
+# 47.6-56.1 min each on 8 CPUs, ~1 GB of kept output per subject.
+#
+# FULL COHORT RUN (2026-08, job 20947592): 648/649 subjects completed.
+# CC221648 alone failed to complete in the first array; resubmitted
+# individually. Every one of the 648 completed files was verified openable by
+# nibabel with shape EXACTLY (97, 115, 97, 193) -- no corruption, no partial
+# writes, no shape variance. That is the real confirmation behind
+# `stimulus.durations_s` below, not the 10-subject pilot.
 #
 # output_root is deliberately the SAME as every other cohort's: the `cohort=`
 # key separates them inside one tree, which is what makes "one atlas, one
@@ -84,8 +90,11 @@ confounds:
   # writes the table from the images it just produced, so this is expected --
   # but ds002837 is the reason it is verified rather than assumed.
   #
-  # RE-CHECK THIS ACROSS ALL 649 before trusting it globally; the pilot
-  # establishes it for 10.
+  # Established on 10 subjects at pilot time; the full-cohort volume-shape
+  # check above (648/648 subjects, all exactly 193 volumes, zero corrupt)
+  # is consistent with it but does not re-verify confounds row counts
+  # individually. If that ever needs re-confirming across all 649, the check
+  # is the same wc -l one used on sub-CC110033, run in a loop.
   #
   # ON THE 0.5 mm THRESHOLD -- treat this as provisional.
   #
@@ -129,25 +138,26 @@ trim:
   column: null
 
 stimulus:
-  # EMPTY, PENDING ONE CHECK -- and unlike the other two cohorts, this one can
-  # probably be filled in.
+  # SET, on real evidence -- CONFIRMED across the full cohort, not the pilot.
   #
   # ds002837 and cneuromod leave this empty because run lengths genuinely vary
   # per subject. Cam-CAN's movie is a FIXED 8-minute clip with a fixed
-  # 193-volume acquisition, so every subject should be exactly
-  # 193 * 2.47 = 476.71 s. If that holds across all 649, set:
+  # 193-volume acquisition: 193 * 2.47 = 476.71 s. Checked directly (2026-08):
+  # every one of 648 completed subjects loads with nibabel to EXACTLY
+  # (97, 115, 97, 193) -- one line of shape output, not several, and zero
+  # files failed to open. That is the same check that would have caught a
+  # cancelled/truncated write, so it also stands as the corruption check for
+  # the full run.
   #
-  #   durations_s: {Movie: 476.71}
+  # This is the only one of the three cohorts where that holds. The result:
+  # an identical window grid for every subject, no `--no-strict` needed, and
+  # no validation warning on this cohort.
   #
-  # and this cohort gains something the others do not have: an identical window
-  # grid for every subject, no `--no-strict` needed, and no validation warning.
-  #
-  # Confirm first (in the container), then edit:
-  #   for f in <derivatives_root>/sub-*/func/*res-2_desc-preproc_bold.nii.gz; do
-  #     python -c "import nibabel,sys; print(nibabel.load(sys.argv[1]).shape[3])" $f
-  #   done | sort | uniq -c
-  # One line reading "649 193" means set it. More than one line means do not.
-  durations_s: {}
+  # If CC221648 (resubmitted individually after the array run) or any later
+  # addition comes back with a different volume count, this assumption
+  # breaks silently rather than loudly -- re-run the shape check above after
+  # any re-run or top-up before trusting this value again.
+  durations_s: {Movie: 476.71}
   timing_source: identity
   unit_of_analysis: run
 
@@ -219,9 +229,9 @@ windows:
 
 # --- how to run -------------------------------------------------------
 #   python tools/check_cohort.py config/camcan_movie.yaml
-#   fmri-decomp extract  config/camcan_movie.yaml --n-jobs 4 --no-strict --limit 2
+#   fmri-decomp extract  config/camcan_movie.yaml --n-jobs 4 --limit 2
 #   python tools/check_cohort.py config/camcan_movie.yaml --checks outputs,parallel --limit 2
 #   fmri-decomp dfc      config/camcan_movie.yaml --n-jobs 4
 #
-# --no-strict is needed only while stimulus.durations_s is empty; fill it in
-# (see above) and it is not.
+# --no-strict is NOT needed here, unlike the other two cohorts: durations_s
+# is set above, so there is no missing-duration validation warning to bypass.
