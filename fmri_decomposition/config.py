@@ -37,6 +37,13 @@ class ConfoundsConfig:
     columns: list[str] = field(default_factory=list)
     confounds_glob: str | None = None     # fMRIPrep *_desc-confounds_timeseries.tsv
     censor_glob: str | None = None        # AFNI censored_timepoints.1D
+    # Read for SUBJECT-LEVEL motion QC only -- `tools/make_participants.py --fd`
+    # turns it into mean_fd in participants.csv. Stages 2 and 3 never open it.
+    # It is separate from censor_glob because the two answer different
+    # questions: censoring needs frame-accurate alignment to the images, a mean
+    # over ~5,470 frames does not. On ds002837 the first is impossible and the
+    # second is fine, which is precisely why this key exists.
+    motion_glob: str | None = None        # AFNI motion / nuisance regressor .1D
     dilate_tr: int = 1                    # addendum §3: dilate censor mask by +/-1 TR
     # Frame censoring derived from a confounds column rather than a censor file.
     # AFNI-preprocessed cohorts ship an explicit 1D censor; fMRIPrep ones do not
@@ -101,12 +108,92 @@ class StimulusConfig:
 
 
 @dataclass
+class WindowSizeSpec:
+    """Per-window-size overrides. Everything unset falls back to WindowConfig.
+
+    `atlases` exists because a window size is not equally meaningful at every
+    parcellation. A 15 s aperture at TR=1 gives 15 samples: fine for yeo7's 7
+    nodes / 21 edges, arithmetically hopeless for Harvard-Oxford's 111 nodes /
+    6,105 edges, where every window comes back flagged `rank_deficient` and the
+    only thing produced is storage. Restricting the size to the atlases it can
+    actually support is cheaper than filtering the flag at stage 4, because the
+    compute is never spent.
+    """
+
+    atlases: list[str] | None = None       # None = every atlas in cfg.atlases
+    n_overlaps: int | None = None          # None = WindowConfig.n_overlaps
+
+
+@dataclass
 class WindowConfig:
     sizes_s: list[float] = field(default_factory=lambda: list(DEFAULT_WINDOWS_S))
     n_overlaps: int = 5
     drop_incomplete: bool = True
     min_n_tr_effective: int = 2           # arithmetically impossible below this
     edge_column_threshold: int = 20_000   # above this, pack edges into a list column
+    # size -> WindowSizeSpec. Written in YAML as, e.g.
+    #     by_size:
+    #       15: {atlases: [yeo7, networks]}
+    by_size: dict[float, WindowSizeSpec] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.n_overlaps < 1:
+            raise ConfigError(f"windows.n_overlaps must be >= 1, got {self.n_overlaps}")
+        sizes = {float(w) for w in self.sizes_s}
+        parsed: dict[float, WindowSizeSpec] = {}
+        for key, spec in (self.by_size or {}).items():
+            try:
+                size = float(key)
+            except (TypeError, ValueError):
+                raise ConfigError(f"windows.by_size key {key!r} is not a window size")
+            if isinstance(spec, WindowSizeSpec):
+                parsed[size] = spec
+                continue
+            if spec is None:
+                spec = {}
+            if not isinstance(spec, dict):
+                raise ConfigError(f"windows.by_size[{key}] must be a mapping, got {type(spec)}")
+            unknown = set(spec) - set(WindowSizeSpec.__dataclass_fields__)
+            if unknown:
+                raise ConfigError(f"unknown key(s) in windows.by_size[{key}]: {sorted(unknown)}")
+            parsed[size] = WindowSizeSpec(**spec)
+        for size, spec in parsed.items():
+            # An override for a size that is never run is dead config, and the
+            # commonest way to write one is a typo in the size. Silence there
+            # would mean the restriction you thought you applied did nothing.
+            if size not in sizes:
+                raise ConfigError(
+                    f"windows.by_size has an entry for {size:g}s, which is not in "
+                    f"windows.sizes_s ({sorted(sizes)}). An override for a size that "
+                    "never runs has no effect; add the size or drop the override."
+                )
+            if spec.atlases is not None and not spec.atlases:
+                raise ConfigError(
+                    f"windows.by_size[{size:g}].atlases is empty -- that runs nothing. "
+                    "Remove the window size from sizes_s instead."
+                )
+            if spec.n_overlaps is not None and spec.n_overlaps < 1:
+                raise ConfigError(
+                    f"windows.by_size[{size:g}].n_overlaps must be >= 1, "
+                    f"got {spec.n_overlaps}"
+                )
+        self.by_size = parsed
+
+    # -- resolution ------------------------------------------------------
+    def spec_for(self, window_s: float) -> WindowSizeSpec:
+        return self.by_size.get(float(window_s), WindowSizeSpec())
+
+    def overlaps_for(self, window_s: float) -> int:
+        spec = self.spec_for(window_s)
+        return int(spec.n_overlaps if spec.n_overlaps is not None else self.n_overlaps)
+
+    def atlases_for(self, window_s: float, available: list[str]) -> list[str]:
+        """Which of `available` this window size runs on, in `available` order."""
+        spec = self.spec_for(window_s)
+        if spec.atlases is None:
+            return list(available)
+        wanted = {a for a in spec.atlases}
+        return [a for a in available if a in wanted]
 
 
 @dataclass
@@ -142,6 +229,16 @@ class CohortConfig:
             self.participants = Path(self.participants)
         if not self.atlases:
             raise ConfigError("at least one atlas must be configured")
+        for size, spec in self.windows.by_size.items():
+            if spec.atlases is None:
+                continue
+            unknown = [a for a in spec.atlases if a not in self.atlases]
+            if unknown:
+                raise ConfigError(
+                    f"windows.by_size[{size:g}].atlases names {unknown}, which is not "
+                    f"in the cohort's atlases ({self.atlases}). A restriction that "
+                    "matches nothing runs nothing, silently."
+                )
 
     # -- derived ---------------------------------------------------------
     def window_tr(self, window_s: float) -> int:

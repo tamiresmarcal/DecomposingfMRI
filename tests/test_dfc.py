@@ -272,3 +272,61 @@ def test_edge_storage_threshold():
     assert edge_storage_mode(6_105) == "columns"      # Harvard-Oxford 111
     assert edge_storage_mode(21) == "columns"         # Yeo-7
     assert edge_storage_mode(499_500) == "list"       # Schaefer-1000
+
+
+class TestPerSizeOverrides:
+    """`windows.by_size` reaches stage 3, and the metadata records what ran."""
+
+    def _cfg(self, tmp_path, **windows):
+        base = {"sizes_s": [15.0, 30.0], "n_overlaps": 5}
+        base.update(windows)
+        return config_from_dict({
+            "cohort": "t", "tr": 1.0,
+            "derivatives_root": str(tmp_path), "output_root": str(tmp_path / "out"),
+            "atlases": ["x"], "windows": base,
+            "stimulus": {"durations_s": {"movie": 200.0}},
+        })
+
+    def _frame(self, n=200):
+        rng = np.random.default_rng(7)
+        df = pd.DataFrame(rng.normal(size=(n, 5)), columns=[f"P{i}" for i in range(5)])
+        df["stimulus_time_s"] = np.arange(n, dtype=float)
+        df["time_s"] = df["stimulus_time_s"]
+        df["t"] = np.arange(n)
+        df["good_frame"] = True
+        df["run_idx"] = np.int8(0)
+        return df
+
+    def test_a_per_size_stride_changes_the_window_count(self, tmp_path):
+        cfg = self._cfg(tmp_path, by_size={15.0: {"n_overlaps": 3}})
+        df, atlas = self._frame(), toy_atlas()
+        fine = dfc_for_run(df, atlas, cfg, 15.0, 200.0)
+        coarse_stride = dfc_for_run(df, atlas, cfg, 30.0, 200.0)
+        # 15 s at stride 5 s vs the cohort default of 3 s
+        assert len(fine) == 38
+        assert len(coarse_stride) == 29
+        assert fine[1].window.start_s == 5.0
+
+    def test_an_explicit_argument_beats_the_config(self, tmp_path):
+        cfg = self._cfg(tmp_path, by_size={15.0: {"n_overlaps": 3}})
+        results = dfc_for_run(self._frame(), toy_atlas(), cfg, 15.0, 200.0, n_overlaps=5)
+        assert results[1].window.start_s == 3.0
+
+    def test_the_stride_that_ran_is_recorded_in_the_metadata(self, tmp_path):
+        """The output path carries only window_s, so the stride must be here."""
+        cfg = self._cfg(tmp_path, by_size={15.0: {"n_overlaps": 3}})
+        results = dfc_for_run(self._frame(), toy_atlas(), cfg, 15.0, 200.0)
+        table = build_dfc_table(results, toy_atlas(), cfg, 15.0, {"cohort": "t"})
+        assert table.schema.metadata[b"n_overlaps"] == b"3"
+
+    def test_rank_deficient_agrees_with_the_shared_predicate(self, tmp_path):
+        """Stage 3's flag and the CLI's prediction are the same inequality."""
+        from fmri_decomposition.windows import is_rank_deficient
+
+        cfg = self._cfg(tmp_path)
+        atlas = toy_atlas(n_nodes=5)
+        df = self._frame()
+        for window_s in (15.0, 30.0):
+            for res in dfc_for_run(df, atlas, cfg, window_s, 200.0):
+                assert res.qc["rank_deficient"] == is_rank_deficient(
+                    res.qc["n_tr_effective"], atlas.n_nodes)

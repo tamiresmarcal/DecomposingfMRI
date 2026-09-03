@@ -93,6 +93,16 @@ def _attach_confounds(cfg, refs):
     return _attach_sidecar(cfg, refs, cfg.confounds.confounds_glob, "confounds")
 
 
+def _attach_motion(cfg, refs):
+    """Motion regressor sidecars, for subject-level QC only (see motion.py).
+
+    Never called by `extract`: nothing in stage 2 or 3 reads this file. It is
+    attached by `tools/make_participants.py --fd`, which turns it into
+    mean_fd in participants.csv.
+    """
+    return _attach_sidecar(cfg, refs, cfg.confounds.motion_glob, "motion")
+
+
 # ------------------------------------------------------------- commands ---
 def cmd_validate(args) -> int:
     cfg = _load(args.config)
@@ -138,35 +148,115 @@ def cmd_extract(args) -> int:
     return _report(entries)
 
 
-def cmd_dfc(args) -> int:
-    from joblib import Parallel, delayed
+def _human_bytes(n: float) -> str:
+    for unit, scale in (("GB", 1e9), ("MB", 1e6), ("KB", 1e3)):
+        if n >= scale:
+            return f"{n / scale:.2f} {unit}"
+    return f"{n:.0f} B"
 
-    from .dfc import process_activation_file
-    from .io import activation_root, write_manifest
 
-    cfg = _load(args.config)
-    atlases = _atlases(cfg)
-    sizes = [float(w) for w in (args.window_s or cfg.windows.sizes_s)]
+# window_id, start_tr, start_s, the two stimulus bounds, three n_tr counts,
+# frac_good_frames, three flags, plus ses/run/acq/run_key.
+_DFC_FIXED_COLUMNS = 16
 
-    jobs = []
+
+def _dfc_plan(cfg, atlases, sizes):
+    """(atlas, window_s, n_overlaps) -> the activation shards it applies to.
+
+    The atlas x window grid is not a full cross product. `windows.by_size`
+    restricts a size to the atlases it can support, which is how a 15 s
+    aperture reaches yeo7 and the 14 coordinate networks without also being
+    spent on Harvard-Oxford's 6,105 edges, where 15 samples estimate nothing.
+    """
+    from .io import activation_root
+
+    plan = []
     for atlas in atlases:
         root = activation_root(cfg.output_root, atlas.name, cfg.cohort)
         files = sorted(root.rglob("*.parquet"))
         if not files:
             print(f"  no activation shards for atlas {atlas.name!r} under {root}")
+            continue
+        for w in sizes:
+            if atlas.name not in cfg.windows.atlases_for(w, [a.name for a in atlases]):
+                continue
+            plan.append((atlas, w, cfg.windows.overlaps_for(w), files))
+    return plan
+
+
+def _preview_plan(cfg, plan) -> None:
+    """Print the row and column counts BEFORE any of them are written.
+
+    Window count scales as 1/stride, so shortening the aperture at fixed
+    n_overlaps multiplies the rows: at TR=1 on a 5,470 s film, 300 s gives 87
+    windows per subject and 15 s gives 1,819 -- 21x, for every subject and
+    every atlas the size runs on. That is a decision worth seeing before a
+    filesystem quota makes it for you.
+    """
+    import pyarrow.parquet as pq
+
+    from .windows import (is_rank_deficient, n_windows, stride_seconds,
+                          window_tr_from_seconds)
+
+    print("\nplan:")
+    total_rows = total_bytes = 0
+    for atlas, w, n_ov, files in plan:
+        # Duration per shard from parquet metadata alone -- num_rows is in the
+        # footer, so this reads kilobytes, not the 5,470-row table.
+        rows = 0
         for f in files:
-            for w in sizes:
-                jobs.append((f, atlas, w))
-    if not jobs:
-        print("nothing to do -- run `extract` first")
+            try:
+                n_tr = pq.ParquetFile(f).metadata.num_rows
+            except Exception:                                    # noqa: BLE001
+                continue
+            rows += n_windows(n_tr * cfg.tr, w, n_ov, cfg.windows.drop_incomplete)
+        n_cols = atlas.n_edges + _DFC_FIXED_COLUMNS
+        approx = rows * n_cols * 4          # float32 before compression
+        total_rows += rows
+        total_bytes += approx
+        n_tr_nominal = window_tr_from_seconds(w, cfg.tr)
+        print(f"  atlas={atlas.name:<16} window_s={w:<6g} n_overlaps={n_ov} "
+              f"stride={stride_seconds(w, n_ov):g}s")
+        print(f"    {len(files):>4} shard(s)  ~{rows:,} row(s) x {atlas.n_edges:,} edge(s) "
+              f"  ~{_human_bytes(approx)} uncompressed")
+        if is_rank_deficient(n_tr_nominal, atlas.n_nodes):
+            print(f"    WARNING: {n_tr_nominal} sample(s) for {atlas.n_nodes} node(s) -- "
+                  f"every window will be flagged rank_deficient.")
+            print("             Restrict the size if that is not what you meant:")
+            print(f"               windows.by_size: {{{w:g}: {{atlases: [...]}}}}")
+    print(f"  TOTAL ~{total_rows:,} row(s), ~{_human_bytes(total_bytes)} uncompressed "
+          f"(zstd typically 2-4x smaller)")
+
+
+def cmd_dfc(args) -> int:
+    from joblib import Parallel, delayed
+
+    from .dfc import process_activation_file
+    from .io import write_manifest
+
+    cfg = _load(args.config)
+    atlases = _atlases(cfg)
+    sizes = [float(w) for w in (args.window_s or cfg.windows.sizes_s)]
+
+    plan = _dfc_plan(cfg, atlases, sizes)
+    if not plan:
+        print("nothing to do -- run `extract` first, or check windows.by_size")
         return 1
+
+    jobs = [(f, atlas, w, n_ov) for atlas, w, n_ov, files in plan for f in files]
+    if args.dry_run:
+        print(f"stage 3 DRY RUN: {len(jobs)} shard file(s) would be written")
+        _preview_plan(cfg, plan)
+        return 0
 
     jobs, shard = _shard(jobs, args.shard)
     tag = f" [shard {shard[0]}/{shard[1]}]" if shard else ""
     print(f"stage 3{tag}: {len(jobs)} shard file(s) across window sizes {sizes}")
+    if not shard or shard[0] == 0:
+        _preview_plan(cfg, plan)
     entries = Parallel(n_jobs=args.n_jobs, backend="loky", verbose=5)(
-        delayed(process_activation_file)(f, a, cfg, w, None, args.overwrite)
-        for f, a, w in jobs
+        delayed(process_activation_file)(f, a, cfg, w, None, args.overwrite, n_ov)
+        for f, a, w, n_ov in jobs
     )
     write_manifest(cfg.output_root, entries, cfg.to_dict(),
                    name=_manifest_name("dfc", shard), cohort=cfg.cohort)
@@ -283,6 +373,9 @@ def build_parser() -> argparse.ArgumentParser:
     common(sub.add_parser("dfc", help="stage 3: parcel timeseries -> windowed DFC")).set_defaults(
         func=cmd_dfc)
     sub.choices["dfc"].add_argument("--window-s", type=float, nargs="*", default=None)
+    sub.choices["dfc"].add_argument(
+        "--dry-run", action="store_true",
+        help="print the atlas x window plan with row and size estimates, write nothing")
 
     v = sub.add_parser("validate", help="check config, discovery and participants.csv")
     v.add_argument("config")

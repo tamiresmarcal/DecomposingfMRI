@@ -108,9 +108,23 @@ windows:
   # windows per run, against ~12 at 120 s and ~65 at 30 s. Kept so every cohort
   # is analysed on the same window grid; drop it here if 7 windows per run is
   # too few for what you are testing.
-  sizes_s: [30, 60, 120, 300]
+  sizes_s: [15, 30, 60, 120, 300]
   n_overlaps: 5
   drop_incomplete: true
+
+  # 15 s is restricted to the same two atlases as ds002837, for the same
+  # reason and one extra. At TR=1.49 a 15 s window is round(15/1.49) = 10
+  # samples -- fewer than ds002837's 15, because the aperture is a stimulus
+  # duration and the sampling rate is the cohort's. Ten samples say something
+  # about yeo7's 21 edges and nothing about Harvard-Oxford's 6,105.
+  #
+  # Rows are not the problem here that they are on the films: a 718 s segment
+  # gives floor((718-15)/3)+1 = 235 windows against 7 at 300 s. Keeping the
+  # restriction identical across cohorts is what keeps "one atlas, one window
+  # size, every cohort" a single directory to read.
+  by_size:
+    15:
+      atlases: [yeo7, networks]
 
 # --- participants CSV -------------------------------------------------
 # Not shipped with the repo, deliberately: unlike ds002837 (where each of the
@@ -131,4 +145,12 @@ windows:
 #   python tools/check_cohort.py config/cneuromod_friends.yaml
 #   fmri-decomp extract  config/cneuromod_friends.yaml --n-jobs 4 --no-strict --limit 2
 #   python tools/check_cohort.py config/cneuromod_friends.yaml --checks outputs,parallel --limit 2
+#   fmri-decomp dfc      config/cneuromod_friends.yaml --dry-run
 #   fmri-decomp dfc      config/cneuromod_friends.yaml --n-jobs 4
+#
+# Subject-level motion into participants.csv. No motion_glob is needed: with
+# format: fmriprep_tsv the tool reads the framewise_displacement column
+# fMRIPrep already computed, rather than recomputing it from rot_*/trans_*
+# and risking the radian/degree convention.
+#   python tools/make_participants.py config/cneuromod_friends.yaml \
+#       -o config/cneuromod_friends_participants.csv --update --fd

@@ -8,6 +8,18 @@
 # window size after changing your mind costs one short job rather than a full
 # re-extraction. That separation is the whole reason stages 2 and 3 are split.
 #
+# CHECK THE ROW COUNT FIRST. Stage 3's cost is rows, and rows go as 1/stride:
+# a 15 s aperture at n_overlaps=5 is 1,819 windows per subject against 87 at
+# 300 s. On a login node, once stage 2 has written its shards:
+#
+#   python -m fmri_decomposition.cli dfc config/ds002837.yaml --dry-run
+#
+# which prints, per (atlas, window size), the shard count, the estimated rows
+# and the uncompressed size, and warns where every window would come back
+# rank_deficient. Array task 0 prints the same plan before it starts work, so
+# it is in the logs either way. Which atlases a size runs on is `windows.by_size`
+# in the config, not an argument here.
+#
 # Ask for far less than stage 2: no NIfTI is ever loaded here. One subject's
 # parcel timeseries at 111 parcels x 5,470 TRs is about 2.4 MB.
 

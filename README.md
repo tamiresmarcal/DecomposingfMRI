@@ -9,7 +9,8 @@ pip install -e ".[test,atlases]"
 ./run_tests.sh                       # unit tests + synthetic end-to-end run
 fmri-decomp validate  config/ds002837.yaml
 fmri-decomp extract   config/ds002837.yaml --n-jobs 8
-fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 30 60 120 300
+fmri-decomp dfc       config/ds002837.yaml --dry-run       # rows before compute
+fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 300
 ```
 
 ---
@@ -131,6 +132,85 @@ df = d.to_table(filter=(ds.field("cohort") == "ds002837")).to_pandas()
 # Columnar: selecting QC columns physically reads three columns, not the file.
 qc = d.to_table(columns=["window_id", "n_tr_effective", "frac_good_frames"]).to_pandas()
 ```
+
+### The window grid is atlas-conditional
+
+`windows.sizes_s` is what to run; `windows.by_size` is where, and how:
+
+```yaml
+windows:
+  sizes_s: [15, 30, 60, 120, 300]
+  n_overlaps: 5
+  by_size:
+    15:
+      atlases: [yeo7, networks]     # not harvardoxford, and never networks_nodes
+      # n_overlaps: 3               # optional: a coarser stride at this aperture
+```
+
+Two independent things make a short window size not portable across atlases,
+both pure arithmetic:
+
+**Rank.** A window is `round(window_s / TR)` samples, and a correlation matrix
+over *p* nodes needs *n − 1 ≥ p*. On ds002837 (TR = 1) that is 15 samples for
+7 nodes (fine), 14 nodes (fine, by exactly one sample) and 111 nodes (not
+remotely). Restricting the size beats filtering `rank_deficient` at stage 4,
+because then the compute is never spent. `fmri-decomp dfc --dry-run` prints the
+warning for any pair where every window would be flagged — including the two
+that are already like that in the default grid, Harvard-Oxford at 30 s and 60 s.
+
+**Rows.** Window count goes as `1/stride`, so halving the aperture at fixed
+`n_overlaps` doubles the rows. On a 5,470 s film:
+
+| window_s | stride (n_overlaps=5) | windows/subject | ×300 s |
+|---|---|---|---|
+| 300 | 60 s | 87 | 1× |
+| 120 | 24 s | 223 | 2.6× |
+| 60 | 12 s | 451 | 5.2× |
+| 30 | 6 s | 907 | 10× |
+| 15 | 3 s | 1,819 | 21× |
+
+21× the rows is nothing at yeo7's 21 edges and unaffordable at
+`networks_nodes`'s 32,131. Check before launching, not after:
+
+```bash
+fmri-decomp dfc config/ds002837.yaml --dry-run
+```
+
+which prints per (atlas, window size) the shard count, estimated rows, edge
+count and uncompressed size, from parquet footers only — no table is read.
+`n_overlaps: 3` at the fine aperture cuts its rows by ~40% (1,819 → 1,092).
+The stride is **not** part of the output path, only `window_s` is, so changing
+it for a size that already ran needs `--overwrite`; the value that produced a
+shard is in its schema metadata.
+
+### Subject-level motion
+
+`participants.csv` carries the motion columns, and is the only route by which
+motion reaches a model — no stage-2 or stage-3 code opens a motion file:
+
+```bash
+python tools/make_participants.py config/ds002837.yaml \
+    -o config/ds002837_participants.csv --update --fd
+```
+
+`--update` keeps every existing row and every hand-written exclusion and adds
+`mean_fd`, `median_fd`, `max_fd`, `frac_fd_gt_0p2`, `frac_fd_gt_0p5`,
+`n_fd_frames`, `n_motion_runs` plus the provenance of each (`fd_source`,
+`fd_columns`, `fd_note`). Two sources, picked by the config: an AFNI motion
+regressor `.1D` via `confounds.motion_glob` (Power FD computed here, with
+rotations converted on a 50 mm sphere and no differencing across a run
+boundary), or fMRIPrep's own `framewise_displacement` column, read as-is.
+
+`--exclude-mean-fd 0.5` will also write the exclusions, recorded as
+`excluded=True` with the reason `auto:mean_fd>0.5`. Rows carrying that marker
+are the tool's and are recomputed when the threshold moves; a row with a
+hand-written reason is never touched, in either direction.
+
+This is deliberately **subject-level only**. On ds002837 the motion regressors
+are on the acquisition clock and the images on the stimulus clock, 15–28 frames
+apart with no recoverable mapping — which is why `confounds.censor_glob` is
+disabled there and `good_frame` is all true. That misalignment is fatal to
+frame-level censoring and irrelevant to a mean over ~5,470 frames.
 
 ### Row contracts
 

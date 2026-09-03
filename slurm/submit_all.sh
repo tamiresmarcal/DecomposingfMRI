@@ -95,6 +95,11 @@ submitted. watch with:
   squeue -u \$USER -o '%.10i %.20j %.8T %.10M %R'
   tail -f slurm_logs/extract_${EXTRACT_ID}_0.out
 
+stage 3's atlas x window plan -- rows, edge counts, estimated size, and any
+pair where every window would be rank_deficient -- is printed by array task 0
+before it starts writing:
+  grep -A40 '^plan:' slurm_logs/dfc_${DFC_ID}_0.out
+
 a timed-out or preempted task is safe to resubmit as-is; skip-if-exists means
 it redoes only the shards that are missing:
   sbatch --array=0-$((N_EXTRACT - 1)) $HERE/01_extract.sbatch $CONFIG

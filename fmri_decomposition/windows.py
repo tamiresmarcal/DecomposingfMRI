@@ -58,6 +58,18 @@ def window_tr_from_seconds(window_s: float, tr: float) -> int:
     return int(math.floor(window_s / tr + 0.5))
 
 
+def is_rank_deficient(n_samples: int, n_nodes: int) -> bool:
+    """Is a correlation matrix over `n_nodes` nodes underdetermined here?
+
+    The sample covariance of p variables from n observations has rank at most
+    n-1 after centring, so below n-1 >= p the matrix is singular however the
+    individual pairwise correlations look. Stage 3 flags every window with
+    this; the CLI predicts it for a whole (atlas, window size) pair before any
+    of it is computed. Both call here so the two answers cannot drift.
+    """
+    return int(n_samples) - 1 < int(n_nodes)
+
+
 def stride_seconds(window_s: float, n_overlaps: int) -> float:
     """Stride in seconds. n_overlaps=5 gives 80% overlap."""
     if n_overlaps < 1:
