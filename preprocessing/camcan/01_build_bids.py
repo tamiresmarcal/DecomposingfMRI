@@ -56,7 +56,19 @@ ANAT_REQUIRED = ["T1w"]
 ANAT_OPTIONAL = ["T2w"]
 
 
-def _echo_names(sub: str, n_echoes: int) -> list[str]:
+def _func_names(sub: str, n_echoes: int) -> list[str]:
+    """Expected func/ filenames for one subject's movie run.
+
+    n_echoes == 0 means single-echo BIDS naming: the spec omits the echo-
+    entity entirely when a run has only one echo, rather than writing
+    echo-01. Confirmed on disk (2026-08): ccfrail/release002 ships
+    sub-X_task-Movie_bold.nii.gz with NO echo tag at all -- a different
+    filename SHAPE from CC700/release004's 5 explicitly-numbered echo files,
+    not just a different count. --n-echoes 1 would look for echo-01_bold and
+    find nothing; 0 is what selects this naming.
+    """
+    if n_echoes == 0:
+        return [f"sub-{sub}_task-{TASK}_bold{ext}" for ext in (".nii.gz", ".json")]
     return [
         f"sub-{sub}_task-{TASK}_echo-{i:02d}_bold{ext}"
         for i in range(1, n_echoes + 1)
@@ -102,25 +114,28 @@ def survey(bidssep: Path, func_subdir: str, n_echoes: int) -> tuple[list[str], d
         missing_anat = [
             s for s in ANAT_REQUIRED if not (adir / f"sub-{sub}_{s}.nii.gz").is_file()
         ]
-        missing_echo = [n for n in _echo_names(sub, n_echoes) if not (fdir / n).is_file()]
+        expected_func = _func_names(sub, n_echoes)
+        missing_func = [n for n in expected_func if not (fdir / n).is_file()]
 
-        # "no movie at all" and "movie missing an echo" are different findings
+        # "no movie at all" and "movie missing a file" are different findings
         # and must not share a bucket. On CC700 ~90 subjects have a T1w but
         # never did the movie task -- that is normal, and reporting it as
         # "incomplete" would read as data corruption. A subject genuinely
-        # missing one echo is rare and worth looking at.
-        no_movie = len(missing_echo) == n_echoes * 2
+        # missing part of its movie run is rare and worth looking at.
+        # Compared against len(expected_func) rather than a recomputed
+        # n_echoes*2, which breaks for the single-echo (n_echoes=0) case.
+        no_movie = len(missing_func) == len(expected_func)
         if missing_anat and no_movie:
             skipped[sub] = "no T1w and no movie"
         elif missing_anat:
             skipped[sub] = f"missing anat: {', '.join(missing_anat)}"
         elif no_movie:
             skipped[sub] = "no movie data (subject did not do the task)"
-        elif missing_echo:
-            n_nii = sum(1 for n in missing_echo if n.endswith(".nii.gz"))
+        elif missing_func:
+            n_nii = sum(1 for n in missing_func if n.endswith(".nii.gz"))
             skipped[sub] = (
-                f"incomplete movie: {len(missing_echo)} file(s) absent "
-                f"({n_nii} image(s)) of {n_echoes * 2}"
+                f"incomplete movie: {len(missing_func)} file(s) absent "
+                f"({n_nii} image(s)) of {len(expected_func)}"
             )
         else:
             usable.append(sub)
@@ -156,7 +171,7 @@ def build(subs: list[str], bidssep: Path, func_subdir: str, n_echoes: int,
                 src = anat_root / s / "anat" / f"{s}_{suffix}{ext}"
                 if src.is_file():
                     link(src, out / s / "anat" / src.name, force)
-        for name in _echo_names(sub, n_echoes):
+        for name in _func_names(sub, n_echoes):
             link(func_root / s / "func" / name, out / s / "func" / name, force)
 
     # subjects.txt and skipped_subjects.tsv are OUR bookkeeping, not BIDS. The
@@ -261,9 +276,13 @@ def main(argv=None) -> int:
     p.add_argument(
         "--n-echoes", type=int, default=N_ECHOES,
         help=f"echoes per movie run (default {N_ECHOES}, confirmed for "
-             "CC700/release004). Confirm from a sidecar before trusting this "
-             "default for any other release -- protocols are not guaranteed "
-             "identical across Cam-CAN releases.",
+             "CC700/release004). Pass 0 for single-echo BIDS naming -- no "
+             "echo- entity in the filename at all, confirmed for "
+             "ccfrail/release002 (sub-X_task-Movie_bold.nii.gz). Confirm from "
+             "a sidecar before trusting either default for a new release --"
+             " protocols are not guaranteed identical across Cam-CAN "
+             "releases, and this is a different filename SHAPE, not just a "
+             "different count.",
     )
     p.add_argument(
         "--dataset-name", default=DEFAULT_DATASET_NAME,
@@ -296,7 +315,8 @@ def main(argv=None) -> int:
     usable, skipped = survey(args.camcan_bidssep, args.func_subdir, args.n_echoes)
     print(f"BIDSsep root : {args.camcan_bidssep}")
     print(f"func subdir  : {args.func_subdir}")
-    print(f"usable subjects (T1w + all {args.n_echoes} echoes): {len(usable)}")
+    func_desc = "single-echo movie" if args.n_echoes == 0 else f"all {args.n_echoes} echoes"
+    print(f"usable subjects (T1w + {func_desc}): {len(usable)}")
     print(f"skipped:                                      {len(skipped)}")
 
     reasons: dict[str, int] = {}
@@ -305,6 +325,29 @@ def main(argv=None) -> int:
         reasons[key] = reasons.get(key, 0) + 1
     for key, n in sorted(reasons.items(), key=lambda kv: -kv[1]):
         print(f"    {n:4d}  {key}")
+
+    # Zero usable subjects is never a legitimate result against a real BIDSsep
+    # root, and it is the exact signature of a wrong --func-subdir or
+    # --n-echoes: every subject gets bucketed as "no movie data", which reads
+    # as a finding about the DATA rather than the mistake about the ARGUMENTS
+    # that it actually is. Verified by negative control -- --n-echoes 5 on
+    # single-echo ccfrail data reports "0 usable / 5 no movie data" and, before
+    # this check, exited 0. Refusing here turns a plausible wrong answer into
+    # a loud failure.
+    if not usable:
+        print(
+            f"\nERROR: 0 usable subjects out of {len(usable) + len(skipped)} found.\n"
+            "That is almost never a fact about the data. Check the arguments:\n"
+            f"  --func-subdir {args.func_subdir!r}  "
+            "(func_movie for CC700/release004, func_Movie for ccfrail/release002)\n"
+            f"  --n-echoes {args.n_echoes}  "
+            "(5 for CC700/release004, 0 for single-echo like ccfrail/release002)\n"
+            "A wrong --n-echoes makes every subject look like it never did the "
+            "task.\nList one subject's func/ directory and match the filenames "
+            "against what\nthis script expects before re-running.",
+            file=sys.stderr,
+        )
+        return 1
 
     if args.subjects:
         want = [s.strip() for s in args.subjects.split(",") if s.strip()]
