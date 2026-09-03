@@ -37,8 +37,8 @@ class ConfoundsConfig:
     columns: list[str] = field(default_factory=list)
     confounds_glob: str | None = None     # fMRIPrep *_desc-confounds_timeseries.tsv
     censor_glob: str | None = None        # AFNI censored_timepoints.1D
-    # Read for SUBJECT-LEVEL motion QC only -- `tools/make_participants.py --fd`
-    # turns it into mean_fd in participants.csv. Stages 2 and 3 never open it.
+    # Read for SUBJECT-LEVEL motion QC only -- `fmri-decomp diagnose` turns it
+    # into mean_fd in participants_qc.csv. Stages 2 and 3 never open it.
     # It is separate from censor_glob because the two answer different
     # questions: censoring needs frame-accurate alignment to the images, a mean
     # over ~5,470 frames does not. On ds002837 the first is impossible and the

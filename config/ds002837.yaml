@@ -213,21 +213,23 @@ windows:
 #   fmri-decomp dfc      config/ds002837.yaml --n-jobs 4
 #   fmri-decomp diagnose config/ds002837.yaml
 #
-# Subject-level QC, AFTER extract (every metric is read out of the stage-2
-# parquet; no NIfTI is opened, so it is seconds rather than core-hours):
-#   python tools/make_participants.py config/ds002837.yaml \
-#       -o config/ds002837_participants.csv --update --fd --qc
+# Subject-level QC is NOT a separate step: `03_finalize.sbatch` runs
+# `fmri-decomp diagnose` after the extract array, and that writes
+#   outputs/meta/cohorts/cohort=ds002837/participants_qc.csv
+# with one row per (sub, task) and one column block per failure mode:
+#   mean_fd                 head movement          (needs motion_glob above)
+#   best_lag_tr, peak_isc   wrong stimulus timing
+#   frac_stimulus_covered   scan stopped early
+#   frac_parcels_empty      registration failure
+#   frac_good_frames        scrubbing survival -- identically 1.0 here, since
+#                           censor_glob is disabled above
 #
-# Four criteria, four different failures -- add the thresholds once you have
-# looked at the printed distributions, and fix them before you look if you can:
-#   --exclude-mean-fd 0.5             head movement
-#   --exclude-lag-tr 1                wrong stimulus timing (a correctness bug)
-#   --exclude-stimulus-covered 0.95   scan stopped early
-#   --exclude-parcels-empty 0.05      registration failure
+# NO THRESHOLD IS APPLIED ANYWHERE IN THIS PIPELINE. The QC table is
+# measurement; turning a number into an exclusion is a decision that belongs
+# with the models, where a sensitivity analysis can move a cutoff without
+# re-running any of the above. `participants.csv` carries only curation a
+# person entered by hand ("corrupted run"), and that one IS honoured, at
+# stage 2.
 #
-# --exclude-good-frames is deliberately NOT listed: with censor_glob disabled
-# above, frac_good_frames is identically 1.0 here and would exclude nobody.
-#
-# The exclusion does not reach stage 3 on its own -- `dfc` walks the filesystem,
-# not this table, so it warns about excluded subjects that still have shards.
-# Filter on the participants join at stage 4/5.
+# Note `dfc` walks the filesystem rather than participants.csv, so it warns
+# about excluded subjects that still have shards rather than skipping them.

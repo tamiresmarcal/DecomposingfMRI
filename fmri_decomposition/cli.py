@@ -97,8 +97,8 @@ def _attach_motion(cfg, refs):
     """Motion regressor sidecars, for subject-level QC only (see motion.py).
 
     Never called by `extract`: nothing in stage 2 or 3 reads this file. It is
-    attached by `tools/make_participants.py --fd`, which turns it into
-    mean_fd in participants.csv.
+    attached by `qc.motion_qc`, which turns it into mean_fd in
+    participants_qc.csv.
     """
     return _attach_sidecar(cfg, refs, cfg.confounds.motion_glob, "motion")
 
@@ -341,12 +341,21 @@ def cmd_dfc(args) -> int:
 
 
 def cmd_diagnose(args) -> int:
-    import pandas as pd
+    """Coverage, L-R, ISC, and the per-subject QC table.
 
-    from .validate import (coverage_table, isc_alignment, isc_gate,
-                           lr_correlation_diagnostic, write_diagnostic)
+    `03_finalize.sbatch` runs this after the extract array, which is what makes
+    `participants_qc.csv` appear without a separate step in the chain. It also
+    means ISC is computed once here and reused for both the gate and the QC
+    table, rather than twice.
 
+    Nothing in here thresholds anything. The QC table is measurement; the
+    exclusion decision belongs with the models, where it can be varied without
+    re-running any of this.
+    """
     from .io import activation_root
+    from .qc import collect_qc, qc_frame
+    from .validate import (coverage_table, isc_gate, lr_correlation_diagnostic,
+                           write_diagnostic)
 
     cfg = _load(args.config)
     atlases = _atlases(cfg)
@@ -367,20 +376,62 @@ def cmd_diagnose(args) -> int:
             cohort=cfg.cohort))
         print(lr.head(5).to_string(index=False))
 
-    try:
-        parcels = tuple(args.isc_parcels) if args.isc_parcels else (atlas.columns[0],)
-        isc = isc_alignment(files, parcels=parcels)
-        print("ISC alignment ->", write_diagnostic(
-            isc, cfg.output_root, "isc_alignment.csv", cohort=cfg.cohort))
-        ok, msg = isc_gate(isc, cfg.stimulus.isc_gate_tr)
-        print(("PASS " if ok else "FAIL ") + msg)
-        if not ok:
-            return 2
-    except Exception as exc:                                     # noqa: BLE001
-        print(f"ISC skipped: {type(exc).__name__}: {exc}")
-    with pd.option_context("display.width", 120):
-        pass
-    return 0
+    qc, messages, isc = collect_qc(cfg, atlases, args.isc_parcels, args.isc_max_lag_tr,
+                                   args.motion_order, args.motion_columns)
+    for m in messages:
+        print(f"  {m}")
+    if qc:
+        print("subject QC ->", write_diagnostic(
+            qc_frame(cfg, qc), cfg.output_root, "participants_qc.csv", cohort=cfg.cohort))
+        _report_qc(qc_frame(cfg, qc))
+
+    if isc is None or not len(isc):
+        print("ISC skipped: no alignment could be computed -- the gate is not applied")
+        return 0
+    print("ISC alignment ->", write_diagnostic(
+        isc, cfg.output_root, "isc_alignment.csv", cohort=cfg.cohort))
+    ok, msg = isc_gate(isc, cfg.stimulus.isc_gate_tr)
+    print(("PASS " if ok else "FAIL ") + msg)
+    return 0 if ok else 2
+
+
+# (column, worse direction, what it is about). One line per failure mode.
+_QC_REPORT = [
+    ("mean_fd", "high", "motion"),
+    ("best_lag_tr", "abs", "timing"),
+    ("frac_stimulus_covered", "low", "coverage"),
+    ("frac_good_frames", "low", "scrubbing"),
+    ("frac_parcels_empty", "high", "registration"),
+    ("peak_isc", "low", "stimulus-drivenness"),
+]
+
+
+def _report_qc(df) -> None:
+    """Print each metric's spread and its worst subjects.
+
+    No thresholds, on purpose -- this is the distribution you look at before
+    choosing one at the models, not a verdict. `peak_isc` in particular is
+    reported and never thresholded: it has no absolute scale, is confounded
+    with motion, and on a six-subject film its reference is a mean of five.
+    """
+    import numpy as np
+
+    print("\n  per-subject QC (measurement only -- thresholds live with the models):")
+    for col, worse, what in _QC_REPORT:
+        if col not in df.columns:
+            continue
+        vals = df[[col, "sub", "task"]].dropna(subset=[col])
+        if vals.empty:
+            print(f"    {col:<24} not computed")
+            continue
+        x = vals[col].to_numpy(dtype=float)
+        key = -np.abs(x) if worse == "abs" else (-x if worse == "high" else x)
+        order = np.argsort(key)[:3]
+        worst = ", ".join(f"sub-{vals.iloc[i]['sub']}/{vals.iloc[i]['task']}="
+                          f"{vals.iloc[i][col]:.3g}" for i in order)
+        print(f"    {col:<24} n={len(x):<4} min={x.min():.3g} "
+              f"median={float(np.median(x)):.3g} max={x.max():.3g}   [{what}]")
+        print(f"    {'':<24} worst: {worst}")
 
 
 def cmd_merge_manifests(args) -> int:
@@ -458,9 +509,21 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("config")
     v.set_defaults(func=cmd_validate)
 
-    d = sub.add_parser("diagnose", help="coverage, L-R and ISC alignment artifacts")
+    d = sub.add_parser(
+        "diagnose",
+        help="coverage, L-R, ISC and participants_qc.csv (measurement, no thresholds)")
     d.add_argument("config")
-    d.add_argument("--isc-parcels", nargs="*", default=None)
+    d.add_argument("--isc-parcels", nargs="*", default=None,
+                   help="parcel column(s) to seed ISC with; default is an auditory "
+                        "parcel of the QC atlas, or a visual one")
+    d.add_argument("--isc-max-lag-tr", type=int, default=30,
+                   help="lag range searched by ISC, in TRs (default 30)")
+    d.add_argument("--motion-order", default="afni", choices=["afni", "fsl", "spm"],
+                   help="motion parameter order when the .1D carries no ColumnLabels; "
+                        "afni = rotations first in degrees (default)")
+    d.add_argument("--motion-columns", type=int, nargs=6, default=None, metavar="J",
+                   help="six 0-based column indices (negatives count from the end) "
+                        "when the motion columns cannot be identified from the header")
     d.set_defaults(func=cmd_diagnose)
 
     m = sub.add_parser("merge-manifests", help="consolidate per-array-task manifests")

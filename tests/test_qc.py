@@ -6,8 +6,8 @@ import pyarrow as pa
 import pytest
 
 from fmri_decomposition.io import write_table_atomic
-from fmri_decomposition.qc import (activation_qc, add_stimulus_coverage,
-                                   default_isc_parcels, pick_qc_atlas)
+from fmri_decomposition.qc import (QC_COLUMNS, activation_qc, add_stimulus_coverage,
+                                   default_isc_parcels, pick_qc_atlas, qc_frame)
 from fmri_decomposition.validate import isc_alignment, isc_gate
 
 
@@ -200,3 +200,30 @@ class TestIscIsGroupedByStimulus:
     def test_the_gate_fails_loudly_when_nothing_is_computable(self):
         ok, msg = isc_gate(pd.DataFrame({"best_lag_tr": [np.nan, np.nan]}), 1.0)
         assert not ok and "no subject" in msg
+
+
+class TestQcFrame:
+    """participants_qc.csv: machine-owned, keyed the way participants.csv is."""
+
+    def test_it_is_keyed_for_the_join_the_models_have_to_do(self, tmp_path):
+        from fmri_decomposition.config import config_from_dict
+
+        cfg = config_from_dict({"cohort": "ds002837", "tr": 1.0,
+                                "derivatives_root": str(tmp_path),
+                                "output_root": str(tmp_path / "out")})
+        df = qc_frame(cfg, {("12", "film"): {"mean_fd": 0.7},
+                            ("03", "film"): {"mean_fd": 0.1}})
+        assert list(df.columns) == QC_COLUMNS
+        assert list(df["sub"]) == ["03", "12"]
+        assert (df["cohort"] == "ds002837").all()
+        assert list(df["participant_id"]) == ["sub-03", "sub-12"]
+
+    def test_it_carries_no_exclusion_column(self):
+        """Measurement here; the decision is at the models."""
+        for forbidden in ("excluded", "exclusion_reason"):
+            assert forbidden not in QC_COLUMNS
+
+    def test_every_failure_mode_has_a_column(self):
+        for col in ("mean_fd", "best_lag_tr", "frac_stimulus_covered",
+                    "frac_good_frames", "frac_parcels_empty"):
+            assert col in QC_COLUMNS

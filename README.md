@@ -13,6 +13,26 @@ fmri-decomp dfc       config/ds002837.yaml --dry-run       # rows before compute
 fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 300
 ```
 
+### The pipeline, end to end
+
+```
+0    fmriprep / afni_proc            outside this repo -- cohorts arrive preprocessed
+1.1  01_extract.sbatch    (array)    NIfTI     -> parcel timeseries
+     03_finalize.sbatch activation   merge manifests + coverage + L-R
+                                     + ISC gate + participants_qc.csv
+1.2  02_dfc.sbatch        (array)    parquet   -> windowed connectivity
+     03_finalize.sbatch dfc          merge manifests
+4    models                          join participants_qc.csv, apply thresholds
+```
+
+`03_finalize` runs twice, taking the stage as an argument. The activation pass
+is where the ISC gate lives, and `--dependency=afterok` on the DFC array is
+what stops stage 3 from running on misaligned data.
+
+There is no separate QC or exclusion step: the metrics are written by the
+activation finalize, and the thresholds that turn them into exclusions live
+with the models.
+
 ---
 
 ## Output structure
@@ -217,81 +237,48 @@ The stride is **not** part of the output path, only `window_s` is, so changing
 it for a size that already ran needs `--overwrite`; the value that produced a
 shard is in its schema metadata.
 
-### Subject-level motion
+### Subject-level QC, and where exclusion happens
 
-`participants.csv` carries the motion columns, and is the only route by which
-motion reaches a model — no stage-2 or stage-3 code opens a motion file:
+Two files, split by **who owns them**:
 
-```bash
-python tools/make_participants.py config/ds002837.yaml \
-    -o config/ds002837_participants.csv --update --fd
-```
-
-`--update` keeps every existing row and every hand-written exclusion and adds
-`mean_fd`, `median_fd`, `max_fd`, `frac_fd_gt_0p2`, `frac_fd_gt_0p5`,
-`n_fd_frames`, `n_motion_runs` plus the provenance of each (`fd_source`,
-`fd_columns`, `fd_note`). Two sources, picked by the config: an AFNI motion
-regressor `.1D` via `confounds.motion_glob` (Power FD computed here, with
-rotations converted on a 50 mm sphere and no differencing across a run
-boundary), or fMRIPrep's own `framewise_displacement` column, read as-is.
-
-This is deliberately **subject-level only**. On ds002837 the motion regressors
-are on the acquisition clock and the images on the stimulus clock, 15–28 frames
-apart with no recoverable mapping — which is why `confounds.censor_glob` is
-disabled there and `good_frame` is all true. That misalignment is fatal to
-frame-level censoring and irrelevant to a mean over ~5,470 frames.
-
-### Exclusion criteria
-
-`--qc` adds four more per-subject metrics, read out of the stage-2 parquet
-(`fmri_decomposition/qc.py`). They are chosen to be about four **different**
-failures — a long list of correlated criteria costs sample size while only
-looking rigorous:
-
-| column | catches | rule | source |
+| file | owner | carries | acted on |
 |---|---|---|---|
-| `mean_fd` | head movement | `--exclude-mean-fd 0.5` | motion file (`--fd`) |
-| `best_lag_tr` | wrong stimulus timing | `--exclude-lag-tr 1` | ISC vs. leave-one-out mean |
-| `frac_stimulus_covered` | scan stopped early | `--exclude-stimulus-covered 0.95` | shard length vs. longest of the same film |
-| `frac_parcels_empty` | registration failure | `--exclude-parcels-empty 0.05` | all-NaN parcel columns |
-| `frac_good_frames` | scrubbing survival | `--exclude-good-frames 0.5` | `good_frame` |
+| `participants.csv` | human | curation — "corrupted run", "consent withdrawn" | stage 2 drops these rows before extraction |
+| `meta/cohorts/cohort=<c>/participants_qc.csv` | pipeline | measurement | **nothing** — thresholds live with the models |
 
-`frac_good_frames` is cohort-conditional: it is identically 1.0 on ds002837,
-where censoring is off, and only informative on an fMRIPrep cohort.
-`peak_isc` and `n_isc_subjects` are written but deliberately **not**
-thresholded — no absolute scale, confounded with motion, and with 6 subjects
-per film for 8 of ds002837's 10 films the reference is itself a mean of five.
+`participants_qc.csv` is written by `fmri-decomp diagnose`, which
+`03_finalize.sbatch` already runs after the extract array. So the metrics
+appear without a separate step, and ISC is computed once for both the gate and
+the table. It is regenerated from scratch every run and must never be
+hand-edited.
 
-```bash
-python tools/make_participants.py config/ds002837.yaml \
-    -o config/ds002837_participants.csv --update --fd --qc \
-    --exclude-mean-fd 0.5 --exclude-lag-tr 1 \
-    --exclude-stimulus-covered 0.95 --exclude-parcels-empty 0.05
-```
+One row per `(sub, task)`, one column block per failure mode — chosen to be
+about four **different** things, since a long list of correlated criteria costs
+sample size while only looking rigorous:
 
-Every rule writes its own machine-readable marker, joined with `; `:
+| column | catches | how it is measured |
+|---|---|---|
+| `mean_fd` | head movement | Power FD from `confounds.motion_glob`, or fMRIPrep's own column |
+| `best_lag_tr` | wrong stimulus timing | ISC peak lag vs. the leave-one-out mean of the same film |
+| `frac_stimulus_covered` | scan stopped early | shard length ÷ longest scan of the same film |
+| `frac_parcels_empty` | registration failure | all-NaN parcel columns, on the finest atlas with shards |
+| `frac_good_frames` | scrubbing survival | `good_frame` — identically 1.0 where censoring is off |
 
-```
-sub-12,12,ds002837,500daysofsummer,True,auto:mean_fd>0.5; auto:frac_parcels_empty>0.05
-```
+`peak_isc` is written and deliberately **not** offered as a criterion: no
+absolute scale, confounded with motion, and with 6 subjects per film for 8 of
+ds002837's 10 films the reference is itself a mean of five.
 
-Exclusions are **recomputed from the rules in force** on every run, so raising
-a threshold releases the rows it used to catch and dropping a rule releases
-only that rule's rows. A hand-written `exclusion_reason` — or one mixing a
-person's words with a marker — is never touched in either direction. A row
-whose metric is missing is never excluded: no motion file is not evidence of
-good motion. The tool prints per-rule counts and how many subjects fail more
-than one, because "excluded 9" is not interpretable and a set of criteria where
-one does all the work is really one criterion.
+**No threshold appears anywhere in this pipeline.** `mean_fd = 0.52` is a
+measurement — deterministic and reproducible. `0.52 > 0.5 → exclude` is a
+decision, arguable and part of what you are claiming. The first belongs in the
+pipeline; the second belongs with the analysis that rests on it, so a
+sensitivity analysis can move a cutoff without re-running any of this.
+`diagnose` prints each metric's spread and worst subjects so the distribution
+is visible, and stops there.
 
-#### Exclusions do not reach stage 3 by themselves
-
-`dfc` walks the filesystem; only `validate` and `extract` read
-`participants.csv`. Since every QC metric is computed *from* stage-2 output,
-the exclusion is necessarily written *after* extraction — by which time the
-shards exist and stage 3 will process them. `fmri-decomp dfc` therefore warns
-when it finds shards for excluded subjects. The real filter belongs at stage
-4/5, on the join.
+Since `dfc` walks the filesystem rather than `participants.csv`, it warns when
+it finds shards for excluded subjects instead of skipping them. The real filter
+is the join, at the models.
 
 #### ISC is computed per stimulus
 
@@ -299,7 +286,8 @@ when it finds shards for excluded subjects. The real filter belongs at stage
 "group mean" out of ten unrelated soundtracks, truncate everyone to the
 shortest film, and report a lag against noise — latent while `include_tasks`
 named one film, live once the cohort opened to all ten. A task with fewer than
-3 subjects gets `NaN` and a stated reason rather than being silently dropped.
+3 subjects gets `NaN` and a stated reason rather than being silently dropped;
+`n_subjects` travels with every row.
 
 ### Row contracts
 

@@ -10,10 +10,33 @@ the axes that catch things the others cannot:
     frac_parcels_empty      registration failure     -> here
     frac_good_frames        scrubbing survival       -> here (cohort-dependent)
 
-Everything here reads the activation parquet, never a NIfTI, and nothing here
-writes anything. `tools/make_participants.py` is the sole writer; this module
-only computes. That split is deliberate: exclusions live in one file, under one
-marker convention, with one writer.
+MEASUREMENT HERE, DECISION AT THE MODELS
+----------------------------------------
+This module measures. It never thresholds and never excludes, and no threshold
+appears anywhere in the pipeline.
+
+    mean_fd = 0.52          a measurement: deterministic, reproducible
+    0.52 > 0.5 -> exclude   a decision: arguable, and part of the claim
+
+The first belongs in the pipeline and runs automatically; the second belongs
+with the analysis that rests on it, so a sensitivity analysis can move a cutoff
+without re-running anything upstream.
+
+That is also why the output is `participants_qc.csv` and not a column added to
+`participants.csv`. The two files differ in who owns them:
+
+    participants.csv      HUMAN-owned. Curation only -- "corrupted run",
+                          "consent withdrawn". Load-bearing at stage 2:
+                          `attach_participants` drops these rows before
+                          extraction. Hand-edited, and nothing writes it
+                          automatically.
+    participants_qc.csv   MACHINE-owned. Rewritten from scratch by every
+                          `diagnose` run. Never hand-edited; an edit here is
+                          lost on the next finalize.
+
+Written by `fmri-decomp diagnose`, which `03_finalize.sbatch` already runs
+after the extract array -- so the metrics appear without a separate step, and
+ISC is computed once rather than twice.
 
 WHY frac_stimulus_covered EXISTS
 --------------------------------
@@ -142,6 +165,54 @@ def add_stimulus_coverage(qc: dict[tuple[str, str], dict]) -> None:
         cur["frac_stimulus_covered"] = (d / ref) if ref > 0 else float("nan")
 
 
+# ---------------------------------------------------------------- motion ---
+def motion_qc(cfg, order: str = "afni", columns=None):
+    """(sub, task) -> subject-level motion. See motion.py for what it claims.
+
+    Two cohort shapes, two sources: an AFNI cohort ships motion parameters and
+    no FD, an fMRIPrep cohort ships FD already computed -- recomputing that from
+    rot_*/trans_* would only add a chance to get the radian convention wrong.
+    """
+    from .cli import _attach_confounds, _attach_motion
+    from .cohort import discover_runs
+    from .motion import (MotionError, MotionSummary, summarize_fd_column,
+                         summarize_motion_file)
+
+    if cfg.confounds.motion_glob:
+        source, attr = "confounds.motion_glob", "motion"
+    elif cfg.confounds.format == "fmriprep_tsv" and cfg.confounds.confounds_glob:
+        source, attr = "confounds.confounds_glob", "confounds"
+    else:
+        return {}, ("motion skipped: set confounds.motion_glob (an AFNI motion .1D) "
+                    "or confounds.confounds_glob with format: fmriprep_tsv")
+
+    refs = discover_runs(cfg)
+    _attach_motion(cfg, refs)
+    _attach_confounds(cfg, refs)
+
+    out: dict[tuple[str, str], dict] = {}
+    for ref in refs:
+        key = (str(ref.sub), ref.task)
+        if key in out:
+            continue          # one row per (sub, task); first run wins, as elsewhere
+        path = getattr(ref, attr)
+        if path is None:
+            out[key] = MotionSummary(fd_note=f"no file matched {source}").as_row()
+            continue
+        try:
+            summary = (summarize_motion_file(path, order=order, columns=columns)
+                       if attr == "motion"
+                       else summarize_fd_column(path, cfg.confounds.fd_column))
+            out[key] = summary.as_row()
+        except (MotionError, OSError, ValueError) as exc:        # noqa: BLE001
+            out[key] = MotionSummary(
+                fd_source=Path(path).name,
+                fd_note=f"{type(exc).__name__}: {exc}".replace("\n", " ")[:300],
+            ).as_row()
+    have = sum(1 for r in out.values() if r["mean_fd"] == r["mean_fd"])
+    return out, f"motion: {have}/{len(out)} run(s) from {source}"
+
+
 # ------------------------------------------------------------------- ISC ---
 def default_isc_parcels(atlas) -> tuple[list[str], str]:
     """Pick an ISC seed from the QC atlas. Returns (columns, how)."""
@@ -156,7 +227,7 @@ def default_isc_parcels(atlas) -> tuple[list[str], str]:
 
 
 def isc_qc(files, atlas, parcels=None, max_lag_tr: int = 30):
-    """(sub, task) -> peak_isc / best_lag_tr, or an empty dict with a reason."""
+    """(sub, task) -> peak_isc / best_lag_tr, a message, and the raw frame."""
     from .validate import isc_alignment
 
     how = "supplied by the caller"
@@ -165,7 +236,7 @@ def isc_qc(files, atlas, parcels=None, max_lag_tr: int = 30):
     try:
         isc = isc_alignment(files, parcels=tuple(parcels), max_lag_tr=max_lag_tr)
     except (ValueError, KeyError) as exc:                        # noqa: BLE001
-        return {}, f"ISC skipped: {type(exc).__name__}: {exc}"
+        return {}, f"ISC skipped: {type(exc).__name__}: {exc}", None
     out = {}
     for row in isc.to_dict("records"):
         out[(str(row["sub"]), str(row["movie"]))] = {
@@ -174,7 +245,7 @@ def isc_qc(files, atlas, parcels=None, max_lag_tr: int = 30):
             "n_isc_subjects": int(row.get("n_subjects") or 0),
             "qc_note": str(row.get("isc_note") or ""),
         }
-    return out, f"ISC seed: {', '.join(parcels[:3])} ({how})"
+    return out, f"ISC seed: {', '.join(parcels[:3])} ({how})", isc
 
 
 # ------------------------------------------------------------ collection ---
@@ -195,14 +266,20 @@ def pick_qc_atlas(cfg, atlases):
     return max(with_shards, key=lambda a: a.n_nodes)
 
 
-def collect_qc(cfg, atlases, isc_parcels=None, max_lag_tr: int = 30):
-    """Everything above, for one cohort. Returns (rows_by_key, messages)."""
+def collect_qc(cfg, atlases, isc_parcels=None, max_lag_tr: int = 30,
+               motion_order: str = "afni", motion_columns=None):
+    """Everything above, for one cohort.
+
+    Returns `(rows_by_key, messages, isc_frame)`. The ISC frame is handed back
+    so `diagnose` can write it and run the gate on the same computation rather
+    than doing it twice.
+    """
     from .io import activation_root
 
     messages: list[str] = []
     atlas = pick_qc_atlas(cfg, atlases)
     if atlas is None:
-        return {}, ["no activation shards found -- run `extract` first"]
+        return {}, ["no activation shards found -- run `extract` first"], None
     files = sorted(activation_root(cfg.output_root, atlas.name, cfg.cohort)
                    .rglob("*.parquet"))
     messages.append(f"QC atlas: {atlas.name} ({atlas.n_nodes} nodes), {len(files)} shard(s)")
@@ -210,7 +287,7 @@ def collect_qc(cfg, atlases, isc_parcels=None, max_lag_tr: int = 30):
     qc = activation_qc(files, atlas, cfg.tr)
     add_stimulus_coverage(qc)
 
-    isc, isc_msg = isc_qc(files, atlas, isc_parcels, max_lag_tr)
+    isc, isc_msg, isc_frame = isc_qc(files, atlas, isc_parcels, max_lag_tr)
     messages.append(isc_msg)
     for key, row in isc.items():
         cur = qc.setdefault(key, {})
@@ -219,9 +296,51 @@ def collect_qc(cfg, atlases, isc_parcels=None, max_lag_tr: int = 30):
         if note:
             cur["qc_note"] = _note(cur.get("qc_note", ""), note)
 
-    # Fill every key to the full schema so the CSV columns are never ragged.
-    blank = SubjectQC().as_row()
-    return {k: {**blank, **v} for k, v in qc.items()}, messages
+    motion, motion_msg = motion_qc(cfg, motion_order, motion_columns)
+    messages.append(motion_msg)
+    for key, row in motion.items():
+        note = row.pop("fd_note", "")
+        cur = qc.setdefault(key, {})
+        cur.update(row)
+        if note:
+            cur["qc_note"] = _note(cur.get("qc_note", ""), note)
+
+    from .motion import MotionSummary
+
+    blank = {**MotionSummary().as_row(), **SubjectQC().as_row()}
+    blank.pop("fd_note", None)
+    return {k: {**blank, **v} for k, v in qc.items()}, messages, isc_frame
 
 
-QC_COLUMNS = list(SubjectQC().as_row().keys())
+def qc_frame(cfg, qc: dict[tuple[str, str], dict]):
+    """The per-subject QC rows as a DataFrame, keyed and column-ordered.
+
+    Keyed the same way `participants.csv` is -- (cohort, sub, task) -- because
+    a join on that pair is the only thing the models have to do to use it.
+    """
+    rows = []
+    for (sub, task), row in sorted(qc.items()):
+        rows.append({"participant_id": f"sub-{sub}", "sub": sub,
+                     "cohort": cfg.cohort, "task": task, **row})
+    df = pd.DataFrame(rows, columns=QC_COLUMNS)
+    return df.sort_values(["task", "sub"], ignore_index=True) if len(df) else df
+
+
+# Column order of participants_qc.csv: keys, then one block per failure mode,
+# then provenance. `qc_note` is last because it is prose.
+QC_COLUMNS = [
+    "participant_id", "sub", "cohort", "task",
+    # motion
+    "mean_fd", "median_fd", "max_fd", "frac_fd_gt_0p2", "frac_fd_gt_0p5",
+    "n_fd_frames", "n_motion_runs",
+    # timing
+    "best_lag_tr", "peak_isc", "n_isc_subjects",
+    # coverage
+    "frac_stimulus_covered", "stimulus_duration_s", "n_tr_total",
+    # scrubbing
+    "frac_good_frames", "n_tr_good",
+    # registration
+    "frac_parcels_empty", "n_parcels", "n_parcels_empty", "qc_atlas",
+    # provenance
+    "fd_source", "fd_columns", "qc_note",
+]

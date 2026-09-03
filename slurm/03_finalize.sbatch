@@ -7,6 +7,16 @@
 # have exactly one writer, in a serial pass afterwards.
 #
 #   sbatch --dependency=afterok:<extract_jobid> slurm/03_finalize.sbatch config.yaml activation
+#
+# The `activation` pass also writes participants_qc.csv -- per-subject motion,
+# timing, coverage, scrubbing and registration metrics. That is why there is no
+# separate QC step in the chain, and why ISC is computed once rather than twice:
+# `diagnose` produces the gate and the table in the same pass.
+#
+# It writes MEASUREMENTS ONLY. No threshold is applied here or anywhere else in
+# the pipeline; turning a number into an exclusion is a decision that belongs
+# with the models. participants.csv, by contrast, carries curation a person
+# entered by hand, and IS honoured -- at stage 2, by `extract`.
 
 #SBATCH --job-name=fmridecomp_finalize
 #SBATCH --account=rpp-aevans-ab

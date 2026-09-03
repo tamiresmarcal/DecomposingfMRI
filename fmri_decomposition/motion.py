@@ -15,9 +15,12 @@ misalignment at the ends moves the mean by well under a percent -- it is the
 same movie, the same head, the same session, just indexed differently. So the
 number this module returns is usable for exactly two things:
 
-  1. a subject-level exclusion criterion (`mean_fd > x mm`), recorded in
-     participants.csv, and
-  2. a subject-level covariate in the stage-5 models.
+  1. a subject-level exclusion criterion (`mean_fd > x mm`), applied at the
+     models, and
+  2. a subject-level covariate in those same models.
+
+Either way it reaches them as a column of `participants_qc.csv`, written by
+`fmri-decomp diagnose`. Nothing here thresholds anything.
 
 It is NOT usable for anything indexed by frame. Nothing here writes
 `good_frame`, and nothing here is imported by stages 2 or 3.

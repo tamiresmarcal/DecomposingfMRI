@@ -95,6 +95,11 @@ submitted. watch with:
   squeue -u \$USER -o '%.10i %.20j %.8T %.10M %R'
   tail -f slurm_logs/extract_${EXTRACT_ID}_0.out
 
+per-subject QC (motion, timing, coverage, scrubbing, registration) is written by
+the activation finalize -- no separate step:
+  outputs/meta/cohorts/cohort=<cohort>/participants_qc.csv
+It is measurement only. Thresholds belong with the models.
+
 stage 3's atlas x window plan -- rows, edge counts, estimated size, and any
 pair where every window would be rank_deficient -- is printed by array task 0
 before it starts writing:
