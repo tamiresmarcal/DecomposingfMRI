@@ -1,0 +1,227 @@
+# Cam-CAN ccfrail -- movie watching (Hitchcock, "Bang! You're Dead").
+# https://camcan-archive.mrc-cbu.cam.ac.uk/dataaccess/
+#
+# A SEPARATE COHORT FROM CC700, NOT MORE SUBJECTS FOR IT
+# ------------------------------------------------------
+# ccfrail is Cam-CAN's frailty study: older adults recruited and assessed for
+# frailty, where CC700 is a population-based sample screened to be healthy. It
+# ships as release002 rather than release004, and the acquisition is NOT the
+# same protocol. Confirmed from a sidecar and the raw headers (2026-09):
+#
+#                       CC700 (release004)        ccfrail (release002)
+#   TR                  2.47 s                    1.12 s
+#   echoes              5 (TE 9.4-56.7 ms)        1 (TE 30 ms)
+#   raw grid            64 x 64 x 32              96 x 96 x 60
+#   volumes             193 (all 648)             433 (54), 443 (1)
+#   run duration        476.7 s                   485.0 s
+#   subjects w/ movie   649                       55
+#
+# Two different `tr:` values cannot live in one config -- every time column
+# would be silently rescaled for one of them -- so this is its own file with
+# its own `cohort:` key. The shared `output_root` and the `cohort=` partition
+# are what keep them separable inside one tree.
+#
+# WHICH IS THE BETTER DATA IS NOT A SIMPLE ANSWER
+# -----------------------------------------------
+# ccfrail wins on sampling and coverage; CC700 wins on dropout and N.
+#
+#   ccfrail better: TR 1.12 vs 2.47 -- more than twice the samples per window,
+#                   so every correlation is measurably less noisy (see
+#                   `windows`). 60 slices vs 32, so the inferior-cerebellum
+#                   coverage worry recorded in camcan_movie.yaml is much less
+#                   likely to bite here.
+#   CC700 better:   5 echoes, combined by fMRIPrep, recovers signal in dropout
+#                   regions that a single-echo sequence simply loses.
+#                   Orbitofrontal and anterior temporal parcels are therefore
+#                   WORSE here than in CC700, not better. And 649 subjects
+#                   against 55.
+#
+# So the frail/older cohort has the cleaner timeseries and the worse coverage
+# of the hardest regions. Do not assume "same study, same data quality".
+
+cohort: camcan_ccfrail
+tr: 1.12
+derivatives_root: /project/6008063/tamires/cohorts/ccfrail_fmriprep
+output_root: /project/6008063/tamires/DecomposingfMRI/outputs
+space: MNI152NLin2009cAsym
+participants: /project/6008063/tamires/DecomposingfMRI/config/camcan_ccfrail_movie_participants.csv
+
+atlases: [harvardoxford, yeo7, networks]
+
+discovery:
+  backend: glob
+  # Identical to camcan_movie.yaml. fMRIPrep drops the echo- entity from its
+  # derivatives regardless of how many echoes went in, so single-echo ccfrail
+  # and multi-echo CC700 produce the same output filenames. The difference is
+  # upstream only (preprocessing/camcan/01_build_bids.py --n-echoes 0).
+  bold_glob: "sub-*/func/sub-*_task-*_space-MNI152NLin2009cAsym_res-2_desc-preproc_bold.nii.gz"
+  mask_glob: "sub-{sub}_task-{task}_space-MNI152NLin2009cAsym_res-2_desc-brain_mask.nii.gz"
+  # Rest exists in release002 (BIDSsep/func_Rest) and is deliberately not
+  # preprocessed -- this pipeline is for naturalistic viewing. Keeping the
+  # filter explicit anyway, for the same reason as CC700: a second task would
+  # arrive with a different TR and be silently rescaled.
+  include_tasks: [Movie]
+
+confounds:
+  format: fmriprep_tsv
+  strategy: 24hmp          # 6 motion params + derivatives + squares
+  confounds_glob: "sub-*_task-*_desc-confounds_timeseries.tsv"
+  fd_column: framewise_displacement
+  fd_threshold: 0.5
+  dilate_tr: 1
+  # NOT yet verified against the images for THIS cohort. For CC700 the check
+  # was: confounds table line count == BOLD volumes + 1 (header), which held
+  # exactly. fMRIPrep writes the table from the images it just produced, so
+  # the same should hold, but ds002837 is the standing reason this gets
+  # checked rather than assumed:
+  #
+  #   for d in <derivatives_root>/sub-*/func; do
+  #     paste <(wc -l < $d/*confounds_timeseries.tsv) \
+  #           <(python -c "import nibabel,glob;print(nibabel.load(glob.glob('$d/*res-2_desc-preproc_bold.nii.gz')[0]).shape[3])")
+  #   done | sort | uniq -c
+  # Every row should read "<n+1> <n>".
+  #
+  # FD 0.5 mm matches CC700 and cneuromod, and carries the same caveat, MORE
+  # sharply here: this is a FRAILTY cohort. Motion rises with age and frailty,
+  # so a fixed threshold removes more data from exactly the participants the
+  # study is about, and less data means noisier correlations means apparently
+  # more variable connectivity. That is a QC rule manufacturing the effect.
+  # Decide it from the FD distribution against frailty score, not convention.
+
+filtering:
+  already_applied: false   # fMRIPrep does NOT filter
+  bandpass: [0.01, 0.1]
+  detrend: true
+  standardize: false
+  # Matches CC700 and cneuromod exactly. See camcan_movie.yaml for why
+  # ds002837 sits in a different band (0.01-0.5 Hz effective) and what it
+  # would take to bring all four into line.
+  #
+  # Note the Nyquist headroom differs: at TR 1.12 Nyquist is 0.446 Hz, so the
+  # 0.1 Hz low-pass is doing real work here, as it does for CC700 (Nyquist
+  # 0.202) and cneuromod (0.336). Only ds002837's declared upper bound sits
+  # above its own Nyquist and therefore does nothing.
+
+runs:
+  mode: concat             # one file per subject; nothing to concatenate
+
+trim:
+  column: null
+
+stimulus:
+  # EMPTY, unlike camcan_movie.yaml -- and this is a real difference, not an
+  # oversight.
+  #
+  # CC700 earned a fixed duration because all 648 completed subjects are
+  # EXACTLY 193 volumes. ccfrail is not uniform: the raw headers show 54
+  # subjects at 433 volumes (485.0 s) and one at 443 (496.2 s). A declared
+  # duration would either exceed one subject's data or silently discard 10
+  # volumes from another, so the per-file observed duration that dfc.py falls
+  # back to is the honest choice, exactly as for ds002837 and cneuromod.
+  #
+  # Consequence: `fmri-decomp extract` needs --no-strict on this cohort, and
+  # `validate` reports one warning per task. Expected, not a bug.
+  #
+  # If the 443-volume subject turns out to be sub-CC620139 -- the one that
+  # failed preprocessing -- then all 54 SURVIVING subjects are 433 volumes and
+  # this could become durations_s: {Movie: 484.96}. That is a guess about two
+  # facts lining up, not a finding: confirm with the shape check in `windows`
+  # below before making the change.
+  durations_s: {}
+  timing_source: identity
+  unit_of_analysis: run
+
+windows:
+  sizes_s: [30, 60, 120, 300]
+  n_overlaps: 5
+  drop_incomplete: true
+  # ccfrail REVERSES the sampling problem recorded in camcan_movie.yaml.
+  #
+  # Windows are defined in seconds, so TR decides how many samples land in
+  # one. CC700's 2.47 s makes it the noisiest cohort in the set; ccfrail's
+  # 1.12 s makes it nearly the cleanest, despite being the same study and the
+  # same stimulus:
+  #
+  #     window   ds002837  ccfrail  cneuromod  CC700     ccfrail windows/run
+  #      30 s      30 TR    27 TR    20 TR     12 TR            76
+  #      60 s      60 TR    54 TR    40 TR     24 TR            36
+  #     120 s     120 TR   107 TR    81 TR     49 TR            16
+  #     300 s     300 TR   268 TR   201 TR    121 TR             4
+  #
+  # Edge noise in Fisher-z (1/sqrt(n-3)):
+  #
+  #     window   ds002837  ccfrail  cneuromod  CC700
+  #      30 s     0.192     0.204    0.243     0.333
+  #     120 s     0.092     0.098    0.112     0.144
+  #     300 s     0.058     0.061    0.071     0.092
+  #
+  # ccfrail sits essentially alongside ds002837 and well clear of CC700. So a
+  # CC700-vs-ccfrail contrast -- healthy ageing against frailty, same stimulus,
+  # same scanner site -- is confounded by a ~1.5x difference in edge noise
+  # arising purely from TR, in the direction that would make the FRAIL group
+  # look LESS variable. Account for the 1/(n-3) floor using `n_tr_effective`,
+  # which is written per window.
+  #
+  # Verify shapes before trusting the sample counts above:
+  #   apptainer exec --bind /project $SIF python -c "
+  #   import nibabel as nib, glob, collections
+  #   print(collections.Counter(nib.load(f).shape for f in glob.glob(
+  #     '<derivatives_root>/sub-*/func/*res-2_desc-preproc_bold.nii.gz')))"
+
+# --- known limitations, recorded so nobody rediscovers them -----------
+#
+# SINGLE ECHO. Unlike CC700's 5-echo acquisition, ccfrail has one echo at
+# TE 30 ms, so there is no multi-echo optimal combination and no recovery of
+# signal in dropout regions. Orbitofrontal and anterior temporal parcels are
+# worse here than in CC700. This is the main quality cost of the cohort.
+#
+# NO FIELDMAPS. Same as CC700: none anywhere in the archive, so distortion
+# correction is estimated from the T1w (fMRIPrep --use-syn-sdc, which the run
+# log confirms engaged as EstimatorType.ANAT). Compounds with single-echo in
+# the same regions.
+#
+# NO T2w for at least some subjects (confirmed absent for sub-CC721209).
+# Optional for fMRIPrep -- it refines the brain mask when present -- so this
+# means slightly different anatomical processing across subjects within the
+# cohort. Not fatal, but not uniform either.
+#
+# OBLIQUE ACQUISITION. AFNI reports the EPI as 28.6 degrees from plumb. fMRIPrep
+# handles this correctly; noted only because it appears as a loud warning in
+# every run log and is not an error.
+#
+# ONE SUBJECT FAILED PREPROCESSING: sub-CC620139 (array index 23 of job
+# 21083198), after 2m31s -- too fast to be the memory pressure that affects
+# later stages, so most likely something about that subject's data; not
+# diagnosed. 54 of 55 completed. Named here rather than quietly dropped:
+# `make_participants.py` generates rows only for what is on disk, so the CSV
+# will show 54 and this subject would otherwise be invisible -- exactly the
+# "is this excluded or did someone forget?" ambiguity the participants table
+# exists to prevent.
+#
+# MEMORY. Submitted at --mem-per-cpu=2G (16 GB), sized from CC700's measured
+# 9.82 GB peak. That was an underestimate: ccfrail's images are ~9x larger by
+# voxel count, and every run logs "Some nodes exceed the total amount of
+# memory available (14.75GB)". It completed anyway (nipype serialises those
+# nodes), but use --mem-per-cpu=4G for any re-run.
+
+# --- participants CSV -------------------------------------------------
+#   python tools/make_participants.py config/camcan_ccfrail_movie.yaml \
+#       -o config/camcan_ccfrail_movie_participants.csv
+#
+# Expect 54 rows, not 55.
+#
+# Frailty score and age are the whole point of this cohort and are NOT in the
+# generated CSV -- merge them in from cc700-scored/ or the ccfrail phenotype
+# files. Extra columns are carried onto each run and reach the output.
+#
+# Every generated row is excluded=False. Edit real exclusions in as
+# excluded=True WITH a reason -- never by deleting the row.
+
+# --- how to run -------------------------------------------------------
+#   python tools/check_cohort.py config/camcan_ccfrail_movie.yaml
+#   fmri-decomp extract  config/camcan_ccfrail_movie.yaml --n-jobs 4 --no-strict --limit 2
+#   python tools/check_cohort.py config/camcan_ccfrail_movie.yaml --checks outputs,parallel --limit 2
+#   fmri-decomp dfc      config/camcan_ccfrail_movie.yaml --n-jobs 4
+#
+# --no-strict IS needed here (unlike camcan_movie.yaml) because
+# stimulus.durations_s is empty -- see the note there.
