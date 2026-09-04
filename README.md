@@ -4,6 +4,11 @@ Stages 2 (activation) and 3 (DFC) of the naturalistic-viewing pipeline.
 Cohort-specific knowledge lives in `config.py` and `cohort.py`; nothing
 downstream touches a filesystem path or a TR.
 
+**Running a full cohort? See [RUNBOOK.md](RUNBOOK.md)** — copy-paste commands
+for Cam-CAN (648 subjects) and CNeuroMod *friends* season 1 (6 subjects, 288
+runs), with the array sizes worked out and the CNeuroMod fetch step. What
+follows is the pipeline itself.
+
 ```bash
 pip install -e ".[test,atlases]"
 ./run_tests.sh                       # unit tests + synthetic end-to-end run
