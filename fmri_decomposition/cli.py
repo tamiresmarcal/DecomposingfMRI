@@ -435,16 +435,35 @@ def _report_qc(df) -> None:
 
 
 def cmd_merge_manifests(args) -> int:
-    """Consolidate per-array-task manifests into one, serially, after the array."""
+    """Consolidate per-array-task manifests into one, serially, after the array.
+
+    An un-sharded run is not a failure. `extract` writes per-shard manifests
+    only when given `--shard`; run without it -- a pilot, a `--limit 2`, a
+    single-node job -- it writes the consolidated `manifest_<stage>.json`
+    directly, and there is nothing here to merge.
+
+    Treating that as an error mattered: `03_finalize.sbatch` runs under
+    `set -euo pipefail`, so a non-zero exit here killed the job before
+    `diagnose` ever ran, and the cohort silently got no participants_qc.csv.
+    The two cases are distinguished by whether the consolidated manifest
+    exists -- nothing to merge is fine, nothing at all is not.
+    """
     import json
 
     from .io import cohort_meta_dir, write_manifest, ManifestEntry
 
     cfg = _load(args.config)
-    shard_dir = cohort_meta_dir(cfg.output_root, cfg.cohort) / "shards"
+    meta = cohort_meta_dir(cfg.output_root, cfg.cohort)
+    shard_dir = meta / "shards"
     files = sorted(shard_dir.glob(f"manifest_{args.stage}_shard-*.json"))
     if not files:
-        print(f"no shard manifests for stage {args.stage!r} under {shard_dir}")
+        consolidated = meta / f"manifest_{args.stage}.json"
+        if consolidated.exists():
+            print(f"no shard manifests for stage {args.stage!r} -- nothing to merge; "
+                  f"{consolidated.name} was written directly by an un-sharded run")
+            return 0
+        print(f"no shard manifests for stage {args.stage!r} under {shard_dir}, and no "
+              f"{consolidated.name} either -- did stage {args.stage!r} run at all?")
         return 1
     entries = []
     for f in files:

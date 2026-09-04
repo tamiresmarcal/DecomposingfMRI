@@ -257,3 +257,60 @@ class TestQcNote:
     def test_a_short_note_is_returned_unchanged(self):
         assert _clip("no motion file matched confounds.motion_glob") == (
             "no motion file matched confounds.motion_glob")
+
+
+class TestMergeManifests:
+    """An un-sharded run must not abort the finalize job.
+
+    03_finalize.sbatch runs under `set -euo pipefail`, so a non-zero exit from
+    merge-manifests stops `diagnose` from ever running -- which is how the
+    cneuromod pilot ended up with no participants_qc.csv.
+    """
+
+    def _cfg(self, tmp_path):
+        import yaml
+
+        cfg = {"cohort": "c", "tr": 1.0, "derivatives_root": str(tmp_path),
+               "output_root": str(tmp_path / "out")}
+        p = tmp_path / "cfg.yaml"
+        p.write_text(yaml.safe_dump(cfg))
+        return str(p)
+
+    def _args(self, cfg, stage="activation"):
+        from fmri_decomposition.cli import build_parser
+
+        return build_parser().parse_args(["merge-manifests", cfg, "--stage", stage])
+
+    def test_no_shards_but_a_complete_manifest_is_success(self, tmp_path):
+        from fmri_decomposition.cli import cmd_merge_manifests
+        from fmri_decomposition.io import cohort_meta_dir
+
+        cfg = self._cfg(tmp_path)
+        meta = cohort_meta_dir(tmp_path / "out", "c")
+        meta.mkdir(parents=True, exist_ok=True)
+        (meta / "manifest_activation.json").write_text('{"entries": []}')
+        assert cmd_merge_manifests(self._args(cfg)) == 0
+
+    def test_nothing_at_all_is_still_an_error(self, tmp_path):
+        from fmri_decomposition.cli import cmd_merge_manifests
+
+        assert cmd_merge_manifests(self._args(self._cfg(tmp_path))) == 1
+
+    def test_shard_manifests_are_merged_as_before(self, tmp_path):
+        import json
+
+        from fmri_decomposition.cli import cmd_merge_manifests
+        from fmri_decomposition.io import cohort_meta_dir
+
+        cfg = self._cfg(tmp_path)
+        shards = cohort_meta_dir(tmp_path / "out", "c") / "shards"
+        shards.mkdir(parents=True, exist_ok=True)
+        for i in range(2):
+            entry = {"stage": "activation", "cohort": "c", "atlas": "a",
+                     "task": "t", "sub": str(i), "path": "p", "status": "ok"}
+            (shards / f"manifest_activation_shard-{i:04d}-of-0002.json").write_text(
+                json.dumps({"entries": [entry]}))
+        assert cmd_merge_manifests(self._args(cfg)) == 0
+        merged = json.loads(
+            (cohort_meta_dir(tmp_path / "out", "c") / "manifest_activation.json").read_text())
+        assert len(merged["entries"]) == 2
