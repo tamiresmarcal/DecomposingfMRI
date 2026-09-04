@@ -1,0 +1,7 @@
+participant_id,sub,cohort,task,excluded,exclusion_reason
+sub-01,01,cneuromod,s01e02a,False,
+sub-02,02,cneuromod,s01e02a,False,
+sub-03,03,cneuromod,s01e02a,False,
+sub-04,04,cneuromod,s01e02a,False,
+sub-05,05,cneuromod,s01e02a,False,
+sub-06,06,cneuromod,s01e02a,False,
