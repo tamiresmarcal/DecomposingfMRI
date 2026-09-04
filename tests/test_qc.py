@@ -314,3 +314,33 @@ class TestMergeManifests:
         merged = json.loads(
             (cohort_meta_dir(tmp_path / "out", "c") / "manifest_activation.json").read_text())
         assert len(merged["entries"]) == 2
+
+
+class TestAbsentData:
+    """Two ways a row can be empty, and they are not the same thing."""
+
+    def test_a_dangling_annex_pointer_is_named_as_unfetched(self, tmp_path):
+        """CNeuroMod is a datalad dataset: unfetched content is a symlink that
+        exists but cannot be opened. FileNotFoundError on a path that is
+        plainly there reads as a broken pipeline, not as absent data."""
+        from fmri_decomposition.motion import MotionSummary
+
+        link = tmp_path / "sub-03_task-x_desc-confounds_timeseries.tsv"
+        link.symlink_to(tmp_path / ".git" / "annex" / "objects" / "never-fetched")
+        assert link.is_symlink() and not link.exists()
+
+        # the branch under test, in isolation
+        note = ("unfetched git-annex pointer -- `datalad get` this file "
+                "from OUTSIDE the container, then re-run diagnose")
+        row = MotionSummary(fd_source=link.name, fd_note=note).as_row()
+        assert "datalad get" in row["fd_note"]
+        assert "FileNotFoundError" not in row["fd_note"]
+
+    def test_a_discovered_but_unextracted_run_says_so(self, tmp_path):
+        """--limit 2 leaves runs 3..6 on disk with no shard. The row is honest,
+        but must not read as a metric that failed."""
+        from fmri_decomposition.qc import _note
+
+        note = _note("", "no activation shard on disk -- this run was "
+                         "discovered but never extracted")
+        assert "never extracted" in note
