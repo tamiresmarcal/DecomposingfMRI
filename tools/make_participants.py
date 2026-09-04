@@ -10,6 +10,12 @@
     python tools/make_participants.py config/ds002837.yaml \
         -o config/ds002837_participants.csv --update
 
+    # build from the subject list the cohort was MEANT to have, so a subject
+    # whose preprocessing failed gets a row instead of vanishing
+    python tools/make_participants.py config/camcan_ccfrail_movie.yaml \
+        -o config/camcan_ccfrail_movie_participants.csv \
+        --from-list /path/to/subjects.txt
+
 Why this exists rather than a checked-in file: for a cohort like ds002837 the
 (sub, task) mapping is a published constant, so the CSV can ship with the
 repo. For CNeuroMod it is not -- which episodes exist is a property of YOUR
@@ -63,6 +69,27 @@ def _fmt(value) -> str:
     return str(value)
 
 
+def read_subject_list(path: Path) -> list[str]:
+    """Subject ids from a plain text list, one per line.
+
+    The list of subjects a cohort was MEANT to contain is not derivable from
+    what is on disk -- that is the whole reason it exists as a separate file.
+    Deriving the table from discovery instead makes a failed subject invisible:
+    it has no bold file, so nothing reports it missing, and 54 silently becomes
+    the cohort size.
+    """
+    out, seen = [], set()
+    for line in path.read_text().splitlines():
+        sub = line.strip()
+        if not sub or sub.startswith("#"):
+            continue
+        sub = sub.removeprefix("sub-")
+        if sub not in seen:
+            seen.add(sub)
+            out.append(sub)
+    return out
+
+
 def read_existing(path: Path) -> tuple[list[dict], list[str]]:
     with open(path, newline="") as fh:
         reader = csv.DictReader(fh)
@@ -92,6 +119,13 @@ def main(argv=None) -> int:
     p.add_argument("--update", action="store_true",
                    help="read the existing CSV, keep every row, every exclusion and "
                         "every extra column, and add newly discovered runs")
+    p.add_argument("--from-list", metavar="PATH",
+                   help="a text file of the subject ids the cohort was MEANT to "
+                        "contain, one per line ('sub-' optional, blank and #-lines "
+                        "skipped). Rows are written for all of them, including any "
+                        "with nothing on disk -- see the note below")
+    p.add_argument("--task", help="task to pair with --from-list ids; needed only "
+                                  "when discovery finds more than one")
     args = p.parse_args(argv)
 
     out = Path(args.out)
@@ -127,6 +161,23 @@ def main(argv=None) -> int:
     # attach_participants joins on that pair.
     pairs = sorted({(str(r.sub), r.task) for r in refs})
 
+    absent: list[str] = []
+    if args.from_list:
+        listed = read_subject_list(Path(args.from_list))
+        if not listed:
+            print(f"{args.from_list} lists no subject ids", file=sys.stderr)
+            return 1
+        tasks = [args.task] if args.task else sorted({t for _, t in pairs})
+        if len(tasks) != 1:
+            print(f"--from-list needs one task, but discovery found {tasks}.\n"
+                  f"  Pass --task to say which of them these ids belong to.",
+                  file=sys.stderr)
+            return 1
+        task = tasks[0]
+        on_disk = {sub for sub, _ in pairs}
+        absent = [s for s in listed if s not in on_disk]
+        pairs = sorted(set(pairs) | {(s, task) for s in listed})
+
     columns = list(COLUMNS)
     if args.update:
         rows, columns = read_existing(out)
@@ -150,6 +201,21 @@ def main(argv=None) -> int:
                 for sub, task in pairs]
 
     write_table(out, rows, columns)
+
+    if absent:
+        # These are the whole point of --from-list. A subject whose
+        # preprocessing failed has no bold file, so discovery cannot see it and
+        # it would otherwise be ABSENT rather than EXCLUDED -- indistinguishable
+        # from one nobody meant to include. The row makes it visible;
+        # `validate_cohort` will now report it as an analysable row with no run
+        # on disk until a person writes down why.
+        print(f"\n  {len(absent)} listed subject(s) with NO run on disk:")
+        for sub in absent[:10]:
+            print(f"    sub-{sub}")
+        if len(absent) > 10:
+            print(f"    ... and {len(absent) - 10} more")
+        print("  Each has a row, excluded=False. Edit in the real status by hand --")
+        print("  excluded=True WITH a reason -- or `validate` will keep reporting them.")
 
     subs = sorted({str(r.get("sub")) for r in rows})
     tasks = sorted({str(r.get("task")) for r in rows})
