@@ -59,6 +59,12 @@ _ALIASES = {
     "ds": "ds", "dl": "dl", "dp": "dp",
 }
 
+# AFNI's `-ortvec mot_demean.r01.1D mot_demean_r01` names the resulting columns
+# after the ortvec, not after the axis: `mot_demean_r01[0]` .. `[5]`, one block
+# per run. `mot_deriv_*` is deliberately NOT matched -- those are temporal
+# derivatives, and differencing them again would compute the second difference.
+ORTVEC_MOTION = re.compile(r"^mot[_.]?demean(?:[_.]r(\d+))?\[([0-5])\]", re.I)
+
 # (rotation column indices, translation column indices, rotation unit).
 PARAM_ORDERS = {
     "afni": ((0, 1, 2), (3, 4, 5), "deg"),
@@ -130,11 +136,45 @@ def _base_label(label: str) -> str:
     return re.sub(r"[_#]\d+$", "", label.strip()).lower()
 
 
+def _ortvec_motion(values: np.ndarray, labels: list[str],
+                   run_starts: list[int] | None):
+    """Assemble the motion parameters from AFNI `-ortvec` per-run blocks.
+
+    Each run contributes its own six columns. They are read over that run's own
+    rows -- taken from the header's `RunStart` -- rather than summed, because
+    whether AFNI zero-pads a block outside its run is not something to assume:
+    slicing is correct either way.
+    """
+    blocks: dict[int, dict[int, int]] = {}
+    for j, lab in enumerate(labels):
+        m = ORTVEC_MOTION.match(lab.strip())
+        if m:
+            blocks.setdefault(int(m.group(1) or 1), {})[int(m.group(2))] = j
+    if not blocks or any(len(axes) != 6 for axes in blocks.values()):
+        return None, ""
+
+    runs = sorted(blocks)
+    n = values.shape[0]
+    starts = sorted(set(run_starts or [0]) | {0})
+    bounds = list(zip(starts, starts[1:] + [n]))
+    if len(runs) != len(bounds):
+        raise MotionError(
+            f"{len(runs)} per-run motion block(s) but {len(bounds)} run(s) in "
+            f"RunStart -- the file's own header disagrees with its own columns"
+        )
+    params = np.empty((n, 6), dtype=np.float64)
+    for run, (lo, hi) in zip(runs, bounds):
+        params[lo:hi] = values[lo:hi, [blocks[run][a] for a in range(6)]]
+    return params, (f"AFNI -ortvec mot_demean, {len(runs)} run block(s) "
+                    f"sliced by RunStart")
+
+
 def select_motion_columns(
     values: np.ndarray,
     header: dict[str, str] | None = None,
     order: str = "afni",
     columns: list[int] | None = None,
+    run_starts: list[int] | None = None,
 ) -> tuple[np.ndarray, tuple[tuple[int, ...], tuple[int, ...], str], str]:
     """Pull the six motion parameters out of a regressor matrix.
 
@@ -165,6 +205,10 @@ def select_motion_columns(
 
     labels = header_column_labels(header)
     if labels and len(labels) == n_cols:
+        params, how = _ortvec_motion(values, labels, run_starts)
+        if params is not None:
+            return params, PARAM_ORDERS["afni"], how
+
         groups: dict[str, list[int]] = {}
         for j, lab in enumerate(labels):
             slot = _ALIASES.get(_base_label(lab))
@@ -333,9 +377,9 @@ def summarize_motion_file(
         raise MotionError(f"motion order must be one of {sorted(PARAM_ORDERS)}, got {order!r}")
     path = Path(path)
     values, header = read_1d(path)
-    params, (rot_idx, trans_idx, rot_unit), how = select_motion_columns(
-        values, header, order=order, columns=columns)
     starts = run_starts_from_matrix(values, header)
+    params, (rot_idx, trans_idx, rot_unit), how = select_motion_columns(
+        values, header, order=order, columns=columns, run_starts=starts)
     fd = framewise_displacement(params, rot_idx, trans_idx, rot_unit,
                                 run_starts=starts, radius_mm=radius_mm)
     summary = summarize_fd(fd, n_runs=len(starts))
