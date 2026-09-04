@@ -212,3 +212,106 @@ class TestSummarizeMotionFile:
         a = summarize_motion_file(full).mean_fd
         b = summarize_motion_file(trimmed).mean_fd
         assert abs(a - b) / a < 0.01
+
+
+class TestAfniOrtvecLayout:
+    """ds002837's real layout, as read from sub-1's header (2026-09).
+
+        0-8     Run#kPol#j          9   polort, 3 runs
+        9-112   bandpass[0..103]  104
+        113-121 ROIPC.fsvent.rNN    9   ventricle PCs
+        122-139 mot_demean_rNN[0-5] 18  <- the parameters
+        140-157 mot_deriv_rNN[0-5]  18  <- derivatives, must NOT be used
+
+    The motion reached 3dDeconvolve through `-ortvec mot_demean.r01.1D
+    mot_demean_r01`, so AFNI named the columns after the ortvec rather than
+    after the axis. Matching only roll/pitch/yaw/dS/dL/dP found nothing here
+    and the reader refused on all 86 subjects.
+    """
+
+    N, RUNS = 300, (0, 100, 200)
+
+    def _file(self, tmp_path, n_bandpass=4, deriv_scale=99.0):
+        rng = np.random.default_rng(0)
+        labels, cols = [], []
+
+        for r in range(1, 4):
+            for pol in range(3):
+                labels.append(f"Run#{r}Pol#{pol}")
+                cols.append(rng.normal(size=self.N))
+        for b in range(n_bandpass):
+            labels.append(f"bandpass[{b}]#0")
+            cols.append(rng.normal(size=self.N))
+        for r in range(1, 4):
+            for pc in range(3):
+                labels.append(f"ROIPC.fsvent.r{r:02d}[{pc}]#0")
+                cols.append(rng.normal(size=self.N))
+
+        # the parameters: one block per run, each meaningful only in its run
+        self.truth = np.zeros((self.N, 6))
+        bounds = list(zip(self.RUNS, list(self.RUNS[1:]) + [self.N]))
+        for r, (lo, hi) in enumerate(bounds, start=1):
+            for axis in range(6):
+                col = rng.normal(scale=0.05, size=self.N)
+                labels.append(f"mot_demean_r{r:02d}[{axis}]#0")
+                cols.append(col)
+                self.truth[lo:hi, axis] = col[lo:hi]
+        # derivatives, deliberately huge so using them would be obvious
+        for r in range(1, 4):
+            for axis in range(6):
+                labels.append(f"mot_deriv_r{r:02d}[{axis}]#0")
+                cols.append(rng.normal(scale=deriv_scale, size=self.N))
+
+        values = np.column_stack(cols)
+        path = tmp_path / "sub-1_task-film_polort_bandpass_vent_wm_motion.1D"
+        with open(path, "w") as fh:
+            fh.write("# <matrix\n")
+            fh.write(f'#  ni_type = "{values.shape[1]}*double"\n')
+            fh.write(f'#  ColumnLabels = "{" ; ".join(labels)}"\n')
+            fh.write(f'#  RunStart = "{",".join(str(s) for s in self.RUNS)}"\n')
+            fh.write("# >\n")
+            for row in values:
+                fh.write(" ".join(f"{v:.6f}" for v in row) + "\n")
+        return str(path)
+
+    def test_the_parameters_are_found_and_the_derivatives_are_not(self, tmp_path):
+        path = self._file(tmp_path)
+        values, header = read_1d(path)
+        starts = run_starts_from_matrix(values, header)
+        params, order, how = select_motion_columns(values, header, run_starts=starts)
+        assert starts == list(self.RUNS)
+        assert params.shape == (self.N, 6)
+        assert np.allclose(params, self.truth, atol=1e-6), "wrong columns selected"
+        assert order == ((0, 1, 2), (3, 4, 5), "deg")
+        assert "mot_demean" in how and "3 run block(s)" in how
+
+    def test_each_run_is_read_over_its_own_rows(self, tmp_path):
+        """Run 2's block must supply rows 100-199, not run 1's."""
+        path = self._file(tmp_path)
+        values, header = read_1d(path)
+        params, _, _ = select_motion_columns(
+            values, header, run_starts=run_starts_from_matrix(values, header))
+        assert np.allclose(params[100:200], self.truth[100:200], atol=1e-6)
+
+    def test_fd_is_finite_and_not_computed_from_the_derivatives(self, tmp_path):
+        """The synthetic derivatives are ~2000x larger; using them would show."""
+        s = summarize_motion_file(self._file(tmp_path))
+        assert s.n_motion_runs == 3
+        assert s.n_fd_frames == self.N - 3      # one NaN per run start
+        assert 0 < s.mean_fd < 1.0, f"mean_fd={s.mean_fd} suggests the wrong columns"
+
+    def test_run_boundaries_come_from_the_header(self, tmp_path):
+        """Not differenced across the two boundaries RunStart declares."""
+        path = self._file(tmp_path)
+        values, header = read_1d(path)
+        starts = run_starts_from_matrix(values, header)
+        params, _, _ = select_motion_columns(values, header, run_starts=starts)
+        fd = framewise_displacement(params, run_starts=starts)
+        assert np.isnan(fd[[0, 100, 200]]).all()
+        assert np.isfinite(np.delete(fd, [0, 100, 200])).all()
+
+    def test_a_header_disagreeing_with_its_own_columns_raises(self, tmp_path):
+        path = self._file(tmp_path)
+        values, header = read_1d(path)
+        with pytest.raises(MotionError, match="disagrees"):
+            select_motion_columns(values, header, run_starts=[0])   # says 1 run

@@ -6,8 +6,9 @@ import pyarrow as pa
 import pytest
 
 from fmri_decomposition.io import write_table_atomic
-from fmri_decomposition.qc import (QC_COLUMNS, activation_qc, add_stimulus_coverage,
-                                   default_isc_parcels, pick_qc_atlas, qc_frame)
+from fmri_decomposition.qc import (QC_COLUMNS, QC_NOTE_MAX, _clip, activation_qc,
+                                   add_stimulus_coverage, default_isc_parcels,
+                                   pick_qc_atlas, qc_frame)
 from fmri_decomposition.validate import isc_alignment, isc_gate
 
 
@@ -227,3 +228,119 @@ class TestQcFrame:
         for col in ("mean_fd", "best_lag_tr", "frac_stimulus_covered",
                     "frac_good_frames", "frac_parcels_empty"):
             assert col in QC_COLUMNS
+
+
+class TestQcNote:
+    """A note that names the fix is only useful if the fix survives the cut."""
+
+    def test_a_multiline_message_becomes_one_readable_line(self):
+        out = _clip("first line\n    indented second\n\n  third")
+        assert out == "first line indented second third"
+
+    def test_the_actionable_instruction_is_not_cut_mid_word(self):
+        msg = ("MotionError: cannot identify the motion columns: 202 columns and no "
+               "usable ColumnLabels header.\n"
+               "  The last 6 columns span [-0.116,+0.218], [-0.592,+1.010], "
+               "[-0.095,+0.150], [-0.348,+0.343], [-0.111,+0.141], [-0.290,+0.305].\n"
+               "  If those are the motion parameters, say so explicitly:\n"
+               "    --motion-columns -6 -5 -4 -3 -2 -1 --motion-order afni")
+        out = _clip(msg)
+        assert "--motion-columns -6 -5 -4 -3 -2 -1" in out, "the fix must survive"
+        assert not out.endswith("--motion-column")
+
+    def test_an_over_long_note_is_cut_on_a_word_boundary_and_says_so(self):
+        out = _clip("word " * 400)
+        assert len(out) <= QC_NOTE_MAX + len(" [...]")
+        assert out.endswith(" [...]")
+        assert not out.replace(" [...]", "").endswith("wor")
+
+    def test_a_short_note_is_returned_unchanged(self):
+        assert _clip("no motion file matched confounds.motion_glob") == (
+            "no motion file matched confounds.motion_glob")
+
+
+class TestMergeManifests:
+    """An un-sharded run must not abort the finalize job.
+
+    03_finalize.sbatch runs under `set -euo pipefail`, so a non-zero exit from
+    merge-manifests stops `diagnose` from ever running -- which is how the
+    cneuromod pilot ended up with no participants_qc.csv.
+    """
+
+    def _cfg(self, tmp_path):
+        import yaml
+
+        cfg = {"cohort": "c", "tr": 1.0, "derivatives_root": str(tmp_path),
+               "output_root": str(tmp_path / "out")}
+        p = tmp_path / "cfg.yaml"
+        p.write_text(yaml.safe_dump(cfg))
+        return str(p)
+
+    def _args(self, cfg, stage="activation"):
+        from fmri_decomposition.cli import build_parser
+
+        return build_parser().parse_args(["merge-manifests", cfg, "--stage", stage])
+
+    def test_no_shards_but_a_complete_manifest_is_success(self, tmp_path):
+        from fmri_decomposition.cli import cmd_merge_manifests
+        from fmri_decomposition.io import cohort_meta_dir
+
+        cfg = self._cfg(tmp_path)
+        meta = cohort_meta_dir(tmp_path / "out", "c")
+        meta.mkdir(parents=True, exist_ok=True)
+        (meta / "manifest_activation.json").write_text('{"entries": []}')
+        assert cmd_merge_manifests(self._args(cfg)) == 0
+
+    def test_nothing_at_all_is_still_an_error(self, tmp_path):
+        from fmri_decomposition.cli import cmd_merge_manifests
+
+        assert cmd_merge_manifests(self._args(self._cfg(tmp_path))) == 1
+
+    def test_shard_manifests_are_merged_as_before(self, tmp_path):
+        import json
+
+        from fmri_decomposition.cli import cmd_merge_manifests
+        from fmri_decomposition.io import cohort_meta_dir
+
+        cfg = self._cfg(tmp_path)
+        shards = cohort_meta_dir(tmp_path / "out", "c") / "shards"
+        shards.mkdir(parents=True, exist_ok=True)
+        for i in range(2):
+            entry = {"stage": "activation", "cohort": "c", "atlas": "a",
+                     "task": "t", "sub": str(i), "path": "p", "status": "ok"}
+            (shards / f"manifest_activation_shard-{i:04d}-of-0002.json").write_text(
+                json.dumps({"entries": [entry]}))
+        assert cmd_merge_manifests(self._args(cfg)) == 0
+        merged = json.loads(
+            (cohort_meta_dir(tmp_path / "out", "c") / "manifest_activation.json").read_text())
+        assert len(merged["entries"]) == 2
+
+
+class TestAbsentData:
+    """Two ways a row can be empty, and they are not the same thing."""
+
+    def test_a_dangling_annex_pointer_is_named_as_unfetched(self, tmp_path):
+        """CNeuroMod is a datalad dataset: unfetched content is a symlink that
+        exists but cannot be opened. FileNotFoundError on a path that is
+        plainly there reads as a broken pipeline, not as absent data."""
+        from fmri_decomposition.motion import MotionSummary
+
+        link = tmp_path / "sub-03_task-x_desc-confounds_timeseries.tsv"
+        link.symlink_to(tmp_path / ".git" / "annex" / "objects" / "never-fetched")
+        assert link.is_symlink() and not link.exists()
+
+        # the branch under test, in isolation
+        note = ("unfetched git-annex pointer -- `datalad get` this file "
+                "from OUTSIDE the container, then re-run diagnose")
+        row = MotionSummary(fd_source=link.name, fd_note=note).as_row()
+        assert "datalad get" in row["fd_note"]
+        assert "FileNotFoundError" not in row["fd_note"]
+
+    def test_a_discovered_but_unextracted_run_says_so(self, tmp_path):
+        """--limit 2 leaves runs 3..6 on disk with no shard. The row is honest,
+        but must not read as a metric that failed."""
+        from fmri_decomposition.qc import _note
+
+        note = _note("", "no activation shard on disk -- this run was "
+                         "discovered but never extracted")
+        assert "never extracted" in note

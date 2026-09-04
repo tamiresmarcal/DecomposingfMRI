@@ -97,6 +97,26 @@ class SubjectQC:
         return asdict(self)
 
 
+# A note exists to be acted on. The ds002837 motion error names the exact flag
+# that resolves it, and at 300 characters that instruction was being cut
+# mid-word -- leaving a cell that says there is a problem but not what to do.
+QC_NOTE_MAX = 600
+
+
+def _clip(text, limit: int = QC_NOTE_MAX) -> str:
+    """Collapse a multi-line message into one readable, actionable cell.
+
+    Exception text spans several lines; a CSV cell is one. Whitespace is
+    collapsed rather than newlines merely replaced, so indentation does not
+    survive as runs of spaces, and the cut lands on a word boundary and says
+    that it happened.
+    """
+    flat = " ".join(str(text).split())
+    if len(flat) <= limit:
+        return flat
+    return flat[:limit].rsplit(" ", 1)[0] + " [...]"
+
+
 def _note(existing: str, addition: str) -> str:
     return "; ".join(x for x in (existing, addition) if x)
 
@@ -199,6 +219,17 @@ def motion_qc(cfg, order: str = "afni", columns=None):
         if path is None:
             out[key] = MotionSummary(fd_note=f"no file matched {source}").as_row()
             continue
+        if Path(path).is_symlink() and not Path(path).exists():
+            # A datalad/git-annex dataset stores unfetched content as a dangling
+            # symlink. `glob` returns it because the link exists; opening it
+            # raises FileNotFoundError for a path that is plainly there, which
+            # reads as a broken pipeline rather than as absent data.
+            out[key] = MotionSummary(
+                fd_source=Path(path).name,
+                fd_note="unfetched git-annex pointer -- `datalad get` this file "
+                        "from OUTSIDE the container, then re-run diagnose",
+            ).as_row()
+            continue
         try:
             summary = (summarize_motion_file(path, order=order, columns=columns)
                        if attr == "motion"
@@ -207,7 +238,7 @@ def motion_qc(cfg, order: str = "afni", columns=None):
         except (MotionError, OSError, ValueError) as exc:        # noqa: BLE001
             out[key] = MotionSummary(
                 fd_source=Path(path).name,
-                fd_note=f"{type(exc).__name__}: {exc}".replace("\n", " ")[:300],
+                fd_note=_clip(f"{type(exc).__name__}: {exc}"),
             ).as_row()
     have = sum(1 for r in out.values() if r["mean_fd"] == r["mean_fd"])
     return out, f"motion: {have}/{len(out)} run(s) from {source}"
@@ -296,6 +327,11 @@ def collect_qc(cfg, atlases, isc_parcels=None, max_lag_tr: int = 30,
         if note:
             cur["qc_note"] = _note(cur.get("qc_note", ""), note)
 
+    # Discovery finds every run on disk; only the extracted ones have shards.
+    # A row for a run that was never extracted is honest, but must say so --
+    # otherwise it reads as a metric that failed rather than one never computed.
+    extracted = set(qc)
+
     motion, motion_msg = motion_qc(cfg, motion_order, motion_columns)
     messages.append(motion_msg)
     for key, row in motion.items():
@@ -304,6 +340,11 @@ def collect_qc(cfg, atlases, isc_parcels=None, max_lag_tr: int = 30,
         cur.update(row)
         if note:
             cur["qc_note"] = _note(cur.get("qc_note", ""), note)
+
+    for key in set(qc) - extracted:
+        qc[key]["qc_note"] = _note(qc[key].get("qc_note", ""),
+                                   "no activation shard on disk -- this run was "
+                                   "discovered but never extracted")
 
     from .motion import MotionSummary
 
