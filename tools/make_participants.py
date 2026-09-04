@@ -223,9 +223,12 @@ def main(argv=None) -> int:
     print(f"\nwrote {out}")
     print(f"  {len(rows)} row(s): {len(subs)} subject(s) x {len(tasks)} task(s), "
           f"{n_excluded} excluded")
+    # Only the surplus direction is a ses/run remark. With --from-list the
+    # table can legitimately hold MORE pairs than there are runs, and those are
+    # already reported above by name -- "-1 extra" was arithmetic, not English.
+    extra = len(refs) - len(pairs)
     print(f"  runs on disk: {len(refs)}"
-          + (f"  ({len(refs) - len(pairs)} extra from multiple ses/run per pair)"
-             if len(refs) != len(pairs) else ""))
+          + (f"  ({extra} extra from multiple ses/run per pair)" if extra > 0 else ""))
     print(f"  subjects: {subs[:8]}{' ...' if len(subs) > 8 else ''}")
     print(f"  tasks:    {tasks[:8]}{' ...' if len(tasks) > 8 else ''}")
     print("\n  Exclusions are unchanged -- nothing here writes one. Edit real ones in")

@@ -120,6 +120,17 @@ class TestFromListCli:
         assert "sub-03" in printed
         assert "excluded=True WITH a reason" in printed
 
+    def test_more_rows_than_runs_is_not_reported_as_negative_extras(
+            self, tmp_path, capsys):
+        """55 listed against 54 on disk is not "-1 extra from multiple ses/run"."""
+        cfg = self._cohort(tmp_path)
+        listing = tmp_path / "subjects.txt"
+        listing.write_text("01\n02\n03\n")
+        mp.main([cfg, "-o", str(tmp_path / "p.csv"), "--from-list", str(listing)])
+        printed = capsys.readouterr().out
+        assert "runs on disk: 2" in printed
+        assert "extra from multiple" not in printed
+
     def test_without_the_flag_the_missing_subject_vanishes(self, tmp_path):
         """The behaviour --from-list exists to prevent."""
         import csv as _csv
