@@ -316,11 +316,19 @@ subjects contribute different frame counts to the same window.
 
 ```bash
 mkdir -p slurm_logs
+export FMRIDECOMP_SIF=/path/to/fmri_decomp.sif   # or FMRIDECOMP_VENV=...
 ./slurm/submit_all.sh config/ds002837.yaml 20 8
 ```
 
 That chains: extract array (20 tasks) → finalize + ISC gate → dfc array
-(8 tasks) → merge manifests, with `afterok` between each. Or submit by hand:
+(8 tasks) → merge manifests, with `afterok` between each.
+
+`FMRIDECOMP_SIF` (container) or `FMRIDECOMP_VENV` (venv) is not optional on a
+cluster whose login node has no importable `fmri_decomposition`: the same
+variable picks the interpreter for the pre-flight `validate` and for every
+array task. `submit_all.sh` refuses to submit anything if it cannot import the
+package, rather than treating the ImportError as a config problem. Or submit by
+hand:
 
 ```bash
 sbatch --array=0-19 slurm/01_extract.sbatch config/ds002837.yaml

@@ -18,9 +18,50 @@ N_DFC="${3:-8}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p slurm_logs
 
+# ------------------------------------------------------------ interpreter ---
+# This script runs on a LOGIN node, but `validate` imports fmri_decomposition,
+# which the login node's bare `python` cannot do. Pick the interpreter exactly
+# the way slurm/01_extract.sbatch does, so the pre-flight check actually runs.
+#
+# Everything here happens in a subshell where needed: sbatch exports the
+# submitting shell's environment to the job, and a venv activated here would
+# follow the array tasks onto the compute nodes and sit in front of the
+# module's interpreter.
+RUN=(python)
+if [[ -n "${FMRIDECOMP_SIF:-}" ]]; then
+  module load apptainer 2>/dev/null || module load apptainer/1.3.5 2>/dev/null || true
+  BINDS="${FMRIDECOMP_BINDS:-/project,/scratch,/home}"
+  RUN=(apptainer exec --bind "${BINDS}" --pwd "${PWD}" "${FMRIDECOMP_SIF}" python)
+elif [[ -x "${FMRIDECOMP_VENV:-$HOME/venvs/fmridecomp}/bin/python" ]]; then
+  RUN=("${FMRIDECOMP_VENV:-$HOME/venvs/fmridecomp}/bin/python")
+fi
+
+# "validate found problems" and "validate could not run at all" are different
+# answers and used to land in the same branch below -- so a missing interpreter
+# silently added --no-strict to the whole chain and skipped the only check this
+# script exists to perform. Separate them here, before anything is submitted.
+# Probe fmri_decomposition.cohort, NOT the bare package: the top-level module
+# imports nothing heavy, so it succeeds on an interpreter that has none of the
+# dependencies, and `validate` then dies on `import pandas` -- which reads as a
+# problem it found rather than one it hit. cohort.py is what `validate` reaches
+# for first, so it is the honest depth to probe at.
+if ! "${RUN[@]}" -c 'import fmri_decomposition.cohort' >/dev/null 2>&1; then
+  echo "ERROR: cannot import fmri_decomposition (and its dependencies) with:" >&2
+  echo "       ${RUN[*]}" >&2
+  echo >&2
+  echo "       Point the script at your environment and re-run:" >&2
+  echo "         export FMRIDECOMP_SIF=/path/to/fmri_decomp.sif   # container, or" >&2
+  echo "         export FMRIDECOMP_VENV=\$HOME/venvs/fmridecomp      # venv" >&2
+  echo >&2
+  echo "       The same variable is read by slurm/01_extract.sbatch, so setting" >&2
+  echo "       it once covers the pre-flight check and every array task." >&2
+  exit 1
+fi
+
 echo "== validating config and cohort before burning any core-hours"
+echo "   interpreter: ${RUN[*]}"
 EXTRA_EXTRACT=()
-if VALIDATE_OUT="$(python -m fmri_decomposition.cli validate "$CONFIG" 2>&1)"; then
+if VALIDATE_OUT="$("${RUN[@]}" -m fmri_decomposition.cli validate "$CONFIG" 2>&1)"; then
   echo "$VALIDATE_OUT"
 else
   # Exit 1 from `validate` means it found problems, not that it crashed. The
