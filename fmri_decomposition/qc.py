@@ -97,6 +97,26 @@ class SubjectQC:
         return asdict(self)
 
 
+# A note exists to be acted on. The ds002837 motion error names the exact flag
+# that resolves it, and at 300 characters that instruction was being cut
+# mid-word -- leaving a cell that says there is a problem but not what to do.
+QC_NOTE_MAX = 600
+
+
+def _clip(text, limit: int = QC_NOTE_MAX) -> str:
+    """Collapse a multi-line message into one readable, actionable cell.
+
+    Exception text spans several lines; a CSV cell is one. Whitespace is
+    collapsed rather than newlines merely replaced, so indentation does not
+    survive as runs of spaces, and the cut lands on a word boundary and says
+    that it happened.
+    """
+    flat = " ".join(str(text).split())
+    if len(flat) <= limit:
+        return flat
+    return flat[:limit].rsplit(" ", 1)[0] + " [...]"
+
+
 def _note(existing: str, addition: str) -> str:
     return "; ".join(x for x in (existing, addition) if x)
 
@@ -207,7 +227,7 @@ def motion_qc(cfg, order: str = "afni", columns=None):
         except (MotionError, OSError, ValueError) as exc:        # noqa: BLE001
             out[key] = MotionSummary(
                 fd_source=Path(path).name,
-                fd_note=f"{type(exc).__name__}: {exc}".replace("\n", " ")[:300],
+                fd_note=_clip(f"{type(exc).__name__}: {exc}"),
             ).as_row()
     have = sum(1 for r in out.values() if r["mean_fd"] == r["mean_fd"])
     return out, f"motion: {have}/{len(out)} run(s) from {source}"

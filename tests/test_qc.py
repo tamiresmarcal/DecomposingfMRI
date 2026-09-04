@@ -6,8 +6,9 @@ import pyarrow as pa
 import pytest
 
 from fmri_decomposition.io import write_table_atomic
-from fmri_decomposition.qc import (QC_COLUMNS, activation_qc, add_stimulus_coverage,
-                                   default_isc_parcels, pick_qc_atlas, qc_frame)
+from fmri_decomposition.qc import (QC_COLUMNS, QC_NOTE_MAX, _clip, activation_qc,
+                                   add_stimulus_coverage, default_isc_parcels,
+                                   pick_qc_atlas, qc_frame)
 from fmri_decomposition.validate import isc_alignment, isc_gate
 
 
@@ -227,3 +228,32 @@ class TestQcFrame:
         for col in ("mean_fd", "best_lag_tr", "frac_stimulus_covered",
                     "frac_good_frames", "frac_parcels_empty"):
             assert col in QC_COLUMNS
+
+
+class TestQcNote:
+    """A note that names the fix is only useful if the fix survives the cut."""
+
+    def test_a_multiline_message_becomes_one_readable_line(self):
+        out = _clip("first line\n    indented second\n\n  third")
+        assert out == "first line indented second third"
+
+    def test_the_actionable_instruction_is_not_cut_mid_word(self):
+        msg = ("MotionError: cannot identify the motion columns: 202 columns and no "
+               "usable ColumnLabels header.\n"
+               "  The last 6 columns span [-0.116,+0.218], [-0.592,+1.010], "
+               "[-0.095,+0.150], [-0.348,+0.343], [-0.111,+0.141], [-0.290,+0.305].\n"
+               "  If those are the motion parameters, say so explicitly:\n"
+               "    --motion-columns -6 -5 -4 -3 -2 -1 --motion-order afni")
+        out = _clip(msg)
+        assert "--motion-columns -6 -5 -4 -3 -2 -1" in out, "the fix must survive"
+        assert not out.endswith("--motion-column")
+
+    def test_an_over_long_note_is_cut_on_a_word_boundary_and_says_so(self):
+        out = _clip("word " * 400)
+        assert len(out) <= QC_NOTE_MAX + len(" [...]")
+        assert out.endswith(" [...]")
+        assert not out.replace(" [...]", "").endswith("wor")
+
+    def test_a_short_note_is_returned_unchanged(self):
+        assert _clip("no motion file matched confounds.motion_glob") == (
+            "no motion file matched confounds.motion_glob")
