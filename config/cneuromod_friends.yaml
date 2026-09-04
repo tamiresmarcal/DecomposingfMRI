@@ -43,10 +43,23 @@
 # the container (datalad is not in the image). An unfetched file is a dangling
 # annex symlink, which check_cohort.py names explicitly.
 #
-# include_tasks is one episode, for a pilot. Verified against the real data
-# (2026-08): both sub-01 and sub-02 have s01e02a under ses-001, the TR check
-# genuinely confirms 1.49s from the headers, and leaves land as
-# task=s01e02a/sub=01/ses-001.parquet.
+# include_tasks is the WHOLE OF SEASON 1 for all six subjects: 48 episode
+# segments x 6 subjects = 288 runs. Verified against the real data (2026-08)
+# for the pilot -- both sub-01 and sub-02 have s01e02a under ses-001, the TR
+# check genuinely confirms 1.49s from the headers, and leaves land as
+# task=s01e02a/sub=01/ses-001.parquet -- and against
+# courtois-neuromod/friends.fmriprep@main (2026-09) for the full season.
+#
+# THE CONTENT MUST BE FETCHED FIRST, and it is not small: the six subjects'
+# season 1 is ~345 GiB of BOLD, because these derivatives were written with
+# `--output-spaces MNI152NLin2009cAsym` and NO res- specifier, so fMRIPrep
+# 20.2.6 wrote them at the template's own 1 mm grid (1.5 GB per 718 s run,
+# ~3.2 MB per volume). Cam-CAN asked for res-2 and is ~40x smaller per run.
+# That is a disk-quota decision before it is a pipeline one. Use
+#   preprocessing/cneuromod/fetch_friends_s01.sh
+# which fetches exactly the three files per run this config reads and nothing
+# else -- the same runs at every other derivative (T1w space, fsLR CIFTI,
+# aparcaseg, boldref, figures) would be several times that again.
 #
 # output_root is deliberately the SAME as every other cohort's: the `cohort=`
 # key separates them inside one tree, which is what makes "one atlas, one
@@ -66,8 +79,31 @@ discovery:
   # ses-* is a real directory level here, unlike ds002837.
   bold_glob: "sub-*/ses-*/func/sub-*_task-*_space-MNI152NLin2009cAsym_desc-preproc_bold.nii.gz"
   mask_glob: "sub-{sub}_*task-{task}_*space-MNI152NLin2009cAsym_desc-brain_mask.nii.gz"
-  # Start small. Broaden once a pilot runs clean.
-  include_tasks: [s01e02a]
+  # SEASON 1, ENTIRE, for all six subjects. Not a pilot any more.
+  #
+  # Enumerated rather than pattern-matched because `include_tasks` is an exact
+  # membership test (cohort.py), and because an explicit list is the thing that
+  # fails loudly if the fetch was partial: a task named here with no file on
+  # disk is an "analysable table row with no run on disk" from validate_cohort,
+  # whereas a pattern would silently analyse whatever happened to arrive.
+  #
+  # Verified against courtois-neuromod/friends.fmriprep@main (2026-09), not
+  # assumed from the episode count: season 1 is 24 episodes x 2 segments = 48
+  # tasks, and each of sub-01..06 has exactly one preproc BOLD for every one of
+  # the 48 -- 288 runs, no duplicates, no missing cells. Segments never go past
+  # `b` in this season.
+  #
+  # Sessions are NOT a filter here and must not become one: which session an
+  # episode was watched in differs per subject (sub-01 has s01e01 in ses-003
+  # and s01e02 in ses-001), and season 1 spans ses-001..ses-012 depending on
+  # the subject. The task entity is the only stable key.
+  include_tasks:
+    [s01e01a, s01e01b, s01e02a, s01e02b, s01e03a, s01e03b, s01e04a, s01e04b,
+     s01e05a, s01e05b, s01e06a, s01e06b, s01e07a, s01e07b, s01e08a, s01e08b,
+     s01e09a, s01e09b, s01e10a, s01e10b, s01e11a, s01e11b, s01e12a, s01e12b,
+     s01e13a, s01e13b, s01e14a, s01e14b, s01e15a, s01e15b, s01e16a, s01e16b,
+     s01e17a, s01e17b, s01e18a, s01e18b, s01e19a, s01e19b, s01e20a, s01e20b,
+     s01e21a, s01e21b, s01e22a, s01e22b, s01e23a, s01e23b, s01e24a, s01e24b]
 
 confounds:
   format: fmriprep_tsv
@@ -127,10 +163,15 @@ windows:
       atlases: [yeo7, networks]
 
 # --- participants CSV -------------------------------------------------
-# Not shipped with the repo, deliberately: unlike ds002837 (where each of the
-# 86 subjects watched exactly one film, a published constant), which CNeuroMod
-# episodes exist is a property of YOUR copy of an incrementally released
-# dataset. Generate it from what discovery actually finds:
+# The checked-in table is the 288 rows above: sub-01..06 x the 48 season-1
+# segments, every row excluded=False. It is shipped because for THIS season
+# the (sub, task) mapping is now a constant -- all six subjects completed all
+# 48 segments upstream, which was checked file by file rather than assumed.
+#
+# It stays a generated file for any other slice of the dataset: which
+# CNeuroMod episodes exist is a property of YOUR copy of an incrementally
+# released dataset, so widening `include_tasks` past season 1 means
+# regenerating it from what discovery actually finds:
 #
 #   python tools/make_participants.py config/cneuromod_friends.yaml \
 #       -o config/cneuromod_friends_participants.csv
@@ -142,7 +183,16 @@ windows:
 # can no longer tell a curation decision from an oversight.
 
 # --- how to run -------------------------------------------------------
+# The full season-1 run is in RUNBOOK.md; it is two commands. By hand:
+#
+#   ./preprocessing/cneuromod/fetch_friends_s01.sh --dry-run   # login node
+#   ./preprocessing/cneuromod/fetch_friends_s01.sh
 #   python tools/check_cohort.py config/cneuromod_friends.yaml
+#   ./slurm/submit_all.sh config/cneuromod_friends.yaml 108 24
+#
+# `--no-strict` is required for extract on this cohort and submit_all.sh offers
+# it for you: stimulus.durations_s is empty, so validate reports one problem
+# per task. Smaller by hand:
 #   fmri-decomp extract  config/cneuromod_friends.yaml --n-jobs 4 --no-strict --limit 2
 #   python tools/check_cohort.py config/cneuromod_friends.yaml --checks outputs,parallel --limit 2
 #   fmri-decomp dfc      config/cneuromod_friends.yaml --dry-run
