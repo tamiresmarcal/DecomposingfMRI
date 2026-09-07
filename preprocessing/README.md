@@ -39,7 +39,32 @@ preprocessing/camcan/
   00_prefetch_templateflow.sh   LOGIN NODE. Templates, or every job dies offline.
   01_build_bids.py              LOGIN NODE. Symlinks anat+func into one BIDS root.
   02_fmriprep.sbatch            COMPUTE. One SLURM array task per subject.
+  03_build_participants_scores.py  LOGIN NODE. cc700-scored/ -> one table.
 ```
 
-Run them in that order. `00` and `01` are cheap and need the network / a shell;
-only `02` costs compute.
+Run `00`–`02` in that order. `00` and `01` are cheap and need the network / a
+shell; only `02` costs compute.
+
+`03` is independent of the other three and touches no images. It consolidates
+the Cam-CAN archive's **behavioural** scoring — `cc700-scored/<Test>/release00N/
+summary/<Test>_summary.txt`, one directory per test — into
+
+    outputs/meta/cohorts/cohort=camcan/participants_scores.csv
+
+one row per subject, columns namespaced by test, alongside a manifest recording
+which release each block came from. It belongs here for the same reason the
+rest of this directory does: the format is Cam-CAN's own, written by ten
+different analysis scripts between 2011 and 2014, and nothing about it
+generalises to another cohort.
+
+Two facts worth knowing before using it:
+
+- **The battery is CC700's, not ccfrail's.** Of the 648 subjects in
+  `camcan_movie_participants.csv`, 617 have a TOT score; of the 55 in
+  `camcan_ccfrail_movie_participants.csv`, **none** do. If a `camcan_ccfrail`
+  analysis needs frailty measures, they come from that study's own phenotype
+  files in release002, not from `cc700-scored/`.
+- **A blank row is an exclusion, not an absence.** Each test's own QC blanks
+  the scores and states a reason in `ErrorMessages` (TOT: "replied dont know on
+  > 80% trials", 12 subjects). The row is kept and the reason travels with it as
+  `<test>_ErrorMessages`.

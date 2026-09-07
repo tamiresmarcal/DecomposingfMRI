@@ -114,12 +114,18 @@ choosing which dataset you open.
 | `config/*_participants.csv` | human | curation — `excluded`, `exclusion_reason` |
 | `outputs/meta/cohorts/cohort=*/participants_qc.csv` | pipeline | measurement — motion, coverage, scrubbing |
 | `config/phenotype/*_phenotype.csv` | human | **age, sex, clinical scores** |
+| `outputs/meta/cohorts/cohort=camcan/participants_scores.csv` | script | Cam-CAN's behavioural battery (`camcan` only) |
 
 The third is not written by anything and does not exist until it is built:
 `tools/make_phenotype.py`, sources documented in `config/phenotype/README.md`.
-`nb.subject_table(cohort)` joins all three and marks every row with
-`has_pheno`, so a missing phenotype reads as missing rather than as a column of
-NaNs.
+`nb.subject_table(cohort)` joins all of them and marks every row with
+`has_pheno` and `has_scores`, so something missing reads as missing rather than
+as a column of NaNs.
+
+The scores table is built by
+`preprocessing/camcan/03_build_participants_scores.py` from the archive's
+`cc700-scored/` summaries. It exists for `camcan` only: none of the 55
+`camcan_ccfrail` subjects appear in that battery.
 
 No threshold is applied anywhere in these notebooks. `mean_fd` is a
 measurement; `mean_fd > 0.5 → exclude` is a claim, and it belongs with the

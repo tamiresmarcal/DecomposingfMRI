@@ -14,6 +14,7 @@ metadata follows:
 | `config/*_participants.csv` | human | curation — who is in, who was removed, why |
 | `outputs/meta/cohorts/cohort=*/participants_qc.csv` | pipeline | measurement — motion, coverage, scrubbing |
 | `config/phenotype/*_phenotype.csv` | human | **who the person is** — age, sex, clinical status |
+| `outputs/meta/cohorts/cohort=camcan/participants_scores.csv` | script | Cam-CAN's behavioural battery, consolidated from `cc700-scored/` |
 
 `make_participants.py` builds the first from what discovery finds on disk, so
 it can only ever contain facts about files. Age is not a fact about a file.
@@ -62,9 +63,21 @@ verify the result by eye rather than trusting a column name.
 ### `camcan` (CC700) and `camcan_ccfrail`
 
 The phenotype is in the Cam-CAN archive, not in the imaging release: CC700
-demographics under `cc700-scored/`, and the ccfrail frailty assessment in its
-own phenotype files. They cover the whole archive, so pass
-`--restrict-to-participants` to keep only the subjects this cohort has.
+demographics in `cc700/participants.tsv`, and the ccfrail frailty assessment in
+that study's own release002 phenotype files. They cover the whole archive, so
+pass `--restrict-to-participants` to keep only the subjects this cohort has.
+
+**`cc700-scored/` is not demographics and not ccfrail's.** It holds the
+behavioural battery — ten tests (CardioMeasures, Cattell, EkmanEmHex,
+EmotionalMemory, EmotionRegulation, FamousFaces, MotorLearning, Proverbs,
+Synsem, TOT), each with its own release and summary file. Measured against the
+uploaded `TOT/release001` summary: 617 of the 648 subjects in `camcan` have a
+TOT score, and **0 of the 55 in `camcan_ccfrail` do**. So the cognitive scores
+belong to CC700, and `preprocessing/camcan/03_build_participants_scores.py`
+consolidates them into
+`outputs/meta/cohorts/cohort=camcan/participants_scores.csv` rather than into a
+phenotype file — they are a battery, not a demographic, and they are
+regenerated from the archive rather than curated by hand.
 
 Sex is coded numerically in several of these tables. The importer refuses to
 guess a numeric coding — read the source's data dictionary and state it:
@@ -81,9 +94,10 @@ Scores split across several tables are joined one at a time with `--merge`.
 
 ## Before comparing `camcan` with `camcan_ccfrail`
 
-`camcan_ccfrail` is the only cohort with clinical information, and CC700 is the
+`camcan_ccfrail` is the cohort with a frailty assessment, and CC700 is the
 obvious healthy comparison — but the two differ in acquisition, not only in
-frailty:
+frailty (and note that the *behavioural* battery runs the other way: it exists
+for CC700 and not for ccfrail):
 
 |  | `camcan` (CC700) | `camcan_ccfrail` |
 |---|---|---|

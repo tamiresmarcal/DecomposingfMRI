@@ -63,7 +63,8 @@ __all__ = [
     "dataset", "parcel_columns", "edge_columns", "load_activation", "load_dfc",
     "atlas_labels", "edge_names", "subject_shards", "read_subject_edges",
     "full_matrix_from_upper", "read_edges", "read_shard", "fisher_z",
-    "load_participants", "load_participants_qc", "load_phenotype",
+    "load_participants", "load_participants_qc", "load_participants_scores",
+    "load_phenotype",
     "subject_table", "estimate_gb", "mem_mb",
 ]
 
@@ -461,6 +462,35 @@ def load_participants_qc(cohort: str, root=None) -> pd.DataFrame:
     return pd.read_csv(path, dtype={"sub": str})
 
 
+def load_participants_scores(cohort: str, root=None,
+                             quiet: bool = False) -> pd.DataFrame | None:
+    """`meta/cohorts/cohort=<c>/participants_scores.csv`, or None with a reason.
+
+    Cam-CAN's behavioural battery, consolidated from the archive's own
+    `cc700-scored/` summaries by
+    `preprocessing/camcan/03_build_participants_scores.py`. One row per subject,
+    columns namespaced by test (`TOT_ToT_ratio`, `Cattell_TotalScore`), plus
+    `<test>_ErrorMessages` where that test's own QC excluded someone -- a blank
+    score with a stated reason, which is not the same thing as never taking the
+    test.
+
+    Only `camcan` (CC700) has one: the scored battery is CC700's, and none of
+    its subjects are in `camcan_ccfrail`. Returns None elsewhere, and reads
+    parquet if that is what was written.
+    """
+    d = cohort_meta_dir(output_root(root), cohort)
+    for path in (d / "participants_scores.csv", d / "participants_scores.parquet"):
+        if path.exists():
+            return (pd.read_parquet(path) if path.suffix == ".parquet"
+                    else pd.read_csv(path, dtype={"sub": str}))
+    if not quiet:
+        print(f"no behavioural scores for cohort={cohort!r} at "
+              f"{d / 'participants_scores.csv'}\n"
+              f"  Build them (camcan only): python "
+              f"preprocessing/camcan/03_build_participants_scores.py --help")
+    return None
+
+
 def load_phenotype(cohort: str, quiet: bool = False) -> pd.DataFrame | None:
     """`config/phenotype/<cohort>_phenotype.csv`, or None with a loud reason.
 
@@ -482,13 +512,14 @@ def load_phenotype(cohort: str, quiet: bool = False) -> pd.DataFrame | None:
 
 
 def subject_table(cohort: str, root=None, with_qc: bool = True) -> pd.DataFrame:
-    """participants + participants_qc + phenotype, joined on (sub, task) / sub.
+    """participants + participants_qc + scores + phenotype, joined on (sub, task) / sub.
 
     Columns that came from the phenotype are prefixed `pheno_` where they would
     collide, so it is always visible which file a value came from. `has_pheno`
     marks the rows the join actually found a person for -- a partial phenotype
     is normal (Cam-CAN's frailty tables do not cover every CC700 subject) and
-    should be visible rather than inferred from NaNs.
+    should be visible rather than inferred from NaNs. `has_scores` does the
+    same for the behavioural battery, which exists for `camcan` only.
     """
     out = load_participants(cohort)
     if with_qc:
@@ -499,6 +530,12 @@ def subject_table(cohort: str, root=None, with_qc: bool = True) -> pd.DataFrame:
                             how="left", suffixes=("", "_qc"))
         except FileNotFoundError as exc:
             print(f"QC not joined: {exc}")
+    scores = load_participants_scores(cohort, root, quiet=True)
+    if scores is not None:
+        out = out.merge(scores.assign(has_scores=True), on="sub", how="left")
+        out["has_scores"] = out["has_scores"].fillna(False)
+    else:
+        out["has_scores"] = False
     ph = load_phenotype(cohort)
     if ph is not None:
         ph = ph.drop(columns=[c for c in ("cohort",) if c in ph.columns])
