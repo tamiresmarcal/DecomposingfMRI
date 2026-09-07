@@ -115,7 +115,46 @@ runs:
   mode: concat
 
 trim:
-  column: null
+  # TRIM AT THE SOURCE. Every run is cut to its episode's declared length
+  # (stimulus.durations_s below) before parcel means are written, so the
+  # activation leaf itself is uniform across subjects and nothing downstream
+  # can see a volume the other subjects do not have.
+  #
+  # Only one run is actually affected: sub-?? on s01e12a has 472 volumes where
+  # the other four have 471. For the other 239 runs n_needed == n_tr and the
+  # mask keeps everything -- this is a no-op that costs one comparison.
+  #
+  # Doing it here rather than only capping the window grid means the fix
+  # applies once, at the point the data enters the pipeline, instead of being
+  # re-derived by every later stage. dfc, QC, and anything in stage 4 all read
+  # the same trimmed timeseries.
+  #
+  # unit MUST be declared and must match what the column holds. `seconds` here
+  # because end_movie is stamped from stimulus.durations_s, which is seconds.
+  # 701.79 / 1.49 = 471 exactly.
+  column: end_movie
+  unit: seconds
+  mode: end
+  #
+  # The column is added to participants.csv from this config's own
+  # durations_s, so the two cannot drift:
+  #
+  #   apptainer exec --bind /project $FMRIDECOMP_SIF python - <<'EOF'
+  #   import csv, yaml
+  #   cfg = yaml.safe_load(open("config/cneuromod_friends.yaml"))
+  #   dur = cfg["stimulus"]["durations_s"]
+  #   p = "config/cneuromod_friends_participants.csv"
+  #   rows = list(csv.DictReader(open(p)))
+  #   for r in rows:
+  #       r["end_movie"] = dur[r["task"]]
+  #   cols = list(rows[0].keys())
+  #   w = csv.DictWriter(open(p, "w", newline=""), fieldnames=cols)
+  #   w.writeheader(); w.writerows(rows)
+  #   EOF
+  #
+  # A run whose file is SHORTER than its declared duration raises rather than
+  # padding (activation.py:256). That is the guard that will catch sub-04 if
+  # any of its segments turns out shorter than the five measured here.
 
 stimulus:
   # MEASURED FROM THE IMAGES, 2026-09: volume count x TR 1.49, per episode

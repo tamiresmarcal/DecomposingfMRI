@@ -185,15 +185,88 @@ class TestProcessRun:
         entry = process_run(ref, spec, cfg)
         assert entry.status == "error" and "trim asks for" in entry.detail
 
-    def test_trim_unit_tr_is_honoured(self, tmp_path):
+    def test_trim_end_s_is_seconds_by_the_time_it_reaches_process_run(self, tmp_path):
+        """The contract _trim_mask relies on: converted once, upstream."""
         cfg = cfg_for(tmp_path, tr=2.0, trim={"column": "end_movie", "unit": "tr"})
         spec, img, _, _ = toy_atlas_and_img(n_tr=40)
         bold = tmp_path / "sub-01_task-movie_bold.nii.gz"
         nib.save(img, bold)
-        ref = RunRef(cohort="t", sub="01", task="movie", bold=bold, trim_end_s=10.0)
+        ref = RunRef(cohort="t", sub="01", task="movie", bold=bold, trim_end_s=20.0)
         entry = process_run(ref, spec, cfg)
         assert entry.status == "ok", entry.detail
+        assert len(pd.read_parquet(entry.path)) == 10   # 20 s / 2 s
+
+    def test_trim_unit_tr_is_honoured_through_attach_participants(self, tmp_path):
+        """`unit: tr` end-to-end, which is where it was broken.
+
+        attach_participants multiplies by tr (cohort.py:125) and _trim_mask
+        used to multiply again, so 10 TR asked for 10*tr*tr seconds -- 20
+        volumes on a tr=2 cohort with only 40, and 702 on cneuromod with 471.
+        The n_needed > n_tr guard turned it into a loud error rather than a
+        silent truncation, which is why nothing was corrupted, but the option
+        did not work.
+
+        The old test constructed RunRef(trim_end_s=...) by hand and so never
+        crossed the boundary where the conversion happens. That is why it
+        passed against the bug.
+        """
+        from fmri_decomposition.cohort import attach_participants
+
+        cfg = cfg_for(tmp_path, tr=2.0, trim={"column": "end_movie", "unit": "tr"})
+        spec, img, _, _ = toy_atlas_and_img(n_tr=40)
+        bold = tmp_path / "sub-01_task-movie_bold.nii.gz"
+        nib.save(img, bold)
+
+        participants = pd.DataFrame([{
+            "participant_id": "sub-01", "sub": "01", "cohort": "t",
+            "task": "movie", "excluded": False, "end_movie": 10,
+        }])
+        refs = attach_participants(
+            [RunRef(cohort="t", sub="01", task="movie", bold=bold)], participants, cfg)
+
+        assert refs[0].trim_end_s == pytest.approx(20.0)   # 10 TR x 2 s, once
+        entry = process_run(refs[0], spec, cfg)
+        assert entry.status == "ok", entry.detail
         assert len(pd.read_parquet(entry.path)) == 10
+
+    def test_trim_unit_seconds_through_attach_participants(self, tmp_path):
+        """The cneuromod case: 701.79 s at TR 1.49 must give exactly 471."""
+        from fmri_decomposition.cohort import attach_participants
+
+        cfg = cfg_for(tmp_path, tr=1.49,
+                      trim={"column": "end_movie", "unit": "seconds"})
+        spec, img, _, _ = toy_atlas_and_img(n_tr=472)
+        bold = tmp_path / "sub-01_task-movie_bold.nii.gz"
+        nib.save(img, bold)
+
+        participants = pd.DataFrame([{
+            "participant_id": "sub-01", "sub": "01", "cohort": "t",
+            "task": "movie", "excluded": False, "end_movie": 471 * 1.49,
+        }])
+        refs = attach_participants(
+            [RunRef(cohort="t", sub="01", task="movie", bold=bold)], participants, cfg)
+        entry = process_run(refs[0], spec, cfg)
+        assert entry.status == "ok", entry.detail
+        assert len(pd.read_parquet(entry.path)) == 471
+
+    def test_trim_equal_to_the_file_length_keeps_every_volume(self, tmp_path):
+        """The other 47 episodes: declared length == file length, nothing cut."""
+        from fmri_decomposition.cohort import attach_participants
+
+        cfg = cfg_for(tmp_path, tr=1.49,
+                      trim={"column": "end_movie", "unit": "seconds"})
+        spec, img, _, _ = toy_atlas_and_img(n_tr=471)
+        bold = tmp_path / "sub-01_task-movie_bold.nii.gz"
+        nib.save(img, bold)
+
+        participants = pd.DataFrame([{
+            "participant_id": "sub-01", "sub": "01", "cohort": "t",
+            "task": "movie", "excluded": False, "end_movie": 471 * 1.49,
+        }])
+        refs = attach_participants(
+            [RunRef(cohort="t", sub="01", task="movie", bold=bold)], participants, cfg)
+        entry = process_run(refs[0], spec, cfg)
+        assert len(pd.read_parquet(entry.path)) == 471
 
 
 class TestConfig:
