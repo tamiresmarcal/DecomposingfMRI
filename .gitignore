@@ -227,3 +227,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# per-user SLURM settings; see slurm/env.sh.example
+slurm/env.sh

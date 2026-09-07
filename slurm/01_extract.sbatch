@@ -38,6 +38,14 @@ EXTRA=("$@")
 N_JOBS="${SLURM_CPUS_PER_TASK:-1}"
 
 # BLAS must be capped or each of the N_JOBS workers spawns its own thread pool.
+# Per-user settings: interpreter, binds, cache paths. Optional and gitignored;
+# see slurm/env.sh.example. SLURM copies this script to a spool directory on
+# the compute node, so $BASH_SOURCE points there, not at the repo -- the
+# submit directory is what finds it. Sourced here as well as in submit_all.sh
+# so a hand-submitted sbatch behaves identically.
+_ENV_SH="${SLURM_SUBMIT_DIR:-$PWD}/slurm/env.sh"
+[[ -f "$_ENV_SH" ]] && source "$_ENV_SH"
+
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1

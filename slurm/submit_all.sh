@@ -18,6 +18,18 @@ N_DFC="${3:-8}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p slurm_logs
 
+# Per-user settings: interpreter, binds, cache paths, SLURM account. Optional
+# and gitignored; see slurm/env.sh.example. sbatch exports the submitting
+# shell's environment, so sourcing it once here also reaches every array task.
+[[ -f "$HERE/env.sh" ]] && source "$HERE/env.sh"
+
+# The `#SBATCH --account=` line in each script names the account this pipeline
+# was written on. A different user needs a different one, and the command line
+# is the only thing that beats a script directive -- SBATCH_ACCOUNT in the
+# environment does not.
+ACCOUNT_ARG=()
+[[ -n "${FMRIDECOMP_ACCOUNT:-}" ]] && ACCOUNT_ARG=(--account="$FMRIDECOMP_ACCOUNT")
+
 # ------------------------------------------------------------ interpreter ---
 # This script runs on a LOGIN node, but `validate` imports fmri_decomposition,
 # which the login node's bare `python` cannot do. Pick the interpreter exactly
@@ -49,12 +61,12 @@ if ! "${RUN[@]}" -c 'import fmri_decomposition.cohort' >/dev/null 2>&1; then
   echo "ERROR: cannot import fmri_decomposition (and its dependencies) with:" >&2
   echo "       ${RUN[*]}" >&2
   echo >&2
-  echo "       Point the script at your environment and re-run:" >&2
-  echo "         export FMRIDECOMP_SIF=/path/to/fmri_decomp.sif   # container, or" >&2
-  echo "         export FMRIDECOMP_VENV=\$HOME/venvs/fmridecomp      # venv" >&2
+  echo "       First time on this cluster? Copy the settings file and edit it:" >&2
+  echo "         cp slurm/env.sh.example slurm/env.sh" >&2
   echo >&2
-  echo "       The same variable is read by slurm/01_extract.sbatch, so setting" >&2
-  echo "       it once covers the pre-flight check and every array task." >&2
+  echo "       It wants ONE of FMRIDECOMP_SIF (container) or FMRIDECOMP_VENV" >&2
+  echo "       (venv). Every script in slurm/ reads it, so setting it once" >&2
+  echo "       covers this pre-flight check and every array task." >&2
   exit 1
 fi
 
@@ -111,22 +123,22 @@ if [[ -n "$N_RUNS" && -n "$N_ATLAS" && "$N_ATLAS" -gt 0 ]]; then
 fi
 
 echo "== stage 2: ${N_EXTRACT} array task(s)"
-EXTRACT_ID=$(sbatch --parsable --array=0-$((N_EXTRACT - 1)) \
+EXTRACT_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --array=0-$((N_EXTRACT - 1)) \
   "$HERE/01_extract.sbatch" "$CONFIG" ${EXTRA_EXTRACT[@]+"${EXTRA_EXTRACT[@]}"})
 echo "   jobid ${EXTRACT_ID}"
 
 echo "== finalize stage 2 (manifest merge + diagnostics + ISC gate)"
-FINAL2_ID=$(sbatch --parsable --dependency=afterok:"${EXTRACT_ID}" \
+FINAL2_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --dependency=afterok:"${EXTRACT_ID}" \
   "$HERE/03_finalize.sbatch" "$CONFIG" activation)
 echo "   jobid ${FINAL2_ID}"
 
 echo "== stage 3: ${N_DFC} array task(s), gated on the diagnostics passing"
-DFC_ID=$(sbatch --parsable --dependency=afterok:"${FINAL2_ID}" \
+DFC_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --dependency=afterok:"${FINAL2_ID}" \
   --array=0-$((N_DFC - 1)) "$HERE/02_dfc.sbatch" "$CONFIG")
 echo "   jobid ${DFC_ID}"
 
 echo "== finalize stage 3"
-FINAL3_ID=$(sbatch --parsable --dependency=afterok:"${DFC_ID}" \
+FINAL3_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --dependency=afterok:"${DFC_ID}" \
   "$HERE/03_finalize.sbatch" "$CONFIG" dfc)
 echo "   jobid ${FINAL3_ID}"
 

@@ -314,21 +314,34 @@ subjects contribute different frame counts to the same window.
 
 ## SLURM
 
+First time on a cluster, once:
+
 ```bash
-mkdir -p slurm_logs
-export FMRIDECOMP_SIF=/path/to/fmri_decomp.sif   # or FMRIDECOMP_VENV=...
+cp slurm/env.sh.example slurm/env.sh   # then edit it
+```
+
+`slurm/env.sh` is gitignored and holds the things that are true of *your*
+account rather than of the project: which interpreter to use
+(`FMRIDECOMP_SIF` for a container, `FMRIDECOMP_VENV` for a venv), the SLURM
+account to bill, and where the atlas cache lives. Every script in `slurm/`
+sources it, so submitting by hand behaves the same as the driver. Anything
+already exported in your shell wins over the file.
+
+Then:
+
+```bash
 ./slurm/submit_all.sh config/ds002837.yaml 20 8
 ```
 
 That chains: extract array (20 tasks) → finalize + ISC gate → dfc array
-(8 tasks) → merge manifests, with `afterok` between each.
+(8 tasks) → merge manifests, with `afterok` between each. It creates
+`slurm_logs/` itself.
 
-`FMRIDECOMP_SIF` (container) or `FMRIDECOMP_VENV` (venv) is not optional on a
-cluster whose login node has no importable `fmri_decomposition`: the same
-variable picks the interpreter for the pre-flight `validate` and for every
-array task. `submit_all.sh` refuses to submit anything if it cannot import the
-package, rather than treating the ImportError as a config problem. Or submit by
-hand:
+An interpreter is not optional: a login node's bare `python` cannot import
+`fmri_decomposition`, and neither can a compute node's. `submit_all.sh` checks
+before submitting anything and refuses rather than treating the ImportError as
+a config problem — otherwise the pre-flight `validate` is skipped silently and
+the whole chain runs unvalidated. Or submit by hand:
 
 ```bash
 sbatch --array=0-19 slurm/01_extract.sbatch config/ds002837.yaml
