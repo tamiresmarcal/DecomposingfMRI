@@ -43,10 +43,20 @@
 # the container (datalad is not in the image). An unfetched file is a dangling
 # annex symlink, which check_cohort.py names explicitly.
 #
-# include_tasks is one episode, for a pilot. Verified against the real data
-# (2026-08): both sub-01 and sub-02 have s01e02a under ses-001, the TR check
-# genuinely confirms 1.49s from the headers, and leaves land as
+# SCOPE: all of Friends season 1, six subjects. 24 episodes x 2 halves = 48
+# runs per subject, 288 in total, filtered by `task-s01e*` in bold_glob.
+# The pilot that established the layout was one episode (s01e02a): verified
+# 2026-08 that both sub-01 and sub-02 have it under ses-001, that the TR check
+# confirms 1.49 s from the headers, and that leaves land as
 # task=s01e02a/sub=01/ses-001.parquet.
+#
+# ON DISK AS OF 2026-09: 240 of 288. sub-04's 48 runs are tracked but their
+# content was never fetched -- `datalad get` fails on them with "S3 bucket does
+# not allow public access", i.e. missing AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY,
+# not a corrupt or absent file. They are dangling annex symlinks, which DO
+# match bold_glob, so sub-04 must be excluded=True in participants.csv until
+# the fetch completes. Re-running extract afterwards adds it: leaves are
+# skip-if-exists, so nothing already computed is redone.
 #
 # output_root is deliberately the SAME as every other cohort's: the `cohort=`
 # key separates them inside one tree, which is what makes "one atlas, one
@@ -64,10 +74,23 @@ atlases: [harvardoxford, yeo7, networks]
 discovery:
   backend: glob
   # ses-* is a real directory level here, unlike ds002837.
-  bold_glob: "sub-*/ses-*/func/sub-*_task-*_space-MNI152NLin2009cAsym_desc-preproc_bold.nii.gz"
+  # task-s01e* is the SEASON FILTER, and it lives here rather than in
+  # include_tasks because include_tasks is an exact-string match: season 1 is
+  # 24 episodes x 2 halves, so naming it there means 48 literals to keep in
+  # sync with an incrementally released dataset. The glob says the same thing
+  # in one token and stays true when season 2 lands on disk.
+  bold_glob: "sub-*/ses-*/func/sub-*_task-s01e*_space-MNI152NLin2009cAsym_desc-preproc_bold.nii.gz"
   mask_glob: "sub-{sub}_*task-{task}_*space-MNI152NLin2009cAsym_desc-brain_mask.nii.gz"
-  # Start small. Broaden once a pilot runs clean.
-  include_tasks: [s01e02a]
+  # Empty on purpose: the season filter is in bold_glob above, and a second
+  # filter here would only be a place for the two to disagree. The pilot ran
+  # on include_tasks: [s01e02a]; that is what this replaced.
+  #
+  # NOT a licence to point bold_glob at everything. Discovery globs FILENAMES
+  # and never checks that the file exists -- a datalad/git-annex symlink whose
+  # content was never fetched matches the glob, is discovered as a real run,
+  # and fails at load time deep inside a compute job. Whatever is not on disk
+  # belongs in participants.csv as excluded=True, with a reason.
+  include_tasks: []
 
 confounds:
   format: fmriprep_tsv
