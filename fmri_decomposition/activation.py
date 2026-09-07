@@ -135,7 +135,8 @@ def build_activation_table(ref: RunRef, atlas: AtlasSpec, cfg: CohortConfig,
         "good_frame": pa.array(good, type=pa.bool_()),
         "run_idx": pa.array(axis.run_idx, type=pa.int8()),
         # cohort / atlas / task / sub are partition keys, carried by the path.
-        # ses / run / acq live in the filename, so they stay as columns.
+        # ses / run / acq are carried NOWHERE ELSE -- every leaf is named
+        # data.parquet -- so these columns are their only record.
         "ses": pa.array([ref.ses] * n_tr, type=pa.string()),
         "run": pa.array([ref.run] * n_tr, type=pa.string()),
         "acq": pa.array([ref.acq] * n_tr, type=pa.string()),
