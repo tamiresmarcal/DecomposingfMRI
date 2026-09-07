@@ -72,10 +72,20 @@
 # cognitive battery in cc700-scored/, which is normal-range performance rather
 # than clinical status, and which ccfrail subjects did not take.
 #
-# NOT YET VERIFIED ON DISK: the 42/51 split, and which variable carries MMSE
-# and group in release002. This cohort has 55 subjects with a movie run, so it
-# is a subset of the 93 -- check the release002 phenotype files and record the
-# split before any group analysis.
+# NOT YET VERIFIED ON DISK: which release002 variable carries MMSE and the
+# case/control label. The two numbers come from different places and do not
+# meet:
+#
+#     93   the CCfrail sample as recruited      42 cases + 51 controls
+#     55   have a Movie run in release002       raw headers, this repo
+#     54   analysable                           one fmriprep failure excluded
+#
+# So 38 of the 93 have no movie run here, and NOTHING ON DISK SAYS WHICH ARM
+# THE 55 BELONG TO. Even split across arms would give ~25 cases and ~30
+# controls (42/93 x 55), but that is an assumption, not a fact -- read the
+# group variable out of the release002 phenotype files and record the real
+# split before any group analysis. Until then `cohort=camcan_ccfrail` is an
+# unlabelled mixture of both arms, not a patient group.
 #
 # So the frail/older cohort has the cleaner timeseries and the worse coverage
 # of the hardest regions. Do not assume "same study, same data quality".
