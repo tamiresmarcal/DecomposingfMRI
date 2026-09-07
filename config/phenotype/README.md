@@ -67,6 +67,16 @@ demographics in `cc700/participants.tsv`, and the ccfrail frailty assessment in
 that study's own release002 phenotype files. They cover the whole archive, so
 pass `--restrict-to-participants` to keep only the subjects this cohort has.
 
+**What `camcan_ccfrail` actually is.** Per the Cam-CAN longitudinal protocol
+(Phase 4/5), Phase 2-Arm 2 — "CCfrail", 2016–18 — is 42 participants who scored
+**below the MMSE cut-off of 24** but had not reported cognitive problems to
+their GP, plus 51 age- and sex-matched controls who passed it. "Frail" is a
+cognitive screening label, not a physical frailty phenotype: there is no
+frailty index, gait speed or grip strength to merge. What to import is **MMSE
+and the case/control group**, and the cohort is *both* arms — so the clean
+clinical contrast is within ccfrail, not ccfrail against CC700. See the header
+of `config/camcan_ccfrail_movie.yaml`.
+
 **`cc700-scored/` is not demographics and not ccfrail's.** It holds the
 behavioural battery — ten tests (CardioMeasures, Cattell, EkmanEmHex,
 EmotionalMemory, EmotionRegulation, FamousFaces, MotorLearning, Proverbs,
@@ -86,18 +96,22 @@ guess a numeric coding — read the source's data dictionary and state it:
 python tools/make_phenotype.py --cohort camcan_ccfrail \
     --source /path/to/ccfrail_phenotype.tsv \
     --sub-column CCID --age-column Age --sex-column Sex \
-    --sex-map "1=M,2=F" --keep frailty_index \
+    --sex-map "1=M,2=F" --keep MMSE,group \
     --restrict-to-participants
 ```
+
+(`--keep` takes whatever the release002 files actually call the MMSE score and
+the case/control label — check them rather than assuming these names.)
 
 Scores split across several tables are joined one at a time with `--merge`.
 
 ## Before comparing `camcan` with `camcan_ccfrail`
 
-`camcan_ccfrail` is the cohort with a frailty assessment, and CC700 is the
-obvious healthy comparison — but the two differ in acquisition, not only in
-frailty (and note that the *behavioural* battery runs the other way: it exists
-for CC700 and not for ccfrail):
+`camcan_ccfrail` is the cohort with impaired participants in it, and CC700 is
+the obvious healthy comparison — but ccfrail already contains its own matched
+controls, and the two cohorts differ in acquisition as well as in cognition
+(the behavioural battery runs the other way again: it exists for CC700 and not
+for ccfrail):
 
 |  | `camcan` (CC700) | `camcan_ccfrail` |
 |---|---|---|
@@ -108,6 +122,10 @@ A window of fixed duration holds ~2.2× more samples in ccfrail, so its edges
 are measurably less noisy — in the direction that makes the **frail** group
 look **less variable**. `n_tr_effective` is the column that lets a model
 account for it (Fisher-z sampling SD is `1/sqrt(n-3)`), and censoring makes it
-worse rather than better: motion is high in ccfrail, so the frailest
+worse rather than better: motion is high in ccfrail, so the most impaired
 participants lose the most frames. `config/camcan_ccfrail_movie.yaml` has the
 full comparison in its header comments; read it before running the contrast.
+
+The within-ccfrail contrast (MMSE < 24 vs matched controls) avoids all of this
+— same TR, same echoes, same protocol, matched on age and sex — which is why it
+is the one to build first.

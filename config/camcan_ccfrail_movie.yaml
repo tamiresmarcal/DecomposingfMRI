@@ -3,8 +3,7 @@
 #
 # A SEPARATE COHORT FROM CC700, NOT MORE SUBJECTS FOR IT
 # ------------------------------------------------------
-# ccfrail is Cam-CAN's frailty study: older adults recruited and assessed for
-# frailty, where CC700 is a population-based sample screened to be healthy. It
+# ccfrail is Cam-CAN's Phase 2-Arm 2 sample, where CC700 is Phase 2-Arm 1. It
 # ships as release002 rather than release004, and the acquisition is NOT the
 # same protocol. Confirmed from a sidecar and the raw headers (2026-09):
 #
@@ -35,6 +34,48 @@
 #                   Orbitofrontal and anterior temporal parcels are therefore
 #                   WORSE here than in CC700, not better. And 649 subjects
 #                   against 55.
+#
+# WHAT "FRAIL" MEANS HERE -- IT IS COGNITIVE, NOT PHYSICAL
+# --------------------------------------------------------
+# Read before treating this cohort as a clinical group. Per the Cam-CAN
+# longitudinal protocol (Phase 4/5 paper, 2025-26), Phase 2-Arm 2 -- "CCfrail",
+# run 2016-18 -- is:
+#
+#   42 participants who scored BELOW the MMSE cut-off of 24 for dementia but
+#      had not reported cognitive problems to their GP  (undetected impairment)
+#   51 age- and sex-matched controls who passed the MMSE cut-off
+#
+# (Memory-clinic MCI patients were scanned on the same protocol but are NOT
+# part of Cam-CAN and are not in this release.)
+#
+# Three consequences:
+#
+#   1. "frail" is a screening label about MMSE, not a physical frailty
+#      phenotype. There is no frailty index, gait speed or grip strength here
+#      to merge; the phenotype that matters is MMSE and case/control group.
+#
+#   2. THIS COHORT IS NOT A SINGLE GROUP. Roughly 42 cases to 51 controls, so
+#      pooling all of ccfrail and comparing it against CC700 averages a case
+#      group with its own control group -- and does so across a TR and echo
+#      difference (below), which moves edge noise the same way the hypothesis
+#      does.
+#
+#   3. THE CLEAN CONTRAST IS WITHIN ccfrail: MMSE < 24 against the matched
+#      controls. Same TR, same echoes, same protocol, matched on age and sex,
+#      so the acquisition confound cancels instead of having to be modelled.
+#      CC700 is then a lifespan reference sample, not the control arm.
+#
+# CC700 by contrast is screened healthy: MMSE > 24, no dementia history, no
+# referral for dementia assessment, no memory complaints, no neurological
+# disorder, native English, normal or corrected vision and hearing, MRI-safe
+# (Shafto et al. 2014). It has NO clinical group -- its rich phenotype is the
+# cognitive battery in cc700-scored/, which is normal-range performance rather
+# than clinical status, and which ccfrail subjects did not take.
+#
+# NOT YET VERIFIED ON DISK: the 42/51 split, and which variable carries MMSE
+# and group in release002. This cohort has 55 subjects with a movie run, so it
+# is a subset of the 93 -- check the release002 phenotype files and record the
+# split before any group analysis.
 #
 # So the frail/older cohort has the cleaner timeseries and the worse coverage
 # of the hardest regions. Do not assume "same study, same data quality".

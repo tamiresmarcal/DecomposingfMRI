@@ -462,7 +462,7 @@ def load_participants_qc(cohort: str, root=None) -> pd.DataFrame:
     return pd.read_csv(path, dtype={"sub": str})
 
 
-def load_participants_scores(cohort: str, root=None,
+def load_participants_scores(cohort: str, root=None, tests: list[str] | None = None,
                              quiet: bool = False) -> pd.DataFrame | None:
     """`meta/cohorts/cohort=<c>/participants_scores.csv`, or None with a reason.
 
@@ -477,12 +477,29 @@ def load_participants_scores(cohort: str, root=None,
     Only `camcan` (CC700) has one: the scored battery is CC700's, and none of
     its subjects are in `camcan_ccfrail`. Returns None elsewhere, and reads
     parquet if that is what was written.
+
+    The full battery is ~290 measures across ten tests, wider than anything you
+    want joined onto a subject frame by accident. `tests=["TOT", "Cattell"]`
+    keeps those blocks and drops the rest; `sub` and `n_tests_with_data` always
+    survive.
     """
     d = cohort_meta_dir(output_root(root), cohort)
     for path in (d / "participants_scores.csv", d / "participants_scores.parquet"):
         if path.exists():
-            return (pd.read_parquet(path) if path.suffix == ".parquet"
-                    else pd.read_csv(path, dtype={"sub": str}))
+            df = (pd.read_parquet(path) if path.suffix == ".parquet"
+                  else pd.read_csv(path, dtype={"sub": str}))
+            if tests is None:
+                return df
+            present = sorted({c.split("_")[0] for c in df.columns
+                              if c not in ("sub", "n_tests_with_data")})
+            unknown = [t for t in tests if t not in present]
+            if unknown and not quiet:
+                print(f"no columns for test(s) {unknown} in {path.name}; "
+                      f"present: {present}")
+            keep = ["sub"] + [c for c in ("n_tests_with_data",) if c in df.columns]
+            keep += [c for c in df.columns
+                     if any(c.startswith(f"{t}_") for t in tests)]
+            return df[keep]
     if not quiet:
         print(f"no behavioural scores for cohort={cohort!r} at "
               f"{d / 'participants_scores.csv'}\n"
@@ -511,15 +528,19 @@ def load_phenotype(cohort: str, quiet: bool = False) -> pd.DataFrame | None:
     return pd.read_csv(path, dtype={"sub": str})
 
 
-def subject_table(cohort: str, root=None, with_qc: bool = True) -> pd.DataFrame:
+def subject_table(cohort: str, root=None, with_qc: bool = True,
+                  with_scores: bool = True,
+                  tests: list[str] | None = None) -> pd.DataFrame:
     """participants + participants_qc + scores + phenotype, joined on (sub, task) / sub.
 
     Columns that came from the phenotype are prefixed `pheno_` where they would
     collide, so it is always visible which file a value came from. `has_pheno`
     marks the rows the join actually found a person for -- a partial phenotype
-    is normal (Cam-CAN's frailty tables do not cover every CC700 subject) and
+    is normal (a source table rarely covers every subject who was scanned) and
     should be visible rather than inferred from NaNs. `has_scores` does the
-    same for the behavioural battery, which exists for `camcan` only.
+    same for the behavioural battery, which exists for `camcan` only -- and
+    that battery is ~290 columns wide, so pass `with_scores=False` to leave it
+    out, or `tests=[...]` to take only the blocks you need.
     """
     out = load_participants(cohort)
     if with_qc:
@@ -530,7 +551,8 @@ def subject_table(cohort: str, root=None, with_qc: bool = True) -> pd.DataFrame:
                             how="left", suffixes=("", "_qc"))
         except FileNotFoundError as exc:
             print(f"QC not joined: {exc}")
-    scores = load_participants_scores(cohort, root, quiet=True)
+    scores = (load_participants_scores(cohort, root, tests=tests, quiet=True)
+              if with_scores else None)
     if scores is not None:
         out = out.merge(scores.assign(has_scores=True), on="sub", how="left")
         out["has_scores"] = out["has_scores"].fillna(False)

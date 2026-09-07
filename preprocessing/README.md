@@ -61,9 +61,9 @@ Two facts worth knowing before using it:
 
 - **The battery is CC700's, not ccfrail's.** Of the 648 subjects in
   `camcan_movie_participants.csv`, 617 have a TOT score; of the 55 in
-  `camcan_ccfrail_movie_participants.csv`, **none** do. If a `camcan_ccfrail`
-  analysis needs frailty measures, they come from that study's own phenotype
-  files in release002, not from `cc700-scored/`.
+  `camcan_ccfrail_movie_participants.csv`, **none** do. ccfrail's own
+  phenotype — MMSE and case/control group, per the Cam-CAN Phase 4/5 protocol —
+  is in that study's release002 files, not in `cc700-scored/`.
 - **A blank row is an exclusion, not an absence.** Each test's own QC blanks
   the scores and states a reason in `ErrorMessages` (TOT: "replied dont know on
   > 80% trials", 12 subjects). The row is kept and the reason travels with it as
