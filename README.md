@@ -123,6 +123,13 @@ d  = open_dataset(dfc_root(out, "harvardoxford", 30), stage="dfc")  # all cohort
 df = read_shard(path)      # one leaf, partition keys restored as columns
 ```
 
+One caveat that is quiet rather than loud: a key is recovered from the path
+*relative to the dataset root*, so a key at or above the root comes back as a
+column of **nulls** — `open_dataset(dfc_root(out, "harvardoxford", 30))` has no
+`atlas` and no `window_s`, and a filter on either matches zero rows without
+raising. Narrow with a filter, not with a deeper root, or backfill the keys the
+root swallowed (`notebooks/nbtools.py` does the latter).
+
 Every file also carries `cohort`, `task`, `sub`, `atlas` in its parquet
 key-value metadata, so a shard opened by hand is still self-identifying.
 
@@ -161,6 +168,12 @@ df = d.to_table(filter=(ds.field("cohort") == "ds002837")).to_pandas()
 # Columnar: selecting QC columns physically reads three columns, not the file.
 qc = d.to_table(columns=["window_id", "n_tr_effective", "frac_good_frames"]).to_pandas()
 ```
+
+`notebooks/` opens both stages this way: `01_activation.ipynb` for stage 2,
+`02_dfc.ipynb` for stage 3, sharing the loaders in `notebooks/nbtools.py`
+(inventory, partition-pruned reads, footer-based size estimates, and the
+participants / QC / phenotype join). `notebooks/README.md` has the container
+recipe and the memory arithmetic.
 
 ### The window grid is atlas-conditional
 
