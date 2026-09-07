@@ -46,14 +46,14 @@ outputs/
 ├── activation/                                   STAGE 2 — one file per run per atlas
 │   └── atlas=harvardoxford/
 │       ├── cohort=ds002837/task=500daysofsummer/sub=1/data.parquet
-│       ├── cohort=cneuromod/task=s01e01a/sub=01/ses-003.parquet
+│       ├── cohort=cneuromod/task=s01e01a/sub=01/data.parquet
 │       └── cohort=hcp7t/task=MOVIE2/sub=100610/data.parquet
 │
 ├── dfc/                                          STAGE 3 — window_s between atlas and cohort
 │   └── atlas=harvardoxford/
 │       ├── window_s=30/cohort=ds002837/task=500daysofsummer/sub=1/data.parquet
 │       ├── window_s=60/cohort=ds002837/task=500daysofsummer/sub=1/data.parquet
-│       └── window_s=120/cohort=cneuromod/task=s01e01a/sub=01/ses-003.parquet
+│       └── window_s=120/cohort=cneuromod/task=s01e01a/sub=01/data.parquet
 │
 ├── latents/                                      STAGE 4 — reserved, adds model=
 │   └── atlas=.../window_s=.../model=pca50/cohort=.../task=.../sub=.../
@@ -88,8 +88,17 @@ per atlas per window size; the alternative would make the path shape
 cohort-dependent, which is the same class of problem as a per-cohort `run=`
 level.
 
-**Directory depth is constant.** Leftover entities go in the *filename*, never a
-directory: `sub=01/ses-003_run-01.parquet`.
+**Directory depth is constant, and so is the leaf name.** Every leaf is
+`data.parquet`, in every cohort — a reader never has to know which cohort it is
+looking at to guess the filename. `ses`, `run`, `acq` and `run_key` are
+*columns* in the table, so the name would only have been a partial second copy.
+
+The cost: two runs of the same `(cohort, atlas, task, sub)` — one subject, one
+task, two sessions — now land on the same leaf, and the second would overwrite
+the first. `fmri-decomp validate` refuses to pass such a cohort, so it cannot
+reach a compute node. If it fires, the answer is not to put the entity back in
+the filename; it is that `(task, sub)` is not the unit of analysis for that
+cohort and the config has to say so.
 
 Because a cohort no longer owns a subtree of the data, its provenance lives in
 `meta/cohorts/cohort=X/`, keyed the same hive way so the same walk finds it.
@@ -314,13 +323,34 @@ subjects contribute different frame counts to the same window.
 
 ## SLURM
 
+First time on a cluster, once:
+
 ```bash
-mkdir -p slurm_logs
+cp slurm/env.sh.example slurm/env.sh   # then edit it
+```
+
+`slurm/env.sh` is gitignored and holds the things that are true of *your*
+account rather than of the project: which interpreter to use
+(`FMRIDECOMP_SIF` for a container, `FMRIDECOMP_VENV` for a venv), the SLURM
+account to bill, and where the atlas cache lives. Every script in `slurm/`
+sources it, so submitting by hand behaves the same as the driver. Anything
+already exported in your shell wins over the file.
+
+Then:
+
+```bash
 ./slurm/submit_all.sh config/ds002837.yaml 20 8
 ```
 
 That chains: extract array (20 tasks) → finalize + ISC gate → dfc array
-(8 tasks) → merge manifests, with `afterok` between each. Or submit by hand:
+(8 tasks) → merge manifests, with `afterok` between each. It creates
+`slurm_logs/` itself.
+
+An interpreter is not optional: a login node's bare `python` cannot import
+`fmri_decomposition`, and neither can a compute node's. `submit_all.sh` checks
+before submitting anything and refuses rather than treating the ImportError as
+a config problem — otherwise the pre-flight `validate` is skipped silently and
+the whole chain runs unvalidated. Or submit by hand:
 
 ```bash
 sbatch --array=0-19 slurm/01_extract.sbatch config/ds002837.yaml

@@ -31,6 +31,14 @@ set -euo pipefail
 CONFIG="${1:?usage: sbatch 03_finalize.sbatch <config.yaml> <activation|dfc>}"
 STAGE="${2:?stage must be 'activation' or 'dfc'}"
 
+# Per-user settings: interpreter, binds, cache paths. Optional and gitignored;
+# see slurm/env.sh.example. SLURM copies this script to a spool directory on
+# the compute node, so $BASH_SOURCE points there, not at the repo -- the
+# submit directory is what finds it. Sourced here as well as in submit_all.sh
+# so a hand-submitted sbatch behaves identically.
+_ENV_SH="${SLURM_SUBMIT_DIR:-$PWD}/slurm/env.sh"
+[[ -f "$_ENV_SH" ]] && source "$_ENV_SH"
+
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 # Compute nodes have no outbound network, so the atlases MUST already be
 # cached or every task dies on a fetch timeout. Prefer an existing cache over

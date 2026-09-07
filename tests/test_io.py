@@ -71,12 +71,34 @@ class TestPaths:
         no_ses = activation_path("/out", "c", "a", "t", "1")
         with_ses = activation_path("/out", "c", "a", "t", "01", ses="003", run="01")
         assert len(no_ses.parts) == len(with_ses.parts)
-        assert with_ses.name == "ses-003_run-01.parquet"
 
     def test_leaf_filename_is_deterministic_not_part_0(self):
         assert leaf_filename() == "data.parquet"
-        assert leaf_filename(ses="1") == "ses-1.parquet"
-        assert leaf_filename(ses="1", run="2", acq="x") == "ses-1_run-2_acq-x.parquet"
+
+    def test_leaf_filename_is_the_same_in_every_cohort(self):
+        """One name, whatever entities the source file carried.
+
+        It used to be `ses-002.parquet` for CNeuroMod and `data.parquet` for
+        ds002837 and Cam-CAN, so a reader had to know the cohort to guess the
+        filename. ses/run/acq are columns in the table already; the name was a
+        partial second copy.
+        """
+        assert leaf_filename(ses="1") == "data.parquet"
+        assert leaf_filename(ses="1", run="2", acq="x") == "data.parquet"
+        assert (activation_path("/out", "c", "a", "t", "01", ses="003", run="01").name
+                == activation_path("/out", "c", "a", "t", "01").name)
+
+    def test_entities_no_longer_disambiguate_the_path(self):
+        """The cost of the constant name, stated as a test.
+
+        Two runs differing ONLY in ses/run/acq now collide. That is why
+        cli.cmd_validate refuses to pass a cohort whose runs collide -- see
+        tests/test_cli.py. If this assertion ever flips back, that guard can
+        be relaxed again.
+        """
+        a = activation_path("/out", "c", "at", "t", "01", ses="001")
+        b = activation_path("/out", "c", "at", "t", "01", ses="002")
+        assert a == b
 
     def test_key_values_are_filesystem_safe(self):
         p = activation_path("/out", "c", "a", "task/with slash", "CC110033")

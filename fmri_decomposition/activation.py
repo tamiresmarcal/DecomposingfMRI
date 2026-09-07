@@ -243,12 +243,19 @@ def _fd_censor(ref: RunRef, cfg: CohortConfig, n_tr: int) -> np.ndarray:
 
 
 def _trim_mask(ref: RunRef, cfg: CohortConfig, axis: TimeAxis, n_tr: int):
-    """Apply the configured trim. Fails loudly rather than truncating silently."""
+    """Apply the configured trim. Fails loudly rather than truncating silently.
+
+    `ref.trim_end_s` is ALWAYS seconds by the time it arrives here: the unit
+    conversion happens once, in cohort.attach_participants, which multiplies by
+    cfg.tr when trim.unit is 'tr'. This used to convert a second time, so
+    `unit: tr` asked for n_tr * tr volumes -- 702 instead of 471 on cneuromod.
+    It raised rather than truncating silently (the n_needed > n_tr guard below
+    is what caught it), but the option was unusable. One conversion, at the
+    boundary where the config unit is known.
+    """
     if ref.trim_end_s is None or cfg.trim.column is None:
         return None
     end_s = float(ref.trim_end_s)
-    if cfg.trim.unit == "tr":
-        end_s *= cfg.tr
     n_needed = int(round(end_s / cfg.tr))
     if n_needed > n_tr:
         raise ValueError(

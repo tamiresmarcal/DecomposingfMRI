@@ -37,11 +37,35 @@ def leaf_filename(ses: str | None = None, run: str | None = None,
                   acq: str | None = None, suffix: str = ".parquet") -> str:
     """Deterministic leaf name so skip_if_exists can just stat() it.
 
+    ALWAYS `data.parquet`, in every cohort. The arguments are kept because the
+    call sites pass them and because they are what `validate` hashes to prove
+    the name is safe -- see below -- but they no longer appear in the name.
+
+    This used to embed whichever of ses/run/acq the source file carried, so
+    ds002837 and Cam-CAN got `data.parquet` while CNeuroMod got
+    `ses-002.parquet`. Two conventions in one tree, for no gain: ses, run, acq
+    and run_key are already COLUMNS in the table (activation.py:139-142, and
+    dfc.py carries them forward), so the filename was a second, partial copy
+    of information the data already holds.
+
     Deliberately not the Spark `part-0` convention: that exists for when one
     logical partition spans several physical files, which never happens here.
+
+    WHAT THIS GIVES UP, and where it is paid back. The entities in the name
+    were also what made two runs of the same (cohort, atlas, task, sub) land
+    on different paths. A cohort where one subject saw one task twice -- two
+    sessions, two runs -- would now have both write to the same leaf, and the
+    second would silently overwrite the first. So `validate` now fails on any
+    such collision BEFORE anything is submitted (cli.py, cmd_validate). That
+    check was previously only in tools/check_cohort.py, which submit_all.sh
+    does not run; making the name constant is what forces it onto the path
+    everyone actually takes.
+
+    If a cohort does collide, the fix is NOT to put the entity back in the
+    name: it is that (cohort, atlas, task, sub) is not the unit of analysis
+    for that cohort, and the config needs to say so.
     """
-    bits = [f"{k}-{_key(v)}" for k, v in (("ses", ses), ("run", run), ("acq", acq)) if v]
-    return ("_".join(bits) if bits else "data") + suffix
+    return "data" + suffix
 
 
 def activation_root(output_root: str | Path, atlas: str,

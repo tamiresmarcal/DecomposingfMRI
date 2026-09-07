@@ -104,11 +104,49 @@ def _attach_motion(cfg, refs):
 
 
 # ------------------------------------------------------------- commands ---
+def _path_collisions(cfg, refs) -> list[str]:
+    """Two runs that would write the same leaf, i.e. one silently overwriting
+    the other.
+
+    Load-bearing since leaf_filename became a constant `data.parquet`: the
+    ses/run/acq entities used to make these paths differ by construction, and
+    now nothing does. The same check exists in tools/check_cohort.py, but
+    slurm/submit_all.sh runs `validate`, not that -- so it has to be here too
+    or the submit path has no guard at all.
+
+    Only the activation path is tested. dfc_path adds `window_s=` above the
+    same task/sub/leaf tail, so it collides exactly when activation does.
+    """
+    from collections import defaultdict
+
+    from .io import activation_path
+
+    owners: dict[str, list[str]] = defaultdict(list)
+    for ref in refs:
+        p = activation_path(cfg.output_root, ref.cohort, cfg.atlases[0],
+                            ref.task, ref.sub, ref.ses, ref.run, ref.acq)
+        owners[str(p)].append(Path(ref.bold).name)
+
+    out = []
+    for path, srcs in owners.items():
+        if len(srcs) > 1:
+            out.append(
+                f"{len(srcs)} runs would write the same leaf {path}: "
+                + ", ".join(sorted(srcs)[:4])
+                + (" ..." if len(srcs) > 4 else "")
+                + " -- they differ by an entity that is not part of the output "
+                  "path, so one would overwrite the other"
+            )
+    return out
+
+
 def cmd_validate(args) -> int:
     cfg = _load(args.config)
     refs, problems = _refs(cfg, strict=False)
     print(f"cohort={cfg.cohort} tr={cfg.tr} runs_discovered={len(refs)}")
     print(f"atlases={cfg.atlases} config_hash={cfg.hash()}")
+    if refs and cfg.atlases:
+        problems = list(problems) + _path_collisions(cfg, refs)
     if problems:
         print(f"\n{len(problems)} problem(s):")
         for p in problems:

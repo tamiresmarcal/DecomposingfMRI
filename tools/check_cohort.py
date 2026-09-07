@@ -110,9 +110,12 @@ def check_paths(cfg, refs, atlas_names) -> bool:
             print(f"    {p}")
             for s in srcs:
                 print(f"      <- {s}")
-        print("  Fix: the colliding runs differ by an entity that discovery is not "
-              "capturing (ses/run/acq). They belong in the FILENAME, via the "
-              "discovery patterns -- never as a new directory level.")
+        print("  Fix: the colliding runs differ by an entity the output path does "
+              "not carry (ses/run/acq). Since every leaf is now `data.parquet`, "
+              "no entity disambiguates them -- so this means (task, sub) is not "
+              "the unit of analysis for this cohort, and the config has to say "
+              "so. Do NOT reintroduce a per-cohort directory level; that makes "
+              "the path shape cohort-dependent and breaks discovery for all.")
         return False
     print(f"[{OK}] no collisions -- every worker owns exactly one leaf")
 
