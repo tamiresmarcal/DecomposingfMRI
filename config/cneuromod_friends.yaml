@@ -118,19 +118,109 @@ trim:
   column: null
 
 stimulus:
-  # Empty for the same reason as ds002837: episode segments differ in length,
-  # and dfc.py falls back to each file's observed duration. Expect one
-  # validation warning per task, and pass --no-strict to extract.
-  durations_s: {}
+  # MEASURED FROM THE IMAGES, 2026-09: volume count x TR 1.49, per episode
+  # segment, taking the MINIMUM across the five subjects who have it.
+  #
+  # This started empty, on the assumption that segments varied per subject the
+  # way ds002837's films do. They do not. Reading all 240 headers showed the
+  # acquisition is scripted: 47 of the 48 segments have an IDENTICAL volume
+  # count across every subject, and the 48th (s01e12a) differs by one volume
+  # in one subject -- 1.49 s. So a declared duration is both possible and
+  # better here than the observed-duration fallback.
+  #
+  # WHY IT MATTERS, precisely. It is not about alignment: make_stimulus_grid
+  # builds Window(k, k*stride, k*stride + window_s) from zero regardless, so
+  # window k already covers the same seconds-since-run-start for everyone. The
+  # duration sets k_max, i.e. HOW MANY windows. Leaving it empty meant the one
+  # subject with 472 volumes on s01e12a could earn a window the other four
+  # never get, making that episode's subject x window matrix ragged for no
+  # reason. Taking the minimum makes the grid identical -- same boundaries AND
+  # same count -- which is what a cross-subject contrast needs.
+  #
+  # MINIMUM, not maximum: the grid must never extend past the shortest
+  # subject's data. The cost is 1.49 s discarded from one subject on one
+  # episode; the alternative is a window that is partly empty for four.
+  #
+  # Note a and b are the same length in EVERY episode -- the halves are equal
+  # by design, not cut at a narrative point. Episode lengths themselves vary
+  # widely (460 vols / 685 s for e19-e20, up to 592 / 882 s for e01), which is
+  # why this is per-task and not one cohort-wide number.
+  #
+  # Re-measure with:
+  #   apptainer exec --bind /project $FMRIDECOMP_SIF python -c "
+  #   import nibabel as nib, glob, os, re
+  #   rows={}
+  #   for f in sorted(glob.glob('sub-*/ses-*/func/*_task-s01e*_space-MNI152NLin2009cAsym_desc-preproc_bold.nii.gz')):
+  #       if not os.path.exists(f): continue
+  #       rows.setdefault(re.search(r'task-(s01e\d+[ab])',f).group(1),[]).append(nib.load(f).shape[3])
+  #   [print(t, min(v)*1.49, sorted(set(v))) for t,v in sorted(rows.items())]"
+  #
+  # sub-04 is NOT in these numbers -- its content was never fetched. When it
+  # lands, re-measure: if any of its segments is SHORTER than the value here,
+  # that value must come down, or sub-04 gets a window running past its data.
+  durations_s:
+    s01e01a: 882.08   # 592 vols
+    s01e01b: 882.08   # 592 vols
+    s01e02a: 718.18   # 482 vols
+    s01e02b: 718.18   # 482 vols
+    s01e03a: 703.28   # 472 vols
+    s01e03b: 703.28   # 472 vols
+    s01e04a: 749.47   # 503 vols
+    s01e04b: 749.47   # 503 vols
+    s01e05a: 697.32   # 468 vols
+    s01e05b: 697.32   # 468 vols
+    s01e06a: 727.12   # 488 vols
+    s01e06b: 727.12   # 488 vols
+    s01e07a: 734.57   # 493 vols
+    s01e07b: 734.57   # 493 vols
+    s01e08a: 709.24   # 476 vols
+    s01e08b: 709.24   # 476 vols
+    s01e09a: 697.32   # 468 vols
+    s01e09b: 697.32   # 468 vols
+    s01e10a: 739.04   # 496 vols
+    s01e10b: 739.04   # 496 vols
+    s01e11a: 710.73   # 477 vols
+    s01e11b: 710.73   # 477 vols
+    s01e12a: 701.79   # 471 vols   # 471 for 4 subjects, 472 for one -- min taken, see above
+    s01e12b: 701.79   # 471 vols
+    s01e13a: 697.32   # 468 vols
+    s01e13b: 697.32   # 468 vols
+    s01e14a: 731.59   # 491 vols
+    s01e14b: 731.59   # 491 vols
+    s01e15a: 710.73   # 477 vols
+    s01e15b: 710.73   # 477 vols
+    s01e16a: 719.67   # 483 vols
+    s01e16b: 719.67   # 483 vols
+    s01e17a: 719.67   # 483 vols
+    s01e17b: 719.67   # 483 vols
+    s01e18a: 740.53   # 497 vols
+    s01e18b: 740.53   # 497 vols
+    s01e19a: 685.40   # 460 vols
+    s01e19b: 685.40   # 460 vols
+    s01e20a: 685.40   # 460 vols
+    s01e20b: 685.40   # 460 vols
+    s01e21a: 710.73   # 477 vols
+    s01e21b: 710.73   # 477 vols
+    s01e22a: 706.26   # 474 vols
+    s01e22b: 706.26   # 474 vols
+    s01e23a: 688.38   # 462 vols
+    s01e23b: 688.38   # 462 vols
+    s01e24a: 767.35   # 515 vols
+    s01e24b: 767.35   # 515 vols
   timing_source: identity
   unit_of_analysis: run
 
 windows:
-  # A friends segment is ~482 TR x 1.49 s = 718 s, so 300 s does fit -- it just
-  # yields few windows: stride is 300/5 = 60 s, giving floor((718-300)/60)+1 = 7
-  # windows per run, against ~12 at 120 s and ~65 at 30 s. Kept so every cohort
-  # is analysed on the same window grid; drop it here if 7 windows per run is
-  # too few for what you are testing.
+  # Segments run 685-882 s (460-592 volumes; see stimulus.durations_s, which is
+  # measured, not assumed). So 300 s fits everywhere -- it just yields few
+  # windows: stride is 300/5 = 60 s, giving floor((685-300)/60)+1 = 7 on the
+  # shortest episode and 10 on the longest, against ~12 at 120 s and ~65 at
+  # 30 s. Kept so every cohort is analysed on the same window grid; drop it
+  # here if 7 windows per run is too few for what you are testing.
+  #
+  # Window COUNT therefore differs by episode, and that is correct: they are
+  # different stimuli of different lengths. What must not differ, and does
+  # not, is the count WITHIN one episode across subjects.
   sizes_s: [15, 30, 60, 120, 300]
   n_overlaps: 5
   drop_incomplete: true
@@ -141,7 +231,7 @@ windows:
   # duration and the sampling rate is the cohort's. Ten samples say something
   # about yeo7's 21 edges and nothing about Harvard-Oxford's 6,105.
   #
-  # Rows are not the problem here that they are on the films: a 718 s segment
+  # Rows are not the problem here that they are on the films: a ~718 s segment
   # gives floor((718-15)/3)+1 = 235 windows against 7 at 300 s. Keeping the
   # restriction identical across cohorts is what keeps "one atlas, one window
   # size, every cohort" a single directory to read.
@@ -166,7 +256,12 @@ windows:
 
 # --- how to run -------------------------------------------------------
 #   python tools/check_cohort.py config/cneuromod_friends.yaml
-#   fmri-decomp extract  config/cneuromod_friends.yaml --n-jobs 4 --no-strict --limit 2
+#   fmri-decomp extract  config/cneuromod_friends.yaml --n-jobs 4 --limit 2
+#
+# --no-strict is NO LONGER needed: stimulus.durations_s is populated, so
+# `validate` passes clean and submit_all.sh does not prompt. If you ever see
+# the 48 "no stimulus duration configured" problems again, something dropped
+# durations_s -- do not answer y past it, put the durations back.
 #   python tools/check_cohort.py config/cneuromod_friends.yaml --checks outputs,parallel --limit 2
 #   fmri-decomp dfc      config/cneuromod_friends.yaml --dry-run
 #   fmri-decomp dfc      config/cneuromod_friends.yaml --n-jobs 4
