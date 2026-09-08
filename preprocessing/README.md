@@ -40,6 +40,7 @@ preprocessing/camcan/
   01_build_bids.py              LOGIN NODE. Symlinks anat+func into one BIDS root.
   02_fmriprep.sbatch            COMPUTE. One SLURM array task per subject.
   03_build_participants_scores.py  LOGIN NODE. cc700-scored/ -> one table.
+  04_build_codebook.py          LOGIN NODE. Code-book xlsx -> two greppable TSVs.
 ```
 
 Run `00`–`02` in that order. `00` and `01` are cheap and need the network / a
@@ -68,3 +69,41 @@ Two facts worth knowing before using it:
   the scores and states a reason in `ErrorMessages` (TOT: "replied dont know on
   > 80% trials", 12 subjects). The row is kept and the reason travels with it as
   `<test>_ErrorMessages`.
+
+`04` is likewise independent and reads no images. The home-interview export
+(`approved_data.tsv`) names its columns `homeint_v112`, `epaq_DURTV`,
+`additional_acer` and says nowhere what `v112` asked; the answer is in
+`MRC_CamCAN_Code_Book_variables.xlsx`, a seven-sheet workbook with its header
+three rows down, section titles in "blue header rows" that leave the variable
+column empty, and the join key in `Variable_name_in_test` rather than
+`Variable_name`. `04` flattens it into two files you can grep mid-analysis:
+
+    outputs/meta/cohorts/cohort=camcan/codebook_variables.tsv   one row per variable
+    outputs/meta/cohorts/cohort=camcan/codebook_values.tsv      one row per coded value
+
+```
+column          group          code          question
+homeint_v112    Verbal fluency verbal fluency I'm going to give you a letter ...
+homeint_v144    ACE-R          ACE-R_L_06     Repeat Hippopotamus
+epaq_DURTV      EPAQ           EPAQ_010       Reported total TV viewing time (hrs/day)
+
+code   value  label
+DG7    1      College or university degree or higher
+DG7    2      A levels/AS levels or equivalent
+```
+
+Pass `--data` to match against a real export. Measured on the 2026-09 workbook
+against `approved_data.tsv`: **204 of 351 data columns documented**. The other
+147 appear nowhere in the workbook under any name, and are written out with
+`group=(not in code book)` so a lookup returns "undocumented" rather than
+nothing. Three columns are documented under a different name and are matched
+through a small alias table; the `match` column records which rows those are
+and whether the link was verified against the data (`homeint_sex` = `DG1`,
+identical on all 2,676 rows) or only inferred from name and range
+(`homeint_handedness` = `EH_total`, `homeint_mmse_i` = `mmse_cal`).
+
+Some groups are fully documented but absent from this export — LEQ has 254
+code-book rows and no data columns, and the same holds for PSQI, Cattell, VSTM
+and the reaction-time tasks. Those are scanner-visit measures that live in
+other files, so a group with `with_data_column = 0` means "wrong file", not
+"missing data".
