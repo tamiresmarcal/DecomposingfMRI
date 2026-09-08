@@ -8,6 +8,8 @@ Exploration of what the pipeline wrote. Nothing here writes to `outputs/`.
 | `02_dfc.ipynb` | stage 3 — windowed connectivity, QC first, edges second |
 | `03_qc.ipynb` | one histogram grid: six QC metrics x every cohort, three cells |
 | `04_activation_pca.ipynb` | open activation → filter by a `{cohort: [subs]}` dict → PCA (standalone, no `nbtools`) |
+| `05_decompose.ipynb` | stage 4 — fit scaler/PCA/UMAP/bins on ds002837 + cneuromod, project camcan |
+| `06_visualize.ipynb` | the latent-space figures, three cohorts, plus one coloured by symptom |
 | `nbtools.py` | the loaders they use: inventory, pruned reads, the participants join |
 
 `03` and `04` are deliberately small. `03` is a load and a histogram grid and
@@ -15,6 +17,18 @@ nothing else. `04` is standalone — pandas, numpy and matplotlib, no `nbtools`
 and no `fmri_decomposition` import: it globs the parquet paths itself, puts the
 partition keys back from the directory names, and does the PCA with
 `numpy.linalg.svd`, so it can be copied out of this repo and still run.
+
+`05` writes to `outputs/latents/atlas=<a>/window_s=<w>/cohort=<c>/data.parquet`
+— one file per cohort, with `task` and `sub` as columns rather than as deeper
+partition levels, because every read here is a whole cohort. The fitted objects
+go to `outputs/meta/models/decompose_atlas-<a>_window-<w>.joblib`; without them
+the projection is not reproducible. Latent columns keep the older naming
+(`pca0/3`, `umap0/3`, `ThresholdCluster_pca3_512`) so earlier plotting code
+reads them unchanged.
+
+**Clear `06`'s outputs before committing it.** Plotly stores each figure inline;
+a previous version of this notebook reached 50 MB and 1.28M lines that way.
+`jupyter nbconvert --clear-output --inplace notebooks/06_visualize.ipynb`.
 
 A blank panel in `03` is never a plotting bug — the cell above the grid names
 any metric that is absent from `participants_qc.csv` or present but all-NaN
