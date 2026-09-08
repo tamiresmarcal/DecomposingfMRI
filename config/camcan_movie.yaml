@@ -162,9 +162,46 @@ stimulus:
   unit_of_analysis: run
 
 windows:
-  sizes_s: [30, 60, 120, 300]
+  sizes_s: [15, 30, 60, 120, 300]
   n_overlaps: 5
   drop_incomplete: true
+  by_size:
+    15:
+      atlases: [yeo7, networks]     # never harvardoxford: 111 nodes, 6 samples
+  # 15 s AT TR 2.47 IS SIX SAMPLES. Added on request; read this before using it.
+  #
+  # round(15 / 2.47) = 6 TR. The rank floor is (n_nodes + 0.5) * tr, so:
+  #
+  #     atlas          nodes   floor at TR 2.47   6 samples is
+  #     yeo7               7        18.5 s        BELOW the floor
+  #     networks          14        35.8 s        BELOW the floor
+  #     harvardoxford    111       275.4 s        far below -- excluded above
+  #
+  # So every 15 s window in this cohort comes back `rank_deficient = True`,
+  # including yeo7. That is not the pipeline refusing to run: `rank_policy:
+  # warn` computes the edges and flags the rows, because the two questions are
+  # different. A rank-deficient window has a SINGULAR correlation MATRIX, while
+  # each edge in it is still an ordinary two-variable correlation over 6
+  # samples. Edge-wise analysis: noisy, usable, flagged. Anything that inverts
+  # or decomposes the matrix (precision, graphical lasso, PCA on the matrix):
+  # void, and the flag is what tells you so.
+  #
+  # How noisy: Fisher-z sampling SD is 1/sqrt(n-3) = 1/sqrt(3) = 0.577 at 6
+  # samples, against 0.316 for ccfrail at the same 15 s and 0.289 for
+  # ds002837. Censoring lowers it further -- `n_tr_effective`, not 6, is the
+  # n that applies to a given window, and at fd_threshold 0.5 some windows
+  # will land at 4 or 5.
+  #
+  # Cost: stride is 15/5 = 3 s, so ~153 windows per subject against 75 at 30 s.
+  # Across 648 subjects that is ~99,000 rows per atlas.
+  #
+  # PROVENANCE: adding a size changes `windows.sizes_s`, which is part of
+  # `cfg.hash()`, so every shard written from now on carries a different
+  # `config_hash` from the 30/60/120/300 shards already on disk. The data is
+  # unchanged and skip_if_exists leaves those files alone; only the label
+  # differs. Do NOT re-run the existing sizes with --overwrite to "fix" it --
+  # that rewrites correct data to change a string.
+  #
   # READ THIS BEFORE COMPARING COHORTS.
   #
   # Windows are defined in SECONDS, so a fixed window holds a different number

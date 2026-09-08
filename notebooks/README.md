@@ -6,7 +6,13 @@ Exploration of what the pipeline wrote. Nothing here writes to `outputs/`.
 |---|---|
 | `01_activation.ipynb` | stage 2 — parcel timeseries, one dataset per cohort |
 | `02_dfc.ipynb` | stage 3 — windowed connectivity, QC first, edges second |
-| `nbtools.py` | the loaders both use: inventory, pruned reads, the participants join |
+| `03_qc.ipynb` | `participants_qc.csv` distributions, every cohort, no thresholds |
+| `04_activation_pca.ipynb` | open activation → filter by a `{cohort: [subs]}` dict → PCA |
+| `nbtools.py` | the loaders they use: inventory, pruned reads, the participants join |
+
+`03` and `04` are deliberately small: `03` is measurement distributions and
+nothing else, `04` is three steps (open, filter, decompose) with the PCA done
+by `numpy.linalg.svd` so it needs no scikit-learn.
 
 `nbtools` wraps `fmri_decomposition.io` rather than re-deriving anything —
 every path it builds comes from there. What it adds is the part a notebook

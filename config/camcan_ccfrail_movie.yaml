@@ -183,9 +183,37 @@ stimulus:
   unit_of_analysis: run
 
 windows:
-  sizes_s: [30, 60, 120, 300]
+  sizes_s: [15, 30, 60, 120, 300]
   n_overlaps: 5
   drop_incomplete: true
+  by_size:
+    15:
+      atlases: [yeo7, networks]     # never harvardoxford: 111 nodes, 13 samples
+  # 15 s AT TR 1.12 IS THIRTEEN SAMPLES -- and here that is mostly fine.
+  #
+  # round(15 / 1.12) = 13 TR. Against the (n_nodes + 0.5) * tr floor:
+  #
+  #     atlas          nodes   floor at TR 1.12   13 samples is
+  #     yeo7               7         8.4 s        ABOVE the floor -- full rank
+  #     networks          14        16.2 s        just below (needs 15 samples)
+  #     harvardoxford    111       124.9 s        far below -- excluded above
+  #
+  # So yeo7 at 15 s is a real, full-rank estimate in this cohort, and networks
+  # misses by 1.2 s -- close enough that its windows are flagged but not
+  # meaningless edge-wise. Fisher-z SD is 1/sqrt(13-3) = 0.316, against 0.577
+  # for CC700 at the same nominal 15 s: the acquisition difference recorded
+  # below, in the direction that makes the FRAIL cohort look cleaner.
+  #
+  # Cost: stride 3 s, ~156 windows per subject, ~8,400 rows per atlas over 54
+  # subjects. Cheap here in a way it is not for CC700's 648.
+  #
+  # PROVENANCE: adding a size changes `windows.sizes_s`, which is part of
+  # `cfg.hash()`, so every shard written from now on carries a different
+  # `config_hash` from the 30/60/120/300 shards already on disk. The data is
+  # unchanged and skip_if_exists leaves those files alone; only the label
+  # differs. Do NOT re-run the existing sizes with --overwrite to "fix" it --
+  # that rewrites correct data to change a string.
+  #
   # ccfrail REVERSES the sampling problem recorded in camcan_movie.yaml.
   #
   # Windows are defined in seconds, so TR decides how many samples land in
