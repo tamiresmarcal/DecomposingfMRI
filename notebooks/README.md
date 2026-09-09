@@ -8,7 +8,6 @@ Exploration of what the pipeline wrote. Nothing here writes to `outputs/`.
 | `02_dfc.ipynb` | stage 3 — windowed connectivity, QC first, edges second |
 | `03_qc.ipynb` | one histogram grid: six QC metrics x every cohort, three cells |
 | `04_activation_pca.ipynb` | open activation → filter by a `{cohort: [subs]}` dict → PCA (standalone, no `nbtools`) |
-| `05_decompose.ipynb` | stage 4 — fit scaler/PCA/UMAP/bins on ds002837 + cneuromod, project camcan |
 | `06_visualize.ipynb` | the latent-space figures, three cohorts, plus one coloured by symptom |
 | `nbtools.py` | the loaders they use: inventory, pruned reads, the participants join |
 
@@ -18,11 +17,30 @@ and no `fmri_decomposition` import: it globs the parquet paths itself, puts the
 partition keys back from the directory names, and does the PCA with
 `numpy.linalg.svd`, so it can be copied out of this repo and still run.
 
-`05` writes to `outputs/latents/atlas=<a>/window_s=<w>/cohort=<c>/data.parquet`
+The decomposition that feeds `06` is **not a notebook** — it is
+`tools/decompose.py`, run through `slurm/04_decompose.sbatch`. It was a
+notebook (`05_decompose.ipynb`) and outgrew one: 124k training windows x 6,105
+edges is 3 GB in float32, and a notebook keeps every intermediate alive. The
+script is float32 end to end, scales in place, and re-reads one cohort at a
+time when writing, so peak memory is roughly the training matrix x1.6 instead
+of several copies of it.
+
+```bash
+# what will it cost?
+python tools/decompose.py --atlas harvardoxford --window-s 30 60 120 300 --dry-run
+
+# one array task per window size
+sbatch --array=0-3 slurm/04_decompose.sbatch harvardoxford 30 60 120 300
+
+# PCA only, no UMAP -- minutes instead of hours
+sbatch --array=0-3 slurm/04_decompose.sbatch harvardoxford 30 60 120 300 -- --no-umap
+```
+
+It writes to `outputs/latents/atlas=<a>/window_s=<w>/cohort=<c>/data.parquet`
 — one file per cohort, with `task` and `sub` as columns rather than as deeper
-partition levels, because every read here is a whole cohort. The fitted objects
-go to `outputs/meta/models/decompose_atlas-<a>_window-<w>.joblib`; without them
-the projection is not reproducible. Latent columns keep the older naming
+partition levels, because every read here is a whole cohort. The fitted objects go to
+`outputs/meta/models/decompose_atlas-<a>_window-<w>.joblib`; without them the
+projection is not reproducible. Latent columns keep the older naming
 (`pca0/3`, `umap0/3`, `ThresholdCluster_pca3_512`) so earlier plotting code
 reads them unchanged.
 
