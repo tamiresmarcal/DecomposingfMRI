@@ -13,7 +13,7 @@
 # CHECK THE MEMORY FIRST. Cost here is the training matrix: rows x edges x 4
 # bytes, and Harvard-Oxford is 6,105 edges. On a login node:
 #
-#   python tools/decompose.py --atlas harvardoxford --window-s 30 --dry-run
+#   fmri-decomp decompose --atlas harvardoxford --window-s 30 --dry-run
 #
 # which prints rows, edges and an estimated peak per window size. Set
 # --mem below to at least double what it says; the default here is sized for
@@ -82,7 +82,7 @@ if [[ -n "${FMRIDECOMP_SIF:-}" ]]; then
   # --cleanenv keeps the host's PYTHONPATH out of the container, where it can
   # shadow container packages with host builds for a different Python.
   RUN=(apptainer exec --cleanenv --bind "${BINDS}" --pwd "${PWD}" \
-       "${FMRIDECOMP_SIF}" python3)
+       "${FMRIDECOMP_SIF}" python3)   # -m fmri_decomposition.cli below
 else
   module load python/3.11 scipy-stack
   source "${FMRIDECOMP_VENV:-$HOME/venvs/fmridecomp}/bin/activate"
@@ -91,6 +91,6 @@ fi
 
 # ${EXTRA[@]+...} so an empty array expands to nothing under `set -u`
 # rather than to one empty string argument.
-"${RUN[@]}" tools/decompose.py --atlas "${ATLAS}" --window-s "${WINDOW}" \
-    ${EXTRA[@]+"${EXTRA[@]}"}
+"${RUN[@]}" -m fmri_decomposition.cli decompose \
+    --atlas "${ATLAS}" --window-s "${WINDOW}" ${EXTRA[@]+"${EXTRA[@]}"}
 echo "atlas=${ATLAS} window_s=${WINDOW} done"

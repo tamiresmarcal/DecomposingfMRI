@@ -472,6 +472,12 @@ def _report_qc(df) -> None:
         print(f"    {'':<24} worst: {worst}")
 
 
+def cmd_decompose(args) -> int:
+    from . import decompose
+
+    return decompose.run(args)
+
+
 def cmd_merge_manifests(args) -> int:
     """Consolidate per-array-task manifests into one, serially, after the array.
 
@@ -582,6 +588,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="six 0-based column indices (negatives count from the end) "
                         "when the motion columns cannot be identified from the header")
     d.set_defaults(func=cmd_diagnose)
+
+    # No `config` positional: a decomposition spans cohorts, so the train /
+    # project split cannot live in a per-cohort YAML.
+    from . import decompose as _decompose
+
+    dec = sub.add_parser(
+        "decompose",
+        help="stage 4: windowed DFC -> latents, fit on some cohorts and "
+             "projected onto others")
+    _decompose.add_arguments(dec)
+    dec.set_defaults(func=cmd_decompose)
 
     m = sub.add_parser("merge-manifests", help="consolidate per-array-task manifests")
     m.add_argument("config")

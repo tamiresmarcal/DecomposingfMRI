@@ -18,7 +18,8 @@ partition keys back from the directory names, and does the PCA with
 `numpy.linalg.svd`, so it can be copied out of this repo and still run.
 
 The decomposition that feeds `06` is **not a notebook** — it is
-`tools/decompose.py`, run through `slurm/04_decompose.sbatch`. It was a
+`fmri_decomposition/decompose.py`, exposed as `fmri-decomp decompose` and run
+through `slurm/04_decompose.sbatch`. It was a
 notebook (`05_decompose.ipynb`) and outgrew one: 124k training windows x 6,105
 edges is 3 GB in float32, and a notebook keeps every intermediate alive. The
 script is float32 end to end, scales in place, and re-reads one cohort at a
@@ -27,7 +28,7 @@ of several copies of it.
 
 ```bash
 # what will it cost?
-python tools/decompose.py --atlas harvardoxford --window-s 30 60 120 300 --dry-run
+fmri-decomp decompose --atlas harvardoxford --window-s 30 60 120 300 --dry-run
 
 # one array task per window size
 sbatch --array=0-3 slurm/04_decompose.sbatch harvardoxford 30 60 120 300
@@ -35,6 +36,13 @@ sbatch --array=0-3 slurm/04_decompose.sbatch harvardoxford 30 60 120 300
 # PCA only, no UMAP -- minutes instead of hours
 sbatch --array=0-3 slurm/04_decompose.sbatch harvardoxford 30 60 120 300 -- --no-umap
 ```
+
+Which cohorts are fit and which are projected is `--train` / `--project`,
+defaulting to `--train ds002837 cneuromod --project camcan`. Every latents row
+carries `role` (`train` / `projected`) and `model_hash` as **columns**, and the
+full fit description is in the file's parquet schema metadata plus a manifest
+beside the models. Two files with the same `model_hash` came from one fit and
+are comparable; two with different hashes are not, whatever the paths say.
 
 It writes to `outputs/latents/atlas=<a>/window_s=<w>/cohort=<c>/data.parquet`
 — one file per cohort, with `task` and `sub` as columns rather than as deeper
