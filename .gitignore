@@ -88,6 +88,8 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+# plotly's iframe renderer writes one HTML file per figure beside the notebook
+iframe_figures/
 
 # IPython
 profile_default/
