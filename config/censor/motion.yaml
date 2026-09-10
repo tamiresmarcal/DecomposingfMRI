@@ -1,0 +1,46 @@
+# First-pass censoring policy: head motion only.
+#
+# Deliberately the smallest policy that does anything. Two subject-level gates
+# are on; everything else is null (disabled) so that the first run's numbers
+# are attributable to motion and nothing else. Turn the others on one at a
+# time, each under a NEW `name`, and the outputs accumulate side by side
+# instead of overwriting -- that is the whole point of naming the policy.
+#
+#   fmri-decomp censor --policy config/censor/motion.yaml
+#
+# -> outputs/censor/policy=motion/cohort=<c>/subjects.parquet
+#    outputs/meta/censor/policy=motion.json
+
+name: motion
+
+subject:
+  # Mean framewise displacement, in mm. The conventional 0.5 mm cut.
+  #
+  # This is the gate that does real work on ds002837, where per-frame
+  # censoring is impossible (the regressor and image timelines cannot be
+  # reconciled, see config/ds002837.yaml) so good_frame is all true and motion
+  # is otherwise uncorrected. The config names sub-12 (14.0% of frames would
+  # have been censored), sub-11 (9.9%) and sub-7 (5.2%) as the real cases.
+  max_mean_fd: 0.5
+
+  # Fraction of frames that survived scrubbing. The other half of "head
+  # motion": mean_fd catches a subject who moved throughout, this catches one
+  # whose run was mostly thrown away.
+  #
+  # Identically 1.0 wherever censoring is off, so it is a no-op on ds002837
+  # and load-bearing on the Cam-CAN cohorts.
+  min_frac_good_frames: 0.5
+
+  # --- off for this policy, on for a later one ---
+  max_frac_parcels_empty: null        # registration failure
+  max_abs_best_lag_tr: null           # stimulus timing, from ISC
+  min_frac_stimulus_covered: null     # scan stopped early
+
+window:
+  # Not read at all unless you pass `--stage dfc`. Left fully inert so that
+  # `policy=motion` means one thing whether or not the window gate is run.
+  min_frac_good_frames: null
+  min_n_tr_effective: null
+  drop_rank_deficient: false
+  drop_crosses_run_boundary: false
+  drop_crosses_clip_boundary: false
