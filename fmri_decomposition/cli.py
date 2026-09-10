@@ -1,4 +1,5 @@
-"""Command line: `fmri-decomp validate | extract | dfc | diagnose | fixture`.
+"""Command line: `fmri-decomp validate | extract | dfc | diagnose | censor |
+decompose | merge-manifests | fixture`.
 
 Parallelism is at or below the deepest partition key, so each worker owns a
 distinct leaf and no locks are needed. Workers never write shared metadata --
@@ -472,6 +473,20 @@ def _report_qc(df) -> None:
         print(f"    {'':<24} worst: {worst}")
 
 
+def cmd_censor(args) -> int:
+    """Stage 3.5: apply a named QC policy, so stage 4 reads a decision.
+
+    Kept out of `diagnose` on purpose. `diagnose` measures and must stay free
+    of thresholds; this applies them, and does so under a policy name that is
+    hashed into every row it writes.
+    """
+    from . import censor
+
+    if args.stage == "dfc" and not (args.atlas and args.window_s):
+        raise SystemExit("--stage dfc needs --atlas and --window-s")
+    return censor.run(args)
+
+
 def cmd_decompose(args) -> int:
     from . import decompose
 
@@ -588,6 +603,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="six 0-based column indices (negatives count from the end) "
                         "when the motion columns cannot be identified from the header")
     d.set_defaults(func=cmd_diagnose)
+
+    # Like `decompose`, no `config` positional: a policy is applied across
+    # cohorts at once, and lives in config/censor/ rather than a cohort YAML.
+    from . import censor as _censor
+
+    c = sub.add_parser(
+        "censor",
+        help="stage 3.5: apply a QC policy, writing per-subject and per-window "
+             "keep/drop for stage 4")
+    _censor.add_arguments(c)
+    c.set_defaults(func=cmd_censor)
 
     # No `config` positional: a decomposition spans cohorts, so the train /
     # project split cannot live in a per-cohort YAML.

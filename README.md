@@ -22,16 +22,19 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      + ISC gate + participants_qc.csv
 1.2  02_dfc.sbatch        (array)    parquet   -> windowed connectivity
      03_finalize.sbatch dfc          merge manifests
-4    models                          join participants_qc.csv, apply thresholds
+3.5  fmri-decomp censor              participants_qc.csv + window flags
+                                     -> keep/drop, under a named policy
+4    fmri-decomp decompose           windowed DFC -> latents, fit on some
+                                     cohorts and projected onto others
 ```
 
 `03_finalize` runs twice, taking the stage as an argument. The activation pass
 is where the ISC gate lives, and `--dependency=afterok` on the DFC array is
 what stops stage 3 from running on misaligned data.
 
-There is no separate QC or exclusion step: the metrics are written by the
-activation finalize, and the thresholds that turn them into exclusions live
-with the models.
+No threshold appears in stages 1–3: they measure. `censor` is the one place a
+measurement becomes a decision, and it does so under a policy that is named,
+versioned and hashed into every row it writes — see below.
 
 ---
 
@@ -300,7 +303,57 @@ is visible, and stops there.
 
 Since `dfc` walks the filesystem rather than `participants.csv`, it warns when
 it finds shards for excluded subjects instead of skipping them. The real filter
-is the join, at the models.
+is `censor`, below.
+
+### `censor` — stage 3.5, where a measurement becomes a decision
+
+Keeping thresholds out of the pipeline is right, and it leaves a gap: the claim
+still has to be made somewhere, and made inline in whatever notebook needs it,
+it gets made differently every time and travels with nothing. `censor` closes
+that gap with one step between measurement and modelling.
+
+```bash
+# Subjects only -- reads participants_qc.csv for every cohort that has one.
+fmri-decomp censor --policy config/censor/default.yaml
+
+# Also gate windows, for one atlas x aperture of the DFC path.
+fmri-decomp censor --policy config/censor/default.yaml \
+    --stage dfc --atlas harvardoxford --window-s 30
+```
+
+It reads only QC columns, never imaging data, and runs in seconds — so it is a
+login-node command, not a SLURM job. It writes:
+
+```
+outputs/censor/policy=<name>/cohort=<c>/subjects.parquet
+outputs/censor/policy=<name>/atlas=<a>/window_s=<w>/cohort=<c>/windows.parquet
+outputs/meta/censor/policy=<name>.json          # counts + what was skipped
+```
+
+Every row carries `keep`, a human-readable `reason` for the drops, and
+`policy` / `policy_hash`. Change a number, change the policy `name`, and the
+new outputs land **beside** the old ones: a sensitivity analysis is two files,
+not a re-run with different constants.
+
+Three things it deliberately does not do:
+
+* **It does not censor frames.** Per-TR censoring already happened at stage 2
+  and is in `good_frame`. Where it could not — ds002837, whose regressor and
+  image timelines cannot be reconciled — it cannot be recovered here either,
+  which is exactly why `max_mean_fd` at the subject level does the work there.
+* **It does not edit `participants.csv`.** That file is human curation and is
+  not the place for a threshold someone will want to move.
+* **It does not drop a cohort for a missing input.** A rule whose column is
+  absent or all-NaN is reported as `NOT APPLIED` and skipped rather than
+  failing every row. `best_lag_tr` is the live case: it is NaN for any task
+  with fewer than three subjects.
+
+Window gating is only for the DFC path — the HMM path runs on stage 2
+activation, where `good_frame` is already per-TR. `drop_crosses_run_boundary`
+defaults to true because a transition across a run boundary is not a
+transition; `drop_rank_deficient` defaults to **false**, because rank
+deficiency makes the correlation *matrix* singular while each edge in it stays
+an ordinary two-variable correlation (see the aperture section above).
 
 #### ISC is computed per stimulus
 
