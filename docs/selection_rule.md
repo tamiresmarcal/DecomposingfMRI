@@ -12,14 +12,29 @@ is the record; the push to GitHub is the server-side timestamp.
 A git commit is not a third-party registration. If a stronger claim is needed
 later, register the same text on OSF and cite both.
 
-## What is being selected
+## What is being selected: a STATE SET
 
-One configuration from the grid: method (HMM on Stage 2 activation, or
-k-means on Stage 3 DFC windows) x atlas x window/aperture x **K**.
+A **state set** is one complete parcellation of time into states, produced by
+one configuration:
+
+    state set = (method, feature, atlas, aperture, K)
+
+e.g. `hmm / activation / harvardoxford / TR-level / K=6`, or
+`kmeans / dfc / yeo7 / 30 s / K=12`. Each state set has its own K state maps,
+its own transition matrix, its own dwell times, its own everything. Two state
+sets are not two views of one thing; they are different objects, and quantities
+computed inside one are not comparable to the other unless this file says so.
+
+The grid of candidate state sets is method x feature x atlas x aperture x K.
 
 Two granularities and two apertures are reported, Yeo-style. So "selection"
-means: which small-K and which large-K configuration are promoted to the main
+means: which small-K and which large-K **state set** is promoted to the main
 text, with the rest in supplement.
+
+The question this file exists to answer, stated the way the paper asks it:
+**which state set has the most stable and most interpretable transitions?**
+Criteria 1 and 2 are "stable"; criteria 4 and 5 are "interpretable"; criterion
+3 is "usable by someone else".
 
 ## Criteria, in this order
 
@@ -65,7 +80,7 @@ Thresholds:
 
 A configuration failing any of these is out, whatever it scores below.
 
-### 2. Split-half stability of the state set
+### 2a. Split-half stability of the state maps
 
 Yeo-style. Fit independently on two random halves of the training subjects,
 100 splits, stratified by cohort.
@@ -76,6 +91,26 @@ Yeo-style. Fit independently on two random halves of the training subjects,
 
 Matching across halves by the Hungarian algorithm on map correlation. Report
 the full distribution, not just the median.
+
+### 2b. Split-half stability of the TRANSITIONS
+
+Stable maps do not imply stable transitions, and transitions are the object of
+the paper. This criterion was missing from the first version of this file and
+is the reason for the amendment; see the note at the end.
+
+On the same 100 splits, after Hungarian matching of states across halves:
+
+- `[FIX]` median correlation between the two halves' group transition
+  matrices, off-diagonal cells only, >= **T4b**. Off-diagonal because the
+  diagonal is dominated by dwell time and will correlate near 1 for any state
+  set with reasonable persistence, which would hide an unstable off-diagonal
+  structure.
+- `[FIX]` median absolute difference in entropy rate between halves <= **T4c**
+  (within a state set, so K is constant and the comparison is legitimate)
+- `[FIX]` rank correlation of the stationary distributions >= **T4d**
+
+A state set that passes 2a and fails 2b is out. That combination is the
+specific failure this paper would otherwise report as a finding.
 
 ### 3. Projectability onto held-out camcan
 
@@ -90,7 +125,7 @@ artifact boundary, not by discipline.
   report where the projected group transition matrix stabilises. This is
   reported, not thresholded.
 
-### 4. Decoding replication
+### 4a. Decoding replication
 
 State maps decoded against Neurosynth/NeuroQuery with spin-test nulls for
 spatial autocorrelation.
@@ -99,8 +134,22 @@ spatial autocorrelation.
   films: rank correlation of topic loadings between ds002837 and cneuromod,
   and between odd and even films within ds002837, >= **T8**
 
-Post-hoc annotation of whatever came out is not a criterion. A configuration
-whose anatomical story does not survive being computed twice does not get one.
+Post-hoc annotation of whatever came out is not a criterion. A state set whose
+anatomical story does not survive being computed twice does not get one.
+
+### 4b. Correspondence with a known parcellation
+
+Each state map is scored against the Yeo-7 networks (Dice on thresholded maps,
+and the full loading profile). This is reported for every candidate state set
+and is a criterion only in the weak sense:
+
+- `[FIX]` at least **T9** of the K states must have an interpretable
+  correspondence -- a dominant Yeo network, or a documented multi-network
+  combination -- rather than being spatially diffuse
+
+A state set of K uninterpretable states can have perfectly stable transitions
+and still fail the paper's first promise, which is that someone else can use
+these states and know what they mean.
 
 ### 5. Tie-break, in order
 
@@ -141,3 +190,13 @@ Amend this file in a new commit that says what changed and why, before running
 anything under the new version. Do not edit history. An amendment after seeing
 criterion results is legitimate and must be visible as such; an amendment after
 seeing phenotype results is not, and the commit order makes that auditable.
+
+### Amendments
+
+**2026-09-10, before any fit.** Added 2b (split-half stability of the
+transition matrix) and 4b (correspondence with Yeo-7). The first version tested
+stability of the state MAPS and called that stability of the state set -- but
+the paper's object is transitions, and a state set can have reproducible maps
+with unreproducible off-diagonal transition structure. Also renamed the unit of
+selection from "configuration" to **state set** throughout, which is the
+paper's own noun. No results of any kind existed when this was written.
