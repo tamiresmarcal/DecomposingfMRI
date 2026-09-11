@@ -300,12 +300,24 @@ def fit_models(X_train: np.ndarray, edges: list[str], args, meta: dict) -> dict:
         evr = models["pca"][n].explained_variance_ratio_
         log(f"pca {n}: cumulative explained {evr.sum():.3f}  {evr.round(3)}")
 
+    models["umap_fitted"] = False
     if not args.no_umap:
         try:
             import umap
         except ImportError:
-            log("umap-learn not importable -- skipping UMAP, PCA still runs")
+            # Used to warn and carry on. That was wrong: the latents file then
+            # recorded `no_umap: false` -- the REQUEST -- while containing no
+            # umap columns, and carried the same model_hash as a run that had
+            # them. The notebook's only symptom was "umap0/3 not in the
+            # latents", with nothing on disk saying why.
+            raise SystemExit(
+                "umap-learn is not importable, but --no-umap was not passed.\n"
+                "Refusing to write latents that silently lack UMAP columns.\n"
+                "  * PCA only:   add --no-umap\n"
+                "  * with UMAP:  use a container that has umap-learn "
+                "(containers/stage45.def pins 0.5.7)")
         else:
+            models["umap_fitted"] = True
             rng = np.random.default_rng(args.seed)
             idx = (rng.choice(len(Z), args.umap_fit_rows, replace=False)
                    if args.umap_fit_rows and len(Z) > args.umap_fit_rows
@@ -373,6 +385,9 @@ def write_latents(lat: pd.DataFrame, path: Path, models: dict, cohort: str) -> N
             for k, v in {**models["fit_meta"], "cohort": cohort,
                          "role": models["role_of"][cohort],
                          "model_hash": models["model_hash"],
+                         # What actually happened, beside what was asked for.
+                         "umap_fitted": bool(models.get("umap_fitted")),
+                         "n_umap_components": sorted(models["umap"]),
                          "n_train_rows": models["n_train_rows"],
                          "package_version": __version__,
                          "written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
@@ -470,6 +485,8 @@ def run_one(root: Path, window_s, args) -> None:
     from . import __version__
     (stem.parent / f"{stem.name}_manifest.json").write_text(json.dumps({
         **meta, "model_hash": mhash, "n_train_rows": int(n_train),
+        "umap_fitted": bool(models.get("umap_fitted")),
+        "n_umap_components": sorted(models["umap"]),
         "n_edges": len(edges), "role_of": role_of,
         "shards": counts, "models_file": model_path.name,
         "package_version": __version__,
