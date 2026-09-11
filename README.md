@@ -348,6 +348,36 @@ Three things it deliberately does not do:
   failing every row. `best_lag_tr` is the live case: it is NaN for any task
   with fewer than three subjects.
 
+#### How stage 4 consumes it
+
+`decompose` takes `--censor-policy NAME` and filters against exactly what
+`censor` wrote:
+
+```bash
+fmri-decomp decompose --atlas yeo7 --window-s 30 --censor-policy motion
+```
+
+A censored subject's shard is **skipped before the file is opened** — its rows
+are never read, never scaled, and never counted toward peak RSS, which is why
+the filter lives in the reader rather than after the concat.
+
+Three properties worth relying on:
+
+* **The policy is in `model_hash`.** A fit on censored rows and a fit on all
+  rows produce different hashes, so two latents files cannot claim to be
+  comparable when they are not. `censor_policy` and `censor_policy_hash` are
+  also written into every latents file's schema metadata and into the model
+  manifest.
+* **A named policy that was never run is a hard error**, naming the `censor`
+  command that would fix it. It never degrades to "no censoring" — that would
+  look identical in the log and be a different analysis.
+* **Omitting the flag prints a warning** and fits on everything. That is the
+  only way to run a tree that predates this stage.
+
+A policy with `subjects.parquet` but no `windows.parquet` for the requested
+atlas × aperture is the normal first-pass state, not an error: it gates whole
+subjects and says `subjects only` in the log.
+
 Window gating is only for the DFC path — the HMM path runs on stage 2
 activation, where `good_frame` is already per-TR. `drop_crosses_run_boundary`
 defaults to true because a transition across a run boundary is not a

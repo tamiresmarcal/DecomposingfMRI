@@ -107,8 +107,49 @@ def edge_columns(path: Path) -> list[str]:
     return edges
 
 
+def load_censor(root: Path, policy: str | None, atlas: str, window_s, cohort: str):
+    """The stage 3.5 decision for one cohort -> (kept subjects, kept windows).
+
+    Returns None when no policy was named, which is how this stage stays
+    runnable on a tree that predates `censor`. Everything else is a hard error:
+    a policy that was asked for and not found must not silently become no
+    censoring at all, because the run would look identical and be a different
+    analysis.
+
+    The window gate is optional even when the policy exists -- `censor` writes
+    windows.parquet only for the atlas x aperture it was given `--stage dfc`
+    for. A policy with subjects only is the normal first-pass state, and gates
+    whole subjects rather than individual windows.
+    """
+    if not policy:
+        return None
+
+    base = root / "censor" / f"policy={policy}"
+    subj_path = base / f"cohort={cohort}" / "subjects.parquet"
+    if not subj_path.exists():
+        raise SystemExit(
+            f"--censor-policy {policy!r} but {subj_path} does not exist.\n"
+            f"Run:  fmri-decomp censor --policy config/censor/{policy}.yaml "
+            f"--cohorts {cohort}")
+
+    subj = pd.read_parquet(subj_path, columns=["sub", "task", "keep"])
+    keep_subs = set(zip(subj.loc[subj["keep"], "task"].astype(str),
+                        subj.loc[subj["keep"], "sub"].astype(str)))
+
+    win_path = (base / f"atlas={atlas}" / f"window_s={window_s}"
+                / f"cohort={cohort}" / "windows.parquet")
+    keep_windows = None
+    if win_path.exists():
+        win = pd.read_parquet(win_path, columns=["sub", "task", "window_id", "keep"])
+        win = win.loc[win["keep"]]
+        keep_windows = set(zip(win["task"].astype(str), win["sub"].astype(str),
+                               win["window_id"].astype("int64")))
+    return {"policy": policy, "subjects": keep_subs, "windows": keep_windows,
+            "n_subject_rows": len(subj), "n_subject_kept": int(subj["keep"].sum())}
+
+
 def read_cohort(root: Path, atlas: str, window_s, cohort: str, edges: list[str],
-                want_edges: bool = True):
+                want_edges: bool = True, censor: dict | None = None):
     """One cohort -> (identity frame, float32 edge matrix or None).
 
     Reads the identity columns and the edge columns in one pass but keeps them
@@ -121,10 +162,32 @@ def read_cohort(root: Path, atlas: str, window_s, cohort: str, edges: list[str],
                          f"atlas={atlas} window_s={window_s}")
     ident_cols = [c for c in IDENT if c not in _DERIVED]
     idents, blocks = [], []
+    n_dropped_subs = n_dropped_windows = 0
     for p in paths:
         keys = dict(s.split("=", 1) for s in p.parts if "=" in s)
+
+        # A censored subject is skipped before the file is opened: the rows are
+        # never read, never scaled and never counted toward peak RSS. That is
+        # the whole reason this filter belongs here rather than after the
+        # concat, where 6,105 float32 edge columns would already be resident.
+        if censor is not None and (keys["task"], keys["sub"]) not in censor["subjects"]:
+            n_dropped_subs += 1
+            continue
+
         cols = ident_cols + (edges if want_edges else [])
         df = pd.read_parquet(p, columns=cols)
+
+        if censor is not None and censor["windows"] is not None:
+            wid = df["window_id"].astype("int64")
+            mask = np.array([(keys["task"], keys["sub"], w) in censor["windows"]
+                             for w in wid], dtype=bool)
+            if not mask.all():
+                n_dropped_windows += int((~mask).sum())
+                df = df.loc[mask]
+            if df.empty:
+                del df
+                continue
+
         ident = df[ident_cols].copy()
         for k in ("cohort", "task", "sub"):
             ident[k] = keys[k]
@@ -132,6 +195,16 @@ def read_cohort(root: Path, atlas: str, window_s, cohort: str, edges: list[str],
         if want_edges:
             blocks.append(df[edges].to_numpy(dtype=np.float32))
         del df
+
+    if censor is not None and (n_dropped_subs or n_dropped_windows):
+        log(f"  censor[{censor['policy']}] {cohort}: dropped {n_dropped_subs} "
+            f"subject-shard(s), {n_dropped_windows:,} further window(s)")
+    if not idents:
+        raise SystemExit(
+            f"censor policy {censor['policy']!r} kept nothing for cohort="
+            f"{cohort} at atlas={atlas} window_s={window_s} -- check the "
+            f"thresholds before running the fit")
+
     ident = pd.concat(idents, ignore_index=True)
     X = np.vstack(blocks) if want_edges else None
     del idents, blocks
@@ -176,7 +249,31 @@ def fit_meta(args, window_s, edges: list[str]) -> dict:
             "train_cohorts": list(args.train), "project_cohorts": list(args.project),
             "n_latents": list(args.n_latents), "bins": list(args.bins),
             "umap_fit_rows": int(args.umap_fit_rows), "no_umap": bool(args.no_umap),
+            # In the fit description, therefore in model_hash: a PCA fit on
+            # censored rows is not the same model as one fit on all of them,
+            # and two latents files that differ only by policy must not be
+            # able to claim the same hash.
+            "censor_policy": args.censor_policy or None,
+            "censor_policy_hash": censor_policy_hash(args),
             "seed": int(args.seed)}
+
+
+def censor_policy_hash(args) -> str | None:
+    """The hash `censor` stamped on its own output, read back from the summary.
+
+    Taken from the written summary rather than re-hashing the YAML: the claim
+    being recorded is "these rows were filtered by that run", and the YAML on
+    disk may have been edited since.
+    """
+    if not args.censor_policy:
+        return None
+    root = Path(args.output_root) if args.output_root else None
+    if root is None:
+        return None
+    summary = root / "meta" / "censor" / f"policy={args.censor_policy}.json"
+    if not summary.exists():
+        return None
+    return json.loads(summary.read_text()).get("policy_hash")
 
 
 def fit_models(X_train: np.ndarray, edges: list[str], args, meta: dict) -> dict:
@@ -324,10 +421,23 @@ def run_one(root: Path, window_s, args) -> None:
     counts = {c: len(shard_paths(root, atlas, window_s, c)) for c in cohorts}
     log(f"window_s={window_s}  {len(edges)} edges  shards: {counts}")
 
+    censors = {c: load_censor(root, args.censor_policy, atlas, window_s, c)
+               for c in cohorts}
+    if args.censor_policy:
+        for c, cen in censors.items():
+            gate = "subjects+windows" if cen["windows"] is not None else "subjects only"
+            log(f"censor[{args.censor_policy}] {c}: "
+                f"{cen['n_subject_kept']}/{cen['n_subject_rows']} subjects kept "
+                f"({gate})")
+    else:
+        log("WARNING: no --censor-policy. Every window in every shard enters "
+            "the fit, including subjects `censor` would have dropped.")
+
     log("loading training cohorts")
     idents, blocks = [], []
     for cohort in args.train:
-        ident, X = read_cohort(root, atlas, window_s, cohort, edges)
+        ident, X = read_cohort(root, atlas, window_s, cohort, edges,
+                               censor=censors[cohort])
         ident, X = drop_nan_rows(ident, X)
         log(f"  {cohort}: {len(X):,} windows, {ident['sub'].nunique()} subs, "
             f"{X.nbytes / 1e9:.2f} GB")
@@ -368,7 +478,8 @@ def run_one(root: Path, window_s, args) -> None:
 
     # Second pass: one cohort in memory at a time.
     for cohort in cohorts:
-        ident, X = read_cohort(root, atlas, window_s, cohort, edges)
+        ident, X = read_cohort(root, atlas, window_s, cohort, edges,
+                               censor=censors[cohort])
         ident, X = drop_nan_rows(ident, X)
         lat = latents_for(ident, X, models, role_of[cohort])
         del ident, X
@@ -401,6 +512,10 @@ def dry_run(root: Path, args) -> None:
               + "  ".join(f"{c}:{len(ps)}({rows[c]:,})" for c, ps in paths.items()))
     print("\npeak GB is the training matrix x1.6 for scaler and PCA workspace; "
           "ask for at least double.")
+    if args.censor_policy:
+        print(f"rows are UNCENSORED counts -- --censor-policy "
+              f"{args.censor_policy} will remove some, so this is an upper "
+              f"bound on memory, which is the safe direction for an allocation.")
 
 
 def add_arguments(p) -> None:
@@ -417,6 +532,10 @@ def add_arguments(p) -> None:
     p.add_argument("--umap-fit-rows", type=int, default=30_000,
                    help="0 fits UMAP on every training row")
     p.add_argument("--no-umap", action="store_true")
+    p.add_argument("--censor-policy", default=None, metavar="NAME",
+                   help="apply the stage 3.5 decision written by `fmri-decomp "
+                        "censor --policy config/censor/NAME.yaml`. Without it "
+                        "every window enters the fit and a warning is printed.")
     p.add_argument("--output-root",
                    help="default: output_root from config/camcan_movie.yaml")
     p.add_argument("--seed", type=int, default=42)
@@ -437,6 +556,9 @@ def run(args) -> int:
             (repo / "config" / "camcan_movie.yaml").read_text())["output_root"])
     if not root.is_dir():
         raise SystemExit(f"output_root does not exist: {root}")
+    # Write the resolved root back, so anything downstream of here (censor
+    # lookup, fit_meta) sees a path rather than the None the user passed.
+    args.output_root = str(root)
     log(f"output_root {root}")
 
     if args.dry_run:
