@@ -27,15 +27,41 @@ Pin the apptainer version. A bare `module load apptainer` opens the
 interactive `mii` menu, and picking the newest entry swaps `StdEnv/2023` for
 `StdEnv/2026`, reloading a dozen modules as a side effect.
 
+### What the base image actually is
+
+`rocker/r-ver:4.4.1` is **Ubuntu 22.04 jammy, Python 3.10.12** — confirmed from
+a build log, not assumed. The `%post` section prints `/etc/os-release` and
+`python3 --version` so the next person does not have to assume either.
+
 ### Things this definition is careful about
 
-Each of these cost a failed build once, and three of the four fail only after
-the expensive part:
+Each of these failed a build. Only the first is cheap to discover; the rest
+fail after minutes of downloading:
 
-* **No python minor version is named.** rocker/r-ver's base distro moved from
-  jammy to noble around R 4.4, and noble has no `python3.11` in apt at all.
-  The build uses `python3`, prints the version, and asserts `>= 3.10`.
-* **`libtiff-dev`, not `libtiff5-dev`**, which does not exist on noble.
+* **No python minor version is named.** The build uses `python3`, prints the
+  version and asserts `>= 3.10`. jammy's `python3` is 3.10, and `python3.11` is
+  not in its default repos — so the original `python3.11` pin could not have
+  worked here, and would break differently again if rocker moves to noble.
+* **`libtiff-dev`, not `libtiff5-dev`.** Both exist on jammy; only the former
+  exists on noble.
+* **`numba` pins `numpy`, not the reverse.** `numba==0.60.0` requires
+  `numpy<2.1`, which contradicted the pinned `numpy==2.1.3` and failed the
+  build with `ResolutionImpossible` after the whole apt stage. `numba==0.61.2`
+  allows `numpy<2.3`; `scipy==1.14.1` caps it the same way, so 2.1.3 sits
+  inside both. **Before changing any of numpy, scipy or numba, resolve the set
+  first** — no container build needed:
+
+  ```bash
+  pip install --dry-run --ignore-installed --python-version 3.10       --only-binary=:all: --target /tmp/pipcheck -r <the pin list>
+  ```
+
+  That reproduces the build's resolution in seconds and reproduced this exact
+  failure.
+* **The pins are a file in the image** (`/opt/requirements.txt`), not a command
+  line, so the set can be audited later — and so the optional install can be
+  constrained with `-c` against it. "Installing neuromaps/nimare last means
+  they cannot move numpy" was a hope about pip's upgrade behaviour; `-c` makes
+  it enforced.
 * **The R install is a heredoc file, not `Rscript -e`.** A backslash-newline
   inside a single-quoted shell string is a literal backslash, not a
   continuation, so a multi-line `-e '...'` hands R a script with stray
