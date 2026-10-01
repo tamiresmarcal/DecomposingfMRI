@@ -23,6 +23,28 @@ apptainer build --fakeroot \
 20–40 minutes, ~6 GB, mostly CmdStan. If `--fakeroot` is refused, build
 somewhere you have root and copy the `.sif` across.
 
+Pin the apptainer version. A bare `module load apptainer` opens the
+interactive `mii` menu, and picking the newest entry swaps `StdEnv/2023` for
+`StdEnv/2026`, reloading a dozen modules as a side effect.
+
+### Things this definition is careful about
+
+Each of these cost a failed build once, and three of the four fail only after
+the expensive part:
+
+* **No python minor version is named.** rocker/r-ver's base distro moved from
+  jammy to noble around R 4.4, and noble has no `python3.11` in apt at all.
+  The build uses `python3`, prints the version, and asserts `>= 3.10`.
+* **`libtiff-dev`, not `libtiff5-dev`**, which does not exist on noble.
+* **The R install is a heredoc file, not `Rscript -e`.** A backslash-newline
+  inside a single-quoted shell string is a literal backslash, not a
+  continuation, so a multi-line `-e '...'` hands R a script with stray
+  backslashes in it.
+* **CmdStan goes in `/opt`, not `~/.cmdstan`.** Apptainer runs as the invoking
+  user and `/root` is mode 700, so a CmdStan under `/root` is unreadable by
+  everyone the image was built for. `CMDSTAN` is then resolved by command
+  substitution — `export CMDSTAN=/opt/cmdstan/cmdstan-*` does not glob.
+
 ## Use
 
 ```bash
@@ -60,3 +82,7 @@ apptainer test /project/6008063/tamires/singularity/fmri_decomp_stage45.sif
 
 Do this before submitting anything. A missing `hmmlearn` discovered inside an
 array job costs an allocation.
+
+It **exits non-zero** when a required module, an R package or CmdStan is
+missing — a gate that only prints is not a gate. `neuromaps` and `nimare` are
+reported and never fatal.
