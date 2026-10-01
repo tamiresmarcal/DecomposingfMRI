@@ -232,3 +232,18 @@ __marimo__/
 
 # per-user SLURM settings; see slurm/env.sh.example
 slurm/env.sh
+
+# Participant-level phenotype. NEVER COMMITTED.
+#
+# config/phenotype/<cohort>_phenotype.csv is age, sex and clinical scores for
+# named subjects -- "who the person is", in the words of the README beside it.
+# Cam-CAN's and CNeuroMod's data access agreements do not permit redistributing
+# participant-level data, and this repository is pushed to GitHub.
+#
+# The BUILDER is tracked (tools/make_phenotype.py) and the OUTPUT is not: the
+# recipe is the reproducible part, and anyone with their own data access can
+# re-run it. Same split as `outputs/`.
+#
+# `config/*_participants.csv` stays tracked on purpose -- ids, task and
+# exclusion reasons are facts about files, not about people.
+config/phenotype/*.csv
