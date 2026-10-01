@@ -436,6 +436,20 @@ def run_one(root: Path, window_s, args) -> None:
     counts = {c: len(shard_paths(root, atlas, window_s, c)) for c in cohorts}
     log(f"window_s={window_s}  {len(edges)} edges  shards: {counts}")
 
+    # Acted on, not just printed. This used to be a log line only, so a cohort
+    # with 0 shards was visible on line 2 and discovered on line 20 -- after a
+    # full fit, and after the training cohorts had already been written. That
+    # left window sizes half-done, which is worse than not starting.
+    empty = [c for c, n in counts.items() if n == 0]
+    if empty:
+        raise SystemExit(
+            f"window_s={window_s}: no dfc shards for {', '.join(empty)} at "
+            f"atlas={atlas}.\n"
+            f"Nothing is written for this window size. Either run stage 3 for "
+            f"it:\n"
+            f"    fmri-decomp dfc config/<cohort>.yaml --window-s {window_s}\n"
+            f"or drop {window_s} from --window-s.")
+
     censors = {c: load_censor(root, args.censor_policy, atlas, window_s, c)
                for c in cohorts}
     if args.censor_policy:
@@ -582,9 +596,26 @@ def run(args) -> int:
         dry_run(root, args)
         return 0
 
+    # Each window size is an independent fit, so one failing is not a reason to
+    # abandon the others -- and a bare loop meant a missing cohort at the FIRST
+    # size silently cancelled the remaining four.
+    failed = {}
     for w in args.window_s:
-        run_one(root, w, args)
-    log("done")
+        try:
+            run_one(root, w, args)
+        except SystemExit as exc:
+            failed[w] = str(exc)
+            log(f"window_s={w} FAILED, continuing with the remaining sizes")
+
+    done = [w for w in args.window_s if w not in failed]
+    log(f"done: {len(done)}/{len(args.window_s)} window size(s) written"
+        + (f" {done}" if done else ""))
+    if failed:
+        print(f"\n{len(failed)} window size(s) did not run:", flush=True)
+        for w, msg in failed.items():
+            print(f"\n  --- window_s={w} ---\n  " + msg.replace("\n", "\n  "),
+                  flush=True)
+        return 1
     return 0
 
 
