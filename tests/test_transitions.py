@@ -142,3 +142,43 @@ class TestSubjectTransitions:
         a = T.subject_transitions(self.frame([0, 0, 1, 1]), "s", 2, 1.0, 1)
         b = T.subject_transitions(self.frame([0, 0, 1, 1]), "s", 2, 2.47, 1)
         assert np.isclose(b["mean_dwell_s"], a["mean_dwell_s"] * 2.47)
+
+
+class TestMaxK:
+    """Discovery is how a NEW state set is picked up automatically. It must not
+    also be how a RETIRED one comes back: latents written before K was cut to 8
+    and 27 still carry ThresholdCluster_pca3_125 and _512, which are 15,625 and
+    262,144 cells per subject."""
+
+    def test_an_oversized_set_is_skipped(self):
+        k_of = {"ThresholdCluster_pca3_8": 8, "ThresholdCluster_pca3_512": 512}
+        keep, skip = T._within_max_k(sorted(k_of), k_of, 64)
+        assert keep == ["ThresholdCluster_pca3_8"]
+        assert skip == ["ThresholdCluster_pca3_512"]
+
+    def test_the_sets_in_use_survive_the_default(self):
+        k_of = {"ThresholdCluster_pca3_8": 8, "HMM_umap3_27": 27,
+                "MeanShift_pca3_7": 7}
+        keep, skip = T._within_max_k(sorted(k_of), k_of, 64)
+        assert len(keep) == 3 and skip == []
+
+    def test_an_unresolvable_k_is_kept_not_dropped(self):
+        # `process` resolves it per cell with the labels in hand and says so.
+        # Dropping it here would silently lose a state set over a missing field.
+        keep, skip = T._within_max_k(["Odd_pca3_x"], {"Odd_pca3_x": None}, 64)
+        assert keep == ["Odd_pca3_x"] and skip == []
+
+    def test_the_boundary_is_inclusive(self):
+        k_of = {"MeanShift_pca3_64": 64, "MeanShift_pca3_65": 65}
+        keep, skip = T._within_max_k(sorted(k_of), k_of, 64)
+        assert keep == ["MeanShift_pca3_64"]
+        assert skip == ["MeanShift_pca3_65"]
+
+    def test_k_quietly_returns_none_rather_than_guessing(self, tmp_path):
+        p = latents(tmp_path, {"Odd_pca3_x": 0})
+        assert T._k_quietly("Odd_pca3_x", p) is None
+
+    def test_k_quietly_reads_the_recorded_k(self, tmp_path):
+        p = latents(tmp_path, {"MeanShift_pca3_7": 0},
+                    metadata={"clusterers": {"MeanShift_pca3_7": {"k": 7}}})
+        assert T._k_quietly("MeanShift_pca3_7", p) == 7

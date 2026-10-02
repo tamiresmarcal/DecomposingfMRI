@@ -452,6 +452,32 @@ def time_axis(path: Path, window_s, n_overlaps: int) -> tuple[float, int]:
     return w / n_overlaps, n_overlaps
 
 
+def _k_quietly(state_col: str, path: Path) -> int | None:
+    """K for a state column, or None if it cannot be resolved without guessing.
+
+    Deliberately does not read the labels: this runs over every file in the grid
+    just to size the columns, and `n_states_for`'s last-resort path both reads
+    data and prints a warning that would repeat once per cohort.
+    """
+    try:
+        return n_states_for(state_col, path=path)
+    except SystemExit:
+        return None
+
+
+def _within_max_k(states: list[str], k_of: dict, max_k: int):
+    """(states to use, states skipped for being too wide).
+
+    A state set with no resolvable K is KEPT: `process` resolves it per cell with
+    the labels in hand and will say so. Only a known, oversized K is dropped.
+    """
+    keep, skip = [], []
+    for st in states:
+        k = k_of.get(st)
+        (skip if (k is not None and k > max_k) else keep).append(st)
+    return keep, skip
+
+
 def process(root: Path, atlas: str, window_s, cohort: str, state_col: str,
             n_overlaps: int, overwrite: bool) -> dict:
     out_dir = (root / "transitions" / f"atlas={atlas}"
@@ -546,19 +572,41 @@ def run(args) -> int:
         # Union over the grid: a state column added at one aperture but not
         # another must still be visible, and the per-cell check below reports
         # exactly where it is missing.
-        found = set()
+        found, k_of = set(), {}
         for atlas in atlases:
             for w in windows:
                 for c in cohorts:
                     p_ = latents_path(root, atlas, w, c)
-                    if p_.exists():
-                        found |= set(discover_state_columns(p_))
+                    if not p_.exists():
+                        continue
+                    for col in discover_state_columns(p_):
+                        found.add(col)
+                        k_of.setdefault(col, _k_quietly(col, p_))
         states = sorted(found)
         if not states:
             raise SystemExit(
                 "no state columns found in any latents file. Run "
                 "`fmri-decomp cluster` to add state definitions, or pass "
                 "--states explicitly.")
+        states, skipped = _within_max_k(states, k_of, args.max_k)
+        if skipped:
+            # Loud, because this is the one case where discovery finds something
+            # real that must not be used. A latents file written before K was cut
+            # to 8 and 27 still carries ThresholdCluster_pca3_125 and _512, and
+            # those are 15,625 and 262,144 cells per subject -- a table wider
+            # than parquet should be asked to hold, over a matrix in which more
+            # than 99% of cells are exactly zero for every subject. Discovery is
+            # how a new state set is picked up automatically; it must not also be
+            # how a retired one comes back.
+            log(f"SKIPPED {len(skipped)} state column(s) above --max-k "
+                f"{args.max_k}: {skipped}")
+            log(f"        They are in the latents and are not used. Name one in "
+                f"--states, or raise --max-k, to override.")
+        if not states:
+            raise SystemExit(
+                f"every discovered state column is above --max-k {args.max_k}: "
+                f"{skipped}\nRun `fmri-decomp cluster` to write usable ones, or "
+                f"raise --max-k if you mean it.")
         log(f"discovered {len(states)} state column(s): {states}")
 
     log(f"grid: {len(atlases)} atlas x {len(windows)} window x {len(states)} "
@@ -614,6 +662,13 @@ def add_arguments(p) -> None:
                         "latents schema, so a method added by `fmri-decomp "
                         "cluster` is picked up without being named here.")
     p.add_argument("--cohorts", nargs="*", default=None)
+    p.add_argument("--max-k", type=int, default=64,
+                   help="skip a DISCOVERED state set with more than this many "
+                        "states; a set named in --states is always used. "
+                        "Default 64, which keeps 8 and 27 and any K MeanShift "
+                        "plausibly finds, and drops the retired 125 and 512: at "
+                        "K=512 a subject's matrix is 262,144 cells of which "
+                        ">99%% are exactly zero.")
     p.add_argument("--n-overlaps", type=int, default=5,
                    help="windows.n_overlaps the shards were written with; sets "
                         "the stride used for dwell times in seconds. Ignored "
