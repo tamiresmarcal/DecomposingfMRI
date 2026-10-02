@@ -4,6 +4,16 @@
 #   sbatch --array=0-3 slurm/04_decompose.sbatch harvardoxford 30 60 120 300
 #   sbatch --array=0-0 slurm/04_decompose.sbatch yeo7 15
 #
+# THE ACTIVATION APERTURE. Per-TR frames instead of windowed edges, written to
+# window_s=-1. One array task, because a frame has no window to vary:
+#
+#   sbatch --array=0-0 slurm/04_decompose.sbatch yeo7 -1 -- --source activation
+#
+# -1 is not a duration: it is one TR, which differs per cohort. Two transforms
+# are applied to the frames that the dfc source does not need -- a common
+# band-pass and a per-run z-score -- both recorded in model_hash. See
+# fmri_decomposition/frames.py for why a correlation needs neither.
+#
 # ONE ARRAY TASK PER WINDOW SIZE. The window sizes are positional arguments
 # after the atlas, and SLURM_ARRAY_TASK_ID indexes them -- so the array range
 # must match the number of sizes you list (four sizes -> --array=0-3). Each

@@ -180,6 +180,24 @@ def check_grid(root: Path, atlases, windows, cohorts, states) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _shorten(states: pd.Series) -> pd.Series:
+    """Drop a prefix every state set shares, and only then.
+
+    This used to strip the literal `ThresholdCluster_pca3_` from every name,
+    which was fine while that was the only family. With several it was actively
+    misleading: `ThresholdCluster_pca3_8` printed as `8` in a table that also
+    listed `MeanShift_umap3_8` in full, so two different state sets were one
+    column apart and indistinguishable. A prefix is only hidden when hiding it
+    cannot merge two names.
+    """
+    uniq = sorted(set(states))
+    if len(uniq) < 2:
+        return states
+    pre = os.path.commonprefix(uniq)
+    pre = pre[:pre.rfind("_") + 1]          # whole underscore-separated tokens
+    return states.str.slice(len(pre)) if pre else states
+
+
 def report_check(df: pd.DataFrame) -> int:
     """Readable at 90 rows: state sets that are ready, then gaps by reason.
 
@@ -190,20 +208,19 @@ def report_check(df: pd.DataFrame) -> int:
         print("nothing in the grid at all -- check --atlas / --window-s")
         return 1
     ok, total = int(df["ok"].sum()), len(df)
-    short = df.assign(K=df["states"].str.replace("ThresholdCluster_pca3_", "",
-                                                 regex=False))
+    short = df.assign(states=_shorten(df["states"]))
     print(f"\ngrid: {ok}/{total} cell(s) ready\n")
 
     ready = short[short["ok"]]
     if len(ready):
-        tab = (ready.groupby(["atlas", "window_s", "K"])
+        tab = (ready.groupby(["atlas", "window_s", "states"])
                     .agg(cohorts=("cohort", "nunique"),
                          rows=("n_rows", "sum"),
                          policy=("censor_policy", "first"))
                     .reset_index())
         tab["window_s"] = tab["window_s"].astype(float)
         print("READY")
-        print(tab.sort_values(["atlas", "window_s", "K"])
+        print(tab.sort_values(["atlas", "window_s", "states"])
                  .to_string(index=False))
 
     gaps = short[~short["ok"]]
@@ -409,6 +426,31 @@ def n_states_for(state_col: str, path: Path | None = None,
     raise SystemExit(f"cannot determine the number of states for {state_col!r}")
 
 
+def time_axis(path: Path, window_s, n_overlaps: int) -> tuple[float, int]:
+    """(seconds between consecutive rows, rows per independent sample).
+
+    Preferred from the latents schema, where stage 4 records it per cohort, and
+    only then derived as `window_s / n_overlaps`. Deriving it is right for a
+    sliding window and wrong for anything else: at `window_s = -1` the rows are
+    single TRs, so the derivation gives a NEGATIVE stride and every dwell time
+    and switch rate computed from it comes out negative. The TR also differs per
+    cohort, which is why it is a per-cohort metadata field and not something
+    this stage could compute from the path.
+    """
+    stride = _meta_value(path, "stride_s")
+    indep = _meta_value(path, "indep_factor")
+    if stride is not None:
+        return float(stride), int(indep) if indep is not None else 1
+    w = float(window_s)
+    if w <= 0:
+        raise SystemExit(
+            f"{path} has window_s={window_s} and no `stride_s` in its schema "
+            f"metadata, so the time between consecutive rows is unknown. It was "
+            f"written by a stage 4 that predates the activation source; re-run "
+            f"`fmri-decomp decompose --source activation` for it.")
+    return w / n_overlaps, n_overlaps
+
+
 def process(root: Path, atlas: str, window_s, cohort: str, state_col: str,
             n_overlaps: int, overwrite: bool) -> dict:
     out_dir = (root / "transitions" / f"atlas={atlas}"
@@ -424,18 +466,20 @@ def process(root: Path, atlas: str, window_s, cohort: str, state_col: str,
     df = pd.read_parquet(src, columns=[c for c in cols if c in have])
 
     K = n_states_for(state_col, path=src, labels=df[state_col].to_numpy())
-    stride_s = float(window_s) / n_overlaps
+    stride_s, indep = time_axis(src, window_s, n_overlaps)
     model_hash = _meta_value(src, "model_hash")
     policy = _meta_value(src, "censor_policy")
 
     rows = [{"task": task, "sub": sub,
-             **subject_transitions(g, state_col, K, stride_s, n_overlaps)}
+             **subject_transitions(g, state_col, K, stride_s, indep)}
             for (task, sub), g in df.sort_values("window_id")
                                     .groupby(["task", "sub"], sort=True)]
 
     prov = {"cohort": cohort, "atlas": atlas, "window_s": str(window_s),
             "states": state_col, "n_states": K, "model_hash": model_hash,
-            "censor_policy": policy, "n_overlaps": n_overlaps}
+            "censor_policy": policy, "n_overlaps": n_overlaps,
+            # What was actually used, which is not n_overlaps at every aperture.
+            "stride_s": stride_s, "indep_factor": indep}
 
     # Column order is the contract: keys, every cell, the features, provenance.
     cells = cell_names(K)
@@ -560,7 +604,10 @@ def add_arguments(p) -> None:
     p.add_argument("--atlas", nargs="+",
                    default=["harvardoxford", "yeo7", "networks"])
     p.add_argument("--window-s", nargs="+",
-                   default=["15", "30", "60", "120", "300"])
+                   default=["15", "30", "60", "120", "300", "-1"],
+                   help="-1 is the activation aperture: one frame per row "
+                        "instead of a sliding window. Cells with no latents are "
+                        "reported by --check, not fatal.")
     p.add_argument("--states", nargs="*", default=None,
                    help="state-label columns. Default: every one found in the "
                         "latents schema, so a method added by `fmri-decomp "
@@ -568,7 +615,9 @@ def add_arguments(p) -> None:
     p.add_argument("--cohorts", nargs="*", default=None)
     p.add_argument("--n-overlaps", type=int, default=5,
                    help="windows.n_overlaps the shards were written with; sets "
-                        "the stride used for dwell times in seconds")
+                        "the stride used for dwell times in seconds. Ignored "
+                        "for any latents file that records its own `stride_s` "
+                        "-- see time_axis.")
     p.add_argument("--check", action="store_true",
                    help="report grid readiness and write nothing")
     p.add_argument("--allow-partial", action="store_true",

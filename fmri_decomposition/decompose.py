@@ -94,6 +94,56 @@ def shard_paths(root: Path, atlas: str, window_s, cohort: str) -> list[Path]:
                             f"cohort={cohort}/task=*/sub=*/data.parquet"))
 
 
+# --------------------------------------------------------- feature sources ---
+# A source answers three questions and nothing else: where its shards are, what
+# its feature columns are called, and how to turn a cohort into (identity,
+# matrix). Everything after that -- scaling, PCA, UMAP, the threshold grid,
+# model_hash, the two-pass write -- is shared, because the aperture is the only
+# thing that differs. Adding a third source is an entry here, not a new stage.
+ACTIVATION_WINDOW = "-1"
+
+
+def source_shard_paths(root: Path, atlas: str, window_s, cohort: str,
+                       source: str) -> list[Path]:
+    if source == "activation":
+        from . import frames
+        return frames.shard_paths(root, atlas, cohort)
+    return shard_paths(root, atlas, window_s, cohort)
+
+
+def source_feature_columns(path: Path, source: str) -> list[str]:
+    if source == "activation":
+        from . import frames
+        return frames.feature_columns(path)
+    return edge_columns(path)
+
+
+def source_read_cohort(root: Path, atlas: str, window_s, cohort: str,
+                       features: list[str], args, censor: dict | None):
+    """-> (identity frame, float32 matrix, stride_s, indep_factor).
+
+    `stride_s` and `indep_factor` describe the time axis of the rows and are
+    written to the latents for stage 5a: at this aperture the step between
+    consecutive rows is the cohort's TR, which decompose cannot derive from
+    `window_s` the way it can for a sliding window. They are None for dfc, where
+    stage 5a's own `--n-overlaps` already gives it both.
+    """
+    if source_of(args) == "activation":
+        from . import frames
+        ident, X, tr = frames.read_cohort(
+            root, atlas, cohort, features, censor=censor,
+            band=args.match_bandpass, zscore=args.zscore_runs, log=log)
+        # Frames do not overlap, so one row IS one independent sample.
+        return ident, X, float(tr), 1
+    ident, X = read_cohort(root, atlas, window_s, cohort, features,
+                           censor=censor)
+    return ident, X, None, None
+
+
+def source_of(args) -> str:
+    return getattr(args, "source", "dfc")
+
+
 def edge_columns(path: Path) -> list[str]:
     """Edge names from one shard's schema, without reading a row group."""
     import pyarrow.parquet as pq
@@ -227,27 +277,42 @@ def drop_nan_rows(ident: pd.DataFrame, X: np.ndarray):
     return ident[keep].reset_index(drop=True), X[keep]
 
 
-def model_hash(meta: dict, edges: list[str]) -> str:
+def model_hash(meta: dict, features: list[str]) -> str:
     """Short digest of everything that changes the fit.
 
     Same role as `config_hash` on the stage 2 and 3 shards: two latents files
     with the same hash came from one fit and are comparable; two with different
-    hashes are not, however alike the paths look. The edge list is included
+    hashes are not, however alike the paths look. The feature list is included
     because a different atlas revision with the same name is a different model.
+
+    The payload keys are still called `n_edges` and `edges_digest` under the
+    activation source, where the features are parcels rather than edges. The
+    names are wrong there and kept anyway: renaming them would change every dfc
+    hash already on disk, and a digest's key names are not read by anything.
+    `meta["source"]` is what distinguishes the two.
     """
     from . import __version__
 
     payload = json.dumps({**meta, "package_version": __version__,
-                          "n_edges": len(edges),
+                          "n_edges": len(features),
                           "edges_digest": hashlib.sha256(
-                              "\n".join(edges).encode()).hexdigest()[:16]},
+                              "\n".join(features).encode()).hexdigest()[:16]},
                          sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-def fit_meta(args, window_s, edges: list[str]) -> dict:
-    """The fit description carried into every output of this run."""
-    return {"stage": "latents", "atlas": args.atlas, "window_s": str(window_s),
+def fit_meta(args, window_s, features: list[str]) -> dict:
+    """The fit description carried into every output of this run.
+
+    The `--source activation` keys are added ONLY for that source, and this is
+    deliberate rather than tidy. Everything in here feeds `model_hash`, so
+    writing `"source": "dfc"` into the default payload would change the hash of
+    every dfc fit ever written -- turning latents, transitions and selection
+    outputs that are perfectly valid into files whose hash no longer matches a
+    re-run. Absent keys mean the default, which is the only way to extend a hash
+    payload without invalidating what it has already stamped.
+    """
+    meta = {"stage": "latents", "atlas": args.atlas, "window_s": str(window_s),
             "train_cohorts": list(args.train), "project_cohorts": list(args.project),
             "n_latents": list(args.n_latents), "bins": list(args.bins),
             "umap_fit_rows": int(args.umap_fit_rows), "no_umap": bool(args.no_umap),
@@ -258,6 +323,17 @@ def fit_meta(args, window_s, edges: list[str]) -> dict:
             "censor_policy": args.censor_policy or None,
             "censor_policy_hash": censor_policy_hash(args),
             "seed": int(args.seed)}
+    if getattr(args, "source", "dfc") != "dfc":
+        meta.update({
+            "source": args.source,
+            # Both are transforms applied to the frames before the fit, so both
+            # change the model -- see frames.py's docstring for why a per-TR
+            # pattern needs them and a correlation does not.
+            "match_bandpass": (list(args.match_bandpass)
+                               if args.match_bandpass else None),
+            "zscore_runs": bool(args.zscore_runs),
+        })
+    return meta
 
 
 def censor_policy_hash(args) -> str | None:
@@ -383,8 +459,16 @@ def write_latents(lat: pd.DataFrame, path: Path, models: dict, cohort: str) -> N
     from . import __version__
 
     table = pa.Table.from_pandas(lat, preserve_index=False)
+    # Written BESIDE fit_meta, not into it: `stride_s` is the cohort's TR under
+    # the activation source, and a TR differs per cohort inside one fit. A
+    # per-cohort quantity in the fit description would make model_hash differ
+    # between two files that came from the same model -- exactly the thing the
+    # hash exists to rule out. Stage 5a reads it from here.
+    axis = {k: v for k, v in (("stride_s", models.get("stride_s")),
+                              ("indep_factor", models.get("indep_factor")))
+            if v is not None}
     meta = {k.encode(): json.dumps(v, default=str).encode()
-            for k, v in {**models["fit_meta"], "cohort": cohort,
+            for k, v in {**models["fit_meta"], **axis, "cohort": cohort,
                          "role": models["role_of"][cohort],
                          "model_hash": models["model_hash"],
                          # What actually happened, beside what was asked for.
@@ -429,14 +513,22 @@ def run_one(root: Path, window_s, args) -> None:
             f"skipping (--overwrite to redo)")
         return
 
-    first = shard_paths(root, atlas, window_s, args.train[0])
+    source = source_of(args)
+    first = source_shard_paths(root, atlas, window_s, args.train[0], source)
     if not first:
-        raise SystemExit(f"no shards for the first training cohort "
+        raise SystemExit(f"no {source} shards for the first training cohort "
                          f"{args.train[0]!r} at atlas={atlas} window_s={window_s}")
-    edges = edge_columns(first[0])
+    features = source_feature_columns(first[0], source)
 
-    counts = {c: len(shard_paths(root, atlas, window_s, c)) for c in cohorts}
-    log(f"window_s={window_s}  {len(edges)} edges  shards: {counts}")
+    counts = {c: len(source_shard_paths(root, atlas, window_s, c, source))
+              for c in cohorts}
+    unit = "parcels" if source == "activation" else "edges"
+    log(f"window_s={window_s}  source={source}  {len(features)} {unit}  "
+        f"shards: {counts}")
+    if source == "activation":
+        log(f"  frames: bandpass="
+            f"{tuple(args.match_bandpass) if args.match_bandpass else 'as extracted'}"
+            f"  zscore_runs={args.zscore_runs}  (both are in model_hash)")
 
     # Acted on, not just printed. This used to be a log line only, so a cohort
     # with 0 shards was visible on line 2 and discovered on line 20 -- after a
@@ -444,12 +536,14 @@ def run_one(root: Path, window_s, args) -> None:
     # left window sizes half-done, which is worse than not starting.
     empty = [c for c, n in counts.items() if n == 0]
     if empty:
+        fix = ("    fmri-decomp extract config/<cohort>.yaml --atlas "
+               f"{atlas}\n" if source == "activation" else
+               f"    fmri-decomp dfc config/<cohort>.yaml --window-s {window_s}\n")
         raise SystemExit(
-            f"window_s={window_s}: no dfc shards for {', '.join(empty)} at "
+            f"window_s={window_s}: no {source} shards for {', '.join(empty)} at "
             f"atlas={atlas}.\n"
-            f"Nothing is written for this window size. Either run stage 3 for "
-            f"it:\n"
-            f"    fmri-decomp dfc config/<cohort>.yaml --window-s {window_s}\n"
+            f"Nothing is written for this window size. Either run the stage "
+            f"that writes them:\n" + fix +
             f"or drop {window_s} from --window-s.")
 
     censors = {c: load_censor(root, args.censor_policy, atlas, window_s, c)
@@ -466,11 +560,12 @@ def run_one(root: Path, window_s, args) -> None:
 
     log("loading training cohorts")
     idents, blocks = [], []
+    stride_s = indep_factor = None
     for cohort in args.train:
-        ident, X = read_cohort(root, atlas, window_s, cohort, edges,
-                               censor=censors[cohort])
+        ident, X, stride_s, indep_factor = source_read_cohort(
+            root, atlas, window_s, cohort, features, args, censors[cohort])
         ident, X = drop_nan_rows(ident, X)
-        log(f"  {cohort}: {len(X):,} windows, {ident['sub'].nunique()} subs, "
+        log(f"  {cohort}: {len(X):,} rows, {ident['sub'].nunique()} subs, "
             f"{X.nbytes / 1e9:.2f} GB")
         idents.append(ident)
         blocks.append(X)
@@ -480,14 +575,15 @@ def run_one(root: Path, window_s, args) -> None:
     gc.collect()
     log(f"training matrix {X_train.shape} = {X_train.nbytes / 1e9:.2f} GB")
 
-    meta = fit_meta(args, window_s, edges)
-    mhash = model_hash(meta, edges)
+    meta = fit_meta(args, window_s, features)
+    mhash = model_hash(meta, features)
     role_of = {c: ("train" if c in args.train else "projected") for c in cohorts}
     log(f"model_hash {mhash}  roles {role_of}")
 
-    models = fit_models(X_train, edges, args, meta={
+    models = fit_models(X_train, features, args, meta={
         **meta, "n_train_rows": int(n_train), "model_hash": mhash,
-        "fit_meta": meta, "role_of": role_of})
+        "fit_meta": meta, "role_of": role_of,
+        "stride_s": stride_s, "indep_factor": indep_factor})
     del X_train
     gc.collect()
 
@@ -503,7 +599,7 @@ def run_one(root: Path, window_s, args) -> None:
         **meta, "model_hash": mhash, "n_train_rows": int(n_train),
         "umap_fitted": bool(models.get("umap_fitted")),
         "n_umap_components": sorted(models["umap"]),
-        "n_edges": len(edges), "role_of": role_of,
+        "n_features": len(features), "role_of": role_of,
         "shards": counts, "models_file": model_path.name,
         "package_version": __version__,
         "written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -511,9 +607,12 @@ def run_one(root: Path, window_s, args) -> None:
 
     # Second pass: one cohort in memory at a time.
     for cohort in cohorts:
-        ident, X = read_cohort(root, atlas, window_s, cohort, edges,
-                               censor=censors[cohort])
+        ident, X, stride_s, indep_factor = source_read_cohort(
+            root, atlas, window_s, cohort, features, args, censors[cohort])
         ident, X = drop_nan_rows(ident, X)
+        # Per cohort, because the TR is: see write_latents on why this sits
+        # outside fit_meta and therefore outside model_hash.
+        models["stride_s"], models["indep_factor"] = stride_s, indep_factor
         lat = latents_for(ident, X, models, role_of[cohort])
         del ident, X
         gc.collect()
@@ -527,24 +626,30 @@ def run_one(root: Path, window_s, args) -> None:
 
 
 def dry_run(root: Path, args) -> None:
-    print(f"{'window':>7}  {'edges':>6}  {'train rows':>11}  {'peak GB':>8}  shards")
+    source = source_of(args)
+    unit = "parcels" if source == "activation" else "edges"
+    print(f"{'window':>7}  {unit:>7}  {'train rows':>11}  {'peak GB':>8}  shards")
     for w in args.window_s:
-        paths = {c: shard_paths(root, args.atlas, w, c)
+        paths = {c: source_shard_paths(root, args.atlas, w, c, source)
                  for c in dict.fromkeys(args.train + args.project)}
         first = next((p for c in args.train for p in paths[c]), None)
         if first is None:
             print(f"{w:>7}  (no shards)")
             continue
-        n_edges = len(edge_columns(first))
+        n_edges = len(source_feature_columns(first, source))
         import pyarrow.parquet as pq
         rows = {c: sum(pq.ParquetFile(p).metadata.num_rows for p in ps)
                 for c, ps in paths.items()}
         n_train = sum(rows[c] for c in args.train)
         peak = n_train * n_edges * 4 * 1.6 / 1e9
-        print(f"{w:>7}  {n_edges:>6}  {n_train:>11,}  {peak:>8.2f}  "
+        print(f"{w:>7}  {n_edges:>7}  {n_train:>11,}  {peak:>8.2f}  "
               + "  ".join(f"{c}:{len(ps)}({rows[c]:,})" for c, ps in paths.items()))
     print("\npeak GB is the training matrix x1.6 for scaler and PCA workspace; "
           "ask for at least double.")
+    if source == "activation":
+        print("rows are counted from the parquet footers, so they INCLUDE the "
+              "frames that will be dropped as not good or as a run boundary -- "
+              "an upper bound, which is the safe direction for an allocation.")
     if args.censor_policy:
         print(f"rows are UNCENSORED counts -- --censor-policy "
               f"{args.censor_policy} will remove some, so this is an upper "
@@ -553,9 +658,35 @@ def dry_run(root: Path, args) -> None:
 
 def add_arguments(p) -> None:
     """Shared by `fmri-decomp decompose` and `python -m ...decompose`."""
+    # One source of truth for the band, imported here because argparse evaluates
+    # the default when the parser is built rather than when the module loads.
+    from .frames import DEFAULT_BANDPASS
     p.add_argument("--atlas", required=True)
-    p.add_argument("--window-s", nargs="+", required=True,
-                   help="one fit per window size; they are independent")
+    p.add_argument("--source", choices=["dfc", "activation"], default="dfc",
+                   help="dfc: windowed edges, one fit per --window-s. "
+                        "activation: per-TR parcel patterns, written to "
+                        f"window_s={ACTIVATION_WINDOW} -- one fit, because a "
+                        "frame has no window to vary.")
+    p.add_argument("--window-s", nargs="+", default=None,
+                   help="one fit per window size; they are independent. Not "
+                        "accepted with --source activation, which has exactly "
+                        f"one aperture and names it {ACTIVATION_WINDOW}.")
+    p.add_argument("--match-bandpass", nargs=2, type=float, metavar=("LOW", "HIGH"),
+                   default=list(DEFAULT_BANDPASS),
+                   help="--source activation only: band-pass every cohort's "
+                        "frames onto this band before the fit, so one cohort's "
+                        "wider preprocessing band does not make its states "
+                        "flicker faster than another's. Default %(default)s.")
+    p.add_argument("--no-match-bandpass", dest="match_bandpass",
+                   action="store_const", const=None,
+                   help="leave the frequency content as extracted. A different "
+                        "analysis, and recorded as one in model_hash.")
+    p.add_argument("--no-zscore-runs", dest="zscore_runs", action="store_false",
+                   help="--source activation only: do NOT centre and scale each "
+                        "parcel within each run. Off-by-default because without "
+                        "it the fit is dominated by between-scanner signal "
+                        "scale -- see frames.py.")
+    p.set_defaults(zscore_runs=True)
     p.add_argument("--train", nargs="+", default=["ds002837", "cneuromod"])
     p.add_argument("--project", nargs="+", default=["camcan"])
     p.add_argument("--n-latents", nargs="+", type=int, default=[2, 3, 5],
@@ -593,6 +724,20 @@ def run(args) -> int:
     # lookup, fit_meta) sees a path rather than the None the user passed.
     args.output_root = str(root)
     log(f"output_root {root}")
+
+    # The aperture is a property of the source, not a free parameter, so it is
+    # resolved here once rather than trusted from the command line. Silently
+    # overriding a --window-s the user typed would write the fit to a path they
+    # did not ask for, so it is an error instead.
+    if source_of(args) == "activation":
+        if args.window_s and list(args.window_s) != [ACTIVATION_WINDOW]:
+            raise SystemExit(
+                f"--source activation has one aperture, written as "
+                f"window_s={ACTIVATION_WINDOW} (a frame is one TR, and the TR "
+                f"differs per cohort). Drop --window-s {' '.join(args.window_s)}.")
+        args.window_s = [ACTIVATION_WINDOW]
+    elif not args.window_s:
+        raise SystemExit("--window-s is required with --source dfc")
 
     if args.dry_run:
         dry_run(root, args)

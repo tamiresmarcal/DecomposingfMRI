@@ -211,6 +211,14 @@ def _seq_lengths(df: pd.DataFrame) -> list[int]:
     return (df.groupby(["task", "sub"], sort=False).size().tolist())
 
 
+def has_columns(path: Path, cols: list[str]) -> bool:
+    """Schema only -- no row group is touched. Used by the pre-flight, which asks
+    about every embedding and would otherwise read each present one twice."""
+    import pyarrow.parquet as pq
+
+    return set(cols) <= set(pq.ParquetFile(path).schema_arrow.names)
+
+
 def read_embedding(path: Path, cols: list[str]) -> pd.DataFrame | None:
     import pyarrow.parquet as pq
 
@@ -266,6 +274,52 @@ def append_columns(path: Path, new: dict[str, np.ndarray],
 
 
 # ------------------------------------------------------------------ run ---
+def _require_embeddings(paths: dict, args, atlas: str, window_s) -> None:
+    """Every requested embedding present in every cohort, or stop.
+
+    A hard failure rather than a skip, and the same reasoning as stage 4's UMAP
+    check: a run that writes 5 of the 10 state sets it was asked for and reports
+    success is one whose gap surfaces much later, as `umap3 not in the latents`
+    at the point someone is reading results.
+    """
+    gaps = {}
+    for emb in args.embeddings:
+        cols = EMBEDDINGS[emb]
+        absent = [c for c, p in paths.items() if not has_columns(p, cols)]
+        if absent:
+            gaps[emb] = (cols, absent)
+    if not gaps:
+        return
+
+    # The command that would produce them depends on which source wrote these
+    # latents: window_s=-1 is only reachable with --source activation, and
+    # suggesting a command that argparse rejects is worse than no suggestion.
+    import json as _json
+
+    import pyarrow.parquet as pq
+
+    md = pq.ParquetFile(next(iter(paths.values()))).schema_arrow.metadata or {}
+    raw = md.get(b"source")
+    src = _json.loads(raw.decode()) if raw else "dfc"
+    extra = " --source activation" if src == "activation" else ""
+    have = [e for e in args.embeddings if e not in gaps]
+
+    lines = [f"  {emb}: {', '.join(cols)} not in cohort(s) {absent}"
+             for emb, (cols, absent) in gaps.items()]
+    raise SystemExit(
+        f"--embeddings asked for {', '.join(gaps)} at atlas={atlas} "
+        f"window_s={window_s}, and those columns are not in the latents:\n"
+        + "\n".join(lines) + "\n"
+        f"Nothing is written. Refusing to add a partial set of state columns -- "
+        f"a state set that is silently absent is one nothing downstream will "
+        f"notice is missing.\n"
+        f"Either give stage 4 that embedding:\n"
+        f"    fmri-decomp decompose --atlas {atlas} --window-s {window_s}"
+        f"{extra}       # without --no-umap\n"
+        f"or ask only for the embeddings that exist:\n"
+        f"    fmri-decomp cluster --embeddings {' '.join(have) or '<none left>'}")
+
+
 def run_one(root: Path, atlas: str, window_s, args) -> list[dict]:
     paths = cohort_paths(root, atlas, window_s)
     if not paths:
@@ -277,15 +331,16 @@ def run_one(root: Path, atlas: str, window_s, args) -> list[dict]:
                          f"atlas={atlas} window_s={window_s}; found "
                          f"{sorted(paths)}")
 
+    # Every requested embedding is checked BEFORE anything is fitted. Checking
+    # inside the loop would still have failed, but only after the earlier
+    # embedding's columns had been written -- leaving the file with half the state
+    # sets it was asked for, which is the state this stage exists to avoid.
+    _require_embeddings(paths, args, atlas, window_s)
+
     entries = []
     for emb in args.embeddings:
         cols = EMBEDDINGS[emb]
         frames = {c: read_embedding(p, cols) for c, p in paths.items()}
-        if any(f is None for f in frames.values()):
-            missing = [c for c, f in frames.items() if f is None]
-            log(f"  {emb}: not in {missing} -- skipped "
-                f"(was decompose run with the matching --n-latents?)")
-            continue
 
         Xtr = np.vstack([frames[c][cols].to_numpy(float) for c in train])
         len_tr = [n for c in train for n in _seq_lengths(frames[c])]
@@ -378,7 +433,9 @@ def add_arguments(p) -> None:
     p.add_argument("--atlas", nargs="+",
                    default=["harvardoxford", "yeo7", "networks"])
     p.add_argument("--window-s", nargs="+",
-                   default=["30", "60", "120", "300"])
+                   default=["30", "60", "120", "300", "-1"],
+                   help="-1 is the activation aperture (one frame per row). A "
+                        "cell with no latents is reported and skipped.")
     p.add_argument("--methods", nargs="+", default=list(CLUSTERERS),
                    choices=list(CLUSTERERS))
     p.add_argument("--embeddings", nargs="+", default=list(EMBEDDINGS),

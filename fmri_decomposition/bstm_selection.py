@@ -301,6 +301,77 @@ def read_phenotype(specs: list[str], id_col: str, target: str,
     return pheno
 
 
+def _label_axes(d: pd.DataFrame) -> pd.DataFrame:
+    """Add the axis columns the figures read, for scored rows and baselines alike.
+
+    `discover` derives these from the directory tree; the score table is
+    assembled from job keys instead, so they have to be re-derived here from the
+    two fields that survive -- `window_s` and `states`. Baseline rows have no
+    state set, so their method and embedding are the baseline label rather than a
+    guess, while their aperture is real and is what the figure plots them against.
+    """
+    d = d.copy()
+    num = d["window_s"].astype(float)
+    d["aperture"] = np.where(num < 0, "frame (1 TR)",
+                             num.map(lambda w: f"{w:g}s"))
+    d["source"] = np.where(num < 0, "per-TR activation", "windowed DFC edges")
+    # reindex to three columns: a baseline label has no underscores, so rsplit
+    # returns one column and parts[1] would raise rather than giving a label.
+    parts = (d["states"].str.rsplit("_", n=2, expand=True)
+             .reindex(columns=[0, 1, 2]))
+    is_set = (d["kind"] == "set").to_numpy() if "kind" in d.columns else True
+    d["method"] = np.where(is_set, parts[0], "(covariates only)")
+    d["embedding"] = np.where(is_set, parts[1], "(covariates only)")
+    return d
+
+
+def _aperture_order(sets: pd.DataFrame) -> list[str]:
+    """Apertures narrowest first, with the frame aperture at the front.
+
+    -1 sorts below every duration numerically, which is also where it belongs
+    descriptively: one TR is narrower than 15 s in all three cohorts.
+    """
+    # `discover` calls the numeric column window_s_num; the score table keeps
+    # window_s itself as a float. Accept either rather than requiring callers to
+    # add a column just to be ordered.
+    num = "window_s_num" if "window_s_num" in sets.columns else "window_s"
+    d = sets[["aperture", num]].drop_duplicates()
+    return list(d.sort_values(num)["aperture"])
+
+
+def _held_fixed_rows(sets: pd.DataFrame, args) -> list[str]:
+    """The `held fixed` table, derived rather than asserted.
+
+    An axis with one value in this run is fixed and named here; an axis with
+    several is compared and named in the table above instead. Writing these rows
+    by hand is how a design document starts lying: `method` and `feature` were
+    both listed as fixed here while stage 4b and the activation source were being
+    added, and a reader would have believed it.
+    """
+    rows = []
+    varied = {
+        "method": ("clustering method", "k-means, GMM, spectral"),
+        "embedding": ("embedding", "a third reduction, or none at all"),
+        "source": ("input feature", "the aperture not run"),
+        "K": ("K (number of states)", "other K"),
+        "atlas": ("atlas", "the atlases not run"),
+        "aperture": ("aperture", "the apertures not run"),
+    }
+    for col, (label, alt) in varied.items():
+        vals = sorted(str(v) for v in sets[col].unique())
+        if len(vals) == 1:
+            rows.append(f"| **{label}** | {vals[0]} | {alt} |")
+    rows += [
+        "| PCA components feeding the clusterers | 3 | 2, 5, 10 |",
+        "| window overlap (windowed apertures) | `n_overlaps=5` (80%) | less overlap |",
+        "| censor policy | the one the latents were built under | other gates |",
+        f"| covariates | {', '.join(args.covariates)} | + education, + handedness |",
+        "| cross-validation | 5-fold | repeated / nested |",
+        "| boosting hyperparameters | fixed, not tuned (ridge's alpha is) | a tuned grid |",
+    ]
+    return rows
+
+
 def discover(root: Path) -> pd.DataFrame:
     rows = [{"atlas": p.parts[-5].split("=")[1],
              "window_s": p.parts[-4].split("=")[1],
@@ -311,8 +382,20 @@ def discover(root: Path) -> pd.DataFrame:
         raise SystemExit(f"no transition tables under {root / 'transitions'} -- "
                          f"run `fmri-decomp transitions` first")
     d = pd.DataFrame(rows)
-    d["K"] = d["states"].str.rsplit("_", n=1).str[1].astype(int)
+    # `<Method>_<embedding>_<K>`, written by stage 4 or 4b. Split out so the
+    # method and the embedding are AXES of the comparison rather than part of an
+    # opaque label -- the DESIGN table has to say which of them was varied, and
+    # it can only say so if it can see them.
+    parts = d["states"].str.rsplit("_", n=2, expand=True)
+    d["method"], d["embedding"] = parts[0], parts[1]
+    d["K"] = parts[2].astype(int)
     d["window_s_num"] = d["window_s"].astype(float)
+    # -1 is not a duration: it is one frame, whose length is the cohort's TR.
+    # Kept as its own category so nothing treats it as "less than 15 seconds".
+    d["aperture"] = np.where(d["window_s_num"] < 0, "frame (1 TR)",
+                             d["window_s"] + "s")
+    d["source"] = np.where(d["window_s_num"] < 0, "per-TR activation",
+                           "windowed DFC edges")
     return d
 
 
@@ -465,6 +548,7 @@ def run(args) -> int:
     scores_df["arm"] = (scores_df["features"]
                         + np.where(scores_df["p_norm"] == "-", "",
                                    " [" + scores_df["p_norm"] + "]"))
+    scores_df = _label_axes(scores_df)
 
     out = root / "bstm_selection" / f"target={args.target}"
     _wipe(out)
@@ -498,9 +582,13 @@ def run(args) -> int:
         {"target": args.target, "cohort": args.cohort, "models": args.models,
          "seeds": args.seeds, "features": args.features,
          "p_norm": args.p_norm, "covariates": args.covariates,
+         # Read off the state sets that ran, for the same reason DESIGN.md's
+         # table is: a hand-written list of what was held fixed goes stale the
+         # first time a new axis is added, and then it is worse than nothing.
+         "compared": {ax: sorted(str(v) for v in sets[ax].unique())
+                      for ax in ("atlas", "aperture", "source", "method",
+                                 "embedding", "K")},
          "fixed_not_compared": {
-             "method": "quantile-binned PCA-3 (ThresholdCluster)",
-             "feature": "windowed DFC edges, not per-TR activation",
              "pca_components": 3, "n_overlaps": 5,
              "boost_hyperparameters": "fixed, not tuned (ridge's alpha is)"},
          "n_state_sets": int(len(sets)), "n_jobs_run": len(jobs),
@@ -602,9 +690,17 @@ def design_note(args, sets, meta, sample_table=None) -> str:
         "|---|---|---|",
         f"| atlas | {sets['atlas'].nunique()} | "
         f"{', '.join(sorted(sets['atlas'].unique()))} |",
-        f"| window_s (aperture) | {sets['window_s_num'].nunique()} | "
-        f"{', '.join(f'{w:g}' for w in sorted(sets['window_s_num'].unique()))} |",
-        f"| state definition (K) | {sets['states'].nunique()} | "
+        f"| aperture | {sets['aperture'].nunique()} | "
+        f"{', '.join(_aperture_order(sets))} |",
+        f"| input feature | {sets['source'].nunique()} | "
+        f"{', '.join(sorted(sets['source'].unique()))} |",
+        f"| clustering method | {sets['method'].nunique()} | "
+        f"{', '.join(sorted(sets['method'].unique()))} |",
+        f"| embedding | {sets['embedding'].nunique()} | "
+        f"{', '.join(sorted(sets['embedding'].unique()))} |",
+        f"| K (number of states) | {sets['K'].nunique()} | "
+        f"{', '.join(str(k) for k in sorted(sets['K'].unique()))} |",
+        f"| state set (method x embedding x K) | {sets['states'].nunique()} | "
         f"{', '.join(sorted(sets['states'].unique()))} |",
         f"| feature set | {len(args.features)} | {', '.join(args.features)} |",
         f"| cell normalisation | {len(args.p_norm)} | "
@@ -618,18 +714,15 @@ def design_note(args, sets, meta, sample_table=None) -> str:
         *([] if sample_table is None else describe_blocks(sample_table, args)),
         "## Held fixed — NOT compared",
         "",
-        "A state set is `(method, feature, atlas, aperture, K)`. This run varies",
-        "atlas, aperture and K. The other two are fixed:",
+        "A state set is `(method, embedding, K)` over `(input feature, atlas,",
+        "aperture)`. The table above lists what this run varied; what follows is",
+        "what it did not. These rows are derived from the state sets actually",
+        "found, so an axis that becomes varied disappears from here by itself —",
+        "the list cannot drift into claiming something is fixed when it is not.",
         "",
         "| | fixed at | the alternative not tested |",
         "|---|---|---|",
-        "| **method** | quantile-binned PCA-3 (`ThresholdCluster`) | k-means, HMM, GMM |",
-        "| **feature** | windowed DFC edges | per-TR activation |",
-        "| PCA components | 3 | 2, 5, 10 |",
-        "| window overlap | `n_overlaps=5` (80%) | less overlap |",
-        "| censor policy | the one the latents were built under | other gates |",
-        f"| covariates | {', '.join(args.covariates)} | + education, + handedness |",
-        "| cross-validation | 5-fold | repeated / nested |",
+        *_held_fixed_rows(sets, args),
         "",
         "## One asymmetry between the regressors",
         "",
@@ -669,20 +762,33 @@ def _figures(scores, summary, fig_dir: Path, target: str) -> None:
     fig, axes = plt.subplots(len(featsets), len(models),
                              figsize=(5.2 * len(models), 4.3 * len(featsets)),
                              squeeze=False)
+    # Apertures on a CATEGORICAL axis, at evenly spaced positions. This used to
+    # be `set_xscale("log")` against window_s in seconds, which is wrong as soon
+    # as the frame aperture exists: log of -1 is undefined, so matplotlib would
+    # have dropped that aperture from every panel without saying anything. A
+    # frame is not a duration anyway -- it is one TR, which is 1.00 s, 1.49 s or
+    # 2.47 s depending on the cohort -- so there is no position on a seconds axis
+    # that is honest for it.
+    order = _aperture_order(sets)
+    xpos = {a: i for i, a in enumerate(order)}
     for r, fs in enumerate(featsets):
       for ax, model in zip(axes[r], models):
         sub = sets[(sets["model"] == model) & (sets["arm"] == fs)]
         for (atlas, K), g in sub.groupby(["atlas", "K"]):
-            m = g.groupby("window_s")["score"].agg(["mean", "std"])
-            ax.errorbar(m.index, m["mean"], yerr=m["std"], marker="o",
-                        capsize=3, label=f"{atlas} K={K}")
-        b = base[base["model"] == model].groupby("window_s")["score"].mean()
-        ax.plot(b.index, b.values, "k--", lw=1.3, label="covariates only")
+            m = g.groupby("aperture")["score"].agg(["mean", "std"])
+            m = m.reindex([a for a in order if a in m.index])
+            ax.errorbar([xpos[a] for a in m.index], m["mean"], yerr=m["std"],
+                        marker="o", capsize=3, label=f"{atlas} K={K}")
+        b = (base[base["model"] == model].groupby("aperture")["score"].mean()
+             .reindex([a for a in order
+                       if a in set(base["aperture"])]))
+        ax.plot([xpos[a] for a in b.index], b.values, "k--", lw=1.3,
+                label="covariates only")
         ax.axhline(0 if model != "logistic" else .5, lw=.6, c="grey")
-        ax.set_xscale("log")
-        ax.set_xticks(sorted(sets["window_s"].unique()))
-        ax.get_xaxis().set_major_formatter(plt.ScalarFormatter())
-        ax.set_xlabel("window_s")
+        ax.set_xticks(range(len(order)))
+        ax.set_xticklabels(order, rotation=30, ha="right", fontsize=8)
+        ax.set_xlabel("aperture (not to scale — a frame is 1 TR, which differs "
+                      "per cohort)", fontsize=8)
         ax.set_ylabel(f"out-of-fold {metric_name(model)}")
         ax.set_title(f"{model} — features: {fs}", fontsize=10)
         ax.legend(fontsize=7)
@@ -697,7 +803,7 @@ def _figures(scores, summary, fig_dir: Path, target: str) -> None:
     for ax, model in zip(axes[0], models):
         g = sets[sets["model"] == model].assign(
             label=lambda d: d["arm"] + " | " + d["atlas"] + " "
-            + d["window_s"].astype(str) + "s K" + d["K"].astype(str))
+            + d["aperture"] + " " + d["method"] + " K" + d["K"].astype(str))
         rank = g.pivot_table(index="label", columns="seed",
                              values="score").rank(ascending=False)
         order = rank.mean(axis=1).sort_values().index
