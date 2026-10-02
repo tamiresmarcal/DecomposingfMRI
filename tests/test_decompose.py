@@ -25,13 +25,16 @@ EDGES = ["A__B", "A__C", "B__C"]
 
 
 class TestFitMetaIsHashStable:
-    # Frozen on purpose, and verified against the commit BEFORE the activation
-    # source existed rather than simply recorded from the code as it now stands.
-    # If this value changes, every dfc latents file on disk stops matching a
-    # re-run of the command that wrote it, and nothing would report that -- it
-    # would look like two incomparable fits. So a change here has to be
-    # deliberate: update the constant in the same commit and say why.
-    DFC_HASH = "433fca34406aafde"
+    # Frozen on purpose. If this value changes, a dfc latents file written before
+    # the change stops matching a re-run of the command that wrote it, and
+    # nothing reports that -- it looks like two incomparable fits. So a change
+    # here has to be deliberate: update the constant in the same commit, and say
+    # in the message what moved.
+    #
+    # Changed once, knowingly: `bins` left the payload when the quantile
+    # thresholding moved out of this stage into `cluster`. It had been
+    # 433fca34406aafde while `bins` was still part of the fit description.
+    DFC_HASH = "8c7c88dca4e6b719"
 
     def test_the_default_payload_is_unchanged(self):
         a = parse("--atlas", "yeo7", "--window-s", "30")
@@ -42,6 +45,51 @@ class TestFitMetaIsHashStable:
         meta = D.fit_meta(a, "30", EDGES)
         for k in ("source", "match_bandpass", "zscore_runs"):
             assert k not in meta
+
+    def test_the_payload_no_longer_describes_a_clustering(self):
+        # `bins` configured the thresholding this stage used to do. It belongs to
+        # stage 4b now, so it must not be in a hash that claims to describe THIS
+        # fit -- a hash that over-claims is one that reports two identical fits
+        # as different.
+        a = parse("--atlas", "yeo7", "--window-s", "30")
+        assert "bins" not in D.fit_meta(a, "30", EDGES)
+
+
+class TestNoStatesHere:
+    def test_bins_is_gone_from_the_command_line(self):
+        p = argparse.ArgumentParser()
+        D.add_arguments(p)
+        with pytest.raises(SystemExit):
+            p.parse_args(["--atlas", "yeo7", "--window-s", "30",
+                          "--bins", "2", "3"])
+
+    def test_three_components_are_still_required(self):
+        # Every stage 4b clusterer works on a 3-D embedding, so a fit without
+        # pca3 produces latents nothing can cluster -- and the failure has to
+        # come at the fit, not later when `cluster` finds no pca3 columns.
+        import numpy as np
+
+        a = parse("--atlas", "yeo7", "--window-s", "30", "--n-latents", "2",
+                  "--no-umap")
+        X = np.random.default_rng(0).normal(size=(60, 6)).astype(np.float32)
+        feats = [f"A__{i}" for i in range(6)]
+        with pytest.raises(SystemExit, match="include 3"):
+            D.fit_models(X, feats, a, meta={})
+
+    def test_latents_for_writes_no_state_column(self):
+        import numpy as np
+        import pandas as pd
+
+        a = parse("--atlas", "yeo7", "--window-s", "30", "--n-latents", "3",
+                  "--no-umap")
+        X = np.random.default_rng(0).normal(size=(60, 6)).astype(np.float32)
+        feats = [f"A__{i}" for i in range(6)]
+        models = D.fit_models(X, feats, a, meta={"model_hash": "x"})
+        ident = pd.DataFrame({"cohort": "c", "task": "m", "sub": "01",
+                              "window_id": np.arange(60)})
+        out = D.latents_for(ident, X, models, "train")
+        assert [c for c in out.columns if "Cluster" in c or "HMM" in c] == []
+        assert "pca0/3" in out.columns
 
     def test_the_activation_payload_records_both_transforms(self):
         a = parse("--atlas", "yeo7", "--source", "activation")

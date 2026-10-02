@@ -3,6 +3,24 @@
 
     fmri-decomp decompose --atlas harvardoxford --window-s 30 60 120 300
 
+THIS STAGE PRODUCES EMBEDDINGS. IT DOES NOT DEFINE STATES
+---------------------------------------------------------
+PCA and UMAP are fitted here; every way of turning those coordinates into a
+discrete state label lives in `cluster` (stage 4b), threshold included.
+
+The quantile thresholding used to be here, and having it here while every other
+clusterer was in `cluster` was the wrong seam in two concrete ways. One method
+got re-fitted on every stage 4 re-run while the others did not, so the cheapest
+state definition was the most expensive to change. And it wrote
+`ThresholdCluster_pca3_*` columns with no entry in the schema's `clusterers`
+provenance, because that block is written by stage 4b -- which is exactly why
+`transitions.n_states_for` needs a fallback that reads K out of a column NAME.
+One owner, one provenance record, one place to add the next method.
+
+`--bins` is therefore gone; `cluster --methods threshold --k 8 27` is where it
+went, and it reproduces the same columns (K = bins**3, quantile edges fitted on
+the training rows).
+
 WHICH COHORT IS FIT AND WHICH IS PROJECTED
 ------------------------------------------
 `--train` and `--project`, and nothing else. No cohort YAML owns this stage:
@@ -18,7 +36,7 @@ description is in that file's parquet schema metadata, and the fitted objects
 plus a manifest sit under `meta/models/`.
 
 `model_hash` is a short digest of everything that changes the fit -- atlas,
-window, train cohorts, n_latents, bins, seed, umap rows, package version and
+window, train cohorts, n_latents, seed, umap rows, package version and
 the edge list. Two files with the same hash came from the same fit; two with
 different hashes are not comparable, whatever the filenames say. It is the
 same idea as `config_hash` on the stage 2 and 3 shards.
@@ -53,10 +71,9 @@ before committing an allocation:
 
 WHAT IS STILL MISSING
 ---------------------
-No tests, and the window grid comes from the command line rather than from
-`windows.sizes_s`. Both are worth closing; neither is a reason to keep this
-outside the package, since it is the stage that turns edges into the latents
-every later analysis reads.
+The window grid comes from the command line rather than from `windows.sizes_s`.
+Worth closing; not a reason to keep this outside the package, since it is the
+stage that turns features into the latents every later analysis reads.
 """
 
 from __future__ import annotations
@@ -314,7 +331,7 @@ def fit_meta(args, window_s, features: list[str]) -> dict:
     """
     meta = {"stage": "latents", "atlas": args.atlas, "window_s": str(window_s),
             "train_cohorts": list(args.train), "project_cohorts": list(args.project),
-            "n_latents": list(args.n_latents), "bins": list(args.bins),
+            "n_latents": list(args.n_latents),
             "umap_fit_rows": int(args.umap_fit_rows), "no_umap": bool(args.no_umap),
             # In the fit description, therefore in model_hash: a PCA fit on
             # censored rows is not the same model as one fit on all of them,
@@ -356,7 +373,7 @@ def censor_policy_hash(args) -> str | None:
 
 def fit_models(X_train: np.ndarray, edges: list[str], args, meta: dict) -> dict:
     from sklearn.decomposition import PCA
-    from sklearn.preprocessing import KBinsDiscretizer, StandardScaler
+    from sklearn.preprocessing import StandardScaler
 
     # copy=False scales the training matrix in place -- there is no second
     # 3 GB array, and X_train is not needed in raw units again.
@@ -365,12 +382,9 @@ def fit_models(X_train: np.ndarray, edges: list[str], args, meta: dict) -> dict:
     log(f"scaled in place: {Z.shape} {Z.dtype} "
         f"({Z.nbytes / 1e9:.2f} GB)")
 
-    # `meta` first, working containers second: meta carries a `bins` LIST (the
-    # bin counts asked for) and this dict needs a `bins` DICT (the fitted
-    # discretizers). Spread the other way round and the list wins, and the
-    # first assignment into it fails with an IndexError.
-    models = {**meta, "scaler": scaler, "pca": {}, "umap": {}, "bins": {},
-              "edges": edges}
+    # `meta` first, working containers second, so a key in both resolves to the
+    # container rather than to the scalar `meta` recorded it as.
+    models = {**meta, "scaler": scaler, "pca": {}, "umap": {}, "edges": edges}
 
     for n in args.n_latents:
         models["pca"][n] = PCA(n_components=n, random_state=args.seed,
@@ -407,24 +421,20 @@ def fit_models(X_train: np.ndarray, edges: list[str], args, meta: dict) -> dict:
                                               random_state=args.seed).fit(Z[idx])
                 log(f"  umap {n}: {time.time() - t0:.0f}s")
 
+    # Nothing here defines a STATE. This stage produces embeddings; `cluster`
+    # turns them into labels -- see the module docstring on why the quantile
+    # thresholding that used to live here moved there.
     if 3 not in args.n_latents:
-        raise SystemExit("the threshold grid is defined on pca3; "
-                         "include 3 in --n-latents")
-    P3 = models["pca"][3].transform(Z)
-    for n in args.bins:
-        kbd = KBinsDiscretizer(n_bins=n, encode="ordinal", strategy="quantile",
-                               subsample=None).fit(P3)
-        models["bins"][n] = kbd
-        lab = np.ravel_multi_index(kbd.transform(P3).astype(int).T, (n, n, n))
-        log(f"{n} bins -> {n ** 3} cells, {len(np.unique(lab))} occupied")
-    del P3, Z
+        raise SystemExit("every clusterer in stage 4b is defined on a 3-D "
+                         "embedding; include 3 in --n-latents")
+    del Z
     gc.collect()
     return models
 
 
 def latents_for(ident: pd.DataFrame, X: np.ndarray, models: dict,
                 role: str) -> pd.DataFrame:
-    """Identity + every latent + every cluster label, for one cohort.
+    """Identity + every embedding, for one cohort. No state labels.
 
     `role` and `model_hash` are COLUMNS, not just schema metadata, because
     pandas drops parquet key-value metadata on read -- a provenance field only
@@ -439,10 +449,6 @@ def latents_for(ident: pd.DataFrame, X: np.ndarray, models: dict,
             arr = model.transform(Z)
             for j in range(n):
                 out[f"{kind}{j}/{n}"] = arr[:, j].astype(np.float32)
-    P3 = models["pca"][3].transform(Z)
-    for n, kbd in models["bins"].items():
-        out[f"ThresholdCluster_pca3_{n ** 3}"] = np.ravel_multi_index(
-            kbd.transform(P3).astype(int).T, (n, n, n))
     return out[[c for c in IDENT if c in out.columns]
                + [c for c in out.columns if c not in IDENT]]
 
@@ -690,9 +696,8 @@ def add_arguments(p) -> None:
     p.add_argument("--train", nargs="+", default=["ds002837", "cneuromod"])
     p.add_argument("--project", nargs="+", default=["camcan"])
     p.add_argument("--n-latents", nargs="+", type=int, default=[2, 3, 5],
-                   help="must include 3: the threshold grid is defined on pca3")
-    p.add_argument("--bins", nargs="+", type=int, default=[2, 3, 5, 8],
-                   help="quantile bins per PCA axis -> n**3 cells")
+                   help="must include 3: every stage 4b clusterer works on a "
+                        "3-D embedding")
     p.add_argument("--umap-fit-rows", type=int, default=30_000,
                    help="0 fits UMAP on every training row")
     p.add_argument("--no-umap", action="store_true")

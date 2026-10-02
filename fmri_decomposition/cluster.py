@@ -1,15 +1,38 @@
 #!/usr/bin/env python3
-"""Stage 4b -- add brain-state definitions to latents that already exist.
+"""Stage 4b -- every brain-state definition, on latents that already exist.
 
     fmri-decomp cluster --atlas yeo7 --window-s 30 60 120 300
     fmri-decomp cluster --methods threshold meanshift hmm \\
                         --embeddings pca3 umap3 --k 8 27
 
-A latents file already holds `pca0/3..pca2/3` and `umap0/3..umap2/3`. A new way
-of defining states needs neither PCA nor UMAP refitted -- it reads those columns
-and appends label columns to the same file. That is the whole reason this is a
-separate stage from `decompose`: adding a sixth state definition must not mean
-redoing the five that already work.
+THE ONLY PLACE A STATE IS DEFINED
+---------------------------------
+Stage 4 produces embeddings; this stage turns them into labels. ALL of them,
+threshold included -- `--bins` used to do the thresholding inside `decompose`
+and no longer exists, because one method sitting in a different stage from the
+others is the wrong seam. It got re-fitted on every stage 4 re-run while the
+others did not, and it wrote columns with no entry in the `clusterers`
+provenance block, which is why `transitions.n_states_for` still carries a
+fallback that reads K out of a column name.
+
+A latents file holds `pca0/3..pca2/3` and `umap0/3..umap2/3`. A new way of
+defining states needs neither PCA nor UMAP refitted -- it reads those columns
+and appends label columns to the same file. Adding a sixth state definition must
+not mean redoing the five that already work.
+
+WHY THE LABELS GO IN THE LATENTS FILE AND NOT A TABLE OF THEIR OWN
+------------------------------------------------------------------
+A label is one small integer per row of a table that already exists, keyed by
+exactly the columns that table is keyed by. A separate table would be the same
+(cohort, task, sub, window_id) index repeated per state set, joined back on
+every read, and joined wrongly the first time someone forgot one of the four
+keys. The embeddings and their labels are one row of one table, which is also
+how stage 4 has always written them.
+
+It does mean this stage REWRITES each latents file (read, add columns, write,
+rename) rather than appending in place, because parquet has no append. That is
+why one job owns an (atlas, aperture) and the sbatch is not an array: two
+writers would each rename over the other's columns.
 
 ADDING A METHOD LATER
 ---------------------
@@ -29,7 +52,8 @@ has a real `predict`.
 WHAT EACH METHOD NEEDS
 ----------------------
     threshold   K = bins**3, so k=8 is 2 bins per axis and k=27 is 3. Quantile
-                edges, fitted on the training rows.
+                edges, fitted on the merged training rows. This is what
+                `decompose --bins` used to write, moved here unchanged.
     meanshift   K is DISCOVERED. `--meanshift-quantile` sets the bandwidth
                 (smaller -> more states); the K it finds is recorded in the
                 column name.
@@ -211,6 +235,59 @@ def _seq_lengths(df: pd.DataFrame) -> list[int]:
     return (df.groupby(["task", "sub"], sort=False).size().tolist())
 
 
+def _training_block(frames: dict, train: list[str], cols: list[str], args):
+    """The merged training matrix -> (X, per-(task,sub) lengths, row share).
+
+    ONE FIT ON THE POOLED TRAINING COHORTS, projected onto everything else. That
+    is what "discover overall states" means here, and it is what makes a state
+    label comparable across cohorts at all: state 5 is only the same state in two
+    cohorts if one fit defined it.
+
+    Pooling is not neutral, though, and the log says so. The cohorts contribute
+    very different numbers of rows -- different subject counts, different hours of
+    film, and at the activation aperture different TRs, so ds002837 contributes
+    ~2.5x the rows per minute of film that camcan would. A density method asked
+    where the modes are will answer mostly about whichever cohort brought the most
+    rows. `--balance-train` subsamples every cohort to the smallest one's row
+    count so each has equal say; it is off by default because it throws data away,
+    and which of the two you want is a judgement about the claim being made, not
+    something this stage should decide.
+
+    The sequence lengths follow the same subsampling, and they stay per
+    (task, sub) either way -- an HMM given one stacked sequence would learn a
+    transition from the last frame of one person to the first frame of the next.
+    """
+    counts = {c: len(frames[c]) for c in train}
+    total = sum(counts.values()) or 1
+    share = {c: counts[c] / total for c in train}
+
+    if not args.balance_train:
+        X = np.vstack([frames[c][cols].to_numpy(float) for c in train])
+        lengths = [n for c in train for n in _seq_lengths(frames[c])]
+        return X, lengths, share
+
+    # Subsample by whole subjects, not by rows: dropping rows from the middle of
+    # a subject's sequence would break the contiguity an HMM's `lengths` asserts.
+    rng = np.random.default_rng(0)
+    target = min(counts.values())
+    blocks, lengths = [], []
+    for c in train:
+        f = frames[c]
+        keys = list(dict.fromkeys(zip(f["task"], f["sub"])))
+        rng.shuffle(keys)
+        taken, kept = 0, []
+        for key in keys:
+            if taken >= target:
+                break
+            kept.append(key)
+            taken += int(((f["task"] == key[0]) & (f["sub"] == key[1])).sum())
+        keep = f.set_index(["task", "sub"]).index.isin(kept)
+        sub = f.loc[keep]
+        blocks.append(sub[cols].to_numpy(float))
+        lengths += _seq_lengths(sub)
+    return np.vstack(blocks), lengths, share
+
+
 def has_columns(path: Path, cols: list[str]) -> bool:
     """Schema only -- no row group is touched. Used by the pre-flight, which asks
     about every embedding and would otherwise read each present one twice."""
@@ -230,10 +307,11 @@ def read_embedding(path: Path, cols: list[str]) -> pd.DataFrame | None:
 
 
 def fit_hash(method: str, embedding: str, k, params: dict, train: list[str],
-             n_rows: int) -> str:
+             n_rows: int, balanced: bool = False) -> str:
     payload = json.dumps({"method": method, "embedding": embedding, "k": k,
                           "params": params, "train": sorted(train),
-                          "n_train_rows": n_rows}, sort_keys=True, default=str)
+                          "n_train_rows": n_rows, "balanced": balanced},
+                         sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -342,8 +420,12 @@ def run_one(root: Path, atlas: str, window_s, args) -> list[dict]:
         cols = EMBEDDINGS[emb]
         frames = {c: read_embedding(p, cols) for c, p in paths.items()}
 
-        Xtr = np.vstack([frames[c][cols].to_numpy(float) for c in train])
-        len_tr = [n for c in train for n in _seq_lengths(frames[c])]
+        Xtr, len_tr, share = _training_block(frames, train, cols, args)
+        how = "balanced" if args.balance_train else "pooled as-is"
+        log(f"  {emb}: one fit on {len(Xtr):,} row(s) from {train} ({how}); "
+            + "  ".join(f"{c} {share[c]:.0%}" for c in train)
+            + " of the merged rows, then projected onto "
+            + f"{sorted(set(paths) - set(train))}")
 
         for method in args.methods:
             ks = [None] if method in K_FREE else args.k
@@ -355,7 +437,8 @@ def run_one(root: Path, atlas: str, window_s, args) -> list[dict]:
                 else:
                     cl.fit(Xtr, k)
                 col = column_name(method, emb, cl.k_found)
-                h = fit_hash(method, emb, cl.k_found, cl.params(), train, len(Xtr))
+                h = fit_hash(method, emb, cl.k_found, cl.params(), train,
+                             len(Xtr), balanced=bool(args.balance_train))
 
                 written = {}
                 for cohort, f in frames.items():
@@ -443,8 +526,13 @@ def add_arguments(p) -> None:
     p.add_argument("--k", nargs="+", type=int, default=[8, 27],
                    help="for methods that need one; meanshift discovers it")
     p.add_argument("--train", nargs="+", default=DEFAULT_TRAIN,
-                   help="cohorts a clusterer may be FITTED on; every cohort "
-                        "present is then labelled")
+                   help="cohorts a clusterer may be FITTED on, MERGED into one "
+                        "fit; every cohort present is then labelled from it")
+    p.add_argument("--balance-train", action="store_true",
+                   help="subsample each training cohort to the smallest one's "
+                        "row count, by whole subjects, so no cohort dominates "
+                        "where the states are. Off by default: it discards data, "
+                        "and the log prints each cohort's share either way.")
     p.add_argument("--meanshift-quantile", type=float, default=0.2,
                    help="bandwidth quantile; smaller finds more states")
     p.add_argument("--meanshift-fit-rows", type=int, default=50_000)

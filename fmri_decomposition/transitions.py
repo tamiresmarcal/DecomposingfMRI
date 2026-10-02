@@ -22,7 +22,7 @@ parquet stores for almost free.
 WHAT A TRANSITION IS HERE
 -------------------------
 A latents file holds one row per window, in time order within (task, sub), each
-carrying a discrete state label (`ThresholdCluster_pca3_8` and `_27`). A
+carrying a discrete state label, written by stage 4b (`cluster`). A
 transition is one neighbouring pair in that sequence, so N windows give N-1
 transitions. `pairs.parquet` has one row per (subject, from_state, to_state)
 that was actually observed -- long, not wide, because a wide table is K*K
@@ -161,7 +161,8 @@ def check_grid(root: Path, atlases, windows, cohorts, states) -> pd.DataFrame:
                 for st in states:
                     reason = ""
                     if st not in names:
-                        reason = f"column {st} absent (was --bins run for it?)"
+                        reason = (f"column {st} absent (run `fmri-decomp cluster` "
+                              f"for this atlas and aperture)")
                     rows.append({**rec, "states": st, "n_rows": n_rows,
                                  "model_hash": present[cohort]["model_hash"],
                                  "censor_policy": present[cohort]["censor_policy"],
