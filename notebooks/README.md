@@ -5,11 +5,18 @@ Exploration of what the pipeline wrote. Nothing here writes to `outputs/`.
 | file | what it opens |
 |---|---|
 | `01_activation.ipynb` | stage 2 — parcel timeseries, one dataset per cohort |
-| `02_dfc.ipynb` | stage 3 — windowed connectivity, QC first, edges second |
+| `02_dfc.ipynb` | stage 3 — windowed connectivity: the aperture grid, window reliability, edges |
 | `03_qc.ipynb` | one histogram grid: six QC metrics x every cohort, three cells |
 | `04_activation_pca.ipynb` | open activation → filter by a `{cohort: [subs]}` dict → PCA (standalone, no `nbtools`) |
 | `06_visualize.ipynb` | the latent-space figures, three cohorts, plus one coloured by symptom |
 | `nbtools.py` | the loaders they use: inventory, pruned reads, the participants join |
+
+**QC lives in one place.** `03_qc.ipynb` owns subject-level quality control —
+motion, coverage, scrubbing, ISC, read from `participants_qc.csv`. `02` used to
+open with a QC section of its own, which duplicated that job; it now carries
+only what is true of a DFC *window* (`n_tr_effective`, `rank_deficient`, and the
+Fisher-z noise that follows from them). Those are properties of the measurement,
+not screening criteria, and they belong beside the edges.
 
 `03` and `04` are deliberately small. `03` is a load and a histogram grid and
 nothing else. `04` is standalone — pandas, numpy and matplotlib, no `nbtools`
