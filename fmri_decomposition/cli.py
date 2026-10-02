@@ -496,9 +496,9 @@ def cmd_decompose(args) -> int:
 def cmd_select(args) -> int:
     """Stage 5b: rank state sets by how well their transitions predict a
     phenotype column. Parallel over (state set x model x fold seed)."""
-    from . import select
+    from . import bstm_selection
 
-    return select.run(args)
+    return bstm_selection.run(args)
 
 
 def cmd_transitions(args) -> int:
@@ -645,12 +645,12 @@ def build_parser() -> argparse.ArgumentParser:
     _decompose.add_arguments(dec)
     dec.set_defaults(func=cmd_decompose)
 
-    from . import select as _select
+    from . import bstm_selection as _bstm_selection
 
     sel = sub.add_parser(
         "select",
         help="stage 5b: which state set predicts a phenotype column best")
-    _select.add_arguments(sel)
+    _bstm_selection.add_arguments(sel)
     sel.set_defaults(func=cmd_select)
 
     from . import transitions as _transitions

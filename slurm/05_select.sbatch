@@ -36,11 +36,13 @@ EXTRA=(); seen_sep=0
 for a in "$@"; do
   if [[ ${seen_sep} -eq 1 ]]; then EXTRA+=("$a")
   elif [[ "$a" == "--" ]]; then seen_sep=1
-  else echo "unexpected argument ${a!r} -- put extra args after a bare --" >&2
+  # `${a!r}` would be python; in bash that is a bad substitution and the error
+  # handler would itself die with a confusing message instead of this one.
+  else echo "unexpected argument '$a' -- put extra args after a bare --" >&2
        exit 1; fi
 done
 
-# The estimators are single-threaded by construction (see select.make_model):
+# The estimators are single-threaded by construction (see bstm_selection.make_model):
 # joblib owns the parallelism, and a threaded estimator inside a joblib worker
 # oversubscribes the node and runs slower than either alone.
 export OMP_NUM_THREADS=1
