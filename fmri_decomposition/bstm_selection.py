@@ -93,6 +93,17 @@ SUMMARY_PREDICTORS = [
 
 FEATURE_SETS = ["cells", "summary", "cells+summary"]
 
+# How a transition cell is expressed.
+#   joint  n(i->j) / all of this subject's transitions. As stored. The whole
+#          table sums to 1, and the denominator is the same for every subject.
+#   cond   n(i->j) / n(i->.), the Markov transition probability -- each ROW
+#          sums to 1. Derived here by multiplying back to counts and
+#          renormalising, so it costs nothing and needs no re-run of
+#          `transitions`.
+# `summary` holds no cells, so it is never expanded over this axis -- doing so
+# would run the identical arm twice.
+P_NORMS = ["joint", "cond"]
+
 CAMCAN = Path("/project/6008063/tamires/cohorts/camcan/dataman/useraccess/"
               "opendata/paule_toussaint_camcan01870")
 DEFAULT_PHENO = [f"{CAMCAN / 'approved_data.tsv'}:\t",
@@ -276,8 +287,16 @@ def design(cov: pd.DataFrame) -> np.ndarray:
     return X.fillna(X.mean()).to_numpy()
 
 
+def to_cond(block: np.ndarray, n_transitions: np.ndarray, K: int) -> np.ndarray:
+    """p_joint -> p_cond. Rows of an unvisited from-state stay at exact zero."""
+    M = (block * n_transitions[:, None]).reshape(len(block), K, K)   # counts
+    rs = M.sum(axis=2, keepdims=True)
+    return np.divide(M, rs, out=np.zeros_like(M),
+                     where=rs > 0).reshape(len(block), K * K)
+
+
 def build(table: Path, pheno: pd.DataFrame, covariates: list[str],
-          feature_sets: list[str]):
+          feature_sets: list[str], p_norms: list[str]):
     """One state set -> ({feature set: matrix}, covariates-only matrix, y, sizes).
 
     Covariates are prepended to every feature set, so each one has to beat the
@@ -307,13 +326,28 @@ def build(table: Path, pheno: pd.DataFrame, covariates: list[str],
               "cells+summary": cells + summary}
 
     C = design(d[covariates])
+    K = int(t["n_states"].iloc[0])
+    n_tr = d["n_transitions"].to_numpy(float)
+    joint = d[cells].to_numpy(float)
+    cond = to_cond(joint, n_tr, K) if cells else joint
+    summ = d[summary].to_numpy(float) if summary else np.empty((len(d), 0))
+
     mats, widths = {}, {}
     for fs in feature_sets:
-        cols = blocks[fs]
-        if not cols:
-            continue
-        mats[fs] = np.column_stack([C, d[cols].to_numpy(float)])
-        widths[fs] = len(cols)
+        # summary carries no cells, so the normalisation axis does not apply
+        norms = ["-"] if fs == "summary" else p_norms
+        for nm in norms:
+            cellblock = joint if nm == "joint" else cond
+            parts = [C]
+            if "cells" in fs:
+                parts.append(cellblock)
+            if "summary" in fs:
+                parts.append(summ)
+            cols = blocks[fs]
+            if not cols:
+                continue
+            mats[(fs, nm)] = np.column_stack(parts)
+            widths[(fs, nm)] = len(cols)
     return mats, C, d["y"].to_numpy(float), widths, len(d)
 
 
@@ -345,61 +379,68 @@ def run(args) -> int:
     for t in sets.itertuples():
         key = (t.atlas, t.window_s, t.states)
         mats, C, y, widths, n = build(t.path, pheno, args.covariates,
-                                      args.features)
+                                      args.features, args.p_norm)
         data[key] = (mats, C, y)
-        for fs, w in widths.items():
+        for (fs, nm), w in widths.items():
             meta.append({"atlas": t.atlas, "window_s": t.window_s_num,
                          "states": t.states, "K": t.K, "features": fs,
-                         "n": n, "n_features": w})
+                         "p_norm": nm, "n": n, "n_features": w})
     meta = pd.DataFrame(meta)
     log(f"  subjects per state set: {meta['n'].min()}-{meta['n'].max()}")
-    for fs, g in meta.groupby("features"):
-        log(f"    {fs:<14} {sorted(g['n_features'].unique())} predictor(s) "
+    for (fs, nm), g in meta.groupby(["features", "p_norm"]):
+        log(f"    {fs + ('' if nm == '-' else f' [{nm}]'):<22} "
+            f"{sorted(g['n_features'].unique())} predictor(s) "
             f"+ {len(args.covariates)} covariate(s)")
 
     # The baseline depends on window_s only -- same subjects, same
     # n_transitions, every atlas, K and feature set. One per
     # (window_s, model, seed), not one per state set.
-    jobs = [("set", k, fs, m, s)
-            for k in data for fs in data[k][0]
+    jobs = [("set", k, arm, m, s)
+            for k in data for arm in data[k][0]
             for m in args.models for s in args.seeds]
     base_keys = {}
     for k in data:
         base_keys.setdefault(k[1], k)          # first state set at this window
     n_base = len(base_keys) * len(args.models) * len(args.seeds)
-    jobs += [("base", base_keys[w], "(covariates only)", m, s)
+    jobs += [("base", base_keys[w], ("(covariates only)", "-"), m, s)
              for w in base_keys for m in args.models for s in args.seeds]
     log(f"  {len(jobs)} fit job(s) ({len(jobs) - n_base} state-set "
         f"+ {n_base} baseline)")
 
-    def one(kind, key, fs, model, seed):
+    def one(kind, key, arm, model, seed):
         mats, C, y = data[key]
-        return score_once(mats[fs] if kind == "set" else C, y, model, seed)
+        return score_once(mats[arm] if kind == "set" else C, y, model, seed)
 
     t0 = time.time()
     scores = Parallel(n_jobs=args.n_jobs, backend="loky", verbose=5)(
-        delayed(one)(kind, key, fs, m, s) for kind, key, fs, m, s in jobs)
+        delayed(one)(kind, key, arm, m, s) for kind, key, arm, m, s in jobs)
     log(f"  fitted in {time.time() - t0:.0f}s")
 
     rows = []
-    for (kind, key, fs, model, seed), sc in zip(jobs, scores):
+    for (kind, key, arm, model, seed), sc in zip(jobs, scores):
         atlas, window_s, states = key
+        fs, nm = arm
         rows.append({"atlas": atlas if kind == "set" else "(baseline)",
                      "window_s": float(window_s),
                      "states": states if kind == "set" else "(covariates only)",
                      "K": int(states.rsplit("_", 1)[1]) if kind == "set" else 0,
-                     "features": fs, "model": model,
+                     "features": fs, "p_norm": nm, "model": model,
                      "metric": metric_name(model),
                      "seed": seed, "kind": kind, "score": sc})
     scores_df = pd.DataFrame(rows).merge(
-        meta, on=["atlas", "window_s", "states", "K", "features"], how="left")
+        meta, on=["atlas", "window_s", "states", "K", "features", "p_norm"],
+        how="left")
+    # one readable label per arm, used by every figure and the ranking
+    scores_df["arm"] = (scores_df["features"]
+                        + np.where(scores_df["p_norm"] == "-", "",
+                                   " [" + scores_df["p_norm"] + "]"))
 
     out = root / "selection" / f"target={args.target}"
     (out / "figures").mkdir(parents=True, exist_ok=True)
     (out / "models").mkdir(parents=True, exist_ok=True)
     scores_df.to_parquet(out / "scores.parquet", index=False)
 
-    summary = (scores_df.groupby(["model", "features", "atlas", "window_s", "K",
+    summary = (scores_df.groupby(["model", "arm", "atlas", "window_s", "K",
                                   "states"], dropna=False)["score"]
                .agg(["mean", "std", "min", "max", "count"]).reset_index()
                .sort_values(["model", "mean"], ascending=[True, False]))
@@ -411,6 +452,10 @@ def run(args) -> int:
                .head(args.show).to_string(index=False))
         print()
 
+    note = design_note(args, sets, meta)
+    (out / "DESIGN.md").write_text(note)
+    print(note)
+
     _figures(scores_df, summary, out / "figures", args.target)
     saved = _save_models(scores_df, data, out / "models", args.save_top,
                          args.covariates)
@@ -420,7 +465,12 @@ def run(args) -> int:
     mf.write_text(json.dumps(
         {"target": args.target, "cohort": args.cohort, "models": args.models,
          "seeds": args.seeds, "features": args.features,
-         "covariates": args.covariates,
+         "p_norm": args.p_norm, "covariates": args.covariates,
+         "fixed_not_compared": {
+             "method": "quantile-binned PCA-3 (ThresholdCluster)",
+             "feature": "windowed DFC edges, not per-TR activation",
+             "pca_components": 3, "n_overlaps": 5,
+             "boost_hyperparameters": "fixed, not tuned (ridge's alpha is)"},
          "n_state_sets": int(len(sets)), "n_jobs_run": len(jobs),
          "saved_models": saved, "output": str(out.relative_to(root)),
          "note": "camcan is the discovery cohort; these scores RANK state sets "
@@ -430,6 +480,79 @@ def run(args) -> int:
     log(f"-> {out.relative_to(root)}  (scores, summary, figures, models)")
     log(f"-> {mf.relative_to(root)}")
     return 0
+
+
+def design_note(args, sets, meta) -> str:
+    """What this run varied and what it held fixed, in the output folder.
+
+    Written beside the scores because six months on, "which state set won" is
+    useless without "won against what, holding what constant" -- and the fixed
+    list is the part nobody writes down.
+    """
+    n_arms = meta[["features", "p_norm"]].drop_duplicates().shape[0]
+    n_sets = sets[["atlas", "window_s", "states"]].drop_duplicates().shape[0]
+    combos = n_sets * n_arms * len(args.models)
+    lines = [
+        f"# Model selection design — target = {args.target}",
+        "",
+        f"Written {time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime())}.",
+        "",
+        "## Compared",
+        "",
+        "| axis | n | values |",
+        "|---|---|---|",
+        f"| atlas | {sets['atlas'].nunique()} | "
+        f"{', '.join(sorted(sets['atlas'].unique()))} |",
+        f"| window_s (aperture) | {sets['window_s_num'].nunique()} | "
+        f"{', '.join(f'{w:g}' for w in sorted(sets['window_s_num'].unique()))} |",
+        f"| state definition (K) | {sets['states'].nunique()} | "
+        f"{', '.join(sorted(sets['states'].unique()))} |",
+        f"| feature set | {len(args.features)} | {', '.join(args.features)} |",
+        f"| cell normalisation | {len(args.p_norm)} | "
+        f"{', '.join(args.p_norm)}  (not applied to `summary`) |",
+        f"| regressor | {len(args.models)} | {', '.join(args.models)} |",
+        "",
+        f"**{combos} configurations**, each repeated over "
+        f"{len(args.seeds)} fold seeds {args.seeds} — the seeds are a "
+        f"reliability check, not a choice.",
+        "",
+        "## Held fixed — NOT compared",
+        "",
+        "A state set is `(method, feature, atlas, aperture, K)`. This run varies",
+        "atlas, aperture and K. The other two are fixed:",
+        "",
+        "| | fixed at | the alternative not tested |",
+        "|---|---|---|",
+        "| **method** | quantile-binned PCA-3 (`ThresholdCluster`) | k-means, HMM, GMM |",
+        "| **feature** | windowed DFC edges | per-TR activation |",
+        "| PCA components | 3 | 2, 5, 10 |",
+        "| window overlap | `n_overlaps=5` (80%) | less overlap |",
+        "| censor policy | the one the latents were built under | other gates |",
+        f"| covariates | {', '.join(args.covariates)} | + education, + handedness |",
+        "| cross-validation | 5-fold | repeated / nested |",
+        "",
+        "## One asymmetry between the regressors",
+        "",
+        "`ridge` has its penalty tuned inside each fit (RidgeCV over 25 alphas).",
+        "The boosted models do **not** — their hyperparameters are fixed, chosen",
+        "conservatively for n in the hundreds. So a boosted model losing is partly",
+        "a statement about those settings; a boosted model winning is stronger,",
+        "because it won while handicapped.",
+        "",
+        "## What the scores are for",
+        "",
+        "camcan is the **discovery** cohort. These scores RANK candidates; they",
+        "are not effect sizes. Choosing the best of many biases the winner's score",
+        "upward even when nothing is real, so quote \"state set X ranked first\",",
+        "never \"transitions explain Y% of the variance\". Confirmation is a",
+        "different dataset.",
+        "",
+        "`figures/cells_vs_summary.png` is the control: if the non-transition",
+        "summaries predict as well as the cells, the signal is where someone sits",
+        "and how long they stay, not how they move.",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def _figures(scores, summary, fig_dir: Path, target: str) -> None:
@@ -442,13 +565,13 @@ def _figures(scores, summary, fig_dir: Path, target: str) -> None:
     models = sorted(sets["model"].unique())
 
     # 1. score vs aperture, one panel per model, with the baseline as a floor
-    featsets = sorted(sets["features"].unique())
+    featsets = sorted(sets["arm"].unique())
     fig, axes = plt.subplots(len(featsets), len(models),
                              figsize=(5.2 * len(models), 4.3 * len(featsets)),
                              squeeze=False)
     for r, fs in enumerate(featsets):
       for ax, model in zip(axes[r], models):
-        sub = sets[(sets["model"] == model) & (sets["features"] == fs)]
+        sub = sets[(sets["model"] == model) & (sets["arm"] == fs)]
         for (atlas, K), g in sub.groupby(["atlas", "K"]):
             m = g.groupby("window_s")["score"].agg(["mean", "std"])
             ax.errorbar(m.index, m["mean"], yerr=m["std"], marker="o",
@@ -473,7 +596,7 @@ def _figures(scores, summary, fig_dir: Path, target: str) -> None:
                              squeeze=False)
     for ax, model in zip(axes[0], models):
         g = sets[sets["model"] == model].assign(
-            label=lambda d: d["features"] + " | " + d["atlas"] + " "
+            label=lambda d: d["arm"] + " | " + d["atlas"] + " "
             + d["window_s"].astype(str) + "s K" + d["K"].astype(str))
         rank = g.pivot_table(index="label", columns="seed",
                              values="score").rank(ascending=False)
@@ -494,9 +617,9 @@ def _figures(scores, summary, fig_dir: Path, target: str) -> None:
     plt.close(fig)
 
     # 3. do the models agree on the winner?
-    piv = (sets.groupby(["model", "features", "atlas", "window_s", "K"])["score"]
+    piv = (sets.groupby(["model", "arm", "atlas", "window_s", "K"])["score"]
                .mean().reset_index()
-               .assign(label=lambda d: d["features"] + " | " + d["atlas"] + " "
+               .assign(label=lambda d: d["arm"] + " | " + d["atlas"] + " "
                        + d["window_s"].astype(str) + "s K" + d["K"].astype(str))
                .pivot(index="label", columns="model", values="score"))
     if piv.shape[1] > 1:
@@ -520,11 +643,13 @@ def _figures(scores, summary, fig_dir: Path, target: str) -> None:
     #    tracks the phenotype as well as `cells`, the signal is occupancy and
     #    dwell rather than the transitions themselves.
     if len(featsets) > 1:
-        pair = (sets.groupby(["model", "features", "atlas", "window_s", "K"])
+        pair = (sets.groupby(["model", "arm", "atlas", "window_s", "K"])
                     ["score"].mean().reset_index()
                     .pivot_table(index=["model", "atlas", "window_s", "K"],
-                                 columns="features", values="score").dropna())
-        if {"cells", "summary"} <= set(pair.columns) and len(pair):
+                                 columns="arm", values="score").dropna())
+        cellarm = next((c for c in pair.columns if c.startswith("cells [")), None)
+        if cellarm and "summary" in pair.columns and len(pair):
+            pair = pair.rename(columns={cellarm: "cells"})
             fig, ax = plt.subplots(figsize=(5.4, 5.2))
             for model, g in pair.reset_index().groupby("model"):
                 ax.scatter(g["summary"], g["cells"], s=34, alpha=.8, label=model)
@@ -557,7 +682,7 @@ def _save_models(scores, data, model_dir: Path, top_n: int,
 
     sets = scores[scores["kind"] == "set"]
     saved = []
-    for (model, fs), g in sets.groupby(["model", "features"]):
+    for (model, fs), g in sets.groupby(["model", "arm"]):
         best = (g.groupby(["atlas", "window_s", "states"])["score"].mean()
                  .sort_values(ascending=False).head(top_n))
         for (atlas, window_s, states), mean_score in best.items():
@@ -566,13 +691,16 @@ def _save_models(scores, data, model_dir: Path, top_n: int,
             if key not in data:
                 continue
             mats, C, y = data[key]
-            if fs not in mats:
+            base, _, nm = fs.partition(" [")
+            arm = (base, nm.rstrip("]") or "-")
+            if arm not in mats:
                 continue
             est, kind, label = make_model(model, 0)
-            est.fit(mats[fs], (y > 0).astype(int) if kind == "clf" else y)
-            name = f"{model}__{fs.replace('+', '-')}__{atlas}__w{key[1]}__{states}.joblib"
+            est.fit(mats[arm], (y > 0).astype(int) if kind == "clf" else y)
+            tag = fs.replace("+", "-").replace(" [", "-").replace("]", "")
+            name = f"{model}__{tag}__{atlas}__w{key[1]}__{states}.joblib"
             joblib.dump({"estimator": est, "model": model, "label": label,
-                         "features": fs,
+                         "features": arm[0], "p_norm": arm[1],
                          "atlas": atlas, "window_s": key[1], "states": states,
                          "covariates": covariates, "n": len(y),
                          "mean_cv_score": float(mean_score),
@@ -598,7 +726,14 @@ def add_arguments(p) -> None:
     p.add_argument("--models", nargs="+", default=["ridge", "hgb"],
                    choices=["ridge", "hgb", "lgbm", "logistic"])
     p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
-    p.add_argument("--features", nargs="+", default=["cells", "summary"],
+    p.add_argument("--p-norm", nargs="+", default=P_NORMS, choices=P_NORMS,
+                   help="how a transition cell is expressed: joint (share of "
+                        "all this subject's transitions, as stored) or cond "
+                        "(the Markov probability, each row summing to 1). "
+                        "Ignored for the `summary` feature set, which has no "
+                        "cells.")
+    p.add_argument("--features", nargs="+",
+                   default=["cells", "summary", "cells+summary"],
                    choices=FEATURE_SETS,
                    help="cells = the K*K transition probabilities (the "
                         "hypothesis); summary = everything else per subject "
