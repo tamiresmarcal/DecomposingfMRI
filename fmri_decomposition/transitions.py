@@ -125,8 +125,13 @@ def check_grid(root: Path, atlases, windows, cohorts, states) -> pd.DataFrame:
                 rec = {"atlas": atlas, "window_s": w, "cohort": cohort,
                        "path": str(p)}
                 if not p.exists():
-                    rows.append({**rec, "states": "*", "ok": False,
-                                 "reason": "no latents file"})
+                    # One row per STATE even when the file is missing, so the
+                    # denominator in the report equals the grid size. Emitting a
+                    # single `states="*"` row here made "48/69" print under a
+                    # header that said 90 cells.
+                    for st in states:
+                        rows.append({**rec, "states": st, "ok": False,
+                                     "reason": "no latents file"})
                     continue
                 names = set(_schema(p).names)
                 present[cohort] = {
@@ -160,17 +165,41 @@ def check_grid(root: Path, atlases, windows, cohorts, states) -> pd.DataFrame:
 
 
 def report_check(df: pd.DataFrame) -> int:
+    """Readable at 90 rows: state sets that are ready, then gaps by reason.
+
+    A row-per-cell table is unreadable once the grid is a few atlases wide, and
+    the thing you need from it is two lists -- what can run, and what to fix.
+    """
     if df.empty:
         print("nothing in the grid at all -- check --atlas / --window-s")
         return 1
     ok, total = int(df["ok"].sum()), len(df)
+    short = df.assign(K=df["states"].str.replace("ThresholdCluster_pca3_", "",
+                                                 regex=False))
     print(f"\ngrid: {ok}/{total} cell(s) ready\n")
-    cols = [c for c in ["atlas", "window_s", "states", "cohort", "n_rows",
-                        "censor_policy", "ok", "reason"] if c in df.columns]
-    show = df[cols].copy()
-    show["states"] = show["states"].str.replace("ThresholdCluster_pca3_", "K=",
-                                                regex=False)
-    print(show.to_string(index=False, max_colwidth=46))
+
+    ready = short[short["ok"]]
+    if len(ready):
+        tab = (ready.groupby(["atlas", "window_s", "K"])
+                    .agg(cohorts=("cohort", "nunique"),
+                         rows=("n_rows", "sum"),
+                         policy=("censor_policy", "first"))
+                    .reset_index())
+        tab["window_s"] = tab["window_s"].astype(float)
+        print("READY")
+        print(tab.sort_values(["atlas", "window_s", "K"])
+                 .to_string(index=False))
+
+    gaps = short[~short["ok"]]
+    if len(gaps):
+        print("\nNOT READY")
+        for reason, g in gaps.groupby("reason"):
+            where = (g.assign(w=g["window_s"].astype(float))
+                      .groupby("atlas")["w"]
+                      .apply(lambda s: ", ".join(f"{x:g}s" for x in sorted(set(s)))))
+            print(f"  {len(g)} cell(s): {reason}")
+            for atlas, windows in where.items():
+                print(f"      {atlas:<16} {windows}")
 
     policies = {p for p in df.get("censor_policy", pd.Series(dtype=object)).dropna()}
     if len(policies) > 1:
