@@ -473,6 +473,82 @@ def _opts(method: str, args) -> dict:
     return {}
 
 
+def check_grid(root: Path, args) -> pd.DataFrame:
+    """One row per (atlas, aperture): what is there, before anything is fitted.
+
+    The same idea as `transitions --check`, and here for the same reason: this
+    stage's cost is the HMM, hours of it at K=27 across a full grid, and
+    discovering a missing embedding or a missing cohort after three of those have
+    run is the expensive way to find out.
+
+    Nothing is written and nothing is fitted.
+    """
+    rows = []
+    for atlas in args.atlas:
+        for w in args.window_s:
+            paths = cohort_paths(root, atlas, w)
+            if not paths:
+                rows.append({"atlas": atlas, "window_s": w, "ok": False,
+                             "reason": "no latents (run stage 4)",
+                             "cohorts": "-", "embeddings": "-", "existing": "-",
+                             "rows": 0})
+                continue
+            train = [c for c in args.train if c in paths]
+            have = [e for e in args.embeddings
+                    if all(has_columns(p, EMBEDDINGS[e]) for p in paths.values())]
+            missing = [e for e in args.embeddings if e not in have]
+            existing = sorted({c for p in paths.values()
+                               for c in _state_columns(p)})
+
+            import pyarrow.parquet as pq
+            n = sum(pq.ParquetFile(p).metadata.num_rows for p in paths.values())
+
+            if not train:
+                reason = f"none of --train {args.train} is present"
+            elif missing:
+                reason = (f"embedding(s) {missing} absent -- rerun stage 4 "
+                          f"without --no-umap, or drop them from --embeddings")
+            else:
+                reason = ""
+            rows.append({"atlas": atlas, "window_s": w, "ok": not reason,
+                         "reason": reason or "ready",
+                         "cohorts": ",".join(sorted(paths)),
+                         "embeddings": ",".join(have) or "-",
+                         "existing": len(existing), "rows": n})
+    return pd.DataFrame(rows)
+
+
+def _state_columns(path: Path) -> list[str]:
+    """State columns already in one latents file -- what a re-run would replace."""
+    import re
+
+    import pyarrow.parquet as pq
+
+    return [n for n in pq.ParquetFile(path).schema_arrow.names
+            if re.fullmatch(r"[A-Za-z]+_[a-z]+\d*_\d+", n)]
+
+
+def report_check(df: pd.DataFrame, args) -> int:
+    if df.empty:
+        print("nothing in the grid -- check --atlas / --window-s")
+        return 1
+    print(f"\ngrid: {int(df['ok'].sum())}/{len(df)} (atlas, aperture) cell(s) "
+          f"ready\n")
+    print(df.to_string(index=False))
+    planned = [column_name(m, e, k) for e in args.embeddings
+               for m in args.methods for k in (args.k if m not in K_FREE else [0])]
+    print(f"\nwould write {len(planned)} state column(s) per cell "
+          f"(MeanShift's K is discovered, shown as 0 here):")
+    print("  " + "  ".join(planned))
+    print("\n`existing` counts state columns already in the file. A re-run "
+          "REPLACES a column of the same name, which is what you want after "
+          "changing a method's settings and not what you want otherwise.")
+    if not df["ok"].all():
+        print(f"\n{len(df) - int(df['ok'].sum())} cell(s) are not ready.")
+        return 1
+    return 0
+
+
 def run(args) -> int:
     root = Path(args.output_root) if args.output_root else _default_root()
     if not root.is_dir():
@@ -480,6 +556,9 @@ def run(args) -> int:
     log(f"output_root {root}")
     log(f"methods {args.methods}  embeddings {args.embeddings}  k {args.k}")
     log(f"fitted on {args.train}, applied to every cohort present")
+
+    if args.check:
+        return report_check(check_grid(root, args), args)
 
     entries = []
     for atlas in args.atlas:
@@ -538,6 +617,10 @@ def add_arguments(p) -> None:
     p.add_argument("--meanshift-fit-rows", type=int, default=50_000)
     p.add_argument("--hmm-iter", type=int, default=50)
     p.add_argument("--output-root")
+    p.add_argument("--check", action="store_true",
+                   help="report what each (atlas, aperture) has and what would "
+                        "be written, fit nothing. The HMM is hours at K=27 "
+                        "across a full grid; find the gaps first.")
 
 
 def main(argv=None) -> int:

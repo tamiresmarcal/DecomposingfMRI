@@ -124,3 +124,64 @@ class TestColumnName:
             name = C.column_name(method, "umap3", k)
             assert re.match(STATE_SUFFIX_RE, name), name
             assert name.endswith(f"_{k}")
+
+
+class TestCheckGrid:
+    """--check must be able to say "not ready" for the reasons that actually
+    occur, because its whole purpose is to be run instead of an HMM grid that
+    would take hours to reach the same conclusion."""
+
+    def latents(self, root, atlas, window_s, cohorts, cols, states=()):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        for c in cohorts:
+            d = pd.DataFrame({"task": "m", "sub": "01", "window_id": range(5)})
+            for col in cols:
+                d[col] = 0.0
+            for st in states:
+                d[st] = 0
+            p = (root / "latents" / f"atlas={atlas}" / f"window_s={window_s}"
+                 / f"cohort={c}" / "data.parquet")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(pa.Table.from_pandas(d, preserve_index=False), p)
+
+    def test_a_missing_aperture_is_reported_not_raised(self, tmp_path):
+        df = C.check_grid(tmp_path, args(atlas=["yeo7"], window_s=["30"]))
+        assert not df["ok"].any()
+        assert "no latents" in df["reason"].iloc[0]
+
+    def test_a_missing_embedding_names_the_fix(self, tmp_path):
+        self.latents(tmp_path, "yeo7", "30", ["a", "b"], COLS)
+        df = C.check_grid(tmp_path, args(atlas=["yeo7"], window_s=["30"],
+                                         embeddings=["pca3", "umap3"]))
+        assert not df["ok"].iloc[0]
+        assert "umap3" in df["reason"].iloc[0]
+
+    def test_a_ready_cell_is_ready(self, tmp_path):
+        self.latents(tmp_path, "yeo7", "30", ["a", "b"], COLS)
+        df = C.check_grid(tmp_path, args(atlas=["yeo7"], window_s=["30"]))
+        assert df["ok"].iloc[0] and df["reason"].iloc[0] == "ready"
+
+    def test_a_missing_training_cohort_is_caught(self, tmp_path):
+        self.latents(tmp_path, "yeo7", "30", ["held_out"], COLS)
+        df = C.check_grid(tmp_path, args(atlas=["yeo7"], window_s=["30"]))
+        assert not df["ok"].iloc[0]
+        assert "--train" in df["reason"].iloc[0]
+
+    def test_it_counts_state_columns_a_rerun_would_replace(self, tmp_path):
+        self.latents(tmp_path, "yeo7", "30", ["a", "b"], COLS,
+                     states=["HMM_pca3_8", "MeanShift_pca3_5"])
+        df = C.check_grid(tmp_path, args(atlas=["yeo7"], window_s=["30"]))
+        assert df["existing"].iloc[0] == 2
+
+    def test_the_embeddings_are_not_counted_as_state_columns(self, tmp_path):
+        self.latents(tmp_path, "yeo7", "30", ["a", "b"], COLS)
+        df = C.check_grid(tmp_path, args(atlas=["yeo7"], window_s=["30"]))
+        assert df["existing"].iloc[0] == 0
+
+    def test_it_writes_nothing(self, tmp_path):
+        self.latents(tmp_path, "yeo7", "30", ["a", "b"], COLS)
+        before = sorted(p.name for p in tmp_path.rglob("*"))
+        C.check_grid(tmp_path, args(atlas=["yeo7"], window_s=["30"]))
+        assert sorted(p.name for p in tmp_path.rglob("*")) == before

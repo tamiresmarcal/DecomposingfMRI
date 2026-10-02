@@ -5,6 +5,16 @@
 #   sbatch slurm/04b_cluster.sbatch yeo7 -1
 #   sbatch slurm/04b_cluster.sbatch yeo7 30 -- --methods hmm --k 8
 #
+# LOOK AT THE GRID FIRST, on a login node -- it fits nothing and takes seconds:
+#
+#   fmri-decomp cluster --check --atlas harvardoxford yeo7 networks \
+#                       --window-s 15 30 60 120 300 -1
+#
+# It prints, per (atlas, aperture), which cohorts and embeddings are there, how
+# many state columns a re-run would REPLACE, and what would be written. The HMM
+# is the cost here and it is hours at K=27 across a full grid; finding a missing
+# embedding after three of those have run is the expensive way to find out.
+#
 # NOT AN ARRAY, and deliberately so. Every clusterer for a given
 # (atlas, aperture) is fitted on the SAME embedding block and the labels are
 # appended to the SAME parquet file. Two array tasks writing different state
