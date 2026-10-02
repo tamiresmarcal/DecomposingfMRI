@@ -7,11 +7,17 @@
 
 writes, per target,
 
-    outputs/selection/target=<t>/scores.parquet     every (state set, model, seed)
-    outputs/selection/target=<t>/summary.csv        the ranking, readable
-    outputs/selection/target=<t>/figures/*.png      the comparison plots
-    outputs/selection/target=<t>/models/*.joblib    refit artifacts for the top N
-    outputs/meta/selection/target=<t>.json          manifest
+    outputs/bstm_selection/target=<t>/DESIGN.md       what was compared and fixed
+    outputs/bstm_selection/target=<t>/scores.parquet  every (state set, arm, model, seed)
+    outputs/bstm_selection/target=<t>/summary.csv     the ranking, readable
+    outputs/bstm_selection/target=<t>/figures/*.png   the comparison plots
+    outputs/bstm_selection/target=<t>/models/*.joblib refit artifacts for the top N
+    outputs/meta/bstm_selection/target=<t>.json       manifest
+
+THE TARGET FOLDER IS WIPED BEFORE EACH RUN. Everything in it is regenerated, so
+a leftover from a previous grid is never a leftover you can trust -- a smaller
+`--features` list would otherwise leave figures and artifacts describing arms
+this run never scored.
 
 WHY A SCRIPT AND NOT THE NOTEBOOK
 ---------------------------------
@@ -460,16 +466,8 @@ def run(args) -> int:
                         + np.where(scores_df["p_norm"] == "-", "",
                                    " [" + scores_df["p_norm"] + "]"))
 
-    out = root / "selection" / f"target={args.target}"
-    # A re-run rewrites scores, summary, DESIGN and the figures by name -- but
-    # the top-N can change, so a previous run's joblib files would linger and
-    # there would be no way to tell which run produced them. Clear first.
-    import shutil
-    if (out / "models").is_dir():
-        n_old = len(list((out / "models").glob("*.joblib")))
-        if n_old:
-            log(f"  clearing {n_old} artifact(s) from a previous run")
-        shutil.rmtree(out / "models")
+    out = root / "bstm_selection" / f"target={args.target}"
+    _wipe(out)
     (out / "figures").mkdir(parents=True, exist_ok=True)
     (out / "models").mkdir(parents=True, exist_ok=True)
     scores_df.to_parquet(out / "scores.parquet", index=False)
@@ -494,7 +492,7 @@ def run(args) -> int:
     saved = _save_models(scores_df, data, out / "models", args.save_top,
                          args.covariates)
 
-    mf = meta_dir(root) / "selection" / f"target={args.target}.json"
+    mf = meta_dir(root) / "bstm_selection" / f"target={args.target}.json"
     mf.parent.mkdir(parents=True, exist_ok=True)
     mf.write_text(json.dumps(
         {"target": args.target, "cohort": args.cohort, "models": args.models,
@@ -556,6 +554,31 @@ def describe_blocks(sample_table: Path, args) -> list[str]:
             "`dynamics` something other than \"every scalar\".",
             ""]
     return out
+
+
+def _wipe(out: Path) -> None:
+    """Empty the target folder before writing a new run into it.
+
+    Everything here is regenerated, so a leftover is never a leftover you can
+    trust: a run with a shorter `--features` would otherwise leave figures and
+    joblib artifacts describing arms it never scored, with nothing saying so.
+
+    `out` is always <root>/bstm_selection/target=<target>, and the target comes
+    from the command line, so the name is checked before anything is removed --
+    a `/` or `..` in it would make this delete something else entirely.
+    """
+    import shutil
+
+    name = out.name
+    if not name.startswith("target=") or "/" in name or ".." in name:
+        raise SystemExit(f"refusing to clear {out} -- unexpected folder name")
+    if out.parent.name != "bstm_selection":
+        raise SystemExit(f"refusing to clear {out} -- unexpected parent")
+    if not out.exists():
+        return
+    n = sum(1 for _ in out.rglob("*") if _.is_file())
+    log(f"  clearing {n} file(s) from the previous run in {out.name}/")
+    shutil.rmtree(out)
 
 
 def design_note(args, sets, meta, sample_table=None) -> str:
