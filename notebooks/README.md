@@ -9,6 +9,7 @@ Exploration of what the pipeline wrote. Nothing here writes to `outputs/`.
 | `03_qc.ipynb` | one histogram grid: six QC metrics x every cohort, three cells |
 | `04_activation_pca.ipynb` | open activation → filter by a `{cohort: [subs]}` dict → PCA (standalone, no `nbtools`) |
 | `06_visualize.ipynb` | the latent-space figures, three cohorts, plus one coloured by symptom |
+| `07_transitions_phenotype.ipynb` | brain-state transitions vs. phenotype: the table, a volcano over every state set, and the model-selection comparison |
 | `nbtools.py` | the loaders they use: inventory, pruned reads, the participants join |
 
 **QC lives in one place.** `03_qc.ipynb` owns subject-level quality control —
@@ -23,6 +24,19 @@ nothing else. `04` is standalone — pandas, numpy and matplotlib, no `nbtools`
 and no `fmri_decomposition` import: it globs the parquet paths itself, puts the
 partition keys back from the directory names, and does the PCA with
 `numpy.linalg.svd`, so it can be copied out of this repo and still run.
+
+`07` reads what `fmri-decomp transitions` wrote, never the latents directly.
+Same split as `06`: the per-subject matrices are a cached batch product, the
+notebook is the statistics and the plots. Its three sections answer one question
+each — what the table looks like, which transition cells track a phenotype
+column, and which state set predicts it best.
+
+Two things `07` states about itself, because they are easy to forget six months
+on. camcan is the **discovery** cohort, so the winning state set is a candidate
+and its CV score is a ranking device rather than an effect size; and the
+transition cells are **compositional** (each subject's row sums to 1), so one
+real effect shows up as a spray of correlated dots rather than as several
+findings.
 
 The decomposition that feeds `06` is **not a notebook** — it is
 `fmri_decomposition/decompose.py`, exposed as `fmri-decomp decompose` and run

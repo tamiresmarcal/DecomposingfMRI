@@ -74,6 +74,8 @@ import pandas as pd
 
 # Identity and QC carried into the latents. Everything else in a dfc file is
 # either an edge (dropped -- it is already in dfc/) or a partition key.
+from .io import latents_root
+
 IDENT = ["cohort", "role", "model_hash", "task", "sub", "window_id", "start_s",
          "stimulus_start_s", "n_tr_effective", "frac_good_frames",
          "rank_deficient", "crosses_run_boundary"]
@@ -416,7 +418,7 @@ def dump_models(models: dict, path_stem: Path) -> Path:
 
 def run_one(root: Path, window_s, args) -> None:
     atlas = args.atlas
-    out_dir = root / "latents" / f"atlas={atlas}" / f"window_s={window_s}"
+    out_dir = latents_root(root, atlas, window_s)
     models_dir = root / "meta" / "models"
     stem = models_dir / f"decompose_atlas-{atlas}_window-{window_s}"
 

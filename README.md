@@ -26,6 +26,8 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      -> keep/drop, under a named policy
 4    fmri-decomp decompose           windowed DFC -> latents, fit on some
                                      cohorts and projected onto others
+5a   fmri-decomp transitions         latents -> per-subject brain-state
+                                     transition matrices, one per state set
 ```
 
 `03_finalize` runs twice, taking the stage as an argument. The activation pass

@@ -1,5 +1,5 @@
 """Command line: `fmri-decomp validate | extract | dfc | diagnose | censor |
-decompose | merge-manifests | fixture`.
+decompose | transitions | merge-manifests | fixture`.
 
 Parallelism is at or below the deepest partition key, so each worker owns a
 distinct leaf and no locks are needed. Workers never write shared metadata --
@@ -493,6 +493,17 @@ def cmd_decompose(args) -> int:
     return decompose.run(args)
 
 
+def cmd_transitions(args) -> int:
+    """Stage 5a: one transition matrix per subject, per state set.
+
+    Separate from `decompose` because the grid is different: one decomposition
+    produces several state definitions, and each is its own state set.
+    """
+    from . import transitions
+
+    return transitions.run(args)
+
+
 def cmd_merge_manifests(args) -> int:
     """Consolidate per-array-task manifests into one, serially, after the array.
 
@@ -625,6 +636,14 @@ def build_parser() -> argparse.ArgumentParser:
              "projected onto others")
     _decompose.add_arguments(dec)
     dec.set_defaults(func=cmd_decompose)
+
+    from . import transitions as _transitions
+
+    t = sub.add_parser(
+        "transitions",
+        help="stage 5a: latents -> per-subject brain-state transition matrices")
+    _transitions.add_arguments(t)
+    t.set_defaults(func=cmd_transitions)
 
     m = sub.add_parser("merge-manifests", help="consolidate per-array-task manifests")
     m.add_argument("config")

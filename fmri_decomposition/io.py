@@ -118,6 +118,22 @@ def dfc_path(output_root: str | Path, cohort: str, atlas: str, window_s: float,
     )
 
 
+def latents_root(output_root: str | Path, atlas: str, window_s=None,
+                 cohort: str | None = None) -> Path:
+    """Stage 4 output. Same key order as `dfc_root`, deliberately.
+
+    Latents are written per (atlas, window_s, cohort) because each window size
+    is an independent fit -- so the keys that select one fit are the ones above
+    cohort, exactly as in stage 3. `window_s` is accepted as a number or as the
+    string already in the path, since callers have it both ways.
+    """
+    p = Path(output_root) / "latents" / f"atlas={_key(atlas)}"
+    if window_s is not None:
+        w = window_s if isinstance(window_s, str) else _fmt_window(window_s)
+        p = p / f"window_s={_key(w)}"
+    return p if cohort is None else p / f"cohort={_key(cohort)}"
+
+
 def _fmt_window(window_s: float) -> str:
     return str(int(window_s)) if float(window_s).is_integer() else str(window_s)
 
