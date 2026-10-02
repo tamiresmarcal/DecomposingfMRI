@@ -177,6 +177,35 @@ def open_dataset(root: str | Path, stage: str = "dfc"):
     return pads.dataset(str(root), format="parquet", partitioning=hive_partitioning(stage))
 
 
+def read_file(path: str | Path, columns: list[str] | None = None):
+    """One parquet FILE -> pyarrow Table. Never a dataset, never partitioning.
+
+    `pq.read_table` and `pd.read_parquet` both build a ParquetDataset, which
+    infers hive partitioning from the directory names even for a single file. For
+    a path like `.../cohort=camcan/data.parquet` that invents a `cohort`
+    partition field and tries to merge it with the file's own `cohort` COLUMN --
+    see PARTITION_KEYS below on why a duplicated key is a trap. The merge raises
+
+        ArrowTypeError: Unable to merge: Field cohort has incompatible types:
+        string vs dictionary<values=string, indices=int32, ordered=0>
+
+    and it is VERSION-DEPENDENT: pyarrow 18 (the analysis container) raises,
+    pyarrow 25 does not, so it passes every local test and fails on the cluster.
+    `ParquetFile` opens the one file through the parquet reader with no dataset
+    layer, so there is nothing to infer and nothing to merge.
+
+    Use this anywhere a single latents or shard file is read whole, or read with
+    a projection that includes a partition key.
+    """
+    import pyarrow.parquet as pq
+
+    f = pq.ParquetFile(path)
+    if columns is None:
+        return f.read()
+    have = set(f.schema_arrow.names)
+    return f.read(columns=[c for c in columns if c in have])
+
+
 def read_shard(path: str | Path):
     """Read one leaf file and restore its partition keys as columns."""
     import pandas as pd

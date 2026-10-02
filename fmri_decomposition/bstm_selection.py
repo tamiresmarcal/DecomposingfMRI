@@ -89,7 +89,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .io import meta_dir
+from .io import meta_dir, read_file
 
 # The per-subject features that are NOT transition cells. `occ_*` is added to
 # this per state set, since its width is K.
@@ -425,7 +425,12 @@ def build(table: Path, pheno: pd.DataFrame, covariates: list[str],
                      as well as `cells`, the signal is not in the transitions.
       cells+summary  both, to see whether the summaries add anything
     """
-    t = pd.read_parquet(table)
+    # read_file, not pd.read_parquet: this path ends in `cohort=<c>/` and the
+    # table carries `cohort`, `atlas`, `window_s` and `states` as PROVENANCE
+    # COLUMNS too, so a dataset-layer read has four partition keys to merge. That
+    # is what broke stage 4b on pyarrow 18 while passing on 25. These two reads
+    # have not been seen to fail, so this is precaution, not a repair.
+    t = read_file(table).to_pandas()
     t["sub"] = t["sub"].astype(str).str.strip().str.upper()
     d = t.merge(pheno, on="sub", how="inner", suffixes=("", "_pheno"))
     if d.empty:
@@ -604,7 +609,7 @@ def run(args) -> int:
 
 def describe_blocks(sample_table: Path, args) -> list[str]:
     """The literal column names each feature set hands the regressor."""
-    t = pd.read_parquet(sample_table)
+    t = read_file(sample_table).to_pandas()
     K = int(t["n_states"].iloc[0])
     cells = [c for c in t.columns if "->" in c]
     occ = sorted((c for c in t.columns if c.startswith("occ_")),

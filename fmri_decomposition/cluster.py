@@ -299,11 +299,16 @@ def has_columns(path: Path, cols: list[str]) -> bool:
 def read_embedding(path: Path, cols: list[str]) -> pd.DataFrame | None:
     import pyarrow.parquet as pq
 
+    from .io import read_file
+
     have = set(pq.ParquetFile(path).schema_arrow.names)
     need = cols + ["task", "sub", "window_id"]
     if not set(cols) <= have:
         return None
-    return pd.read_parquet(path, columns=[c for c in need if c in have])
+    # Via read_file rather than pd.read_parquet: the projection happens to
+    # exclude `cohort` today, which is the only reason the dataset layer does not
+    # raise here. Not a property worth depending on.
+    return read_file(path, need).to_pandas()
 
 
 def fit_hash(method: str, embedding: str, k, params: dict, train: list[str],
@@ -329,7 +334,12 @@ def append_columns(path: Path, new: dict[str, np.ndarray],
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    table = pq.read_table(path)
+    from .io import read_file
+
+    # read_file, not pq.read_table: this path ends in `cohort=<c>/data.parquet`
+    # and the file also has a `cohort` COLUMN, so read_table's hive inference
+    # tries to merge the two and raises on pyarrow 18. See io.read_file.
+    table = read_file(path)
     md = dict(table.schema.metadata or {})
     existing = json.loads(md.get(b"clusterers", b"{}").decode())
     existing.update(provenance)

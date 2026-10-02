@@ -489,8 +489,14 @@ def process(root: Path, atlas: str, window_s, cohort: str, state_col: str,
 
     src = latents_path(root, atlas, window_s, cohort)
     cols = IDENT + [state_col] + [c for c in COORDS] + ["crosses_run_boundary"]
-    have = set(_schema(src).names)
-    df = pd.read_parquet(src, columns=[c for c in cols if c in have])
+    # `cols` includes `cohort`, which is ALSO the name of a directory key on this
+    # path, so pd.read_parquet's dataset layer would try to merge a string column
+    # with an inferred dictionary partition field and raise on pyarrow 18.
+    # io.read_file opens the one file and infers nothing. It also drops columns
+    # the file does not have, which is what the old comprehension did.
+    from .io import read_file
+
+    df = read_file(src, cols).to_pandas()
 
     K = n_states_for(state_col, path=src, labels=df[state_col].to_numpy())
     stride_s, indep = time_axis(src, window_s, n_overlaps)
