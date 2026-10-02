@@ -84,7 +84,16 @@ WINDOW="${WINDOWS[$IDX]}"
 echo "host=$(hostname) atlas=${ATLAS} window_s=${WINDOW} " \
      "task=${IDX}/${#WINDOWS[@]} cpus=${OMP_NUM_THREADS}"
 
-if [[ -n "${FMRIDECOMP_SIF:-}" ]]; then
+# Stages 4 and 5 need the OTHER image. containers/README.md: stages 2-3 run in
+# fmri_decomp.sif, stages 4-5 in fmri_decomp_stage45.sif, which is where Stan,
+# hmmlearn, umap-learn and lightgbm live. One FMRIDECOMP_SIF for both meant
+# either editing slurm/env.sh between stages or watching this job die on
+# `ModuleNotFoundError: hmmlearn` minutes in, so FMRIDECOMP_SIF45 wins here and
+# FMRIDECOMP_SIF is the fallback for anyone who keeps one image.
+SIF="${FMRIDECOMP_SIF45:-${FMRIDECOMP_SIF:-}}"
+DEPS="sklearn, umap"
+
+if [[ -n "${SIF}" ]]; then
   # No version pin: clusters retire apptainer releases, and a pinned load that
   # no longer exists fails every array task at once.
   module load apptainer 2>/dev/null || module load apptainer/1.3.5
@@ -92,7 +101,18 @@ if [[ -n "${FMRIDECOMP_SIF:-}" ]]; then
   # --cleanenv keeps the host's PYTHONPATH out of the container, where it can
   # shadow container packages with host builds for a different Python.
   RUN=(apptainer exec --cleanenv --bind "${BINDS}" --pwd "${PWD}" \
-       "${FMRIDECOMP_SIF}" python3)   # -m fmri_decomposition.cli below
+       "${SIF}" python3)   # -m fmri_decomposition.cli below
+  # Fail in seconds rather than after the first fit. An image without these is
+  # the stage 2/3 image, and the error it would otherwise give arrives late and
+  # names only the first missing module.
+  if ! "${RUN[@]}" -c "import ${DEPS}" 2>/dev/null; then
+    echo "ERROR: ${SIF}" >&2
+    echo "       cannot import: ${DEPS}" >&2
+    echo "       That is the stage 2/3 image. Stages 4-5 need the stage45 one:" >&2
+    echo "         export FMRIDECOMP_SIF45=/project/6008063/tamires/singularity/fmri_decomp_stage45.sif" >&2
+    echo "       Build it per containers/README.md if it does not exist yet." >&2
+    exit 1
+  fi
 else
   module load python/3.11 scipy-stack
   source "${FMRIDECOMP_VENV:-$HOME/venvs/fmridecomp}/bin/activate"
