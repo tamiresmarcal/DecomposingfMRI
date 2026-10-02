@@ -1,5 +1,6 @@
 """Command line: `fmri-decomp validate | extract | dfc | diagnose | censor |
-decompose | transitions | select | merge-manifests | fixture`.
+decompose | cluster | transitions | select | merge-manifests |
+fixture`.
 
 Parallelism is at or below the deepest partition key, so each worker owns a
 distinct leaf and no locks are needed. Workers never write shared metadata --
@@ -493,6 +494,17 @@ def cmd_decompose(args) -> int:
     return decompose.run(args)
 
 
+def cmd_cluster(args) -> int:
+    """Stage 4b: more ways of defining states, on latents already written.
+
+    Separate from `decompose` because the embeddings do not need refitting --
+    a sixth state definition must not mean redoing the five that work.
+    """
+    from . import cluster
+
+    return cluster.run(args)
+
+
 def cmd_select(args) -> int:
     """Stage 5b: rank state sets by how well their transitions predict a
     phenotype column. Parallel over (state set x model x fold seed)."""
@@ -644,6 +656,14 @@ def build_parser() -> argparse.ArgumentParser:
              "projected onto others")
     _decompose.add_arguments(dec)
     dec.set_defaults(func=cmd_decompose)
+
+    from . import cluster as _cluster
+
+    cl = sub.add_parser(
+        "cluster",
+        help="stage 4b: add brain-state definitions to latents that exist")
+    _cluster.add_arguments(cl)
+    cl.set_defaults(func=cmd_cluster)
 
     from . import bstm_selection as _bstm_selection
 

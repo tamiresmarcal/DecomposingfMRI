@@ -82,7 +82,10 @@ from .io import latents_root, meta_dir
 # The state-label columns this stage reads. K = 8 and 27 only: at 125 and 512
 # cells a subject's 74 transitions leave >99% of the matrix at exactly zero, so
 # there is no probability to correlate with anything.
-STATE_COLUMNS = ["ThresholdCluster_pca3_8", "ThresholdCluster_pca3_27"]
+# No fixed list. `--states` defaults to every state column found in the
+# schema, so a method added by stage 4b is picked up without being named here.
+# The convention is `<Method>_<embedding>_<K>`; anything matching it qualifies.
+STATE_SUFFIX_RE = r"^[A-Za-z]+_[a-z]+\d*_\d+$"
 
 # Identity and ordering. `window_id` is the time order within (task, sub) and
 # is globally meaningful within a movie -- see windows.make_stimulus_grid.
@@ -356,9 +359,54 @@ def _empty_row(n_states: int) -> dict:
     return d
 
 
-def n_states_for(state_col: str) -> int:
-    """8 or 27, from the column name -- the grid is K**3 cells by construction."""
-    return int(state_col.rsplit("_", 1)[1])
+def discover_state_columns(path: Path) -> list[str]:
+    """State columns in one latents file, from the schema.
+
+    Read rather than listed, so a clusterer added by stage 4b needs no edit
+    here. `<Method>_<embedding>_<K>` is the convention stage 4b writes.
+    """
+    import re
+
+    import pyarrow.parquet as pq
+
+    names = pq.ParquetFile(path).schema_arrow.names
+    skip = {"n_states", "n_transitions", "n_transitions_independent"}
+    return sorted(n for n in names
+                  if n not in skip and "->" not in n
+                  and re.match(STATE_SUFFIX_RE, n))
+
+
+def n_states_for(state_col: str, path: Path | None = None,
+                 labels=None) -> int:
+    """How many states this state SET has -- never how many a cohort used.
+
+    Resolution order, and the order matters:
+
+      1. the `clusterers` provenance stage 4b wrote into the latents schema,
+      2. the `<Method>_<embedding>_<K>` column name,
+      3. only then `max(label) + 1`.
+
+    Deriving it from the labels alone is wrong and was a real bug: a cohort that
+    happens to visit 6 of 8 states would get a 6x6 matrix while another gets
+    8x8, so the same state set would have different columns per cohort and
+    nothing downstream could pool them. K is a property of the fit, which is
+    why the fit records it.
+    """
+    if path is not None:
+        md = _schema(path).metadata or {}
+        raw = md.get(b"clusterers")
+        if raw:
+            entry = json.loads(raw.decode()).get(state_col)
+            if entry and entry.get("k"):
+                return int(entry["k"])
+    tail = state_col.rsplit("_", 1)[1]
+    if tail.isdigit():
+        return int(tail)
+    if labels is not None and len(labels):
+        print(f"  WARNING: {state_col} has no recorded K and none in its name; "
+              f"falling back to max(label)+1, which can differ per cohort")
+        return int(np.max(labels)) + 1
+    raise SystemExit(f"cannot determine the number of states for {state_col!r}")
 
 
 def process(root: Path, atlas: str, window_s, cohort: str, state_col: str,
@@ -375,7 +423,7 @@ def process(root: Path, atlas: str, window_s, cohort: str, state_col: str,
     have = set(_schema(src).names)
     df = pd.read_parquet(src, columns=[c for c in cols if c in have])
 
-    K = n_states_for(state_col)
+    K = n_states_for(state_col, path=src, labels=df[state_col].to_numpy())
     stride_s = float(window_s) / n_overlaps
     model_hash = _meta_value(src, "model_hash")
     policy = _meta_value(src, "censor_policy")
@@ -444,11 +492,30 @@ def run(args) -> int:
 
     windows = [str(w) for w in args.window_s]
     atlases = list(args.atlas)
-    states = list(args.states)
+    states = list(args.states) if args.states else []
     cohorts = args.cohorts or _discover_cohorts(root, atlases, windows)
     if not cohorts:
         raise SystemExit("no cohort has latents under any grid cell -- run "
                          "`fmri-decomp decompose` first")
+    if not states:
+        # Union over the grid: a state column added at one aperture but not
+        # another must still be visible, and the per-cell check below reports
+        # exactly where it is missing.
+        found = set()
+        for atlas in atlases:
+            for w in windows:
+                for c in cohorts:
+                    p_ = latents_path(root, atlas, w, c)
+                    if p_.exists():
+                        found |= set(discover_state_columns(p_))
+        states = sorted(found)
+        if not states:
+            raise SystemExit(
+                "no state columns found in any latents file. Run "
+                "`fmri-decomp cluster` to add state definitions, or pass "
+                "--states explicitly.")
+        log(f"discovered {len(states)} state column(s): {states}")
+
     log(f"grid: {len(atlases)} atlas x {len(windows)} window x {len(states)} "
         f"state def x {len(cohorts)} cohort(s) = "
         f"{len(atlases) * len(windows) * len(states) * len(cohorts)} cell(s)")
@@ -494,9 +561,10 @@ def add_arguments(p) -> None:
                    default=["harvardoxford", "yeo7", "networks"])
     p.add_argument("--window-s", nargs="+",
                    default=["15", "30", "60", "120", "300"])
-    p.add_argument("--states", nargs="+", default=STATE_COLUMNS,
-                   help="state-label columns; K=125 and 512 are excluded on "
-                        "purpose (>99%% of their cells are zero per subject)")
+    p.add_argument("--states", nargs="*", default=None,
+                   help="state-label columns. Default: every one found in the "
+                        "latents schema, so a method added by `fmri-decomp "
+                        "cluster` is picked up without being named here.")
     p.add_argument("--cohorts", nargs="*", default=None)
     p.add_argument("--n-overlaps", type=int, default=5,
                    help="windows.n_overlaps the shards were written with; sets "
