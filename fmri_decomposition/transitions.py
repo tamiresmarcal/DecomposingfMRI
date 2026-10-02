@@ -6,9 +6,18 @@
 
 writes, per (atlas, window_s, state definition, cohort),
 
-    outputs/transitions/atlas=<a>/window_s=<w>/states=<def>/cohort=<c>/pairs.parquet
-    outputs/transitions/atlas=<a>/window_s=<w>/states=<def>/cohort=<c>/summary.parquet
+    outputs/transitions/atlas=<a>/window_s=<w>/states=<def>/cohort=<c>/subjects.parquet
     outputs/meta/transitions/manifest.json
+
+ONE ROW PER SUBJECT, ONE TABLE
+------------------------------
+    cohort, task, sub | 0->0, 0->1, ... (every K*K cell) | switch_rate, ... | provenance
+
+Everything a model reads is at subject level, so it is one table rather than a
+long pair table plus a summary to join. An earlier version stored the cells long
+because K=512 would have been 262,144 columns; with K capped at 27 that reason
+is gone -- 729 columns is nothing, and unobserved cells are exact zeros, which
+parquet stores for almost free.
 
 WHAT A TRANSITION IS HERE
 -------------------------
@@ -41,16 +50,20 @@ attenuates an association toward zero rather than inflating type I error.
 non-overlapping grid would have given, so the ~5x inflation is a number in the
 table rather than something to remember.
 
-TWO NORMALISATIONS
-------------------
-`p_cond` is the Markov transition probability, n(i->j) / n(i->.), which is what
-"transition probability" usually means. `p_joint` is n(i->j) / n_transitions.
+WHICH PROBABILITY IS IN THE CELLS
+---------------------------------
+`p_joint` -- n(i->j) divided by all of that subject's transitions. The whole
+table sums to 1 per subject.
 
-Prefer `p_joint` for across-subject modelling. Its denominator is the same for
-every subject (one fixed-length clip), so subjects are comparable; `p_cond`
-divides by a per-subject, per-row count that is often 1 or 2, which both makes
-the value jump to 1.0 on a single observation and makes two subjects' values
-mean different things.
+The alternative is `p_cond`, n(i->j) / n(i->.), which is what "transition
+probability" usually means and makes each ROW sum to 1. It is the wrong view for
+an across-subject model: its denominator is a per-subject, per-row count often
+equal to 1, so a single observation gives 1.0, and `0.5` means "1 of 2" for one
+subject and "37 of 74" for another.
+
+Nothing is lost by choosing. `count = p_joint * n_transitions` exactly, and
+`p_cond` is a row-wise renormalisation of those counts, so both are one line
+away from the table as written.
 """
 
 from __future__ import annotations
@@ -240,9 +253,19 @@ def _entropy_rate(counts: np.ndarray) -> float:
     return float(-(pi * term.sum(axis=1)).sum())
 
 
+def cell_names(n_states: int) -> list[str]:
+    """`0->0`, `0->1`, ... every cell, in (from, to) order.
+
+    All K*K are emitted even when a subject never made that transition, so the
+    schema is identical across subjects and cohorts -- which is what a model
+    reading the table needs.
+    """
+    return [f"{i}->{j}" for i in range(n_states) for j in range(n_states)]
+
+
 def subject_transitions(g: pd.DataFrame, state_col: str, n_states: int,
-                        stride_s: float, indep_factor: int):
-    """One subject x task -> (long pair rows, one summary row).
+                        stride_s: float, indep_factor: int) -> dict:
+    """One subject x task -> ONE row: every cell, then the features.
 
     `g` must already be sorted by window_id. A run boundary is not a
     transition, so pairs that straddle one are dropped -- `crosses_run_boundary`
@@ -260,9 +283,7 @@ def subject_transitions(g: pd.DataFrame, state_col: str, n_states: int,
     if "crosses_run_boundary" in g.columns:
         g = g.loc[~g["crosses_run_boundary"].to_numpy(dtype=bool)]
     if g.empty:
-        return (pd.DataFrame(columns=["from_state", "to_state", "n", "transition",
-                                      "p_cond", "p_joint", "n_transitions"]),
-                _empty_summary(n_states))
+        return _empty_row(n_states)
 
     lab = g[state_col].to_numpy(dtype=np.int64, copy=True)
     wid = g["window_id"].to_numpy(dtype=np.int64, copy=True)
@@ -280,25 +301,26 @@ def subject_transitions(g: pd.DataFrame, state_col: str, n_states: int,
         runs_all.append(_runs(seg))
     n_tr = int(counts.sum())
 
-    nz = np.argwhere(counts > 0)
-    row_tot = counts.sum(axis=1)
-    pairs = pd.DataFrame({
-        "from_state": nz[:, 0],
-        "to_state": nz[:, 1],
-        "n": counts[nz[:, 0], nz[:, 1]],
-    })
-    pairs["transition"] = [f"{i}->{j}" for i, j in nz]
-    pairs["p_cond"] = pairs["n"] / row_tot[pairs["from_state"]]
-    pairs["p_joint"] = pairs["n"] / n_tr if n_tr else np.nan
-    pairs["n_transitions"] = n_tr
-
     runs = np.concatenate(runs_all) if runs_all else np.array([], dtype=int)
     n_change = n_tr - int(np.trace(counts))
+    n_distinct = int((counts > 0).sum())
     occupancy = np.bincount(lab, minlength=n_states) / max(len(lab), 1)
     xyz = g[COORDS].to_numpy(dtype=float, copy=True) if all(
         c in g.columns for c in COORDS) else None
 
-    summary = {
+    # The cells, as p_joint: n(i->j) / all of this subject's transitions.
+    #
+    # One value per cell and still lossless: count = p_joint * n_transitions
+    # exactly, and p_cond (the Markov probability, n(i->j) / n(i->.)) is a
+    # row-wise renormalisation of those counts. Storing p_joint beside
+    # n_transitions therefore throws nothing away, and it is the view a model
+    # should read -- its denominator is the same for every subject, while
+    # p_cond divides by a per-row count that is often 1, so `0.5` can mean
+    # "1 of 2" for one subject and "37 of 74" for another.
+    flat = (counts.ravel() / n_tr) if n_tr else np.full(n_states ** 2, np.nan)
+    row = dict(zip(cell_names(n_states), flat.astype(float)))
+
+    row.update({
         "n_windows": len(lab),
         "n_transitions": n_tr,
         # What a non-overlapping grid would have given: one window per stride
@@ -307,7 +329,7 @@ def subject_transitions(g: pd.DataFrame, state_col: str, n_states: int,
         # overlaps, so the ~5x inflation is a number in the table.
         "n_transitions_independent": max(len(lab) // indep_factor - 1, 0),
         "n_states_visited": int((occupancy > 0).sum()),
-        "n_distinct_transitions": int(len(nz)),
+        "n_distinct_transitions": n_distinct,
         "switch_rate": (n_change / n_tr) if n_tr else np.nan,
         "self_transition_rate": (1 - n_change / n_tr) if n_tr else np.nan,
         "switches_per_min": (n_change / (len(lab) * stride_s / 60)
@@ -316,19 +338,20 @@ def subject_transitions(g: pd.DataFrame, state_col: str, n_states: int,
         "entropy_rate_bits": _entropy_rate(counts),
         "dispersion": (float(np.linalg.norm(xyz - xyz.mean(0), axis=1).mean())
                        if xyz is not None and len(xyz) else np.nan),
-    }
-    summary.update({f"occ_{k}": float(occupancy[k]) for k in range(n_states)})
-    return pairs, summary
+    })
+    row.update({f"occ_{k}": float(occupancy[k]) for k in range(n_states)})
+    return row
 
 
-def _empty_summary(n_states: int) -> dict:
+def _empty_row(n_states: int) -> dict:
     """Every column present, all NaN -- a subject whose every window crossed a
     run boundary must still appear, or a cohort's n would silently shrink."""
-    d = {k: np.nan for k in
-         ("n_windows", "n_transitions", "n_transitions_independent",
-          "n_states_visited", "n_distinct_transitions", "switch_rate",
-          "self_transition_rate", "switches_per_min", "mean_dwell_s",
-          "entropy_rate_bits", "dispersion")}
+    d = {c: np.nan for c in cell_names(n_states)}
+    d.update({k: np.nan for k in
+              ("n_windows", "n_transitions", "n_transitions_independent",
+               "n_states_visited", "n_distinct_transitions", "switch_rate",
+               "self_transition_rate", "switches_per_min", "mean_dwell_s",
+               "entropy_rate_bits", "dispersion")})
     d.update({f"occ_{k}": np.nan for k in range(n_states)})
     return d
 
@@ -343,8 +366,8 @@ def process(root: Path, atlas: str, window_s, cohort: str, state_col: str,
     out_dir = (root / "transitions" / f"atlas={atlas}"
                / f"window_s={window_s}" / f"states={state_col}"
                / f"cohort={cohort}")
-    pairs_path, summary_path = out_dir / "pairs.parquet", out_dir / "summary.parquet"
-    if not overwrite and pairs_path.exists() and summary_path.exists():
+    out_path = out_dir / "subjects.parquet"
+    if not overwrite and out_path.exists():
         return {"status": "skipped", "cohort": cohort}
 
     src = latents_path(root, atlas, window_s, cohort)
@@ -357,34 +380,28 @@ def process(root: Path, atlas: str, window_s, cohort: str, state_col: str,
     model_hash = _meta_value(src, "model_hash")
     policy = _meta_value(src, "censor_policy")
 
-    all_pairs, all_summary = [], []
-    for (task, sub), g in df.sort_values("window_id").groupby(["task", "sub"],
-                                                             sort=True):
-        pairs, summary = subject_transitions(g, state_col, K, stride_s, n_overlaps)
-        if len(pairs):
-            all_pairs.append(pairs.assign(task=task, sub=sub))
-        all_summary.append({"task": task, "sub": sub, **summary})
+    rows = [{"task": task, "sub": sub,
+             **subject_transitions(g, state_col, K, stride_s, n_overlaps)}
+            for (task, sub), g in df.sort_values("window_id")
+                                    .groupby(["task", "sub"], sort=True)]
 
     prov = {"cohort": cohort, "atlas": atlas, "window_s": str(window_s),
             "states": state_col, "n_states": K, "model_hash": model_hash,
             "censor_policy": policy, "n_overlaps": n_overlaps}
 
-    pairs_df = (pd.concat(all_pairs, ignore_index=True) if all_pairs
-                else pd.DataFrame(columns=["from_state", "to_state", "n",
-                                           "transition", "p_cond", "p_joint",
-                                           "n_transitions", "task", "sub"]))
-    summary_df = pd.DataFrame(all_summary)
+    # Column order is the contract: keys, every cell, the features, provenance.
+    cells = cell_names(K)
+    feats = [c for c in rows[0] if c not in set(cells) | {"task", "sub"}] if rows else []
+    out = pd.DataFrame(rows, columns=["task", "sub"] + cells + feats)
     for k, v in prov.items():
-        pairs_df[k] = v
-        summary_df[k] = v
+        out[k] = v
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    _write(pairs_df, pairs_path)
-    _write(summary_df, summary_path)
-    return {"status": "ok", "cohort": cohort, "subjects": len(summary_df),
-            "pair_rows": len(pairs_df),
-            "median_transitions": float(summary_df["n_transitions"].median())
-            if len(summary_df) else np.nan,
+    _write(out, out_path)
+    return {"status": "ok", "cohort": cohort, "subjects": len(out),
+            "n_cells": len(cells), "n_columns": out.shape[1],
+            "median_transitions": float(out["n_transitions"].median())
+            if len(out) else np.nan,
             **prov}
 
 
@@ -456,9 +473,10 @@ def run(args) -> int:
             if e["status"] == "skipped":
                 log(f"    {cohort:<14} already written, skipped")
             else:
-                log(f"    {cohort:<14} {e['subjects']:>4} subject(s), "
-                    f"{e['pair_rows']:>7,} pair row(s), "
-                    f"median {e['median_transitions']:.0f} transitions each")
+                log(f"    {cohort:<14} {e['subjects']:>4} subject(s) x "
+                    f"{e['n_columns']:>4} column(s) "
+                    f"({e['n_cells']} cell(s)), median "
+                    f"{e['median_transitions']:.0f} transitions each")
 
     out = meta_dir(root) / "transitions" / "manifest.json"
     out.parent.mkdir(parents=True, exist_ok=True)
