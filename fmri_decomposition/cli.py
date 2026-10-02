@@ -1,5 +1,5 @@
 """Command line: `fmri-decomp validate | extract | dfc | diagnose | censor |
-decompose | transitions | merge-manifests | fixture`.
+decompose | transitions | select | merge-manifests | fixture`.
 
 Parallelism is at or below the deepest partition key, so each worker owns a
 distinct leaf and no locks are needed. Workers never write shared metadata --
@@ -493,6 +493,14 @@ def cmd_decompose(args) -> int:
     return decompose.run(args)
 
 
+def cmd_select(args) -> int:
+    """Stage 5b: rank state sets by how well their transitions predict a
+    phenotype column. Parallel over (state set x model x fold seed)."""
+    from . import select
+
+    return select.run(args)
+
+
 def cmd_transitions(args) -> int:
     """Stage 5a: one transition matrix per subject, per state set.
 
@@ -636,6 +644,14 @@ def build_parser() -> argparse.ArgumentParser:
              "projected onto others")
     _decompose.add_arguments(dec)
     dec.set_defaults(func=cmd_decompose)
+
+    from . import select as _select
+
+    sel = sub.add_parser(
+        "select",
+        help="stage 5b: which state set predicts a phenotype column best")
+    _select.add_arguments(sel)
+    sel.set_defaults(func=cmd_select)
 
     from . import transitions as _transitions
 

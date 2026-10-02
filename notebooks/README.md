@@ -9,7 +9,7 @@ Exploration of what the pipeline wrote. Nothing here writes to `outputs/`.
 | `03_qc.ipynb` | one histogram grid: six QC metrics x every cohort, three cells |
 | `04_activation_pca.ipynb` | open activation → filter by a `{cohort: [subs]}` dict → PCA (standalone, no `nbtools`) |
 | `06_visualize.ipynb` | the latent-space figures, three cohorts, plus one coloured by symptom |
-| `07_transitions_phenotype.ipynb` | brain-state transitions vs. phenotype: one subject-level table, a volcano over every state set, and the model-selection comparison |
+| `07_transitions_phenotype.ipynb` | brain-state transitions vs. phenotype: one subject-level table and a volcano over every state set |
 | `nbtools.py` | the loaders they use: inventory, pruned reads, the participants join |
 
 **QC lives in one place.** `03_qc.ipynb` owns subject-level quality control —
@@ -24,6 +24,12 @@ nothing else. `04` is standalone — pandas, numpy and matplotlib, no `nbtools`
 and no `fmri_decomposition` import: it globs the parquet paths itself, puts the
 partition keys back from the directory names, and does the PCA with
 `numpy.linalg.svd`, so it can be copied out of this repo and still run.
+
+Model selection is **not** in `07`. It is state sets x models x fold seeds --
+hundreds of fits -- so it is `fmri-decomp select` / `slurm/05_select.sbatch`,
+parallel over the grid, writing scores, a ranking, comparison figures and refit
+model artifacts to `outputs/selection/target=<t>/`. `07` keeps the volcano,
+which takes seconds.
 
 `07` reads what `fmri-decomp transitions` wrote, never the latents directly.
 That is **one table per (state set, cohort)**, one row per subject: the K*K

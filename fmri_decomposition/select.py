@@ -1,0 +1,518 @@
+#!/usr/bin/env python3
+"""Stage 5b -- which state set predicts a phenotype column best.
+
+    fmri-decomp select --target additional_HADS_anx_category
+    fmri-decomp select --target additional_HADS_anx_category \\
+        --models ridge hgb lgbm --n-jobs 16
+
+writes, per target,
+
+    outputs/selection/target=<t>/scores.parquet     every (state set, model, seed)
+    outputs/selection/target=<t>/summary.csv        the ranking, readable
+    outputs/selection/target=<t>/figures/*.png      the comparison plots
+    outputs/selection/target=<t>/models/*.joblib    refit artifacts for the top N
+    outputs/meta/selection/target=<t>.json          manifest
+
+WHY A SCRIPT AND NOT THE NOTEBOOK
+---------------------------------
+The grid is state sets x models x fold seeds, and a boosted model is ~800 fits
+at 16 state sets and 5 seeds -- tens of minutes in a kernel, and it blocks the
+notebook while it runs. It is also embarrassingly parallel: every cell of the
+grid is independent, so it belongs in a batch job with `--n-jobs`.
+
+The notebook keeps the volcano, which is seconds.
+
+WHAT THE SCORE IS FOR
+---------------------
+camcan is the DISCOVERY cohort. The score ranks candidate state sets; it is not
+an effect size. Choosing the best of ~16-24 biases the winner's score upward
+even when nothing is real, so the number to quote is "state set X ranked first",
+never "transitions explain Y% of anxiety". Confirmation is a different dataset.
+
+That is also why the ranking is repeated over fold seeds and the spread is
+reported: a winner that changes with the seed has not been selected, it has been
+sampled.
+
+THE BASELINE
+------------
+Covariates alone, which every state set has to beat. It depends on `window_s`
+(through `n_transitions`) but NOT on atlas or K -- the same subjects and the
+same transition counts serve every atlas at a given aperture. So it is computed
+once per (window_s, model, seed) and reused, rather than recomputed identically
+for every state set.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from .io import meta_dir
+
+CAMCAN = Path("/project/6008063/tamires/cohorts/camcan/dataman/useraccess/"
+              "opendata/paule_toussaint_camcan01870")
+DEFAULT_PHENO = [f"{CAMCAN / 'approved_data.tsv'}:\t",
+                 f"{CAMCAN / 'standard_data.csv'}:,"]
+ORDINAL_LEVELS = ["Normal", "Mild", "Moderate", "Severe"]
+
+
+def log(msg: str) -> None:
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+# ------------------------------------------------------------- estimators ---
+def make_model(name: str, seed: int):
+    """(estimator, kind, label). `kind` is 'reg' or 'clf', which picks the metric.
+
+    Every estimator is single-threaded on purpose: the parallelism is over grid
+    cells via joblib, and a threaded estimator inside a joblib worker
+    oversubscribes the node and runs slower than either alone.
+
+    Boosting hyperparameters are deliberately small. Library defaults target
+    tens of thousands of rows; here it is ~600 subjects against 64-729
+    correlated, compositional features, where a default-sized ensemble
+    memorises the training fold and the ranking turns to noise.
+    """
+    from sklearn.linear_model import LogisticRegression, RidgeCV
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+
+    if name == "ridge":
+        return (make_pipeline(StandardScaler(),
+                              RidgeCV(alphas=np.logspace(-2, 4, 25))),
+                "reg", "ridge")
+
+    if name == "hgb":
+        from sklearn.ensemble import HistGradientBoostingRegressor
+        return (HistGradientBoostingRegressor(
+                    max_iter=300, learning_rate=0.05, max_leaf_nodes=7,
+                    min_samples_leaf=30, l2_regularization=1.0,
+                    early_stopping=False, random_state=seed),
+                "reg", "hgb (sklearn histogram boosting)")
+
+    if name == "lgbm":
+        try:
+            from lightgbm import LGBMRegressor
+        except ImportError:
+            raise SystemExit(
+                "lightgbm is not installed in this environment.\n"
+                "  * use --models hgb, which is sklearn's histogram boosting "
+                "and the same algorithm family, or\n"
+                "  * rebuild the container: containers/stage45.def pins "
+                "lightgbm==4.5.0")
+        return (LGBMRegressor(n_estimators=300, learning_rate=0.05, num_leaves=7,
+                              min_child_samples=30, colsample_bytree=0.5,
+                              subsample=0.8, subsample_freq=1, reg_lambda=1.0,
+                              n_jobs=1, verbose=-1, random_state=seed),
+                "reg", "lgbm")
+
+    if name == "logistic":
+        return (make_pipeline(StandardScaler(),
+                              LogisticRegression(max_iter=2000, C=0.1,
+                                                 class_weight="balanced")),
+                "clf", "logistic (Normal vs above)")
+
+    raise SystemExit(f"unknown model {name!r}; choose from "
+                     f"ridge, hgb, lgbm, logistic")
+
+
+def score_once(X: np.ndarray, y: np.ndarray, model: str, seed: int) -> float:
+    """One out-of-fold score. Never accuracy -- with the upper ordinal levels
+    this thin, predicting Normal for everyone scores well and means nothing."""
+    from scipy import stats
+    from sklearn.base import clone
+    from sklearn.metrics import roc_auc_score
+    from sklearn.model_selection import KFold, StratifiedKFold
+
+    est, kind, _ = make_model(model, seed)
+    if kind == "clf":
+        yb = (y > 0).astype(int)
+        if yb.sum() < 10 or (1 - yb).sum() < 10:
+            return np.nan
+        pred = np.empty(len(yb), float)
+        for tr, te in StratifiedKFold(5, shuffle=True,
+                                      random_state=seed).split(X, yb):
+            pred[te] = clone(est).fit(X[tr], yb[tr]).predict_proba(X[te])[:, 1]
+        return float(roc_auc_score(yb, pred))
+
+    pred = np.empty(len(y), float)
+    for tr, te in KFold(5, shuffle=True, random_state=seed).split(X):
+        pred[te] = clone(est).fit(X[tr], y[tr]).predict(X[te])
+    return float(stats.spearmanr(pred, y).statistic)
+
+
+def metric_name(model: str) -> str:
+    return "AUC" if model == "logistic" else "Spearman"
+
+
+# --------------------------------------------------------------- the data ---
+def read_phenotype(specs: list[str], id_col: str, target: str,
+                   covariates: list[str], categorical: list[str]) -> pd.DataFrame:
+    """Merge the release tables on the id column, code the ordinal, coerce types.
+
+    Cam-CAN splits what is needed: the HADS categories are in one table and Age
+    and Sex in another, both keyed by CCID. A missing covariate is therefore a
+    missing FILE, not a missing column, which is worth saying in the error.
+    """
+    frames = []
+    for spec in specs:
+        path_s, _, sep = spec.rpartition(":")
+        path = Path(path_s or spec)
+        if not path.exists():
+            raise SystemExit(f"{path} does not exist")
+        f = pd.read_csv(path, sep=sep or ",", dtype={id_col: str})
+        if id_col not in f.columns:
+            raise SystemExit(f"{id_col!r} not in {path.name}: "
+                             f"{list(f.columns)[:20]}")
+        f[id_col] = f[id_col].astype(str).str.strip().str.upper()
+        log(f"  {path.name:<24} {len(f):>6,} row(s) {len(f.columns):>4} col(s)")
+        frames.append(f)
+
+    pheno = frames[0]
+    for f in frames[1:]:
+        dup = [c for c in f.columns if c in pheno.columns and c != id_col]
+        pheno = pheno.merge(f.drop(columns=dup), on=id_col, how="outer")
+    pheno = pheno.rename(columns={id_col: "sub"})
+
+    lower = {c.strip().lower(): c for c in pheno.columns}
+    want = [target] + [c for c in covariates if c != "n_transitions"]
+    missing = [w for w in want if w.strip().lower() not in lower]
+    if missing:
+        near = [c for c in pheno.columns
+                if any(k in c.lower() for k in ("hads", "age", "sex"))]
+        raise SystemExit(f"not in any phenotype file: {missing}\n"
+                         f"close names: {near[:14]}")
+    for w in want:
+        got = lower[w.strip().lower()]
+        if got != w:
+            pheno[w] = pheno[got]
+            log(f"  matched {w!r} -> column {got!r}")
+
+    raw = pheno[target].astype("string").str.strip()
+    codes = pd.to_numeric(raw, errors="coerce")
+    codes = codes.where(codes.notna(),
+                        raw.str.lower().map({v.lower(): i for i, v
+                                             in enumerate(ORDINAL_LEVELS)}))
+    unknown = sorted(set(raw.dropna()) - set(ORDINAL_LEVELS)
+                     - set(str(i) for i in range(len(ORDINAL_LEVELS))))
+    if unknown:
+        log(f"  values not in ORDINAL_LEVELS, now NaN: {unknown[:6]}")
+    pheno["y"] = codes
+
+    for c in covariates:
+        if c in pheno.columns and c not in categorical:
+            pheno[c] = pd.to_numeric(pheno[c], errors="coerce")
+
+    keep = ["sub", "y"] + [c for c in covariates if c != "n_transitions"]
+    pheno = pheno[keep].dropna()
+    vc = pheno["y"].astype(int).value_counts().sort_index()
+    log(f"  usable labels: {len(pheno):,}  "
+        + "  ".join(f"{ORDINAL_LEVELS[int(k)]}={v}" for k, v in vc.items()
+                    if int(k) < len(ORDINAL_LEVELS)))
+    return pheno
+
+
+def discover(root: Path) -> pd.DataFrame:
+    rows = [{"atlas": p.parts[-5].split("=")[1],
+             "window_s": p.parts[-4].split("=")[1],
+             "states": p.parts[-3].split("=")[1],
+             "cohort": p.parts[-2].split("=")[1], "path": p}
+            for p in (root / "transitions").rglob("subjects.parquet")]
+    if not rows:
+        raise SystemExit(f"no transition tables under {root / 'transitions'} -- "
+                         f"run `fmri-decomp transitions` first")
+    d = pd.DataFrame(rows)
+    d["K"] = d["states"].str.rsplit("_", n=1).str[1].astype(int)
+    d["window_s_num"] = d["window_s"].astype(float)
+    return d
+
+
+def design(cov: pd.DataFrame) -> np.ndarray:
+    X = pd.get_dummies(cov, drop_first=True, dummy_na=False).astype(float)
+    return X.fillna(X.mean()).to_numpy()
+
+
+def build(table: Path, pheno: pd.DataFrame, covariates: list[str]):
+    """One state set -> (cells+covariates matrix, covariates-only matrix, y)."""
+    t = pd.read_parquet(table)
+    t["sub"] = t["sub"].astype(str).str.strip().str.upper()
+    d = t.merge(pheno, on="sub", how="inner", suffixes=("", "_pheno"))
+    if d.empty:
+        raise SystemExit(
+            f"{table}: the phenotype join matched nothing.\n"
+            f"  transitions sub e.g. {t['sub'].iloc[:3].tolist()}\n"
+            f"  phenotype   sub e.g. {pheno['sub'].iloc[:3].tolist()}")
+    cells = sorted((c for c in t.columns if "->" in c),
+                   key=lambda c: tuple(int(x) for x in c.split("->")))
+    C = design(d[covariates])
+    F = np.column_stack([C, d[cells].to_numpy(float)])
+    return F, C, d["y"].to_numpy(float), len(cells), len(d)
+
+
+# ------------------------------------------------------------------- run ---
+def run(args) -> int:
+    from joblib import Parallel, delayed
+
+    root = Path(args.output_root) if args.output_root else _default_root()
+    sets = discover(root)
+    sets = sets[sets["cohort"] == args.cohort]
+    if args.atlas:
+        sets = sets[sets["atlas"].isin(args.atlas)]
+    if args.window_s:
+        sets = sets[sets["window_s"].isin([str(w) for w in args.window_s])]
+    if sets.empty:
+        raise SystemExit("no state set matches --atlas / --window-s / --cohort")
+    sets = sets.sort_values(["atlas", "K", "window_s_num"]).reset_index(drop=True)
+
+    log(f"phenotype for target={args.target!r}")
+    pheno = read_phenotype(args.pheno, args.id_col, args.target,
+                           args.covariates, args.categorical)
+
+    log(f"{len(sets)} state set(s) x {len(args.models)} model(s) x "
+        f"{len(args.seeds)} seed(s)")
+
+    # Load once. Each table is ~100 KB, so the whole grid is a few MB and
+    # re-reading it inside every worker would dominate the runtime.
+    data, meta = {}, []
+    for t in sets.itertuples():
+        key = (t.atlas, t.window_s, t.states)
+        F, C, y, n_cells, n = build(t.path, pheno, args.covariates)
+        data[key] = (F, C, y)
+        meta.append({"atlas": t.atlas, "window_s": t.window_s_num,
+                     "states": t.states, "K": t.K, "n": n, "n_cells": n_cells})
+    meta = pd.DataFrame(meta)
+    log(f"  subjects per state set: {meta['n'].min()}-{meta['n'].max()}; "
+        f"cells {sorted(meta['n_cells'].unique())}")
+
+    # The baseline depends on window_s only -- same subjects, same
+    # n_transitions, every atlas and K. One per (window_s, model, seed).
+    jobs = [("set", k, m, s) for k in data for m in args.models for s in args.seeds]
+    base_keys = {}
+    for k in data:
+        base_keys.setdefault(k[1], k)          # first state set at this window
+    jobs += [("base", base_keys[w], m, s)
+             for w in base_keys for m in args.models for s in args.seeds]
+    log(f"  {len(jobs)} fit job(s) ({len(jobs) - len(base_keys)*len(args.models)*len(args.seeds)}"
+        f" state-set + {len(base_keys)*len(args.models)*len(args.seeds)} baseline)")
+
+    def one(kind, key, model, seed):
+        F, C, y = data[key]
+        return score_once(F if kind == "set" else C, y, model, seed)
+
+    t0 = time.time()
+    scores = Parallel(n_jobs=args.n_jobs, backend="loky", verbose=5)(
+        delayed(one)(kind, key, m, s) for kind, key, m, s in jobs)
+    log(f"  fitted in {time.time() - t0:.0f}s")
+
+    rows = []
+    for (kind, key, model, seed), sc in zip(jobs, scores):
+        atlas, window_s, states = key
+        rows.append({"atlas": atlas if kind == "set" else "(baseline)",
+                     "window_s": float(window_s),
+                     "states": states if kind == "set" else "(covariates only)",
+                     "K": int(states.rsplit("_", 1)[1]) if kind == "set" else 0,
+                     "model": model, "metric": metric_name(model),
+                     "seed": seed, "kind": kind, "score": sc})
+    scores_df = pd.DataFrame(rows).merge(
+        meta, on=["atlas", "window_s", "states", "K"], how="left")
+
+    out = root / "selection" / f"target={args.target}"
+    (out / "figures").mkdir(parents=True, exist_ok=True)
+    (out / "models").mkdir(parents=True, exist_ok=True)
+    scores_df.to_parquet(out / "scores.parquet", index=False)
+
+    summary = (scores_df.groupby(["model", "atlas", "window_s", "K", "states"],
+                                 dropna=False)["score"]
+               .agg(["mean", "std", "min", "max", "count"]).reset_index()
+               .sort_values(["model", "mean"], ascending=[True, False]))
+    summary.to_csv(out / "summary.csv", index=False)
+    print()
+    for model, g in summary.groupby("model"):
+        print(f"=== {model}  ({metric_name(model)}) ===")
+        print(g.drop(columns=["model"]).head(args.show).to_string(index=False))
+        print()
+
+    _figures(scores_df, summary, out / "figures", args.target)
+    saved = _save_models(scores_df, data, out / "models", args.save_top,
+                         args.covariates)
+
+    mf = meta_dir(root) / "selection" / f"target={args.target}.json"
+    mf.parent.mkdir(parents=True, exist_ok=True)
+    mf.write_text(json.dumps(
+        {"target": args.target, "cohort": args.cohort, "models": args.models,
+         "seeds": args.seeds, "covariates": args.covariates,
+         "n_state_sets": int(len(sets)), "n_jobs_run": len(jobs),
+         "saved_models": saved, "output": str(out.relative_to(root)),
+         "note": "camcan is the discovery cohort; these scores RANK state sets "
+                 "and are not effect sizes",
+         "written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
+        indent=2, default=str))
+    log(f"-> {out.relative_to(root)}  (scores, summary, figures, models)")
+    log(f"-> {mf.relative_to(root)}")
+    return 0
+
+
+def _figures(scores, summary, fig_dir: Path, target: str) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    sets = scores[scores["kind"] == "set"]
+    base = scores[scores["kind"] == "base"]
+    models = sorted(sets["model"].unique())
+
+    # 1. score vs aperture, one panel per model, with the baseline as a floor
+    fig, axes = plt.subplots(1, len(models), figsize=(5.2 * len(models), 4.3),
+                             squeeze=False)
+    for ax, model in zip(axes[0], models):
+        for (atlas, K), g in sets[sets["model"] == model].groupby(["atlas", "K"]):
+            m = g.groupby("window_s")["score"].agg(["mean", "std"])
+            ax.errorbar(m.index, m["mean"], yerr=m["std"], marker="o",
+                        capsize=3, label=f"{atlas} K={K}")
+        b = base[base["model"] == model].groupby("window_s")["score"].mean()
+        ax.plot(b.index, b.values, "k--", lw=1.3, label="covariates only")
+        ax.axhline(0 if model != "logistic" else .5, lw=.6, c="grey")
+        ax.set_xscale("log")
+        ax.set_xticks(sorted(sets["window_s"].unique()))
+        ax.get_xaxis().set_major_formatter(plt.ScalarFormatter())
+        ax.set_xlabel("window_s")
+        ax.set_ylabel(f"out-of-fold {metric_name(model)}")
+        ax.set_title(model, fontsize=10)
+        ax.legend(fontsize=7)
+    fig.suptitle(f"{target} — state set vs aperture", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(fig_dir / "score_by_window.png", dpi=150)
+    plt.close(fig)
+
+    # 2. rank stability: a winner that moves with the fold seed is not a winner
+    fig, axes = plt.subplots(1, len(models), figsize=(5.2 * len(models), 4.6),
+                             squeeze=False)
+    for ax, model in zip(axes[0], models):
+        g = sets[sets["model"] == model].assign(
+            label=lambda d: d["atlas"] + " " + d["window_s"].astype(str)
+            + "s K" + d["K"].astype(str))
+        rank = g.pivot_table(index="label", columns="seed",
+                             values="score").rank(ascending=False)
+        order = rank.mean(axis=1).sort_values().index
+        ax.imshow(rank.loc[order], aspect="auto", cmap="viridis_r")
+        ax.set_yticks(range(len(order)))
+        ax.set_yticklabels(order, fontsize=6)
+        ax.set_xticks(range(rank.shape[1]))
+        ax.set_xticklabels(rank.columns)
+        ax.set_xlabel("fold seed")
+        ax.set_title(f"{model}: rank by seed (1 = best)", fontsize=9)
+        for i, lab in enumerate(order):
+            for j, c in enumerate(rank.columns):
+                ax.text(j, i, int(rank.loc[lab, c]), ha="center", va="center",
+                        fontsize=5, color="w")
+    fig.tight_layout()
+    fig.savefig(fig_dir / "rank_stability.png", dpi=150)
+    plt.close(fig)
+
+    # 3. do the models agree on the winner?
+    piv = (sets.groupby(["model", "atlas", "window_s", "K"])["score"].mean()
+               .reset_index()
+               .assign(label=lambda d: d["atlas"] + " " + d["window_s"].astype(str)
+                       + "s K" + d["K"].astype(str))
+               .pivot(index="label", columns="model", values="score"))
+    if piv.shape[1] > 1:
+        fig, ax = plt.subplots(figsize=(6, 1 + .3 * len(piv)))
+        r = piv.rank(ascending=False)
+        ax.imshow(r, aspect="auto", cmap="viridis_r")
+        ax.set_yticks(range(len(r))); ax.set_yticklabels(r.index, fontsize=6)
+        ax.set_xticks(range(r.shape[1])); ax.set_xticklabels(r.columns, fontsize=8)
+        for i in range(r.shape[0]):
+            for j in range(r.shape[1]):
+                ax.text(j, i, int(r.iloc[i, j]), ha="center", va="center",
+                        fontsize=6, color="w")
+        ax.set_title("rank by model — agreement means the winner is robust",
+                     fontsize=9)
+        fig.tight_layout()
+        fig.savefig(fig_dir / "model_agreement.png", dpi=150)
+        plt.close(fig)
+
+
+def _save_models(scores, data, model_dir: Path, top_n: int,
+                 covariates: list[str]) -> list[str]:
+    """Refit the top state sets on ALL subjects and store the fitted object.
+
+    Refit on everything on purpose: these are artifacts to carry to the
+    validation dataset, not the thing the score came from. The score came from
+    held-out folds and is recorded separately.
+    """
+    import joblib
+
+    sets = scores[scores["kind"] == "set"]
+    saved = []
+    for model, g in sets.groupby("model"):
+        best = (g.groupby(["atlas", "window_s", "states"])["score"].mean()
+                 .sort_values(ascending=False).head(top_n))
+        for (atlas, window_s, states), mean_score in best.items():
+            key = (atlas, str(int(window_s)) if float(window_s).is_integer()
+                   else str(window_s), states)
+            if key not in data:
+                continue
+            F, C, y = data[key]
+            est, kind, label = make_model(model, 0)
+            est.fit(F, (y > 0).astype(int) if kind == "clf" else y)
+            name = f"{model}__{atlas}__w{key[1]}__{states}.joblib"
+            joblib.dump({"estimator": est, "model": model, "label": label,
+                         "atlas": atlas, "window_s": key[1], "states": states,
+                         "covariates": covariates, "n": len(y),
+                         "mean_cv_score": float(mean_score),
+                         "note": "refit on all subjects; the score came from "
+                                 "held-out folds, not from this fit"},
+                        model_dir / name)
+            saved.append(name)
+    return saved
+
+
+def _default_root() -> Path:
+    if os.environ.get("FMRIDECOMP_OUTPUTS"):
+        return Path(os.environ["FMRIDECOMP_OUTPUTS"])
+    import yaml
+    repo = Path(__file__).resolve().parent.parent
+    return Path(yaml.safe_load(
+        (repo / "config" / "camcan_movie.yaml").read_text())["output_root"])
+
+
+def add_arguments(p) -> None:
+    p.add_argument("--target", required=True,
+                   help="phenotype column, e.g. additional_HADS_anx_category")
+    p.add_argument("--models", nargs="+", default=["ridge", "hgb"],
+                   choices=["ridge", "hgb", "lgbm", "logistic"])
+    p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
+    p.add_argument("--pheno", nargs="+", default=DEFAULT_PHENO,
+                   metavar="PATH:SEP",
+                   help="phenotype tables as path:separator, merged on --id-col")
+    p.add_argument("--id-col", default="CCID")
+    p.add_argument("--covariates", nargs="+",
+                   default=["Age", "Sex", "n_transitions"])
+    p.add_argument("--categorical", nargs="+", default=["Sex"])
+    p.add_argument("--cohort", default="camcan")
+    p.add_argument("--atlas", nargs="*", default=None)
+    p.add_argument("--window-s", nargs="*", default=None)
+    p.add_argument("--n-jobs", type=int, default=-1,
+                   help="parallel fits; match --cpus-per-task")
+    p.add_argument("--save-top", type=int, default=3,
+                   help="refit and store this many state sets per model")
+    p.add_argument("--show", type=int, default=12,
+                   help="rows of the ranking to print per model")
+    p.add_argument("--output-root")
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_arguments(p)
+    return run(p.parse_args(argv))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
