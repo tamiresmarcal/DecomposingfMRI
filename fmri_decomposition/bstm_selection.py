@@ -29,12 +29,25 @@ THE GRID
     model       ridge | hgb | lgbm | logistic
     fold seed   --seeds
 
-`cells` is the hypothesis: the K*K transition probabilities. `summary` is the
-CONTROL -- occupancy, switch rate, dwell, entropy rate, dispersion, everything
-about a subject that is not a transition cell. If `summary` predicts as well as
-`cells`, the signal is where someone SITS and how long they stay, not how they
-move, and the transition claim does not hold. `figures/cells_vs_summary.png`
-puts the two on one axis.
+`cells` is the hypothesis: the K*K transition probabilities. The rest are
+controls, deliberately separated so a win can be attributed:
+
+    occupancy   share of time in each state -- WHERE someone sits, ordering
+                discarded entirely
+    dynamics    switch rate, dwell, entropy rate, dispersion -- scalars that
+                need no transition matrix
+    all         everything together
+
+If `occupancy` predicts as well as `cells`, the signal is time spent. If
+`dynamics` does, it is a handful of summary numbers and the K*K matrix is
+unnecessary. Either way the transition claim does not hold, and
+`figures/cells_vs_summary.png` plots `cells` against whichever control does
+best -- the hypothesis has to beat the best of them, not their average.
+
+TARGET CODING. The ordinal is fitted as a number (Normal=0 ... Severe=3), which
+assumes Normal->Mild is the same step as Moderate->Severe. The SCORE is
+Spearman, which is rank-based and does not. `--models logistic` drops the
+assumption entirely, at the cost of the ordering.
 
 Every feature set is prepended with the covariates, so each is measured against
 the same covariates-only baseline.
@@ -85,13 +98,28 @@ from .io import meta_dir
 # switch_rate and self_transition_rate sum to 1 by construction. Both are kept
 # -- ridge is untroubled by it and dropping one would make this block something
 # other than "everything else".
-SUMMARY_PREDICTORS = [
+DYNAMICS_PREDICTORS = [
     "n_states_visited", "n_distinct_transitions", "switch_rate",
     "self_transition_rate", "switches_per_min", "mean_dwell_s",
     "entropy_rate_bits", "dispersion",
 ]
 
-FEATURE_SETS = ["cells", "summary", "cells+summary"]
+# What each feature set hands the regressor, on top of the covariates.
+#
+#   cells       the K*K transition probabilities        THE HYPOTHESIS
+#   occupancy   occ_0..occ_{K-1}: share of windows in each state -- WHERE
+#               someone sits, with the ordering thrown away
+#   dynamics    the scalars above: how much they switch, how long they dwell,
+#               how predictable the next state is, how far they roam
+#   summary     occupancy + dynamics: everything that is not a cell
+#   all         cells + occupancy + dynamics
+#
+# occupancy and dynamics are the controls that matter. If either predicts as
+# well as `cells`, the signal is not in the transition structure: occupancy
+# says it is time spent, dynamics says it is a summary statistic that needs no
+# transition matrix at all.
+FEATURE_SETS = ["cells", "occupancy", "dynamics", "summary", "all"]
+CELL_BEARING = ("cells", "all")                 # the sets p_norm applies to
 
 # How a transition cell is expressed.
 #   joint  n(i->j) / all of this subject's transitions. As stored. The whole
@@ -321,32 +349,29 @@ def build(table: Path, pheno: pd.DataFrame, covariates: list[str],
                    key=lambda c: tuple(int(x) for x in c.split("->")))
     occ = sorted((c for c in t.columns if c.startswith("occ_")),
                  key=lambda c: int(c.split("_")[1]))
-    summary = [c for c in SUMMARY_PREDICTORS if c in t.columns] + occ
-    blocks = {"cells": cells, "summary": summary,
-              "cells+summary": cells + summary}
+    dynamics = [c for c in DYNAMICS_PREDICTORS if c in t.columns]
+    blocks = {"cells": cells, "occupancy": occ, "dynamics": dynamics,
+              "summary": occ + dynamics, "all": cells + occ + dynamics}
 
     C = design(d[covariates])
     K = int(t["n_states"].iloc[0])
     n_tr = d["n_transitions"].to_numpy(float)
     joint = d[cells].to_numpy(float)
     cond = to_cond(joint, n_tr, K) if cells else joint
-    summ = d[summary].to_numpy(float) if summary else np.empty((len(d), 0))
-
     mats, widths = {}, {}
     for fs in feature_sets:
-        # summary carries no cells, so the normalisation axis does not apply
-        norms = ["-"] if fs == "summary" else p_norms
-        for nm in norms:
-            cellblock = joint if nm == "joint" else cond
-            parts = [C]
-            if "cells" in fs:
-                parts.append(cellblock)
-            if "summary" in fs:
-                parts.append(summ)
-            cols = blocks[fs]
-            if not cols:
-                continue
-            mats[(fs, nm)] = np.column_stack(parts)
+        cols = blocks[fs]
+        if not cols:
+            continue
+        # p_norm only means something where there are cells; expanding the
+        # others over it would run identical arms twice.
+        for nm in (p_norms if fs in CELL_BEARING else ["-"]):
+            block = d[cols].to_numpy(float)
+            if fs in CELL_BEARING and nm == "cond":
+                # the cell columns are the FIRST len(cells) of this block
+                block = block.copy()
+                block[:, :len(cells)] = cond
+            mats[(fs, nm)] = np.column_stack([C, block])
             widths[(fs, nm)] = len(cols)
     return mats, C, d["y"].to_numpy(float), widths, len(d)
 
@@ -436,6 +461,15 @@ def run(args) -> int:
                                    " [" + scores_df["p_norm"] + "]"))
 
     out = root / "selection" / f"target={args.target}"
+    # A re-run rewrites scores, summary, DESIGN and the figures by name -- but
+    # the top-N can change, so a previous run's joblib files would linger and
+    # there would be no way to tell which run produced them. Clear first.
+    import shutil
+    if (out / "models").is_dir():
+        n_old = len(list((out / "models").glob("*.joblib")))
+        if n_old:
+            log(f"  clearing {n_old} artifact(s) from a previous run")
+        shutil.rmtree(out / "models")
     (out / "figures").mkdir(parents=True, exist_ok=True)
     (out / "models").mkdir(parents=True, exist_ok=True)
     scores_df.to_parquet(out / "scores.parquet", index=False)
@@ -452,7 +486,7 @@ def run(args) -> int:
                .head(args.show).to_string(index=False))
         print()
 
-    note = design_note(args, sets, meta)
+    note = design_note(args, sets, meta, sample_table=sets.iloc[0]["path"])
     (out / "DESIGN.md").write_text(note)
     print(note)
 
@@ -482,7 +516,49 @@ def run(args) -> int:
     return 0
 
 
-def design_note(args, sets, meta) -> str:
+def describe_blocks(sample_table: Path, args) -> list[str]:
+    """The literal column names each feature set hands the regressor."""
+    t = pd.read_parquet(sample_table)
+    K = int(t["n_states"].iloc[0])
+    cells = [c for c in t.columns if "->" in c]
+    occ = sorted((c for c in t.columns if c.startswith("occ_")),
+                 key=lambda c: int(c.split("_")[1]))
+    dyn = [c for c in DYNAMICS_PREDICTORS if c in t.columns]
+    content = {"cells": (f"{len(cells)} columns", f"`0->0` ... `{K-1}->{K-1}`"),
+               "occupancy": (f"{len(occ)} columns",
+                             "`" + "`, `".join(occ[:4]) + f"` ... `{occ[-1]}`"),
+               "dynamics": (f"{len(dyn)} columns",
+                            "`" + "`, `".join(dyn) + "`"),
+               "summary": (f"{len(occ) + len(dyn)} columns",
+                           "occupancy + dynamics"),
+               "all": (f"{len(cells) + len(occ) + len(dyn)} columns",
+                       "cells + occupancy + dynamics")}
+    out = ["## What is inside each feature set",
+           "",
+           f"Shown at K={K}; the cell and occupancy counts scale with K.",
+           "Every set is prepended with the covariates "
+           f"(`{'`, `'.join(args.covariates)}`), so all are measured against the",
+           "same covariates-only baseline.",
+           "",
+           "| feature set | width | columns |", "|---|---|---|"]
+    for fs in args.features:
+        w, cols = content[fs]
+        out.append(f"| `{fs}` | {w} | {cols} |")
+    out += ["",
+            "Three columns are deliberately **excluded** from every predictor set:",
+            "`n_windows`, `n_transitions` and `n_transitions_independent`. All three",
+            "are the same quantity, and `n_transitions` is already a nuisance",
+            "covariate -- as predictors they would hand the model its own covariate",
+            "back, nearly collinear with it.",
+            "",
+            "`switch_rate` and `self_transition_rate` sum to 1 by construction. Both",
+            "are kept: ridge is untroubled by it, and dropping one would make",
+            "`dynamics` something other than \"every scalar\".",
+            ""]
+    return out
+
+
+def design_note(args, sets, meta, sample_table=None) -> str:
     """What this run varied and what it held fixed, in the output folder.
 
     Written beside the scores because six months on, "which state set won" is
@@ -516,6 +592,7 @@ def design_note(args, sets, meta) -> str:
         f"{len(args.seeds)} fold seeds {args.seeds} — the seeds are a "
         f"reliability check, not a choice.",
         "",
+        *([] if sample_table is None else describe_blocks(sample_table, args)),
         "## Held fixed — NOT compared",
         "",
         "A state set is `(method, feature, atlas, aperture, K)`. This run varies",
@@ -648,8 +725,13 @@ def _figures(scores, summary, fig_dir: Path, target: str) -> None:
                     .pivot_table(index=["model", "atlas", "window_s", "K"],
                                  columns="arm", values="score").dropna())
         cellarm = next((c for c in pair.columns if c.startswith("cells [")), None)
-        if cellarm and "summary" in pair.columns and len(pair):
-            pair = pair.rename(columns={cellarm: "cells"})
+        ctrl = [c for c in pair.columns
+                if c in ("occupancy", "dynamics", "summary")]
+        if cellarm and ctrl and len(pair):
+            # the control is the BEST non-cell arm -- the hypothesis has to beat
+            # whichever of them does best, not an average of them
+            pair = pair.assign(**{"cells": pair[cellarm],
+                                  "summary": pair[ctrl].max(axis=1)})
             fig, ax = plt.subplots(figsize=(5.4, 5.2))
             for model, g in pair.reset_index().groupby("model"):
                 ax.scatter(g["summary"], g["cells"], s=34, alpha=.8, label=model)
@@ -659,7 +741,7 @@ def _figures(scores, summary, fig_dir: Path, target: str) -> None:
             bl = base["score"].mean()
             ax.axhline(bl, color="grey", lw=.7, ls=":")
             ax.axvline(bl, color="grey", lw=.7, ls=":")
-            ax.set_xlabel("summary features (occupancy, dwell, entropy, ...)")
+            ax.set_xlabel(f"best non-transition arm ({', '.join(ctrl)})")
             ax.set_ylabel("transition cells")
             ax.set_title("above the diagonal = the transitions carry something\n"
                          "the summaries do not  (dotted = covariates-only)",
@@ -733,13 +815,15 @@ def add_arguments(p) -> None:
                         "Ignored for the `summary` feature set, which has no "
                         "cells.")
     p.add_argument("--features", nargs="+",
-                   default=["cells", "summary", "cells+summary"],
+                   default=["cells", "occupancy", "dynamics", "all"],
                    choices=FEATURE_SETS,
                    help="cells = the K*K transition probabilities (the "
-                        "hypothesis); summary = everything else per subject "
-                        "(occupancy, switch rate, dwell, entropy, dispersion) "
-                        "-- the control that asks whether the signal is in the "
-                        "transitions at all")
+                        "hypothesis); occupancy = share of time in each state; "
+                        "dynamics = switch rate, dwell, entropy, dispersion; "
+                        "summary = occupancy + dynamics; all = everything. "
+                        "occupancy and dynamics are the controls: if either "
+                        "predicts as well as cells, the signal is not in the "
+                        "transition structure")
     p.add_argument("--pheno", nargs="+", default=DEFAULT_PHENO,
                    metavar="PATH:SEP",
                    help="phenotype tables as path:separator, merged on --id-col")
