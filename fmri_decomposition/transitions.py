@@ -465,16 +465,23 @@ def _k_quietly(state_col: str, path: Path) -> int | None:
         return None
 
 
-def _within_max_k(states: list[str], k_of: dict, max_k: int):
-    """(states to use, states skipped for being too wide).
+def _within_k_band(states: list[str], k_of: dict, min_k: int, max_k: int):
+    """(states to use, states skipped for a K outside the band).
+
+    Both ends matter, for opposite reasons. Too wide (125, 512) is a table with
+    more columns than a subject has transitions. Too narrow is worse because it
+    looks fine: at K=1 every subject's table is the single cell `0->0` = 1.0, a
+    column of a constant that costs fits and dilutes an FDR family. Stage 4b
+    refuses to write those now, but latents written before it did still carry
+    them -- `MeanShift_pca3_1` and friends -- and discovery would pick them up.
 
     A state set with no resolvable K is KEPT: `process` resolves it per cell with
-    the labels in hand and will say so. Only a known, oversized K is dropped.
+    the labels in hand and will say so. Only a KNOWN, out-of-band K is dropped.
     """
     keep, skip = [], []
     for st in states:
         k = k_of.get(st)
-        (skip if (k is not None and k > max_k) else keep).append(st)
+        (skip if (k is not None and not min_k <= k <= max_k) else keep).append(st)
     return keep, skip
 
 
@@ -594,7 +601,7 @@ def run(args) -> int:
                 "no state columns found in any latents file. Run "
                 "`fmri-decomp cluster` to add state definitions, or pass "
                 "--states explicitly.")
-        states, skipped = _within_max_k(states, k_of, args.max_k)
+        states, skipped = _within_k_band(states, k_of, args.min_k, args.max_k)
         if skipped:
             # Loud, because this is the one case where discovery finds something
             # real that must not be used. A latents file written before K was cut
@@ -604,15 +611,16 @@ def run(args) -> int:
             # than 99% of cells are exactly zero for every subject. Discovery is
             # how a new state set is picked up automatically; it must not also be
             # how a retired one comes back.
-            log(f"SKIPPED {len(skipped)} state column(s) above --max-k "
-                f"{args.max_k}: {skipped}")
+            log(f"SKIPPED {len(skipped)} state column(s) outside "
+                f"K in [{args.min_k}, {args.max_k}]: {skipped}")
             log(f"        They are in the latents and are not used. Name one in "
                 f"--states, or raise --max-k, to override.")
         if not states:
             raise SystemExit(
-                f"every discovered state column is above --max-k {args.max_k}: "
-                f"{skipped}\nRun `fmri-decomp cluster` to write usable ones, or "
-                f"raise --max-k if you mean it.")
+                f"every discovered state column has a K outside "
+                f"[{args.min_k}, {args.max_k}]: {skipped}\nRun `fmri-decomp "
+                f"cluster` to write usable ones, or widen the band if you mean "
+                f"it.")
         log(f"discovered {len(states)} state column(s): {states}")
 
     log(f"grid: {len(atlases)} atlas x {len(windows)} window x {len(states)} "
@@ -668,6 +676,11 @@ def add_arguments(p) -> None:
                         "latents schema, so a method added by `fmri-decomp "
                         "cluster` is picked up without being named here.")
     p.add_argument("--cohorts", nargs="*", default=None)
+    p.add_argument("--min-k", type=int, default=2,
+                   help="skip a DISCOVERED state set with fewer states than "
+                        "this. K=1 is one cell, `0->0`=1.0 for every subject -- "
+                        "a constant. Stage 4b refuses to write those now, but "
+                        "latents written before it did still carry them.")
     p.add_argument("--max-k", type=int, default=64,
                    help="skip a DISCOVERED state set with more than this many "
                         "states; a set named in --states is always used. "

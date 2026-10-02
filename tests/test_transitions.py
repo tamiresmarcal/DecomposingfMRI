@@ -152,25 +152,25 @@ class TestMaxK:
 
     def test_an_oversized_set_is_skipped(self):
         k_of = {"ThresholdCluster_pca3_8": 8, "ThresholdCluster_pca3_512": 512}
-        keep, skip = T._within_max_k(sorted(k_of), k_of, 64)
+        keep, skip = T._within_k_band(sorted(k_of), k_of, 2, 64)
         assert keep == ["ThresholdCluster_pca3_8"]
         assert skip == ["ThresholdCluster_pca3_512"]
 
     def test_the_sets_in_use_survive_the_default(self):
         k_of = {"ThresholdCluster_pca3_8": 8, "HMM_umap3_27": 27,
                 "MeanShift_pca3_7": 7}
-        keep, skip = T._within_max_k(sorted(k_of), k_of, 64)
+        keep, skip = T._within_k_band(sorted(k_of), k_of, 2, 64)
         assert len(keep) == 3 and skip == []
 
     def test_an_unresolvable_k_is_kept_not_dropped(self):
         # `process` resolves it per cell with the labels in hand and says so.
         # Dropping it here would silently lose a state set over a missing field.
-        keep, skip = T._within_max_k(["Odd_pca3_x"], {"Odd_pca3_x": None}, 64)
+        keep, skip = T._within_k_band(["Odd_pca3_x"], {"Odd_pca3_x": None}, 2, 64)
         assert keep == ["Odd_pca3_x"] and skip == []
 
     def test_the_boundary_is_inclusive(self):
         k_of = {"MeanShift_pca3_64": 64, "MeanShift_pca3_65": 65}
-        keep, skip = T._within_max_k(sorted(k_of), k_of, 64)
+        keep, skip = T._within_k_band(sorted(k_of), k_of, 2, 64)
         assert keep == ["MeanShift_pca3_64"]
         assert skip == ["MeanShift_pca3_65"]
 
@@ -182,3 +182,18 @@ class TestMaxK:
         p = latents(tmp_path, {"MeanShift_pca3_7": 0},
                     metadata={"clusterers": {"MeanShift_pca3_7": {"k": 7}}})
         assert T._k_quietly("MeanShift_pca3_7", p) == 7
+
+    def test_a_single_state_set_is_skipped(self):
+        # MeanShift at too wide a bandwidth wrote these before stage 4b refused
+        # them. One state means one cell, the same value for every subject.
+        k_of = {"MeanShift_pca3_1": 1, "MeanShift_pca3_7": 7}
+        keep, skip = T._within_k_band(sorted(k_of), k_of, 2, 64)
+        assert keep == ["MeanShift_pca3_7"]
+        assert skip == ["MeanShift_pca3_1"]
+
+    def test_both_ends_are_skipped_together(self):
+        k_of = {"MeanShift_pca3_1": 1, "ThresholdCluster_pca3_8": 8,
+                "ThresholdCluster_pca3_512": 512}
+        keep, skip = T._within_k_band(sorted(k_of), k_of, 2, 64)
+        assert keep == ["ThresholdCluster_pca3_8"]
+        assert len(skip) == 2

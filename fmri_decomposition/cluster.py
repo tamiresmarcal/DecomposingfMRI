@@ -139,8 +139,23 @@ class MeanShiftCluster:
 
     name = "MeanShift"
 
-    def __init__(self, quantile=0.2, fit_rows=50_000):
+    # `quantile` sets the bandwidth, and the right value is a property of the
+    # DATA, not of the method: on the real grid, 0.2 -- the sklearn-ish default
+    # this started with -- collapsed 7 of 8 harvardoxford state sets to K=1 or 2.
+    # One state has one cell, `0->0 = 1.0` for every subject, so a K=1 state set
+    # is not a weak arm in the selection grid, it is a column of a constant. And
+    # the right quantile differs per (atlas, aperture, embedding), so there are
+    # ~40 of them to pick and hand-tuning each is not a plan.
+    #
+    # So the quantile is SEARCHED rather than set: start wide, halve while K is
+    # below the target band, widen while it is above, and stop at the first fit
+    # that lands inside. The value that worked is recorded in params and
+    # therefore in fit_hash, so two columns fitted at different quantiles are
+    # never confused for the same model.
+    def __init__(self, quantile=0.1, fit_rows=50_000, min_k=3, max_k=64,
+                 max_tries=7):
         self.quantile, self.fit_rows = quantile, fit_rows
+        self.min_k, self.max_k, self.max_tries = min_k, max_k, max_tries
 
     def fit(self, X, k=None, rng=None):
         from sklearn.cluster import MeanShift, estimate_bandwidth
@@ -148,23 +163,47 @@ class MeanShiftCluster:
         rng = rng or np.random.default_rng(0)
         idx = (rng.choice(len(X), self.fit_rows, replace=False)
                if self.fit_rows and len(X) > self.fit_rows else np.arange(len(X)))
-        self.bandwidth = float(estimate_bandwidth(
-            X[idx], quantile=self.quantile,
-            n_samples=min(10_000, len(idx)), random_state=0))
-        if not self.bandwidth > 0:
-            raise SystemExit("estimate_bandwidth returned 0 -- the embedding is "
-                             "degenerate, or --meanshift-quantile is too small")
-        self.ms = MeanShift(bandwidth=self.bandwidth, bin_seeding=True,
-                            n_jobs=-1).fit(X[idx])
-        self.k_found = int(len(self.ms.cluster_centers_))
+        Xs = X[idx]
+
+        q = float(self.quantile)
+        self.search = []
+        for _ in range(self.max_tries):
+            bw = float(estimate_bandwidth(Xs, quantile=q,
+                                          n_samples=min(10_000, len(Xs)),
+                                          random_state=0))
+            if not bw > 0:
+                raise SystemExit(
+                    f"estimate_bandwidth returned 0 at quantile {q:g} -- the "
+                    f"embedding is degenerate (every row identical?), which no "
+                    f"bandwidth can fix.")
+            ms = MeanShift(bandwidth=bw, bin_seeding=True, n_jobs=-1).fit(Xs)
+            k_found = int(len(ms.cluster_centers_))
+            self.search.append({"quantile": round(q, 5),
+                                "bandwidth": round(bw, 5), "k": k_found})
+            self.ms, self.bandwidth, self.k_found, self.quantile_used = \
+                ms, bw, k_found, q
+            if self.min_k <= k_found <= self.max_k:
+                break
+            # Fewer modes than wanted means the bandwidth swallowed them, so
+            # shrink it; more means it was too fine. Halving converges fast and
+            # the 1.5x widening is deliberately gentler, so an overshoot does not
+            # bounce straight back past the band.
+            q = q / 2 if k_found < self.min_k else q * 1.5
         return self
 
     def labels(self, X):
         return self.ms.predict(X)
 
     def params(self):
-        return {"quantile": self.quantile, "bandwidth": round(self.bandwidth, 5),
-                "fit_rows": int(self.fit_rows)}
+        return {"quantile": round(self.quantile_used, 5),
+                "quantile_start": self.quantile,
+                "bandwidth": round(self.bandwidth, 5),
+                "fit_rows": int(self.fit_rows),
+                "target_k": [self.min_k, self.max_k],
+                # The whole ladder, so a K at the edge of the band can be read
+                # as "the nearest alternatives were 2 and 31" rather than taken
+                # as a property of the data.
+                "search": self.search}
 
 
 class HMMCluster:
@@ -408,11 +447,12 @@ def _require_embeddings(paths: dict, args, atlas: str, window_s) -> None:
         f"    fmri-decomp cluster --embeddings {' '.join(have) or '<none left>'}")
 
 
-def run_one(root: Path, atlas: str, window_s, args) -> list[dict]:
+def run_one(root: Path, atlas: str, window_s, args):
+    """-> (state columns written, state sets refused for a degenerate K)."""
     paths = cohort_paths(root, atlas, window_s)
     if not paths:
         log(f"  atlas={atlas} window_s={window_s}: no latents, skipped")
-        return []
+        return [], []
     train = [c for c in args.train if c in paths]
     if not train:
         raise SystemExit(f"none of --train {args.train} has latents at "
@@ -425,7 +465,7 @@ def run_one(root: Path, atlas: str, window_s, args) -> list[dict]:
     # sets it was asked for, which is the state this stage exists to avoid.
     _require_embeddings(paths, args, atlas, window_s)
 
-    entries = []
+    entries, skipped = [], []
     for emb in args.embeddings:
         cols = EMBEDDINGS[emb]
         frames = {c: read_embedding(p, cols) for c, p in paths.items()}
@@ -446,6 +486,34 @@ def run_one(root: Path, atlas: str, window_s, args) -> list[dict]:
                     cl.fit(Xtr, k, lengths=len_tr)
                 else:
                     cl.fit(Xtr, k)
+                # Refused BEFORE anything is written. A K below --min-k cannot
+                # carry a transition structure -- at K=1 every subject's table is
+                # the single cell `0->0` = 1.0 -- so writing it would put a
+                # column of a constant into the selection grid, where it costs
+                # fits and can only dilute an FDR family. Skipped rather than
+                # fatal, because the other columns in this cell are fine and a
+                # 9-minute job should not be thrown away; the WARNING and the
+                # non-zero exit at the end are what make it impossible to miss.
+                if not args.min_k <= cl.k_found <= args.max_k:
+                    extra = ""
+                    if method in K_FREE:
+                        ladder = " -> ".join(
+                            f"q={t['quantile']:g}:K={t['k']}"
+                            for t in getattr(cl, "search", []))
+                        extra = (f"\n      searched {ladder}"
+                                 f"\n      lower --meanshift-quantile below "
+                                 f"{cl.params()['quantile']:g} to start finer")
+                    log(f"  SKIPPED {column_name(method, emb, cl.k_found)}: "
+                        f"K={cl.k_found} outside [{args.min_k}, {args.max_k}]"
+                        + extra)
+                    skipped.append({"atlas": atlas, "window_s": str(window_s),
+                                    "method": method, "embedding": emb,
+                                    "k": int(cl.k_found),
+                                    "reason": f"K outside "
+                                              f"[{args.min_k}, {args.max_k}]",
+                                    "search": getattr(cl, "search", None)})
+                    continue
+
                 col = column_name(method, emb, cl.k_found)
                 h = fit_hash(method, emb, cl.k_found, cl.params(), train,
                              len(Xtr), balanced=bool(args.balance_train))
@@ -471,13 +539,14 @@ def run_one(root: Path, atlas: str, window_s, args) -> list[dict]:
                                 "embedding": emb, "k": int(cl.k_found),
                                 "fit_hash": h, "train_cohorts": train,
                                 "states_used": written})
-    return entries
+    return entries, skipped
 
 
 def _opts(method: str, args) -> dict:
     if method == "meanshift":
         return {"quantile": args.meanshift_quantile,
-                "fit_rows": args.meanshift_fit_rows}
+                "fit_rows": args.meanshift_fit_rows,
+                "min_k": args.min_k, "max_k": args.max_k}
     if method == "hmm":
         return {"n_iter": args.hmm_iter}
     return {}
@@ -570,11 +639,13 @@ def run(args) -> int:
     if args.check:
         return report_check(check_grid(root, args), args)
 
-    entries = []
+    entries, skipped = [], []
     for atlas in args.atlas:
         for w in args.window_s:
             log(f"atlas={atlas} window_s={w}")
-            entries += run_one(root, atlas, w, args)
+            e, sk = run_one(root, atlas, w, args)
+            entries += e
+            skipped += sk
 
     if not entries:
         raise SystemExit("nothing was written -- check --atlas / --window-s "
@@ -583,12 +654,27 @@ def run(args) -> int:
     out = meta_dir(root) / "cluster" / "manifest.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(
-        {"entries": entries, "methods": args.methods,
+        {"entries": entries, "skipped": skipped, "methods": args.methods,
          "embeddings": args.embeddings, "k": args.k, "train": args.train,
-         "n_state_columns": len(entries),
+         "min_k": args.min_k, "max_k": args.max_k,
+         "balance_train": bool(args.balance_train),
+         "n_state_columns": len(entries), "n_skipped": len(skipped),
          "written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
         indent=2, default=str))
     log(f"{len(entries)} state column(s) written -> {out.relative_to(root)}")
+
+    if skipped:
+        # Repeated at the end because the per-cell line scrolls past, and exiting
+        # non-zero so a batch job that produced a short grid is not reported as a
+        # clean success by sacct.
+        print(f"\n{len(skipped)} state set(s) REFUSED for a degenerate K "
+              f"(outside [{args.min_k}, {args.max_k}]):", flush=True)
+        for sk in skipped:
+            print(f"  {sk['atlas']:<14} {sk['window_s']:>4}s  {sk['method']}/"
+                  f"{sk['embedding']}  K={sk['k']}", flush=True)
+        print("Nothing was written for those. They are listed under `skipped` in "
+              f"{out.relative_to(root)}.", flush=True)
+        return 1
     return 0
 
 
@@ -622,8 +708,18 @@ def add_arguments(p) -> None:
                         "row count, by whole subjects, so no cohort dominates "
                         "where the states are. Off by default: it discards data, "
                         "and the log prints each cohort's share either way.")
-    p.add_argument("--meanshift-quantile", type=float, default=0.2,
-                   help="bandwidth quantile; smaller finds more states")
+    p.add_argument("--meanshift-quantile", type=float, default=0.1,
+                   help="STARTING bandwidth quantile for meanshift; smaller "
+                        "finds more states. It is searched from here until K "
+                        "lands between --min-k and --max-k, so this is a hint "
+                        "rather than a setting.")
+    p.add_argument("--min-k", type=int, default=3,
+                   help="refuse to write a state set with fewer states than "
+                        "this. K=1 has one cell, `0->0`=1.0 for every subject, "
+                        "so it is a constant and not a weak predictor.")
+    p.add_argument("--max-k", type=int, default=64,
+                   help="upper end of the band meanshift searches for, and the "
+                        "most states any method may write.")
     p.add_argument("--meanshift-fit-rows", type=int, default=50_000)
     p.add_argument("--hmm-iter", type=int, default=50)
     p.add_argument("--output-root")

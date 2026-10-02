@@ -185,3 +185,100 @@ class TestCheckGrid:
         before = sorted(p.name for p in tmp_path.rglob("*"))
         C.check_grid(tmp_path, args(atlas=["yeo7"], window_s=["30"]))
         assert sorted(p.name for p in tmp_path.rglob("*")) == before
+
+
+def blobs(n_per=4000, k=4, spread=0.6, seed=0):
+    """k separated gaussian blobs in 3-D -- a density a bandwidth can resolve."""
+    rng = np.random.default_rng(seed)
+    centres = rng.normal(scale=6.0, size=(k, 3))
+    return np.vstack([c + rng.normal(scale=spread, size=(n_per, 3))
+                      for c in centres])
+
+
+class TestMeanShiftQuantileSearch:
+    """The right bandwidth is a property of the data, and on the real grid the
+    old fixed quantile of 0.2 collapsed 7 of 8 harvardoxford state sets to K=1
+    or 2. There are ~40 of these to fit, so the quantile is searched."""
+
+    def test_it_escapes_a_collapse_to_one_state(self):
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(8000, 3)) * 2.0
+        X[:2000] += 3.0
+        cl = C.MeanShiftCluster(quantile=0.2, fit_rows=4000).fit(X)
+        assert cl.k_found >= 3
+        assert cl.search[0]["k"] < 3        # the start really did collapse
+        assert cl.params()["quantile"] < 0.2
+
+    def test_it_stops_as_soon_as_k_is_in_band(self):
+        cl = C.MeanShiftCluster(quantile=0.1, fit_rows=4000,
+                               min_k=2, max_k=64).fit(blobs())
+        assert len(cl.search) >= 1
+        assert 2 <= cl.search[-1]["k"] <= 64
+        # no wasted fit after a hit
+        assert all(not (2 <= t["k"] <= 64) for t in cl.search[:-1])
+
+    def test_the_ladder_is_recorded_for_reading_a_result(self):
+        cl = C.MeanShiftCluster(quantile=0.2, fit_rows=4000).fit(blobs())
+        s = cl.params()["search"]
+        assert s and all({"quantile", "bandwidth", "k"} <= set(t) for t in s)
+
+    def test_the_quantile_used_is_in_the_fit_hash(self):
+        # Two columns fitted at different bandwidths are different models, and
+        # the column name alone cannot tell them apart when K happens to match.
+        a = C.fit_hash("meanshift", "pca3", 4, {"quantile": 0.1}, ["a"], 100)
+        b = C.fit_hash("meanshift", "pca3", 4, {"quantile": 0.05}, ["a"], 100)
+        assert a != b
+
+    def test_it_gives_up_rather_than_looping_forever(self):
+        cl = C.MeanShiftCluster(quantile=0.2, fit_rows=2000, min_k=500,
+                               max_k=600, max_tries=3).fit(blobs())
+        assert len(cl.search) == 3          # bounded
+        assert cl.k_found < 500             # and honest about failing
+
+    def test_a_degenerate_embedding_is_fatal_not_silent(self):
+        # Every row identical: no bandwidth can find structure, and a K=1 column
+        # would be a constant.
+        X = np.ones((500, 3))
+        with pytest.raises(SystemExit, match="degenerate"):
+            C.MeanShiftCluster(fit_rows=None).fit(X)
+
+
+class TestDegenerateKIsRefused:
+    def frames(self, tmp_path, n_subs=4, n=50):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        rng = np.random.default_rng(0)
+        for c in ("a", "b"):
+            d = pd.concat([pd.DataFrame({
+                "task": "m", "sub": f"{s:02d}", "window_id": np.arange(n),
+                "pca0/3": rng.normal(size=n), "pca1/3": rng.normal(size=n),
+                "pca2/3": rng.normal(size=n)}) for s in range(n_subs)],
+                ignore_index=True)
+            p = (tmp_path / "latents" / "atlas=toy" / "window_s=30"
+                 / f"cohort={c}" / "data.parquet")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(pa.Table.from_pandas(d, preserve_index=False), p)
+
+    def test_a_k_below_min_k_is_not_written(self, tmp_path):
+        self.frames(tmp_path)
+        # min_k above anything threshold can produce at k=8 -> refused
+        a = args(methods=["threshold"], k=[8], min_k=20, max_k=64)
+        entries, skipped = C.run_one(tmp_path, "toy", "30", a)
+        assert entries == []
+        assert len(skipped) == 1 and skipped[0]["k"] == 8
+
+    def test_nothing_is_added_to_the_file_when_refused(self, tmp_path):
+        self.frames(tmp_path)
+        a = args(methods=["threshold"], k=[8], min_k=20, max_k=64)
+        C.run_one(tmp_path, "toy", "30", a)
+        p = (tmp_path / "latents" / "atlas=toy" / "window_s=30"
+             / "cohort=a" / "data.parquet")
+        assert C._state_columns(p) == []
+
+    def test_a_usable_k_alongside_a_refused_one_still_gets_written(self, tmp_path):
+        self.frames(tmp_path)
+        a = args(methods=["threshold"], k=[8, 27], min_k=10, max_k=64)
+        entries, skipped = C.run_one(tmp_path, "toy", "30", a)
+        assert [e["k"] for e in entries] == [27]
+        assert [s["k"] for s in skipped] == [8]
