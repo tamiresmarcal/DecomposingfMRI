@@ -20,8 +20,17 @@ apptainer build --fakeroot \
     containers/stage45.def
 ```
 
-20–40 minutes, ~6 GB, mostly CmdStan. If `--fakeroot` is refused, build
-somewhere you have root and copy the `.sif` across.
+20–40 minutes. If `--fakeroot` is refused, build somewhere you have root and
+copy the `.sif` across.
+
+**The finished `.sif` is about 1 GB**, not the ~6 GB this file used to claim. A
+.sif is compressed squashfs, so the image is a few times smaller than the tree
+inside it, and a build that looks "too small to contain CmdStan" is the normal
+size. Checking the size is not a way to tell what an image holds — ask it:
+
+```bash
+apptainer exec "$FMRIDECOMP_SIF45" sh -c 'ls /opt/cmdstan; python3 -c "import lightgbm, hmmlearn, umap"'
+```
 
 **Build from the repository root.** `%files` copies `containers/stage45.def`
 into the image and its source path resolves against the working directory, so
