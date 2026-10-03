@@ -138,6 +138,22 @@ def _fmt_window(window_s: float) -> str:
     return str(int(window_s)) if float(window_s).is_integer() else str(window_s)
 
 
+# The usable range for K, the number of brain states in a state set. One
+# definition, because three stages consult it and they had drifted apart: stage
+# 4b refused to WRITE K<3 while stage 5a happily built tables for K=2, so a
+# state set could be rejected and analysed in the same run.
+#
+#   floor 3  K=1 is a single cell, `0->0`=1.0 for every subject -- a constant.
+#            K=2 is four cells of which one is free given the row sums, so it is
+#            `switch_rate` under another name, and switch_rate is already a
+#            summary feature. Neither earns a slot in the selection grid.
+#   ceiling 64
+#            at K=125 a subject's matrix is 15,625 cells and at 512 it is
+#            262,144, against a few hundred transitions -- >99% exactly zero for
+#            every subject, so there is no probability to correlate with.
+STATE_K_BAND = (3, 64)
+
+
 # Keys carried by the directory tree. They are deliberately NOT written as
 # columns: a partition key duplicated as a column must match its inferred type
 # exactly, and pyarrow reads `sub=01` as int32 -- which both collides with the

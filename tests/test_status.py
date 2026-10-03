@@ -144,3 +144,70 @@ class TestStale:
         latents(tmp_path, states=["HMM_pca3_8"])
         assert S.stale(S.latents(tmp_path), S.transitions(tmp_path)) == []
         assert S.stale(pd.DataFrame(), pd.DataFrame()) == []
+
+
+class TestBehind:
+    """The mirror of stale, and the more common state: stage 4b is cheap and gets
+    re-run, stage 5a is a separate job and gets forgotten. Stage 6 then picks a
+    winner among whatever has tables, without mentioning what it never saw."""
+
+    def test_state_sets_with_no_transition_table(self, tmp_path):
+        latents(tmp_path, states=["HMM_pca3_8", "MeanShift_pca3_4"])
+        trans(tmp_path, state="HMM_pca3_8")
+        out = S.behind(S.latents(tmp_path), S.transitions(tmp_path))
+        assert len(out) == 1
+        assert "MeanShift_pca3_4" in out[0] and "HMM_pca3_8" not in out[0]
+
+    def test_no_transitions_at_all_lists_every_state_set(self, tmp_path):
+        latents(tmp_path, states=["HMM_pca3_8", "MeanShift_pca3_4"])
+        out = S.behind(S.latents(tmp_path), S.transitions(tmp_path))
+        assert len(out) == 1 and "2 state set(s)" in out[0]
+
+    def test_a_caught_up_cell_says_nothing(self, tmp_path):
+        latents(tmp_path, states=["HMM_pca3_8"])
+        trans(tmp_path, state="HMM_pca3_8")
+        assert S.behind(S.latents(tmp_path), S.transitions(tmp_path)) == []
+
+
+class TestShardGap:
+    def test_fewer_dfc_shards_than_activation(self, tmp_path):
+        act = pd.DataFrame([{"atlas": "yeo7", "cohort": "camcan", "shards": 648}])
+        dfcs = pd.DataFrame([{"atlas": "yeo7", "window_s": "30",
+                              "cohort": "camcan", "shards": 647}])
+        out = S.shard_gap(act, dfcs)
+        assert len(out) == 1 and "1 subject-task(s)" in out[0]
+
+    def test_an_aperture_not_run_at_all_is_not_a_gap(self, tmp_path):
+        # 0 means stage 3 was never run for it, which is a different thing and
+        # already visible in the DFC table.
+        act = pd.DataFrame([{"atlas": "yeo7", "cohort": "camcan", "shards": 648}])
+        dfcs = pd.DataFrame([{"atlas": "yeo7", "window_s": "15",
+                              "cohort": "camcan", "shards": 0}])
+        assert S.shard_gap(act, dfcs) == []
+
+    def test_matching_counts_say_nothing(self, tmp_path):
+        act = pd.DataFrame([{"atlas": "yeo7", "cohort": "a", "shards": 86}])
+        dfcs = pd.DataFrame([{"atlas": "yeo7", "window_s": "30",
+                              "cohort": "a", "shards": 86}])
+        assert S.shard_gap(act, dfcs) == []
+
+
+class TestTransitionPeopleCount:
+    def test_rows_and_people_are_reported_separately(self, tmp_path):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        # 6 rows, 2 people, 3 tasks each -- cneuromod's shape in miniature.
+        d = pd.DataFrame({"task": ["e1", "e2", "e3"] * 2,
+                          "sub": ["s1"] * 3 + ["s2"] * 3,
+                          "0->0": 1.0, "n_states": 8})
+        p = (tmp_path / "transitions" / "atlas=yeo7" / "window_s=30"
+             / "states=HMM_pca3_8" / "cohort=cneuromod" / "subjects.parquet")
+        p.parent.mkdir(parents=True)
+        pq.write_table(pa.Table.from_pandas(d, preserve_index=False), p)
+        got = S.transitions(tmp_path).iloc[0]
+        assert got["rows"] == 6 and got["subs"] == 2
+
+    def test_shallow_skips_the_people_count(self, tmp_path):
+        trans(tmp_path, state="HMM_pca3_8")
+        assert S.transitions(tmp_path, deep=False)["subs"].isna().all()

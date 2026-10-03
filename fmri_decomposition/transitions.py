@@ -77,7 +77,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .io import latents_root, meta_dir
+from .io import STATE_K_BAND, latents_root, meta_dir
 
 # The state-label columns this stage reads. K = 8 and 27 only: at 125 and 512
 # cells a subject's 74 transitions leave >99% of the matrix at exactly zero, so
@@ -676,12 +676,12 @@ def add_arguments(p) -> None:
                         "latents schema, so a method added by `fmri-decomp "
                         "cluster` is picked up without being named here.")
     p.add_argument("--cohorts", nargs="*", default=None)
-    p.add_argument("--min-k", type=int, default=2,
+    p.add_argument("--min-k", type=int, default=STATE_K_BAND[0],
                    help="skip a DISCOVERED state set with fewer states than "
                         "this. K=1 is one cell, `0->0`=1.0 for every subject -- "
                         "a constant. Stage 4b refuses to write those now, but "
                         "latents written before it did still carry them.")
-    p.add_argument("--max-k", type=int, default=64,
+    p.add_argument("--max-k", type=int, default=STATE_K_BAND[1],
                    help="skip a DISCOVERED state set with more than this many "
                         "states; a set named in --states is always used. "
                         "Default 64, which keeps 8 and 27 and any K MeanShift "

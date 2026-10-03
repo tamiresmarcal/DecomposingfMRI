@@ -79,7 +79,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .io import latents_root, meta_dir
+from .io import STATE_K_BAND, latents_root, meta_dir
 
 EMBEDDINGS = {
     "pca3": ["pca0/3", "pca1/3", "pca2/3"],
@@ -749,11 +749,11 @@ def add_arguments(p) -> None:
                         "finds more states. It is searched from here until K "
                         "lands between --min-k and --max-k, so this is a hint "
                         "rather than a setting.")
-    p.add_argument("--min-k", type=int, default=3,
+    p.add_argument("--min-k", type=int, default=STATE_K_BAND[0],
                    help="refuse to write a state set with fewer states than "
                         "this. K=1 has one cell, `0->0`=1.0 for every subject, "
                         "so it is a constant and not a weak predictor.")
-    p.add_argument("--max-k", type=int, default=64,
+    p.add_argument("--max-k", type=int, default=STATE_K_BAND[1],
                    help="upper end of the band meanshift searches for, and the "
                         "most states any method may write.")
     p.add_argument("--meanshift-fit-rows", type=int, default=50_000)

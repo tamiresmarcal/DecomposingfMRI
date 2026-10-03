@@ -25,6 +25,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from .io import STATE_K_BAND
+
 STATE_RE = re.compile(r"^[A-Za-z]+_[a-z]+\d*_\d+$")
 EMBEDDINGS = {"pca3": "pca0/3", "umap3": "umap0/3"}
 
@@ -115,13 +117,29 @@ def latents(root: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def transitions(root: Path) -> pd.DataFrame:
+def transitions(root: Path, deep: bool = True) -> pd.DataFrame:
+    """One row per table. `rows` is (task, sub) pairs; `subs` is PEOPLE.
+
+    The two are not the same and the difference matters: cneuromod is 5 people
+    across ~48 episodes, so a table with 240 rows has 48 correlated rows per
+    person. Stage 6 treats a row as an independent observation, which is true
+    for camcan (one task) and false for cneuromod. Reporting only the row count
+    would hide that, so `subs` is read -- one small column, the only place this
+    command touches a row group.
+    """
     rows = []
     for p in sorted((root / "transitions").rglob("subjects.parquet")):
         n, cols = _footer(p)
+        subs = None
+        if deep:
+            try:
+                from .io import read_file
+                subs = read_file(p, ["sub"]).to_pandas()["sub"].nunique()
+            except Exception:                                    # noqa: BLE001
+                subs = None
         rows.append({"atlas": _key(p, "atlas"), "window_s": _key(p, "window_s"),
                      "states": _key(p, "states"), "cohort": _key(p, "cohort"),
-                     "subjects": n,
+                     "rows": n, "subs": subs,
                      "cells": sum(1 for c in cols if "->" in c)})
     return pd.DataFrame(rows)
 
@@ -165,6 +183,52 @@ def stale(lat: pd.DataFrame, tr: pd.DataFrame) -> list[str]:
                        f"re-run after stage 4, or a discovered K changed. Stage "
                        f"6 reads whatever tables it finds, so delete these or "
                        f"re-run stage 5 before trusting a selection.")
+    return out
+
+
+def behind(lat: pd.DataFrame, tr: pd.DataFrame) -> list[str]:
+    """State sets that exist in the latents with no transition table.
+
+    The mirror of `stale`, and the more common state: stage 4b is cheap and gets
+    re-run, stage 5a is a separate job and gets forgotten. Stage 6 then selects
+    over whatever subset of the state sets happens to have tables, and reports a
+    winner among them without ever mentioning the ones it never saw.
+    """
+    if lat.empty:
+        return []
+    out = []
+    done = {(a, w): set(g["states"]) for (a, w), g in
+            (tr.groupby(["atlas", "window_s"]) if not tr.empty else [])}
+    for (a, w), g in lat.groupby(["atlas", "window_s"]):
+        have = set().union(*(set(x) for x in g["states"])) if len(g) else set()
+        todo = sorted(have - done.get((a, w), set()))
+        if todo:
+            out.append(f"{a} {w}s: {len(todo)} state set(s) in the latents have "
+                       f"NO transition table -- stage 5 is behind stage 4 here. "
+                       f"Stage 6 would pick a winner without ever seeing them: "
+                       f"{todo}")
+    return out
+
+
+def shard_gap(act: pd.DataFrame, dfcs: pd.DataFrame) -> list[str]:
+    """A cohort with activation shards but fewer dfc shards.
+
+    Stage 3 reads stage 2's output one shard at a time and tolerates a failure,
+    so a run that produced no windows -- too short for the aperture, or a read
+    error -- just leaves a gap. Nothing downstream can tell a missing subject
+    from one that never existed.
+    """
+    if act.empty or dfcs.empty:
+        return []
+    out = []
+    a = act.set_index(["atlas", "cohort"])["shards"]
+    for (atlas, w, cohort), n in dfcs.set_index(
+            ["atlas", "window_s", "cohort"])["shards"].items():
+        have = a.get((atlas, cohort))
+        if have is not None and 0 < n < have:
+            out.append(f"{atlas} {w}s {cohort}: {n} dfc shard(s) from {have} "
+                       f"activation shard(s) -- {have - n} subject-task(s) "
+                       f"produced no windows at this aperture.")
     return out
 
 
@@ -228,7 +292,8 @@ def run(args) -> int:
     print(f"output_root {root}")
 
     act, dfcs, cen = activation(root), dfc(root), censor(root)
-    lat, tr, sel = latents(root), transitions(root), selection(root)
+    lat, tr, sel = (latents(root), transitions(root, deep=not args.shallow),
+                    selection(root))
 
     def narrow(d):
         if d.empty:
@@ -266,10 +331,12 @@ def run(args) -> int:
             if odd:
                 print(f"  {'':<14} {'':>4}  NOT in every cohort: {odd}")
 
-    _show("5  TRANSITIONS  tables written", tr)
+    _show("5  TRANSITIONS  tables written  (rows = task x sub; subs = people)",
+          tr)
     _show("6  SELECTION    targets", sel)
 
-    probs = problems(lat, args) + stale(lat, tr)
+    probs = (problems(lat, args) + stale(lat, tr) + behind(lat, tr)
+             + shard_gap(act, dfcs))
     print(f"\n{'=' * 70}")
     if probs:
         print(f"{len(probs)} PROBLEM(S)")
@@ -294,8 +361,11 @@ def add_arguments(p) -> None:
     p.add_argument("--window-s", nargs="*", default=None)
     p.add_argument("--embeddings", nargs="+", default=["pca3", "umap3"],
                    help="embeddings the plan needs; a missing one is a problem")
-    p.add_argument("--min-k", type=int, default=2)
-    p.add_argument("--max-k", type=int, default=64)
+    p.add_argument("--min-k", type=int, default=STATE_K_BAND[0])
+    p.add_argument("--max-k", type=int, default=STATE_K_BAND[1])
+    p.add_argument("--shallow", action="store_true",
+                   help="skip the one column read that counts distinct PEOPLE "
+                        "per transition table; footers only")
     p.add_argument("--output-root")
 
 
