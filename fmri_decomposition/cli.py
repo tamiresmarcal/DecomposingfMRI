@@ -1,5 +1,5 @@
-"""Command line: `fmri-decomp validate | extract | dfc | diagnose | censor |
-decompose | cluster | transitions | select | merge-manifests |
+"""Command line: `fmri-decomp status | validate | extract | dfc | diagnose |
+censor | decompose | cluster | transitions | select | merge-manifests |
 fixture`.
 
 Parallelism is at or below the deepest partition key, so each worker owns a
@@ -494,6 +494,13 @@ def cmd_decompose(args) -> int:
     return decompose.run(args)
 
 
+def cmd_status(args) -> int:
+    """Read-only inventory of the whole output tree. Footers only."""
+    from . import status
+
+    return status.run(args)
+
+
 def cmd_cluster(args) -> int:
     """Stage 4b: more ways of defining states, on latents already written.
 
@@ -656,6 +663,14 @@ def build_parser() -> argparse.ArgumentParser:
              "projected onto others")
     _decompose.add_arguments(dec)
     dec.set_defaults(func=cmd_decompose)
+
+    from . import status as _status
+
+    st = sub.add_parser(
+        "status",
+        help="read-only: what every stage has on disk, and what disagrees")
+    _status.add_arguments(st)
+    st.set_defaults(func=cmd_status)
 
     from . import cluster as _cluster
 

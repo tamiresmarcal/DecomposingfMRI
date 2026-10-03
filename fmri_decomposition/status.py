@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""What is actually on disk, read from the tree rather than from memory.
+
+    fmri-decomp status
+    fmri-decomp status --atlas yeo7 --window-s 30 -1
+
+Every other `--check` answers "can the next stage run?" for one stage. This
+answers "where is the whole pipeline?", by walking the output tree and reading
+only parquet FOOTERS -- no row group is touched, so it is seconds on a tree with
+thousands of shards and safe to run while jobs are writing.
+
+It is READ-ONLY and takes no decisions. Its job is to make a disagreement
+visible: the same state set with two different `model_hash`es across cohorts,
+one aperture censored and another not, a state column at a K nothing downstream
+will use. Those are the failures that look like success until much later.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+from pathlib import Path
+
+import pandas as pd
+
+STATE_RE = re.compile(r"^[A-Za-z]+_[a-z]+\d*_\d+$")
+EMBEDDINGS = {"pca3": "pca0/3", "umap3": "umap0/3"}
+
+
+def _meta(path: Path, key: str):
+    import pyarrow.parquet as pq
+
+    md = pq.ParquetFile(path).schema_arrow.metadata or {}
+    raw = md.get(key.encode())
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw.decode())
+    except Exception:                                            # noqa: BLE001
+        return raw.decode()
+
+
+def _footer(path: Path):
+    """(n_rows, column names) from the footer alone."""
+    import pyarrow.parquet as pq
+
+    f = pq.ParquetFile(path)
+    return f.metadata.num_rows, list(f.schema_arrow.names)
+
+
+def _key(p: Path, name: str):
+    for part in p.parts:
+        if part.startswith(f"{name}="):
+            return part.split("=", 1)[1]
+    return None
+
+
+# ------------------------------------------------------------------ stages ---
+def activation(root: Path) -> pd.DataFrame:
+    rows = []
+    for d in sorted((root / "activation").glob("atlas=*/cohort=*")):
+        rows.append({"atlas": _key(d, "atlas"), "cohort": _key(d, "cohort"),
+                     "shards": sum(1 for _ in d.rglob("*.parquet"))})
+    return pd.DataFrame(rows)
+
+
+def dfc(root: Path) -> pd.DataFrame:
+    rows = []
+    for d in sorted((root / "dfc").glob("atlas=*/window_s=*/cohort=*")):
+        rows.append({"atlas": _key(d, "atlas"), "window_s": _key(d, "window_s"),
+                     "cohort": _key(d, "cohort"),
+                     "shards": sum(1 for _ in d.rglob("*.parquet"))})
+    return pd.DataFrame(rows)
+
+
+def censor(root: Path) -> pd.DataFrame:
+    rows = []
+    for d in sorted((root / "censor").glob("policy=*")):
+        # The window gate is written only for the (atlas, aperture) `censor` was
+        # given --stage dfc for. Subjects-only is the normal first-pass state, so
+        # this reports which it is rather than treating absence as a fault.
+        gates = sorted({f"{_key(q, 'atlas')}/{_key(q, 'window_s')}s"
+                        for q in d.glob(
+                            "atlas=*/window_s=*/cohort=*/windows.parquet")})
+        for sp in sorted(d.glob("cohort=*/subjects.parquet")):
+            try:
+                t = pd.read_parquet(sp, columns=["keep"])
+                kept, total = int(t["keep"].sum()), len(t)
+            except Exception as exc:                             # noqa: BLE001
+                kept, total = -1, -1
+                print(f"  (could not read {sp}: {type(exc).__name__})")
+            rows.append({"policy": _key(d, "policy"),
+                         "cohort": _key(sp, "cohort"),
+                         "subjects_kept": kept, "of": total,
+                         "window_gate": ",".join(gates) or "subjects only"})
+    return pd.DataFrame(rows)
+
+
+def latents(root: Path) -> pd.DataFrame:
+    rows = []
+    for p in sorted((root / "latents").glob("atlas=*/window_s=*/cohort=*/data.parquet")):
+        n, cols = _footer(p)
+        states = sorted(c for c in cols if STATE_RE.match(c))
+        rows.append({
+            "atlas": _key(p, "atlas"), "window_s": _key(p, "window_s"),
+            "cohort": _key(p, "cohort"), "rows": n,
+            "emb": ",".join(e for e, c in EMBEDDINGS.items() if c in cols) or "-",
+            "censor": str(_meta(p, "censor_policy")),
+            "source": str(_meta(p, "source") or "dfc"),
+            "role": str(_meta(p, "role")),
+            "model_hash": str(_meta(p, "model_hash")),
+            "n_states": len(states), "states": states})
+    return pd.DataFrame(rows)
+
+
+def transitions(root: Path) -> pd.DataFrame:
+    rows = []
+    for p in sorted((root / "transitions").rglob("subjects.parquet")):
+        n, cols = _footer(p)
+        rows.append({"atlas": _key(p, "atlas"), "window_s": _key(p, "window_s"),
+                     "states": _key(p, "states"), "cohort": _key(p, "cohort"),
+                     "subjects": n,
+                     "cells": sum(1 for c in cols if "->" in c)})
+    return pd.DataFrame(rows)
+
+
+def selection(root: Path) -> pd.DataFrame:
+    rows = []
+    for d in sorted((root / "bstm_selection").glob("target=*")):
+        sc = d / "scores.parquet"
+        rows.append({"target": _key(d, "target"),
+                     "scores": sc.exists(),
+                     "n_rows": _footer(sc)[0] if sc.exists() else 0,
+                     "design": (d / "DESIGN.md").exists(),
+                     "figures": sum(1 for _ in (d / "figures").glob("*.png"))})
+    return pd.DataFrame(rows)
+
+
+# ----------------------------------------------------------------- problems ---
+def stale(lat: pd.DataFrame, tr: pd.DataFrame) -> list[str]:
+    """Transition tables for a state set the latents no longer carry.
+
+    This is the condition that made the whole command worth writing. Nothing
+    else notices it: the tables are well-formed, they just describe states that
+    no longer exist. Two ways in, both ordinary:
+
+      * Stage 3 re-run after stage 4. It is the only stage that REWRITES a
+        latents file wholesale, so it drops every state column stage 4 added.
+      * A K-free method finding a different K. `MeanShift_pca3_7` becomes
+        `MeanShift_pca3_4` after a bandwidth change, and the old table keeps its
+        own directory under `states=MeanShift_pca3_7`.
+    """
+    if lat.empty or tr.empty:
+        return []
+    out = []
+    have = {(a, w): set().union(*(set(x) for x in g["states"]))
+            for (a, w), g in lat.groupby(["atlas", "window_s"])}
+    for (a, w), g in tr.groupby(["atlas", "window_s"]):
+        gone = sorted(set(g["states"]) - have.get((a, w), set()))
+        if gone:
+            out.append(f"{a} {w}s: STALE transition table(s) for state set(s) "
+                       f"the latents no longer have: {gone}. Either stage 3 was "
+                       f"re-run after stage 4, or a discovered K changed. Stage "
+                       f"6 reads whatever tables it finds, so delete these or "
+                       f"re-run stage 5 before trusting a selection.")
+    return out
+
+
+def problems(lat: pd.DataFrame, args) -> list[str]:
+    """Disagreements that no single stage's --check would surface.
+
+    Each one is a thing that looks like success: the files exist, the columns are
+    there, and the analysis is quietly not the one anybody intended.
+    """
+    out = []
+    if lat.empty:
+        return ["no latents at all -- stage 3 has not run"]
+
+    for (atlas, w), g in lat.groupby(["atlas", "window_s"]):
+        if g["model_hash"].nunique() > 1:
+            out.append(f"{atlas} {w}s: cohorts came from DIFFERENT fits "
+                       f"({sorted(g['model_hash'].unique())}). State 5 is not "
+                       f"the same state in two of them; nothing downstream can "
+                       f"pool them.")
+        if g["censor"].nunique() > 1:
+            out.append(f"{atlas} {w}s: cohorts disagree on the censor policy "
+                       f"({sorted(g['censor'].unique())}).")
+        miss = [e for e in args.embeddings if e not in set(
+            ",".join(g["emb"]).split(","))]
+        if miss:
+            out.append(f"{atlas} {w}s: embedding(s) {miss} absent -- stage 4 "
+                       f"will refuse the state sets built on them.")
+        if (g["n_states"] == 0).any():
+            out.append(f"{atlas} {w}s: no state columns -- stage 4 has not run "
+                       f"for it.")
+
+    pol = set(lat["censor"].unique())
+    if len(pol) > 1:
+        out.append(f"THE GRID SPANS {len(pol)} CENSOR POLICIES {sorted(pol)}. "
+                   f"One aperture censored and another not is not a fair "
+                   f"comparison of apertures.")
+
+    # State sets at a K nothing downstream will use.
+    bad_k = sorted({s for row in lat["states"] for s in row
+                    if not args.min_k <= int(s.rsplit("_", 1)[1]) <= args.max_k})
+    if bad_k:
+        out.append(f"state column(s) at a K outside [{args.min_k}, {args.max_k}], "
+                   f"skipped by stage 5: {bad_k}")
+    return out
+
+
+# --------------------------------------------------------------------- run ---
+def _show(title: str, df: pd.DataFrame, cols=None) -> None:
+    print(f"\n{title}")
+    if df.empty:
+        print("  (nothing)")
+        return
+    d = df if cols is None else df[cols]
+    print("  " + d.to_string(index=False).replace("\n", "\n  "))
+
+
+def run(args) -> int:
+    root = Path(args.output_root) if args.output_root else _default_root()
+    if not root.is_dir():
+        raise SystemExit(f"output_root does not exist: {root}")
+    print(f"output_root {root}")
+
+    act, dfcs, cen = activation(root), dfc(root), censor(root)
+    lat, tr, sel = latents(root), transitions(root), selection(root)
+
+    def narrow(d):
+        if d.empty:
+            return d
+        if args.atlas and "atlas" in d:
+            d = d[d["atlas"].isin(args.atlas)]
+        if args.window_s and "window_s" in d:
+            d = d[d["window_s"].isin([str(w) for w in args.window_s])]
+        return d
+
+    dfcs, lat, tr = narrow(dfcs), narrow(lat), narrow(tr)
+
+    _show("1  ACTIVATION   shards per cohort", act)
+    _show("2  DFC          shards per aperture",
+          dfcs.pivot_table(index=["atlas", "window_s"], columns="cohort",
+                           values="shards", fill_value=0).reset_index()
+          if not dfcs.empty else dfcs)
+    _show("2.5 CENSOR      subjects kept per policy", cen)
+    _show("3  LATENTS      embeddings per aperture", lat,
+          ["atlas", "window_s", "cohort", "rows", "emb", "source", "censor",
+           "role", "model_hash", "n_states"])
+
+    print("\n4  STATE SETS   per aperture (K in the name)")
+    if lat.empty:
+        print("  (nothing)")
+    else:
+        for (atlas, w), g in lat.groupby(["atlas", "window_s"]):
+            per = {c: sorted(set(x)) for c, x in
+                   zip(g["cohort"], g["states"])}
+            common = sorted(set.intersection(*(set(v) for v in per.values()))
+                            if per else [])
+            odd = {c: sorted(set(v) - set(common)) for c, v in per.items()
+                   if set(v) - set(common)}
+            print(f"  {atlas:<14} {w:>4}  {len(common)} shared: {common}")
+            if odd:
+                print(f"  {'':<14} {'':>4}  NOT in every cohort: {odd}")
+
+    _show("5  TRANSITIONS  tables written", tr)
+    _show("6  SELECTION    targets", sel)
+
+    probs = problems(lat, args) + stale(lat, tr)
+    print(f"\n{'=' * 70}")
+    if probs:
+        print(f"{len(probs)} PROBLEM(S)")
+        for i, p_ in enumerate(probs, 1):
+            print(f"  {i}. {p_}")
+    else:
+        print("no disagreement found between cohorts or apertures")
+    return 1 if probs else 0
+
+
+def _default_root() -> Path:
+    if os.environ.get("FMRIDECOMP_OUTPUTS"):
+        return Path(os.environ["FMRIDECOMP_OUTPUTS"])
+    import yaml
+    repo = Path(__file__).resolve().parent.parent
+    return Path(yaml.safe_load(
+        (repo / "config" / "camcan_movie.yaml").read_text())["output_root"])
+
+
+def add_arguments(p) -> None:
+    p.add_argument("--atlas", nargs="*", default=None)
+    p.add_argument("--window-s", nargs="*", default=None)
+    p.add_argument("--embeddings", nargs="+", default=["pca3", "umap3"],
+                   help="embeddings the plan needs; a missing one is a problem")
+    p.add_argument("--min-k", type=int, default=2)
+    p.add_argument("--max-k", type=int, default=64)
+    p.add_argument("--output-root")
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_arguments(p)
+    return run(p.parse_args(argv))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
