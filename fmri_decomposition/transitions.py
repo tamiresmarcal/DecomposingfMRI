@@ -119,63 +119,121 @@ def _meta_value(path: Path, key: str):
         return raw.decode()
 
 
-def check_grid(root: Path, atlases, windows, cohorts, states) -> pd.DataFrame:
-    """One row per grid cell, with `ok` and the reason it is not.
+def cell_states(root: Path, atlas: str, w, cohorts, min_k: int, max_k: int):
+    """The state sets usable in ONE (atlas, aperture) cell.
+
+    PER CELL, not a union across the grid, and that distinction is the whole
+    point. A union works while every state set has a fixed name -- threshold and
+    HMM are `_8` and `_27` everywhere -- and breaks the moment a method DISCOVERS
+    its K: `MeanShift_pca3_16` exists at harvardoxford/30s and nowhere else,
+    because 30s harvardoxford is where the bandwidth search landed on 16. Demanded
+    across the grid it is missing from 14 cells, and stage 5a refused to start on
+    an "incomplete" grid that was never incomplete.
+
+    Returns (usable, partial, skipped):
+      usable   present in EVERY cohort of this cell, K inside the band. A state
+               label is comparable across cohorts only if one fit defined it, so
+               a set missing from one cohort is not usable in any of them.
+      partial  per cohort, the sets it has that its siblings do not -- stage 4b
+               ran unevenly, which is worth saying rather than silently dropping.
+      skipped  shared but outside the K band.
+    """
+    per, first = {}, None
+    for c in cohorts:
+        p = latents_path(root, atlas, w, c)
+        if p.exists():
+            per[c] = set(discover_state_columns(p))
+            first = first or p
+    if not per:
+        return [], {}, []
+
+    shared = set.intersection(*per.values())
+    partial = {c: sorted(v - shared) for c, v in per.items() if v - shared}
+    k_of = {st: _k_quietly(st, first) for st in shared}
+    usable, skipped = _within_k_band(sorted(shared), k_of, min_k, max_k)
+    return usable, partial, skipped
+
+
+def check_grid(root: Path, atlases, windows, cohorts, states, min_k: int,
+               max_k: int) -> pd.DataFrame:
+    """One row per (atlas, aperture, state set, cohort), with `ok` and why not.
 
     Checked before anything is written, because the alternative is discovering a
     gap after a cohort has been processed -- which is how stage 4 left window
     sizes half-done.
 
     The `model_hash` check is the one that would otherwise fail silently. State
-    `5` is only the same state in two cohorts if both came from the same fit;
-    if camcan's latents were written by a different `decompose` run than
-    ds002837's, every transition compared across them is meaningless and
-    nothing downstream would notice.
+    `5` is only the same state in two cohorts if both came from the same fit; if
+    camcan's latents were written by a different `decompose` run than
+    ds002837's, every transition compared across them is meaningless and nothing
+    downstream would notice.
+
+    `states` names the sets explicitly and applies to every cell; None discovers
+    them per cell via `cell_states`.
     """
+    import pyarrow.parquet as pq
+
     rows = []
     for atlas in atlases:
         for w in windows:
+            if states:
+                here, partial, skipped = list(states), {}, []
+            else:
+                here, partial, skipped = cell_states(root, atlas, w, cohorts,
+                                                     min_k, max_k)
+            base = {"atlas": atlas, "window_s": w}
+
             present = {}
             for cohort in cohorts:
                 p = latents_path(root, atlas, w, cohort)
-                rec = {"atlas": atlas, "window_s": w, "cohort": cohort,
-                       "path": str(p)}
+                rec = {**base, "cohort": cohort, "path": str(p)}
                 if not p.exists():
-                    # One row per STATE even when the file is missing, so the
-                    # denominator in the report equals the grid size. Emitting a
-                    # single `states="*"` row here made "48/69" print under a
-                    # header that said 90 cells.
-                    for st in states:
-                        rows.append({**rec, "states": st, "ok": False,
-                                     "reason": "no latents file"})
+                    # Reported, not fatal: an aperture stage 3 never ran is a
+                    # gap in the plan, not a corruption of what exists. The
+                    # default --window-s spans more apertures than any one tree
+                    # has, and aborting on that made the command unusable.
+                    rows.append({**rec, "states": "(no latents)", "ok": False,
+                                 "reason": "no latents file", "n_rows": 0,
+                                 "fatal": False})
                     continue
                 names = set(_schema(p).names)
-                present[cohort] = {
-                    "model_hash": _meta_value(p, "model_hash"),
-                    "censor_policy": _meta_value(p, "censor_policy"),
-                    "umap_fitted": _meta_value(p, "umap_fitted"),
-                    "names": names,
-                }
-                import pyarrow.parquet as pq
+                present[cohort] = _meta_value(p, "model_hash")
                 n_rows = pq.ParquetFile(p).metadata.num_rows
-                for st in states:
-                    reason = ""
-                    if st not in names:
-                        reason = (f"column {st} absent (run `fmri-decomp cluster` "
+                for st in here:
+                    reason = ("" if st in names else
+                              f"column {st} absent (run `fmri-decomp cluster` "
                               f"for this atlas and aperture)")
                     rows.append({**rec, "states": st, "n_rows": n_rows,
-                                 "model_hash": present[cohort]["model_hash"],
-                                 "censor_policy": present[cohort]["censor_policy"],
-                                 "ok": not reason, "reason": reason})
+                                 "model_hash": present[cohort],
+                                 "censor_policy": _meta_value(p, "censor_policy"),
+                                 "ok": not reason, "reason": reason,
+                                 # Only when NAMED does an absent column stop the
+                                 # run: the user asked for it by hand. A set that
+                                 # discovery simply did not find in this cell is
+                                 # not a fault of the cell.
+                                 "fatal": bool(reason) and bool(states)})
+                for st in partial.get(cohort, []):
+                    rows.append({**rec, "states": st, "n_rows": n_rows,
+                                 "model_hash": present[cohort],
+                                 "ok": False,
+                                 "fatal": False,
+                                 "reason": f"{st} is in {cohort} but not in "
+                                           f"every cohort of this cell -- stage "
+                                           f"4b ran unevenly here"})
+                for st in skipped:
+                    rows.append({**rec, "states": st, "n_rows": n_rows,
+                                 "ok": False, "fatal": False,
+                                 "reason": f"K outside [{min_k}, {max_k}]"})
 
-            # Cross-cohort consistency, within this (atlas, window_s).
-            hashes = {c: v["model_hash"] for c, v in present.items()}
-            if len(set(hashes.values())) > 1:
+            if len(set(present.values())) > 1:
                 for r in rows:
                     if r["atlas"] == atlas and r["window_s"] == w and r["ok"]:
                         r["ok"] = False
+                        # THIS one stops everything. Two cohorts from different
+                        # fits cannot be pooled and nothing downstream notices.
+                        r["fatal"] = True
                         r["reason"] = (f"model_hash differs across cohorts "
-                                       f"{hashes} -- state labels are not "
+                                       f"{present} -- state labels are not "
                                        f"comparable; re-run decompose for all "
                                        f"cohorts together")
     return pd.DataFrame(rows)
@@ -240,9 +298,14 @@ def report_check(df: pd.DataFrame) -> int:
         print(f"\nWARNING: more than one censor policy in the grid: {policies}.")
         print("         One state set censored and another not is not a fair "
               "comparison.")
+    n_fatal = int(df.get("fatal", pd.Series(dtype=bool)).fillna(False).sum())
     if ok < total:
-        print(f"\n{total - ok} cell(s) are not ready. Fix them, or pass "
-              f"--allow-partial to run the rest.")
+        print(f"\n{total - ok} cell(s) are not ready, {n_fatal} of them "
+              f"INCONSISTENT rather than merely absent.")
+        if not n_fatal:
+            print("         None of these stops the run: a state set absent "
+                  "from a cell, or an aperture stage 3 never ran, is a gap in "
+                  "the plan and not a fault in what exists.")
     return 0 if ok == total else 1
 
 
@@ -581,59 +644,39 @@ def run(args) -> int:
     if not cohorts:
         raise SystemExit("no cohort has latents under any grid cell -- run "
                          "`fmri-decomp decompose` first")
+    # NO GLOBAL UNION. The state sets are resolved per (atlas, aperture) by
+    # check_grid, because a method that discovers its K has a different column
+    # name in every cell -- see cell_states. `--states` still overrides, for
+    # forcing one set across the grid.
+    check = check_grid(root, atlases, windows, cohorts, states or None,
+                       args.min_k, args.max_k)
+    if check.empty:
+        raise SystemExit("nothing in the grid at all -- check --atlas / "
+                         "--window-s against what stage 4 produced")
     if not states:
-        # Union over the grid: a state column added at one aperture but not
-        # another must still be visible, and the per-cell check below reports
-        # exactly where it is missing.
-        found, k_of = set(), {}
-        for atlas in atlases:
-            for w in windows:
-                for c in cohorts:
-                    p_ = latents_path(root, atlas, w, c)
-                    if not p_.exists():
-                        continue
-                    for col in discover_state_columns(p_):
-                        found.add(col)
-                        k_of.setdefault(col, _k_quietly(col, p_))
-        states = sorted(found)
-        if not states:
+        found = sorted(set(check.loc[check["ok"], "states"]))
+        if not found:
             raise SystemExit(
-                "no state columns found in any latents file. Run "
-                "`fmri-decomp cluster` to add state definitions, or pass "
-                "--states explicitly.")
-        states, skipped = _within_k_band(states, k_of, args.min_k, args.max_k)
-        if skipped:
-            # Loud, because this is the one case where discovery finds something
-            # real that must not be used. A latents file written before K was cut
-            # to 8 and 27 still carries ThresholdCluster_pca3_125 and _512, and
-            # those are 15,625 and 262,144 cells per subject -- a table wider
-            # than parquet should be asked to hold, over a matrix in which more
-            # than 99% of cells are exactly zero for every subject. Discovery is
-            # how a new state set is picked up automatically; it must not also be
-            # how a retired one comes back.
-            log(f"SKIPPED {len(skipped)} state column(s) outside "
-                f"K in [{args.min_k}, {args.max_k}]: {skipped}")
-            log(f"        They are in the latents and are not used. Name one in "
-                f"--states, or raise --max-k, to override.")
-        if not states:
-            raise SystemExit(
-                f"every discovered state column has a K outside "
-                f"[{args.min_k}, {args.max_k}]: {skipped}\nRun `fmri-decomp "
-                f"cluster` to write usable ones, or widen the band if you mean "
-                f"it.")
-        log(f"discovered {len(states)} state column(s): {states}")
+                "no usable state set in any cell. Run `fmri-decomp cluster` to "
+                "add state definitions, or pass --states explicitly.\n"
+                "See the report above for what was found and why it was "
+                "rejected.")
+        log(f"discovered {len(found)} distinct state set(s) across the grid; "
+            f"each cell uses the ones its own cohorts all have")
 
-    log(f"grid: {len(atlases)} atlas x {len(windows)} window x {len(states)} "
-        f"state def x {len(cohorts)} cohort(s) = "
-        f"{len(atlases) * len(windows) * len(states) * len(cohorts)} cell(s)")
+    log(f"grid: {len(atlases)} atlas x {len(windows)} window x "
+        f"{len(cohorts)} cohort(s) -> {int(check['ok'].sum())} ready cell(s) "
+        f"of {len(check)}")
 
-    check = check_grid(root, atlases, windows, cohorts, states)
     rc = report_check(check)
     if args.check:
         return rc
-    if rc and not args.allow_partial:
-        raise SystemExit("\nrefusing to start on an incomplete grid; see above, "
-                         "or pass --allow-partial")
+    fatal = check[check.get("fatal", False) == True]           # noqa: E712
+    if len(fatal) and not args.allow_partial:
+        raise SystemExit(
+            f"\nrefusing to start: {len(fatal)} cell(s) are not merely missing "
+            f"but INCONSISTENT -- see the reasons above. Pass --allow-partial to "
+            f"run the rest anyway.")
 
     ready = check[check["ok"]]
     entries = []

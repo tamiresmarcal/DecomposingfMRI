@@ -197,3 +197,90 @@ class TestMaxK:
         keep, skip = T._within_k_band(sorted(k_of), k_of, 2, 64)
         assert keep == ["ThresholdCluster_pca3_8"]
         assert len(skip) == 2
+
+
+class TestPerCellStateSets:
+    """A method that DISCOVERS its K has a different column name in every cell.
+    `MeanShift_pca3_16` exists at harvardoxford/30s and nowhere else, because
+    that is where the bandwidth search landed on 16. Demanded across the grid it
+    is missing from 14 cells, and stage 5a refused to start on an "incomplete"
+    grid that was never incomplete. That is the failure these pin."""
+
+    def cell(self, root, atlas, w, ms, cohorts=("a", "b"), mh=None, k_of=None):
+        for c in cohorts:
+            d = pd.DataFrame({"cohort": c, "task": "m", "sub": "s1",
+                              "window_id": range(6),
+                              "crosses_run_boundary": False,
+                              "ThresholdCluster_pca3_8": 0, ms: 0})
+            md = {b"model_hash": json.dumps(mh or f"h-{atlas}-{w}").encode(),
+                  b"stride_s": json.dumps(6.0).encode(),
+                  b"clusterers": json.dumps(
+                      k_of or {ms: {"k": int(ms.rsplit("_", 1)[1])},
+                               "ThresholdCluster_pca3_8": {"k": 8}}).encode()}
+            p = (root / "latents" / f"atlas={atlas}" / f"window_s={w}"
+                 / f"cohort={c}" / "data.parquet")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(pa.Table.from_pandas(d, preserve_index=False)
+                             .replace_schema_metadata(md), p)
+
+    def test_each_cell_uses_its_own_discovered_k(self, tmp_path):
+        self.cell(tmp_path, "yeo7", "30", "MeanShift_pca3_16")
+        self.cell(tmp_path, "yeo7", "60", "MeanShift_pca3_3")
+        d = T.check_grid(tmp_path, ["yeo7"], ["30", "60"], ["a", "b"], None, 3, 64)
+        ready = d[d["ok"]]
+        at30 = set(ready[ready["window_s"] == "30"]["states"])
+        at60 = set(ready[ready["window_s"] == "60"]["states"])
+        assert "MeanShift_pca3_16" in at30 and "MeanShift_pca3_16" not in at60
+        assert "MeanShift_pca3_3" in at60 and "MeanShift_pca3_3" not in at30
+        # and the fixed-name set is usable in both
+        assert "ThresholdCluster_pca3_8" in at30 & at60
+
+    def test_a_cell_only_missing_a_set_is_not_fatal(self, tmp_path):
+        self.cell(tmp_path, "yeo7", "30", "MeanShift_pca3_16")
+        self.cell(tmp_path, "yeo7", "60", "MeanShift_pca3_3")
+        d = T.check_grid(tmp_path, ["yeo7"], ["30", "60"], ["a", "b"], None, 3, 64)
+        assert not d["fatal"].any()
+
+    def test_an_absent_aperture_is_reported_not_fatal(self, tmp_path):
+        self.cell(tmp_path, "yeo7", "30", "MeanShift_pca3_16")
+        d = T.check_grid(tmp_path, ["yeo7"], ["30", "120"], ["a", "b"], None, 3, 64)
+        gap = d[d["window_s"] == "120"]
+        assert len(gap) and not gap["fatal"].any()
+        assert (gap["reason"] == "no latents file").all()
+
+    def test_differing_model_hash_IS_fatal(self, tmp_path):
+        # The one that must stop everything: two cohorts from different fits.
+        self.cell(tmp_path, "yeo7", "30", "MeanShift_pca3_4", cohorts=("a",),
+                  mh="h1")
+        self.cell(tmp_path, "yeo7", "30", "MeanShift_pca3_4", cohorts=("b",),
+                  mh="h2")
+        d = T.check_grid(tmp_path, ["yeo7"], ["30"], ["a", "b"], None, 3, 64)
+        assert d["fatal"].any()
+        assert any("model_hash differs" in r for r in d["reason"])
+
+    def test_a_named_state_set_that_is_absent_IS_fatal(self, tmp_path):
+        # Asked for by hand, so its absence is a mistake worth stopping on.
+        self.cell(tmp_path, "yeo7", "30", "MeanShift_pca3_4")
+        d = T.check_grid(tmp_path, ["yeo7"], ["30"], ["a", "b"],
+                         ["HMM_umap3_8"], 3, 64)
+        assert d["fatal"].all()
+
+    def test_a_set_in_one_cohort_only_is_not_usable_by_either(self, tmp_path):
+        # A state label is comparable across cohorts only if one fit defined it.
+        self.cell(tmp_path, "yeo7", "30", "MeanShift_pca3_4", cohorts=("a",))
+        self.cell(tmp_path, "yeo7", "30", "MeanShift_pca3_9", cohorts=("b",))
+        usable, partial, _ = T.cell_states(tmp_path, "yeo7", "30", ["a", "b"],
+                                           3, 64)
+        assert "MeanShift_pca3_4" not in usable
+        assert "MeanShift_pca3_9" not in usable
+        assert usable == ["ThresholdCluster_pca3_8"]
+        assert partial == {"a": ["MeanShift_pca3_4"], "b": ["MeanShift_pca3_9"]}
+
+    def test_a_degenerate_k_is_excluded_per_cell(self, tmp_path):
+        self.cell(tmp_path, "yeo7", "30", "MeanShift_pca3_1",
+                  k_of={"MeanShift_pca3_1": {"k": 1},
+                        "ThresholdCluster_pca3_8": {"k": 8}})
+        usable, _, skipped = T.cell_states(tmp_path, "yeo7", "30", ["a", "b"],
+                                           3, 64)
+        assert usable == ["ThresholdCluster_pca3_8"]
+        assert skipped == ["MeanShift_pca3_1"]
