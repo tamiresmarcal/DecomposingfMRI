@@ -14,9 +14,18 @@ from fmri_decomposition import decompose as D
 
 
 def parse(*argv):
+    """Parse, supplying --censor-policy none unless the caller names one.
+
+    The flag is REQUIRED on the real command line -- forgetting it silently
+    produced an uncensored aperture once already -- so a test that wants the
+    default behaviour has to say `none` out loud, exactly as a user does.
+    """
     p = argparse.ArgumentParser()
     D.add_arguments(p)
-    a = p.parse_args(list(argv))
+    argv = list(argv)
+    if "--censor-policy" not in argv:
+        argv += ["--censor-policy", "none"]
+    a = p.parse_args(argv)
     a.output_root = None                     # skips the censor-summary lookup
     return a
 
@@ -113,6 +122,44 @@ class TestNoStatesHere:
         f = ["P0", "P1"]
         assert (D.model_hash(D.fit_meta(a, "-1", f), f)
                 != D.model_hash(D.fit_meta(b, "-1", f), f))
+
+
+class TestCensorPolicyIsNotForgettable:
+    def test_omitting_it_is_an_error(self):
+        # It used to default to None and print a warning. A warning in a
+        # 30-line cluster log is not a guard: window_s=-1 was built uncensored
+        # while every other aperture used `motion`, and nothing stopped it.
+        p = argparse.ArgumentParser()
+        D.add_arguments(p)
+        with pytest.raises(SystemExit):
+            p.parse_args(["--atlas", "yeo7", "--window-s", "30"])
+
+    def test_none_is_how_you_opt_out(self, tmp_path):
+        a = parse("--atlas", "yeo7", "--window-s", "30", "--dry-run",
+                  "--censor-policy", "none")
+        a.output_root = str(tmp_path)
+        D.run(a)
+        assert a.censor_policy is None       # normalised, so fit_meta is unchanged
+
+    @pytest.mark.parametrize("spelling", ["none", "NONE", "  none  "])
+    def test_opting_out_normalises_at_parse_time(self, spelling):
+        # Not in run(): fit_meta is reachable without it, and the literal string
+        # "none" in the payload is a DIFFERENT model_hash from None -- so an
+        # uncensored fit would stop matching every uncensored file on disk for no
+        # reason but spelling.
+        a = parse("--atlas", "yeo7", "--window-s", "30",
+                  "--censor-policy", spelling)
+        assert a.censor_policy is None
+        assert D.fit_meta(a, "30", EDGES)["censor_policy"] is None
+        assert D.model_hash(D.fit_meta(a, "30", EDGES), EDGES) == \
+            TestFitMetaIsHashStable.DFC_HASH
+
+    def test_a_named_policy_is_a_different_model(self):
+        a = parse("--atlas", "yeo7", "--window-s", "30")
+        b = parse("--atlas", "yeo7", "--window-s", "30",
+                  "--censor-policy", "motion")
+        assert (D.model_hash(D.fit_meta(a, "30", EDGES), EDGES)
+                != D.model_hash(D.fit_meta(b, "30", EDGES), EDGES))
 
 
 class TestApertureGuards:

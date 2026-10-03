@@ -353,6 +353,19 @@ def fit_meta(args, window_s, features: list[str]) -> dict:
     return meta
 
 
+def _censor_policy(value: str):
+    """`none` -> None, at PARSE time rather than in run().
+
+    It has to be here and not in `run`, because `fit_meta` is reachable without
+    going through `run` and the literal string "none" in its payload is a
+    DIFFERENT model_hash from None -- so an uncensored fit would stop matching
+    every uncensored latents file already on disk, for no reason but spelling.
+    Normalising at the boundary makes `args.censor_policy is None` mean "no
+    censoring" everywhere, with no caller able to see the other spelling.
+    """
+    return None if value.strip().lower() == "none" else value
+
+
 def censor_policy_hash(args) -> str | None:
     """The hash `censor` stamped on its own output, read back from the summary.
 
@@ -701,10 +714,15 @@ def add_arguments(p) -> None:
     p.add_argument("--umap-fit-rows", type=int, default=30_000,
                    help="0 fits UMAP on every training row")
     p.add_argument("--no-umap", action="store_true")
-    p.add_argument("--censor-policy", default=None, metavar="NAME",
+    p.add_argument("--censor-policy", required=True, metavar="NAME",
+                   type=_censor_policy,
                    help="apply the stage 3.5 decision written by `fmri-decomp "
-                        "censor --policy config/censor/NAME.yaml`. Without it "
-                        "every window enters the fit and a warning is printed.")
+                        "censor --policy config/censor/NAME.yaml`. REQUIRED: "
+                        "pass `none` to fit on every window, which is a "
+                        "different analysis and is recorded as one. There is no "
+                        "default, because the default was silently `none` and "
+                        "one aperture got built that way while the others were "
+                        "censored -- a warning in a 30-line log is not a guard.")
     p.add_argument("--output-root",
                    help="default: output_root from config/camcan_movie.yaml")
     p.add_argument("--seed", type=int, default=42)

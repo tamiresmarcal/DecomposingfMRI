@@ -1,13 +1,19 @@
 #!/bin/bash
 # Stage 4 -- latent decomposition. Fit on some cohorts, project onto others.
 #
-#   sbatch --array=0-3 slurm/04_decompose.sbatch harvardoxford 30 60 120 300
-#   sbatch --array=0-0 slurm/04_decompose.sbatch yeo7 15
+#   sbatch --array=0-3 slurm/04_decompose.sbatch harvardoxford 30 60 120 300 \
+#            -- --censor-policy motion
+#
+# --censor-policy IS REQUIRED and has no default. Pass `none` to fit on every
+# window, which is a different analysis and is recorded as one. It used to
+# default to none with a warning, and window_s=-1 got built that way while every
+# other aperture used `motion` -- a warning in a 30-line log is not a guard.
 #
 # THE ACTIVATION APERTURE. Per-TR frames instead of windowed edges, written to
 # window_s=-1. One array task, because a frame has no window to vary:
 #
-#   sbatch --array=0-0 slurm/04_decompose.sbatch yeo7 -1 -- --source activation
+#   sbatch --array=0-0 slurm/04_decompose.sbatch yeo7 -1 \
+#            -- --source activation --censor-policy motion
 #
 # -1 is not a duration: it is one TR, which differs per cohort. Two transforms
 # are applied to the frames that the dfc source does not need -- a common

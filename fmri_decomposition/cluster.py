@@ -582,19 +582,43 @@ def check_grid(root: Path, args) -> pd.DataFrame:
             import pyarrow.parquet as pq
             n = sum(pq.ParquetFile(p).metadata.num_rows for p in paths.values())
 
+            # The censor policy each cohort's latents were built under. Checked
+            # HERE, one stage before `transitions --check` would catch it,
+            # because by then the aperture has already cost an hour of stage 4.
+            # This is the defect that let window_s=-1 be built uncensored while
+            # every other aperture used `motion`.
+            pol = {_meta(p, "censor_policy") for p in paths.values()}
+            pol_s = ", ".join(sorted(str(x) for x in pol))
+
             if not train:
                 reason = f"none of --train {args.train} is present"
             elif missing:
                 reason = (f"embedding(s) {missing} absent -- rerun stage 4 "
                           f"without --no-umap, or drop them from --embeddings")
+            elif len(pol) > 1:
+                reason = (f"cohorts disagree on the censor policy ({pol_s}) -- "
+                          f"they came from different stage 4 runs")
             else:
                 reason = ""
             rows.append({"atlas": atlas, "window_s": w, "ok": not reason,
                          "reason": reason or "ready",
                          "cohorts": ",".join(sorted(paths)),
                          "embeddings": ",".join(have) or "-",
-                         "existing": len(existing), "rows": n})
+                         "censor": pol_s, "existing": len(existing), "rows": n})
     return pd.DataFrame(rows)
+
+
+def _meta(path: Path, key: str):
+    import pyarrow.parquet as pq
+
+    md = pq.ParquetFile(path).schema_arrow.metadata or {}
+    raw = md.get(key.encode())
+    if raw is None:
+        return None
+    try:
+        return json.loads(raw.decode())
+    except Exception:                                            # noqa: BLE001
+        return raw.decode()
 
 
 def _state_columns(path: Path) -> list[str]:
@@ -622,8 +646,20 @@ def report_check(df: pd.DataFrame, args) -> int:
     print("\n`existing` counts state columns already in the file. A re-run "
           "REPLACES a column of the same name, which is what you want after "
           "changing a method's settings and not what you want otherwise.")
-    if not df["ok"].all():
-        print(f"\n{len(df) - int(df['ok'].sum())} cell(s) are not ready.")
+    # ACROSS cells, not just within one. Two apertures built under different
+    # policies are each internally consistent and still not comparable, and
+    # nothing downstream pools them -- so it has to be said here.
+    pols = {p for p in df.loc[df["censor"] != "", "censor"] if p}
+    if len(pols) > 1:
+        print(f"\nWARNING: the grid spans more than one censor policy: "
+              f"{sorted(pols)}.")
+        print("         One aperture censored and another not is not a fair "
+              "comparison of apertures.\n         Rebuild the odd one with "
+              "`decompose --censor-policy <name>`.")
+    if not df["ok"].all() or len(pols) > 1:
+        bad = len(df) - int(df["ok"].sum())
+        if bad:
+            print(f"\n{bad} cell(s) are not ready.")
         return 1
     return 0
 
