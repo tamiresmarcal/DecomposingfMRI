@@ -52,7 +52,7 @@ export OPENBLAS_NUM_THREADS="${OMP_NUM_THREADS}"
 
 # Stages 4 and 5 need the OTHER image -- see slurm/env.sh.example.
 SIF="${FMRIDECOMP_SIF45:-${FMRIDECOMP_SIF:-}}"
-export DEPS="pandas pyarrow"
+DEPS="pandas pyarrow"
 
 echo "host=$(hostname) cpus=${OMP_NUM_THREADS}"
 
@@ -61,13 +61,17 @@ if [[ -n "${SIF}" ]]; then
   BINDS="${FMRIDECOMP_BINDS:-/project,/scratch,/home}"
   RUN=(apptainer exec --cleanenv --bind "${BINDS}" --pwd "${PWD}" \
        "${SIF}" python3)
-  MISSING=$("${RUN[@]}" - <<'PY'
-import importlib.util, os
-print(" ".join(m for m in os.environ["DEPS"].split()
-               if importlib.util.find_spec(m) is None))
-PY
-) || { echo "ERROR: ${SIF} -- could not run python3 to check imports" >&2
-       exit 1; }
+  # The module names go in as ARGV, not through the environment. RUN carries
+  # --cleanenv -- deliberately, to keep the host's PYTHONPATH out of the
+  # container -- and --cleanenv strips exported variables too, so os.environ
+  # ["DEPS"] raised KeyError inside the container, python exited non-zero, and
+  # this guard killed every job in 10 seconds. A check that cannot run is not a
+  # check; argv crosses the boundary that the environment does not.
+  MISSING=$("${RUN[@]}" -c 'import importlib.util, sys
+print(" ".join(m for m in sys.argv[1:] if importlib.util.find_spec(m) is None))' \
+            ${DEPS}) || {
+    echo "ERROR: ${SIF} -- could not run python3 inside it to check imports" >&2
+    exit 1; }
   # IS THIS IMAGE BUILT FROM THE CURRENT DEFINITION? A warning, not a failure:
   # most changes to the definition do not affect a given run, and refusing to
   # start would be worse than saying so. But it is the check that was missing --
@@ -80,9 +84,13 @@ PY
     # the interpreter out of the array: `${RUN[@]%python3}` strips the suffix from
     # EVERY element and leaves an empty string where python3 was, so the command
     # it builds is unrunnable.
+    # `|| true` because this is a WARNING and must never be able to kill a job.
+    # The script runs under `set -e`, so a non-zero exit from a purely
+    # informational check would abort the run -- which is precisely how the
+    # import guard above took out three jobs in ten seconds.
     _HAVE=$("${RUN[@]}" -c 'import pathlib,sys
 p = pathlib.Path("/opt/def_sha256")
-sys.stdout.write(p.read_text().strip() if p.exists() else "")' 2>/dev/null)
+sys.stdout.write(p.read_text().strip() if p.exists() else "")' 2>/dev/null || true)
     if [[ -z "${_HAVE}" ]]; then
       echo "NOTE: ${SIF} records no def_sha256, so it predates provenance" >&2
       echo "      being stamped into the image. It may be missing packages the" >&2
