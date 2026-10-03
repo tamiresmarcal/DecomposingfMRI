@@ -52,7 +52,7 @@ export OPENBLAS_NUM_THREADS="${OMP_NUM_THREADS}"
 
 # Stages 4 and 5 need the OTHER image -- see slurm/env.sh.example.
 SIF="${FMRIDECOMP_SIF45:-${FMRIDECOMP_SIF:-}}"
-DEPS="pandas, pyarrow"
+export DEPS="pandas pyarrow"
 
 echo "host=$(hostname) cpus=${OMP_NUM_THREADS}"
 
@@ -61,8 +61,15 @@ if [[ -n "${SIF}" ]]; then
   BINDS="${FMRIDECOMP_BINDS:-/project,/scratch,/home}"
   RUN=(apptainer exec --cleanenv --bind "${BINDS}" --pwd "${PWD}" \
        "${SIF}" python3)
-  if ! "${RUN[@]}" -c "import ${DEPS}" 2>/dev/null; then
-    echo "ERROR: ${SIF} cannot import ${DEPS}" >&2
+  MISSING=$("${RUN[@]}" - <<'PY'
+import importlib.util, os
+print(" ".join(m for m in os.environ["DEPS"].split()
+               if importlib.util.find_spec(m) is None))
+PY
+) || { echo "ERROR: ${SIF} -- could not run python3 to check imports" >&2
+       exit 1; }
+  if [[ -n "${MISSING// /}" ]]; then
+    echo "ERROR: ${SIF} cannot import: ${MISSING}" >&2
     exit 1
   fi
 else

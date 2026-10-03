@@ -4,6 +4,12 @@
 #   sbatch slurm/05_select.sbatch additional_HADS_anx_category
 #   sbatch slurm/05_select.sbatch additional_HADS_dep_category -- --models ridge hgb lgbm
 #
+# --models defaults to `ridge hgb`, both of which are sklearn. `lgbm` needs
+# lightgbm, which containers/stage45.def pins but an older build of the image may
+# not carry; bstm_selection.make_model says so by name and offers hgb, the same
+# algorithm family. So lightgbm is NOT checked up front -- doing that blocked a
+# default run that never wanted it.
+#
 # ONE JOB, NOT AN ARRAY. The grid (state sets x models x fold seeds) is
 # parallelised inside the process with joblib, because every cell needs the same
 # handful of small tables in memory and splitting across nodes would re-read and
@@ -59,7 +65,7 @@ echo "host=$(hostname) target=${TARGET} cpus=${SLURM_CPUS_PER_TASK:-1}"
 # `ModuleNotFoundError: hmmlearn` minutes in, so FMRIDECOMP_SIF45 wins here and
 # FMRIDECOMP_SIF is the fallback for anyone who keeps one image.
 SIF="${FMRIDECOMP_SIF45:-${FMRIDECOMP_SIF:-}}"
-DEPS="sklearn, lightgbm"
+export DEPS="sklearn"
 
 if [[ -n "${SIF}" ]]; then
   module load apptainer 2>/dev/null || module load apptainer/1.3.5
@@ -68,15 +74,33 @@ if [[ -n "${SIF}" ]]; then
   # shadow container packages with host builds for a different Python.
   RUN=(apptainer exec --cleanenv --bind "${BINDS}" --pwd "${PWD}" \
        "${SIF}" python3)
-  # Fail in seconds rather than after the first fit. An image without these is
-  # the stage 2/3 image, and the error it would otherwise give arrives late and
-  # names only the first missing module.
-  if ! "${RUN[@]}" -c "import ${DEPS}" 2>/dev/null; then
+  # Fail in seconds rather than after the first fit, and name the module that is
+  # ACTUALLY missing. Printing the whole list instead sent a real diagnosis
+  # astray: the image had sklearn and lacked lightgbm, and the message said
+  # "cannot import: sklearn, lightgbm", which reads as the wrong image entirely.
+  #
+  # Only HARD requirements belong here. An optional dependency -- lightgbm for
+  # --models lgbm, hmmlearn for --methods hmm, umap for --embeddings umap3 -- is
+  # already handled where it is used, with a message that knows which flag asked
+  # for it. Demanding it here is stricter than the code it guards, and blocked a
+  # default `select` run that needed neither.
+  # `import importlib.util` explicitly: a bare `import importlib` does NOT make
+  # `.util` an attribute, so the block raised AttributeError, 2>/dev/null ate it,
+  # MISSING came back empty and the guard passed everything. A guard that fails
+  # open is worse than no guard, so the exit status is checked too.
+  MISSING=$("${RUN[@]}" - <<'PY'
+import importlib.util, os, sys
+print(" ".join(m for m in os.environ["DEPS"].replace(",", " ").split()
+               if importlib.util.find_spec(m) is None))
+PY
+) || { echo "ERROR: ${SIF} -- could not even run python3 to check imports" >&2
+       exit 1; }
+  if [[ -n "${MISSING// /}" ]]; then
     echo "ERROR: ${SIF}" >&2
-    echo "       cannot import: ${DEPS}" >&2
-    echo "       That is the stage 2/3 image. Stages 4-5 need the stage45 one:" >&2
-    echo "         export FMRIDECOMP_SIF45=/project/6008063/tamires/singularity/fmri_decomp_stage45.sif" >&2
-    echo "       Build it per containers/README.md if it does not exist yet." >&2
+    echo "       cannot import: ${MISSING}" >&2
+    echo "       Those are required here. Either this is the stage 2/3 image --" >&2
+    echo "         export FMRIDECOMP_SIF45=<the stage45 .sif>" >&2
+    echo "       -- or the stage45 image needs rebuilding per containers/README.md." >&2
     exit 1
   fi
 else
