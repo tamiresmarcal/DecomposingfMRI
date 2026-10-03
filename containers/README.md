@@ -23,6 +23,42 @@ apptainer build --fakeroot \
 20–40 minutes, ~6 GB, mostly CmdStan. If `--fakeroot` is refused, build
 somewhere you have root and copy the `.sif` across.
 
+**Build from the repository root.** `%files` copies `containers/stage45.def`
+into the image and its source path resolves against the working directory, so
+building from inside `containers/` fails at the copy.
+
+### An image does not update itself
+
+The definition is a file in git; the image is a build of it at one moment. Three
+commits changed the definition after the image on `nibi` was built, and the
+newest of them added `lightgbm` — so `select` died for a package the definition
+had carried for two days.
+
+    2026-09-10  definition created, no lightgbm
+    2026-09-30  image built  <-- the .sif on disk
+    2026-10-01  four build failures fixed
+    2026-10-01  numba/numpy pin conflict fixed
+    2026-10-02  lightgbm==4.5.0 added
+
+Nothing connected the two, so nothing could notice. Now the image carries its
+own provenance:
+
+    /opt/stage45.def            the definition it was built from
+    /opt/def_sha256             that file's sha256
+    /opt/image_provenance.txt   build time, python version, full pip freeze
+
+and every stage 4–5 sbatch compares `/opt/def_sha256` against the definition in
+the checkout, printing a NOTE when they differ. A note and not a failure: most
+changes to the definition do not affect a given run, and refusing to start would
+be worse than saying so. Both files are written at the END of `%post`, so they
+exist only in an image that built all the way through.
+
+To see what an image actually has:
+
+```bash
+apptainer exec "$FMRIDECOMP_SIF45" cat /opt/image_provenance.txt | head -20
+```
+
 Pin the apptainer version. A bare `module load apptainer` opens the
 interactive `mii` menu, and picking the newest entry swaps `StdEnv/2023` for
 `StdEnv/2026`, reloading a dozen modules as a side effect.

@@ -109,6 +109,34 @@ print(" ".join(m for m in os.environ["DEPS"].replace(",", " ").split()
 PY
 ) || { echo "ERROR: ${SIF} -- could not even run python3 to check imports" >&2
        exit 1; }
+  # IS THIS IMAGE BUILT FROM THE CURRENT DEFINITION? A warning, not a failure:
+  # most changes to the definition do not affect a given run, and refusing to
+  # start would be worse than saying so. But it is the check that was missing --
+  # the image on disk was built from a definition three commits old, and the
+  # lightgbm added in the newest of them went unnoticed until a job died for it.
+  _DEF="${SLURM_SUBMIT_DIR:-$PWD}/containers/stage45.def"
+  if [[ -f "${_DEF}" ]]; then
+    _WANT=$(sha256sum "${_DEF}" | cut -d" " -f1)
+    # Through RUN as it stands (it ends in python3) rather than trying to swap
+    # the interpreter out of the array: `${RUN[@]%python3}` strips the suffix from
+    # EVERY element and leaves an empty string where python3 was, so the command
+    # it builds is unrunnable.
+    _HAVE=$("${RUN[@]}" -c 'import pathlib,sys
+p = pathlib.Path("/opt/def_sha256")
+sys.stdout.write(p.read_text().strip() if p.exists() else "")' 2>/dev/null)
+    if [[ -z "${_HAVE}" ]]; then
+      echo "NOTE: ${SIF} records no def_sha256, so it predates provenance" >&2
+      echo "      being stamped into the image. It may be missing packages the" >&2
+      echo "      current containers/stage45.def installs." >&2
+    elif [[ "${_HAVE}" != "${_WANT}" ]]; then
+      echo "NOTE: ${SIF} was built from a DIFFERENT containers/stage45.def" >&2
+      echo "      image: ${_HAVE}" >&2
+      echo "      repo : ${_WANT}" >&2
+      echo "      Rebuild per containers/README.md if a run needs a package the" >&2
+      echo "      definition has gained since." >&2
+    fi
+  fi
+
   if [[ -n "${MISSING// /}" ]]; then
     echo "ERROR: ${SIF}" >&2
     echo "       cannot import: ${MISSING}" >&2

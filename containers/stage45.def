@@ -22,6 +22,21 @@ From: rocker/r-ver:4.4.1
 # compiling from source. brms + its dependency tree is the difference between
 # minutes and hours.
 
+# The definition goes INTO the image so the image can say which definition built
+# it. Without that link the two are unconnected: a .sif built on 30 September
+# from the 10 September definition is indistinguishable from one built today, and
+# three commits' worth of changes -- including the lightgbm `select` needs -- were
+# invisible until a job failed for want of them.
+#
+# BUILD FROM THE REPOSITORY ROOT. %files sources resolve against the working
+# directory at build time, so `apptainer build ... containers/stage45.def` run
+# from inside containers/ cannot find this path and the build fails at the copy.
+# The comment lives out here because %files entries are parsed as `source dest`
+# pairs, and a commented line inside the section is not worth the risk on a
+# 40-minute build.
+%files
+    containers/stage45.def /opt/stage45.def
+
 %labels
     Purpose    DecomposingfMRI stage 4/5 -- state sets, transitions, brms
     R          4.4.1
@@ -136,6 +151,20 @@ cmdstanr::install_cmdstan(dir = "/opt/cmdstan", cores = 4)
 RSCRIPT
     Rscript /opt/install_r.R
     chmod -R a+rX /opt/cmdstan /opt/venv
+
+    # Provenance, written last so it only exists in an image that built fully.
+    # `def_sha256` is what the sbatch scripts compare against the definition in
+    # the checkout; a mismatch means the image predates a change to the file that
+    # describes it, which is exactly how a missing lightgbm went unnoticed for
+    # two days.
+    sha256sum /opt/stage45.def | cut -d" " -f1 > /opt/def_sha256
+    {
+      echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "def_sha256=$(cat /opt/def_sha256)"
+      echo "python=$(/opt/venv/bin/python3 --version 2>&1)"
+      /opt/venv/bin/pip freeze
+    } > /opt/image_provenance.txt
+    chmod a+r /opt/def_sha256 /opt/image_provenance.txt
 
 %environment
     export PATH=/opt/venv/bin:$PATH
