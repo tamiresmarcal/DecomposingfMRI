@@ -161,3 +161,78 @@ class TestPhenoSpecParsing:
         p.write_text("CCID,Age,total\nCC01,70,14\nCC02,62,3\n")
         d = B.read_phenotype([f"{p}:,"], "CCID", "total", ["Age"], [])
         assert sorted(d["y"].to_list()) == [3, 14]
+
+
+class TestOrdinalLevelCoding:
+    """A label set that is not Cam-CAN's.
+
+    ORDINAL_LEVELS is Cam-CAN's HADS wording. Any other cohort's -- low/mid/high,
+    absent/borderline/case -- used to code to NaN for every row, which emptied
+    the frame and surfaced as "the phenotype join matched nothing": the ids were
+    blamed for a problem in the labels.
+    """
+
+    def write(self, tmp_path, labels):
+        p = tmp_path / "t.csv"
+        rows = [f"CC{i:02d},{60 + i},{v}" for i, v in enumerate(labels)]
+        p.write_text("CCID,Age,HADS\n" + "\n".join(rows) + "\n")
+        return p
+
+    def test_an_unknown_label_set_fails_as_a_label_problem(self, tmp_path):
+        p = self.write(tmp_path, ["low", "mid", "high"])
+        with pytest.raises(SystemExit) as e:
+            B.read_phenotype([f"{p}:,"], "CCID", "HADS", ["Age"], [])
+        msg = str(e.value)
+        assert "could be coded" in msg
+        assert "join matched nothing" not in msg
+        # Both halves of the fix: what it saw, and the flag that accepts it.
+        assert "'high'" in msg and "'low'" in msg
+        assert "--ordinal-levels" in msg
+
+    def test_declaring_the_levels_codes_them_in_the_order_given(self, tmp_path):
+        p = self.write(tmp_path, ["low", "mid", "high"])
+        d = B.read_phenotype([f"{p}:,"], "CCID", "HADS", ["Age"], [],
+                             levels=["low", "mid", "high"])
+        assert d.sort_values("sub")["y"].to_list() == [0, 1, 2]
+
+    def test_the_order_is_the_claim_not_the_alphabet(self, tmp_path):
+        """Reversing the list reverses the code -- the target is fitted as a
+        number, so nothing else can carry which end is worse."""
+        p = self.write(tmp_path, ["low", "mid", "high"])
+        d = B.read_phenotype([f"{p}:,"], "CCID", "HADS", ["Age"], [],
+                             levels=["high", "mid", "low"])
+        assert d.sort_values("sub")["y"].to_list() == [2, 1, 0]
+
+    def test_matching_is_case_insensitive(self, tmp_path):
+        p = self.write(tmp_path, ["NORMAL", "severe"])
+        d = B.read_phenotype([f"{p}:,"], "CCID", "HADS", ["Age"], [])
+        assert d.sort_values("sub")["y"].to_list() == [0, 3]
+
+    def test_some_labels_coding_is_not_fatal(self, tmp_path):
+        """One bad value among good ones is a dropped subject, not a dead run."""
+        p = self.write(tmp_path, ["Mild", "???", "Severe"])
+        d = B.read_phenotype([f"{p}:,"], "CCID", "HADS", ["Age"], [])
+        assert sorted(d["y"].to_list()) == [1, 3]
+
+    def test_default_levels_still_apply_when_none_is_passed(self, tmp_path):
+        p = self.write(tmp_path, ["Normal", "Moderate"])
+        d = B.read_phenotype([f"{p}:,"], "CCID", "HADS", ["Age"], [], levels=None)
+        assert sorted(d["y"].to_list()) == [0, 2]
+
+    def test_the_flag_default_matches_the_module_constant(self):
+        """The help text quotes ORDINAL_LEVELS; the default must be it."""
+        import argparse
+        p = argparse.ArgumentParser()
+        B.add_arguments(p)
+        got = p.parse_args(["--target", "x"])
+        assert got.ordinal_levels == B.ORDINAL_LEVELS
+
+    def test_an_empty_covariate_is_named_rather_than_blamed_on_the_join(
+            self, tmp_path):
+        p = tmp_path / "t.csv"
+        p.write_text("CCID,Age,HADS\nCC01,,Mild\nCC02,,Severe\n")
+        with pytest.raises(SystemExit) as e:
+            B.read_phenotype([f"{p}:,"], "CCID", "HADS", ["Age"], [])
+        msg = str(e.value)
+        assert "entirely empty" in msg and "Age" in msg
+        assert "join matched nothing" not in msg

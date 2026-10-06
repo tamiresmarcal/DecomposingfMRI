@@ -55,6 +55,15 @@ assumes Normal->Mild is the same step as Moderate->Severe. The SCORE is
 Spearman, which is rank-based and does not. `--models logistic` drops the
 assumption entirely, at the cost of the ordering.
 
+Those four words are Cam-CAN's. A cohort that spells severity differently names
+its own with `--ordinal-levels`, LOWEST FIRST, because the order is the claim:
+
+    --target severity --ordinal-levels low mid high
+
+An already-numeric target needs no list. A target whose labels match neither is
+refused where it happens rather than coded to NaN -- silently, that empties the
+frame and reappears as "the join matched nothing", blaming the subject ids.
+
 Every feature set is prepended with the covariates, so each is measured against
 the same covariates-only baseline.
 
@@ -142,6 +151,10 @@ CAMCAN = Path("/project/6008063/tamires/cohorts/camcan/dataman/useraccess/"
               "opendata/paule_toussaint_camcan01870")
 DEFAULT_PHENO = [f"{CAMCAN / 'approved_data.tsv'}:\t",
                  f"{CAMCAN / 'standard_data.csv'}:,"]
+# Cam-CAN's HADS category labels, in order. A cohort that codes the same
+# severity differently -- low/mid/high, 0-3, absent/borderline/case -- passes
+# its own with --ordinal-levels; the ORDER is what is being declared, since the
+# target is fitted as a number and rank is the whole meaning.
 ORDINAL_LEVELS = ["Normal", "Mild", "Moderate", "Severe"]
 
 
@@ -236,7 +249,8 @@ def metric_name(model: str) -> str:
 
 # --------------------------------------------------------------- the data ---
 def read_phenotype(specs: list[str], id_col: str, target: str,
-                   covariates: list[str], categorical: list[str]) -> pd.DataFrame:
+                   covariates: list[str], categorical: list[str],
+                   levels: list[str] | None = None) -> pd.DataFrame:
     """Merge the release tables on the id column, code the ordinal, coerce types.
 
     Cam-CAN splits what is needed: the HADS categories are in one table and Age
@@ -291,15 +305,30 @@ def read_phenotype(specs: list[str], id_col: str, target: str,
             pheno[w] = pheno[got]
             log(f"  matched {w!r} -> column {got!r}")
 
+    levels = list(levels or ORDINAL_LEVELS)
     raw = pheno[target].astype("string").str.strip()
     codes = pd.to_numeric(raw, errors="coerce")
-    codes = codes.where(codes.notna(),
-                        raw.str.lower().map({v.lower(): i for i, v
-                                             in enumerate(ORDINAL_LEVELS)}))
-    unknown = sorted(set(raw.dropna()) - set(ORDINAL_LEVELS)
-                     - set(str(i) for i in range(len(ORDINAL_LEVELS))))
+    by_name = {v.strip().lower(): i for i, v in enumerate(levels)}
+    codes = codes.where(codes.notna(), raw.str.lower().map(by_name))
+    # Compare case-insensitively, the same way the mapping above does -- the old
+    # check was case-sensitive, so a label that coded perfectly well was still
+    # reported as unknown.
+    unknown = sorted({v for v, c in zip(raw, codes) if pd.notna(v) and pd.isna(c)})
     if unknown:
-        log(f"  values not in ORDINAL_LEVELS, now NaN: {unknown[:6]}")
+        log(f"  values outside the level list, now NaN: {unknown[:6]}")
+    if raw.notna().any() and codes.isna().all():
+        # Every label failed to code. Left alone, dropna() below empties the
+        # frame and the next error is "the phenotype join matched nothing" --
+        # which blames the subject ids for a problem in the LABELS, and sends
+        # you looking at the wrong file. Say it here, where it happened.
+        raise SystemExit(
+            f"--target {target!r}: not one of {raw.notna().sum():,} value(s) "
+            f"could be coded.\n"
+            f"  found:    {sorted(set(raw.dropna()))[:8]}\n"
+            f"  expected: a number, or one of {levels} (case-insensitive)\n"
+            f"  If this cohort labels severity its own way, declare it IN "
+            f"ORDER, lowest first:\n"
+            f"    --ordinal-levels low mid high")
     pheno["y"] = codes
 
     for c in covariates:
@@ -307,11 +336,24 @@ def read_phenotype(specs: list[str], id_col: str, target: str,
             pheno[c] = pd.to_numeric(pheno[c], errors="coerce")
 
     keep = ["sub", "y"] + [c for c in covariates if c != "n_transitions"]
-    pheno = pheno[keep].dropna()
+    pheno_full = pheno[keep]
+    pheno = pheno_full.dropna()
+    if pheno.empty:
+        # Which column emptied it, said in the error -- otherwise this lands as
+        # "the phenotype join matched nothing" two steps later and reads as an
+        # id mismatch.
+        empty = [c for c in keep if c != "sub" and pheno_full[c].isna().all()]
+        raise SystemExit(
+            f"--target {target!r}: no subject has every one of "
+            f"{[c for c in keep if c != 'sub']} present.\n"
+            + (f"  entirely empty: {empty}\n" if empty else
+               "  no single column is empty, so no subject has the whole set; "
+               "narrow --covariates.\n")
+            + "  Coding the target itself worked.")
     vc = pheno["y"].astype(int).value_counts().sort_index()
     log(f"  usable labels: {len(pheno):,}  "
-        + "  ".join(f"{ORDINAL_LEVELS[int(k)]}={v}" for k, v in vc.items()
-                    if int(k) < len(ORDINAL_LEVELS)))
+        + "  ".join(f"{levels[int(k)] if int(k) < len(levels) else int(k)}={v}"
+                    for k, v in vc.items()))
     return pheno
 
 
@@ -501,7 +543,8 @@ def run(args) -> int:
 
     log(f"phenotype for target={args.target!r}")
     pheno = read_phenotype(args.pheno, args.id_col, args.target,
-                           args.covariates, args.categorical)
+                           args.covariates, args.categorical,
+                           levels=args.ordinal_levels)
 
     log(f"{len(sets)} state set(s) x {len(args.models)} model(s) x "
         f"{len(args.seeds)} seed(s)")
@@ -976,6 +1019,13 @@ def add_arguments(p) -> None:
                    metavar="PATH:SEP",
                    help="phenotype tables as path:separator, merged on --id-col")
     p.add_argument("--id-col", default="CCID")
+    p.add_argument("--ordinal-levels", nargs="+", default=list(ORDINAL_LEVELS),
+                   metavar="LEVEL",
+                   help="the --target column's labels, LOWEST FIRST -- they are "
+                        "coded 0,1,2,... and fitted as a number, so the order "
+                        "is the claim. Matched case-insensitively, and a column "
+                        "that is already numeric needs no list. Default: "
+                        + " ".join(ORDINAL_LEVELS))
     p.add_argument("--covariates", nargs="+",
                    default=["Age", "Sex", "n_transitions"])
     p.add_argument("--categorical", nargs="+", default=["Sex"])

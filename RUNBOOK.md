@@ -253,6 +253,26 @@ for Y in additional_HADS_anx_category additional_HADS_dep_category; do
 done
 ```
 
+The phenotype table defaults to Cam-CAN's release. Everything after `--` goes
+straight to `select`, so another cohort's table needs no edit to the script:
+
+```bash
+sbatch slurm/model_selection.sbatch severity -- \
+  --pheno /path/to/table.tsv:$'\t' --id-col SubjectID --cohort hcp
+```
+
+The `--target` column may be numeric, or labelled. Labels are matched against
+`Normal Mild Moderate Severe` — Cam-CAN's HADS wording — so any other set has to
+be declared, **lowest first**, since the target is fitted as a number and the
+order is the claim:
+
+```bash
+  --target severity --ordinal-levels low mid high
+```
+
+Get that wrong and `select` stops and says so, naming the values it found; it
+does not quietly code them to NaN.
+
 `model_selection` **wipes its target directory before writing** — back up a
 result you care about first.
 
