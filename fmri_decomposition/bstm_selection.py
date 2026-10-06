@@ -245,8 +245,22 @@ def read_phenotype(specs: list[str], id_col: str, target: str,
     """
     frames = []
     for spec in specs:
-        path_s, _, sep = spec.rpartition(":")
-        path = Path(path_s or spec)
+        path_s, found, sep = spec.rpartition(":")
+        if not found:
+            # No separator given. `rpartition` puts the WHOLE string in the last
+            # field when the character is absent, so the old code read
+            # `--pheno table.csv` as "separator = table.csv" -- a multi-character
+            # separator, which pandas quietly treats as a regex and which fails
+            # later as "id column not found", naming neither the real cause nor
+            # the fix.
+            path_s, sep = spec, ","
+        if len(sep) != 1:
+            raise SystemExit(
+                f"--pheno {spec!r}: the separator after the last ':' is "
+                f"{sep!r}, which is not a single character.\n"
+                f"Write it as PATH:SEP, e.g. table.csv:, or table.tsv:$'\\t' "
+                f"(the $'...' is what makes bash send a real tab).")
+        path = Path(path_s)
         if not path.exists():
             raise SystemExit(f"{path} does not exist")
         f = pd.read_csv(path, sep=sep or ",", dtype={id_col: str})

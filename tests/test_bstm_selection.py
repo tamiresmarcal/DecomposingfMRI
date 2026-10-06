@@ -8,6 +8,7 @@ that became varied while the document still called it fixed.
 import argparse
 
 import numpy as np
+import pytest
 import pandas as pd
 
 from fmri_decomposition import bstm_selection as B
@@ -112,3 +113,51 @@ class TestHeldFixed:
         for always in ("PCA components", "censor policy", "cross-validation",
                        "covariates"):
             assert always in rows
+
+
+class TestPhenoSpecParsing:
+    """`--pheno PATH:SEP`. The separator is after the LAST colon, so a path that
+    contains one still works -- and a spec with no colon at all must not read the
+    path itself as the separator, which is what rpartition does unguarded."""
+
+    def write(self, tmp_path, name, sep):
+        p = tmp_path / name
+        rows = ["CCID,Age,HADS", "CC01,70,Mild", "CC02,62,Severe"]
+        p.write_text("\n".join(r.replace(",", sep) for r in rows) + "\n")
+        return p
+
+    def test_explicit_comma(self, tmp_path):
+        p = self.write(tmp_path, "t.csv", ",")
+        d = B.read_phenotype([f"{p}:,"], "CCID", "HADS", ["Age"], [])
+        assert len(d) == 2 and d["y"].to_list() == [1, 3]
+
+    def test_explicit_tab(self, tmp_path):
+        p = self.write(tmp_path, "t.tsv", "\t")
+        d = B.read_phenotype([f"{p}:\t"], "CCID", "HADS", ["Age"], [])
+        assert len(d) == 2
+
+    def test_no_separator_defaults_to_comma(self, tmp_path):
+        # Was read as "separator = the whole path", which pandas treats as a
+        # regex; it failed later as "id column not found".
+        p = self.write(tmp_path, "t.csv", ",")
+        d = B.read_phenotype([str(p)], "CCID", "HADS", ["Age"], [])
+        assert len(d) == 2
+
+    def test_a_colon_in_the_path_is_not_the_separator(self, tmp_path):
+        d = tmp_path / "od:d"
+        d.mkdir()
+        p = self.write(d, "t.csv", ",")
+        assert len(B.read_phenotype([f"{p}:,"], "CCID", "HADS", ["Age"], [])) == 2
+
+    def test_a_multi_character_separator_is_refused_by_name(self, tmp_path):
+        p = self.write(tmp_path, "t.csv", ",")
+        with pytest.raises(SystemExit, match="not a single character"):
+            B.read_phenotype([f"{p}:;;"], "CCID", "HADS", ["Age"], [])
+
+    def test_a_numeric_target_bypasses_ORDINAL_LEVELS(self, tmp_path):
+        # A new cohort whose score is 0-21 rather than Normal/Mild/... still
+        # works: to_numeric runs first and the ordinal map is only a fallback.
+        p = tmp_path / "t.csv"
+        p.write_text("CCID,Age,total\nCC01,70,14\nCC02,62,3\n")
+        d = B.read_phenotype([f"{p}:,"], "CCID", "total", ["Age"], [])
+        assert sorted(d["y"].to_list()) == [3, 14]
