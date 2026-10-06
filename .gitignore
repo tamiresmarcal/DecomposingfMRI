@@ -15,7 +15,12 @@ __pycache__/
 .fixture/
 .nilearn_data/
 slurm_logs/
-outputs/
+# Every output tree, not just the live one. `outputs/` alone matched ONLY that
+# name, so the rename this repo's own RUNBOOK recommends before a re-run --
+# `mv outputs outputs.old.$(date +%F)` -- produced an UNIGNORED directory full of
+# derived participant-level data (participants_qc.csv is per-subject motion;
+# latents are keyed by sub). One `git add -A` away from being pushed.
+outputs*/
 
 # Distribution / packaging
 .Python
