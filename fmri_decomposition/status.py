@@ -186,13 +186,21 @@ def stale(lat: pd.DataFrame, tr: pd.DataFrame) -> list[str]:
     return out
 
 
-def behind(lat: pd.DataFrame, tr: pd.DataFrame) -> list[str]:
+def behind(lat: pd.DataFrame, tr: pd.DataFrame, min_k: int, max_k: int
+           ) -> list[str]:
     """State sets that exist in the latents with no transition table.
 
     The mirror of `stale`, and the more common state: stage 4b is cheap and gets
     re-run, stage 5a is a separate job and gets forgotten. Stage 6 then selects
     over whatever subset of the state sets happens to have tables, and reports a
-    winner among them without ever mentioning the ones it never saw.
+    winner without ever mentioning the ones it never saw.
+
+    A state set OUTSIDE the K band does NOT count as behind. Stage 5a skips those
+    deliberately and says so, so flagging them again here reports a correctly
+    working pipeline as broken -- 12 of the 37 problems on the first clean run
+    were this, every one an orphan column that is supposed to have no table. A
+    check that cries wolf on the normal state teaches people to skim past it,
+    which is the opposite of what it is for.
     """
     if lat.empty:
         return []
@@ -201,6 +209,7 @@ def behind(lat: pd.DataFrame, tr: pd.DataFrame) -> list[str]:
             (tr.groupby(["atlas", "window_s"]) if not tr.empty else [])}
     for (a, w), g in lat.groupby(["atlas", "window_s"]):
         have = set().union(*(set(x) for x in g["states"])) if len(g) else set()
+        have = {st for st in have if min_k <= _k_from_name(st) <= max_k}
         todo = sorted(have - done.get((a, w), set()))
         if todo:
             out.append(f"{a} {w}s: {len(todo)} state set(s) in the latents have "
@@ -208,6 +217,14 @@ def behind(lat: pd.DataFrame, tr: pd.DataFrame) -> list[str]:
                        f"Stage 6 would pick a winner without ever seeing them: "
                        f"{todo}")
     return out
+
+
+def _k_from_name(state: str) -> int:
+    """K out of `<Method>_<embedding>_<K>`. An unparseable name counts as usable,
+    so a naming convention that changes cannot silently hide state sets."""
+    tail = state.rsplit("_", 1)[-1]
+    return int(tail) if tail.isdigit() else 1 << 30
+
 
 
 def shard_gap(act: pd.DataFrame, dfcs: pd.DataFrame) -> list[str]:
@@ -335,7 +352,8 @@ def run(args) -> int:
           tr)
     _show("6  SELECTION    targets", sel)
 
-    probs = (problems(lat, args) + stale(lat, tr) + behind(lat, tr)
+    probs = (problems(lat, args) + stale(lat, tr)
+             + behind(lat, tr, args.min_k, args.max_k)
              + shard_gap(act, dfcs))
     print(f"\n{'=' * 70}")
     if probs:

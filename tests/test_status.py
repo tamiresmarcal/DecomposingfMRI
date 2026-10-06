@@ -154,19 +154,19 @@ class TestBehind:
     def test_state_sets_with_no_transition_table(self, tmp_path):
         latents(tmp_path, states=["HMM_pca3_8", "MeanShift_pca3_4"])
         trans(tmp_path, state="HMM_pca3_8")
-        out = S.behind(S.latents(tmp_path), S.transitions(tmp_path))
+        out = S.behind(S.latents(tmp_path), S.transitions(tmp_path), 3, 64)
         assert len(out) == 1
         assert "MeanShift_pca3_4" in out[0] and "HMM_pca3_8" not in out[0]
 
     def test_no_transitions_at_all_lists_every_state_set(self, tmp_path):
         latents(tmp_path, states=["HMM_pca3_8", "MeanShift_pca3_4"])
-        out = S.behind(S.latents(tmp_path), S.transitions(tmp_path))
+        out = S.behind(S.latents(tmp_path), S.transitions(tmp_path), 3, 64)
         assert len(out) == 1 and "2 state set(s)" in out[0]
 
     def test_a_caught_up_cell_says_nothing(self, tmp_path):
         latents(tmp_path, states=["HMM_pca3_8"])
         trans(tmp_path, state="HMM_pca3_8")
-        assert S.behind(S.latents(tmp_path), S.transitions(tmp_path)) == []
+        assert S.behind(S.latents(tmp_path), S.transitions(tmp_path), 3, 64) == []
 
 
 class TestShardGap:
@@ -211,3 +211,36 @@ class TestTransitionPeopleCount:
     def test_shallow_skips_the_people_count(self, tmp_path):
         trans(tmp_path, state="HMM_pca3_8")
         assert S.transitions(tmp_path, deep=False)["subs"].isna().all()
+
+
+class TestBehindIgnoresSkippedK:
+    """Stage 5a deliberately skips a state set outside the K band. Reporting it
+    as "behind" describes a correctly working pipeline as broken -- 12 of the 37
+    problems on the first clean run were exactly this."""
+
+    def test_an_out_of_band_set_is_not_behind(self, tmp_path):
+        latents(tmp_path, states=["HMM_pca3_8", "MeanShift_pca3_1",
+                                  "ThresholdCluster_pca3_512"])
+        trans(tmp_path, state="HMM_pca3_8")
+        assert S.behind(S.latents(tmp_path), S.transitions(tmp_path), 3, 64) == []
+
+    def test_an_in_band_set_is_still_behind(self, tmp_path):
+        latents(tmp_path, states=["HMM_pca3_8", "MeanShift_pca3_1"])
+        trans(tmp_path, state="MeanShift_pca3_1")      # the wrong one has a table
+        out = S.behind(S.latents(tmp_path), S.transitions(tmp_path), 3, 64)
+        assert len(out) == 1 and "HMM_pca3_8" in out[0]
+
+    def test_an_unparseable_name_counts_as_in_band(self):
+        # Tested directly, not through `behind`: a name that does not match
+        # STATE_RE is never discovered as a state column in the first place, so
+        # this fallback is defensive. It matters only if the naming convention
+        # changes, and then it must fail OPEN -- a changed convention should make
+        # state sets noisy, never silently invisible.
+        assert S._k_from_name("Odd_pca3_x") > 64
+        assert S._k_from_name("HMM_pca3_8") == 8
+        assert S._k_from_name("ThresholdCluster_pca3_512") == 512
+
+    def test_a_name_outside_the_convention_is_not_discovered_at_all(self, tmp_path):
+        latents(tmp_path, states=["Odd_pca3_x", "HMM_pca3_8"])
+        found = S.latents(tmp_path)["states"].iloc[0]
+        assert found == ["HMM_pca3_8"]
