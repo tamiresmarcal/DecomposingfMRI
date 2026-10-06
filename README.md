@@ -22,27 +22,27 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
 
 ```
 0    fmriprep / afni_proc            outside this repo -- cohorts arrive preprocessed
-1.1  01_extract.sbatch    (array)    NIfTI     -> parcel timeseries
-     03_finalize.sbatch activation   merge manifests + coverage + L-R
+1.1  extract_activations.sbatch    (array)    NIfTI     -> parcel timeseries
+     finalize.sbatch activation   merge manifests + coverage + L-R
                                      + ISC gate + participants_qc.csv
-1.2  02_dfc.sbatch        (array)    parquet   -> windowed connectivity
-     03_finalize.sbatch dfc          merge manifests
+1.2  extract_dfc.sbatch        (array)    parquet   -> windowed connectivity
+     finalize.sbatch dfc          merge manifests
 3.5  fmri-decomp censor              participants_qc.csv + window flags
                                      -> keep/drop, under a named policy
-4    04_decompose.sbatch             -> latents: PCA + UMAP coordinates, fit on
+4    dimensionality_reduction.sbatch             -> latents: PCA + UMAP coordinates, fit on
                                      the train cohorts, projected onto the rest.
                                      --source dfc      windowed edges, one fit
                                                        per --window-s
                                      --source activation   per-TR frames, written
                                                        to window_s=-1
-4b   04b_cluster.sbatch              latents -> brain-state LABELS, appended to
+4b   clustering.sbatch              latents -> brain-state LABELS, appended to
                                      the same files. threshold / MeanShift / HMM
                                      x pca3 / umap3. Every state definition lives
                                      here; stage 4 defines none.
-5a   05a_transitions.sbatch          labels -> per-subject transition matrices,
+5a   brain_states_transitions.sbatch          labels -> per-subject transition matrices,
                                      one table per state set. The state sets are
                                      discovered per (atlas, aperture).
-5b   05_select.sbatch                rank state sets by how well their
+5b   model_selection.sbatch                rank state sets by how well their
                                      transitions predict a phenotype column,
                                      against non-transition controls
                                      -> outputs/bstm_selection/target=<t>/
@@ -307,7 +307,7 @@ Two files, split by **who owns them**:
 | `meta/cohorts/cohort=<c>/participants_qc.csv` | pipeline | measurement | **nothing** — thresholds live with the models |
 
 `participants_qc.csv` is written by `fmri-decomp diagnose`, which
-`03_finalize.sbatch` already runs after the extract array. So the metrics
+`finalize.sbatch` already runs after the extract array. So the metrics
 appear without a separate step, and ISC is computed once for both the gate and
 the table. It is regenerated from scratch every run and must never be
 hand-edited.
@@ -484,8 +484,8 @@ a config problem — otherwise the pre-flight `validate` is skipped silently and
 the whole chain runs unvalidated. Or submit by hand:
 
 ```bash
-sbatch --array=0-19 slurm/01_extract.sbatch config/ds002837.yaml
-sbatch --array=0-7  slurm/02_dfc.sbatch     config/ds002837.yaml 30 60
+sbatch --array=0-19 slurm/extract_activations.sbatch config/ds002837.yaml
+sbatch --array=0-7  slurm/extract_dfc.sbatch     config/ds002837.yaml 30 60
 ```
 
 Each array task takes `--shard $SLURM_ARRAY_TASK_ID/$SLURM_ARRAY_TASK_COUNT` and
@@ -505,6 +505,6 @@ atomic rename plus skip-if-exists means it redoes only what is missing.
 | `--account=def-aevans` | `--account=rpp-aevans-ab` | the legacy sbatch and the legacy data paths disagree — **check which allocation you mean to charge.** |
 
 Shared files (`manifest.json`, diagnostics, the atlas label CSVs) have exactly
-one writer, in `03_finalize.sbatch`. Array tasks write per-shard manifests into
+one writer, in `finalize.sbatch`. Array tasks write per-shard manifests into
 `meta/shards/`, merged afterwards by `fmri-decomp merge-manifests`. Never let
 workers write `_metadata` / `_common_metadata`.

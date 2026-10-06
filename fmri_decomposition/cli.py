@@ -383,7 +383,7 @@ def cmd_dfc(args) -> int:
 def cmd_diagnose(args) -> int:
     """Coverage, L-R, ISC, and the per-subject QC table.
 
-    `03_finalize.sbatch` runs this after the extract array, which is what makes
+    `finalize.sbatch` runs this after the extract array, which is what makes
     `participants_qc.csv` appear without a separate step in the chain. It also
     means ISC is computed once here and reused for both the gate and the QC
     table, rather than twice.
@@ -539,7 +539,7 @@ def cmd_merge_manifests(args) -> int:
     single-node job -- it writes the consolidated `manifest_<stage>.json`
     directly, and there is nothing here to merge.
 
-    Treating that as an error mattered: `03_finalize.sbatch` runs under
+    Treating that as an error mattered: `finalize.sbatch` runs under
     `set -euo pipefail`, so a non-zero exit here killed the job before
     `diagnose` ever ran, and the cohort silently got no participants_qc.csv.
     The two cases are distinguished by whether the consolidated manifest

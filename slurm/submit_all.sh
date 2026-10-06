@@ -33,7 +33,7 @@ ACCOUNT_ARG=()
 # ------------------------------------------------------------ interpreter ---
 # This script runs on a LOGIN node, but `validate` imports fmri_decomposition,
 # which the login node's bare `python` cannot do. Pick the interpreter exactly
-# the way slurm/01_extract.sbatch does, so the pre-flight check actually runs.
+# the way slurm/extract_activations.sbatch does, so the pre-flight check actually runs.
 #
 # Everything here happens in a subshell where needed: sbatch exports the
 # submitting shell's environment to the job, and a venv activated here would
@@ -100,7 +100,7 @@ fi
 N_RUNS="$(sed -n 's/.*runs_discovered=\([0-9]*\).*/\1/p' <<<"$VALIDATE_OUT")"
 N_ATLAS="$(sed -n "s/^atlases=\[\(.*\)\] config_hash.*/\1/p" <<<"$VALIDATE_OUT" \
            | tr ',' '\n' | grep -c .)"
-CPUS="$(sed -n 's/^#SBATCH --cpus-per-task=\([0-9]*\).*/\1/p' "$HERE/01_extract.sbatch" | head -1)"
+CPUS="$(sed -n 's/^#SBATCH --cpus-per-task=\([0-9]*\).*/\1/p' "$HERE/extract_activations.sbatch" | head -1)"
 CPUS="${CPUS:-1}"
 
 if [[ -n "$N_RUNS" && -n "$N_ATLAS" && "$N_ATLAS" -gt 0 ]]; then
@@ -124,22 +124,22 @@ fi
 
 echo "== stage 2: ${N_EXTRACT} array task(s)"
 EXTRACT_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --array=0-$((N_EXTRACT - 1)) \
-  "$HERE/01_extract.sbatch" "$CONFIG" ${EXTRA_EXTRACT[@]+"${EXTRA_EXTRACT[@]}"})
+  "$HERE/extract_activations.sbatch" "$CONFIG" ${EXTRA_EXTRACT[@]+"${EXTRA_EXTRACT[@]}"})
 echo "   jobid ${EXTRACT_ID}"
 
 echo "== finalize stage 2 (manifest merge + diagnostics + ISC gate)"
 FINAL2_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --dependency=afterok:"${EXTRACT_ID}" \
-  "$HERE/03_finalize.sbatch" "$CONFIG" activation)
+  "$HERE/finalize.sbatch" "$CONFIG" activation)
 echo "   jobid ${FINAL2_ID}"
 
 echo "== stage 3: ${N_DFC} array task(s), gated on the diagnostics passing"
 DFC_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --dependency=afterok:"${FINAL2_ID}" \
-  --array=0-$((N_DFC - 1)) "$HERE/02_dfc.sbatch" "$CONFIG")
+  --array=0-$((N_DFC - 1)) "$HERE/extract_dfc.sbatch" "$CONFIG")
 echo "   jobid ${DFC_ID}"
 
 echo "== finalize stage 3"
 FINAL3_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --dependency=afterok:"${DFC_ID}" \
-  "$HERE/03_finalize.sbatch" "$CONFIG" dfc)
+  "$HERE/finalize.sbatch" "$CONFIG" dfc)
 echo "   jobid ${FINAL3_ID}"
 
 cat <<EOF
@@ -160,5 +160,5 @@ before it starts writing:
 
 a timed-out or preempted task is safe to resubmit as-is; skip-if-exists means
 it redoes only the shards that are missing:
-  sbatch --array=0-$((N_EXTRACT - 1)) $HERE/01_extract.sbatch $CONFIG
+  sbatch --array=0-$((N_EXTRACT - 1)) $HERE/extract_activations.sbatch $CONFIG
 EOF

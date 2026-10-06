@@ -30,7 +30,7 @@ removed from it, with the reason: "corrupted run", "consent withdrawn",
 drops excluded rows before extraction -- and nothing writes it automatically.
 
 QC METRICS ARE NOT HERE. They live in `participants_qc.csv`, written by
-`fmri-decomp diagnose` (which `03_finalize.sbatch` already runs), and the
+`fmri-decomp diagnose` (which `finalize.sbatch` already runs), and the
 thresholds that turn them into exclusions live with the models. The split is
 by ownership: this file is edited by a person and read by the pipeline;
 that one is written by the pipeline and never hand-edited.

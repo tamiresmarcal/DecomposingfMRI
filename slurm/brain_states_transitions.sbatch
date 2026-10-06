@@ -1,8 +1,8 @@
 #!/bin/bash
 # Stage 5a -- per-subject brain-state transition tables, one per state set.
 #
-#   sbatch slurm/05a_transitions.sbatch
-#   sbatch slurm/05a_transitions.sbatch -- --atlas yeo7 --window-s -1
+#   sbatch slurm/brain_states_transitions.sbatch
+#   sbatch slurm/brain_states_transitions.sbatch -- --atlas yeo7 --window-s -1
 #
 # NO ARGUMENTS NEEDED. Every default is the full grid, and the state columns are
 # DISCOVERED from the latents schema rather than named -- a state set added by

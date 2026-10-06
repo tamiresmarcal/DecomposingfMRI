@@ -6,7 +6,7 @@
 # (manifest.json, the diagnostics, and parquet's _metadata if you ever want it)
 # have exactly one writer, in a serial pass afterwards.
 #
-#   sbatch --dependency=afterok:<extract_jobid> slurm/03_finalize.sbatch config.yaml activation
+#   sbatch --dependency=afterok:<extract_jobid> slurm/finalize.sbatch config.yaml activation
 #
 # The `activation` pass also writes participants_qc.csv -- per-subject motion,
 # timing, coverage, scrubbing and registration metrics. That is why there is no
@@ -28,7 +28,7 @@
 
 set -euo pipefail
 
-CONFIG="${1:?usage: sbatch 03_finalize.sbatch <config.yaml> <activation|dfc>}"
+CONFIG="${1:?usage: sbatch finalize.sbatch <config.yaml> <activation|dfc>}"
 STAGE="${2:?stage must be 'activation' or 'dfc'}"
 
 # Per-user settings: interpreter, binds, cache paths. Optional and gitignored;

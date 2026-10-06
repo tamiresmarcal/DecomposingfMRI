@@ -12,7 +12,7 @@
 # hangs on an HTTP timeout, burns its walltime, and dies hours in with a
 # traceback that looks like a bug in fMRIPrep.
 #
-# This is the same trap as NILEARN_DATA in slurm/01_extract.sbatch, one layer
+# This is the same trap as NILEARN_DATA in slurm/extract_activations.sbatch, one layer
 # down. Same fix: fetch on a login node, export the path in the job.
 #
 # Cost: a few GB, once. Re-running is cheap -- TemplateFlow skips what it has.

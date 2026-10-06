@@ -262,7 +262,7 @@ class TestQcNote:
 class TestMergeManifests:
     """An un-sharded run must not abort the finalize job.
 
-    03_finalize.sbatch runs under `set -euo pipefail`, so a non-zero exit from
+    finalize.sbatch runs under `set -euo pipefail`, so a non-zero exit from
     merge-manifests stops `diagnose` from ever running -- which is how the
     cneuromod pilot ended up with no participants_qc.csv.
     """

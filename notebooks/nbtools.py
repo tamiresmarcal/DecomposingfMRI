@@ -458,7 +458,7 @@ def load_participants_qc(cohort: str, root=None) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(
             f"{path} not found -- written by `fmri-decomp diagnose` "
-            f"(03_finalize.sbatch). Run it for cohort={cohort!r}.")
+            f"(finalize.sbatch). Run it for cohort={cohort!r}.")
     return pd.read_csv(path, dtype={"sub": str})
 
 

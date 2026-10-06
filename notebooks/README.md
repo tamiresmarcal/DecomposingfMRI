@@ -26,7 +26,7 @@ partition keys back from the directory names, and does the PCA with
 `numpy.linalg.svd`, so it can be copied out of this repo and still run.
 
 Model selection is **not** in `07`. It is state sets x models x fold seeds --
-hundreds of fits -- so it is `fmri-decomp select` / `slurm/05_select.sbatch`,
+hundreds of fits -- so it is `fmri-decomp select` / `slurm/model_selection.sbatch`,
 parallel over the grid, writing scores, a ranking, comparison figures and refit
 model artifacts to `outputs/bstm_selection/target=<t>/`. `07` keeps the volcano,
 which takes seconds.
@@ -49,7 +49,7 @@ findings.
 
 The decomposition that feeds `06` is **not a notebook** — it is
 `fmri_decomposition/decompose.py`, exposed as `fmri-decomp decompose` and run
-through `slurm/04_decompose.sbatch`. It was a
+through `slurm/dimensionality_reduction.sbatch`. It was a
 notebook (`05_decompose.ipynb`) and outgrew one: 124k training windows x 6,105
 edges is 3 GB in float32, and a notebook keeps every intermediate alive. The
 script is float32 end to end, scales in place, and re-reads one cohort at a
@@ -61,10 +61,10 @@ of several copies of it.
 fmri-decomp decompose --atlas harvardoxford --window-s 30 60 120 300 --dry-run
 
 # one array task per window size
-sbatch --array=0-3 slurm/04_decompose.sbatch harvardoxford 30 60 120 300
+sbatch --array=0-3 slurm/dimensionality_reduction.sbatch harvardoxford 30 60 120 300
 
 # PCA only, no UMAP -- minutes instead of hours
-sbatch --array=0-3 slurm/04_decompose.sbatch harvardoxford 30 60 120 300 -- --no-umap
+sbatch --array=0-3 slurm/dimensionality_reduction.sbatch harvardoxford 30 60 120 300 -- --no-umap
 ```
 
 Which cohorts are fit and which are projected is `--train` / `--project`,

@@ -127,10 +127,20 @@ Run it after every stage. It exits non-zero when it finds something.
 
 ## 3. From zero: the full sequence
 
-### Stage 1–2, per cohort
+Three cohorts prepared, states defined on two of them and projected onto the
+third, then the analysis. Every command below is copy-pasteable in order.
 
-One cohort at a time. `submit_all.sh` chains extract → finalize → dfc → finalize
-with the right dependencies and an ISC gate between them:
+```bash
+cd /project/6008063/tamires/DecomposingfMRI
+source slurm/env.sh
+RUN="apptainer exec --cleanenv --bind /project,/scratch,/home ${FMRIDECOMP_SIF45:?source slurm/env.sh}"
+```
+
+### PHASE 1 — PREPARE (per cohort)
+
+One `submit_all.sh` per cohort. Each chains extract -> finalize -> dfc ->
+finalize with the right dependencies and an ISC gate between them, so the three
+can run at the same time without interfering.
 
 ```bash
 ./slurm/submit_all.sh config/ds002837.yaml
@@ -138,135 +148,149 @@ with the right dependencies and an ISC gate between them:
 ./slurm/submit_all.sh config/camcan_movie.yaml
 ```
 
-Before burning core-hours on a cohort you have not run before:
+For a cohort you have never run, check it first — this is minutes against hours:
 
 ```bash
 $RUN python3 -m fmri_decomposition.cli validate config/<cohort>.yaml
 python3 tools/check_cohort.py config/<cohort>.yaml --all --limit 3
 ```
 
-`submit_all.sh` covers stages 1–2 only, and that is deliberate: it takes one
-cohort config, and stages 3–6 span cohorts.
+**Wait for all three to finish** before going on. Phase 2 fits across cohorts,
+so a cohort that is still being written would silently be left out of the fit:
 
-### Stage 2.5 — censor
+```bash
+squeue -u $USER                       # empty = done
+$RUN python3 -m fmri_decomposition.cli status | sed -n '/^1  ACTIV/,/^3 /p'
+```
+
+### Between the phases — censor
+
+Not an sbatch, and deliberately so. It is the one place a measurement becomes a
+decision, it takes seconds, and the numbers it prints are ones you should read
+rather than let scroll past in a job log. It also spans cohorts, so it does not
+belong in a per-cohort script.
 
 ```bash
 $RUN python3 -m fmri_decomposition.cli censor --policy config/censor/motion.yaml
 ```
 
-Writes `outputs/censor/policy=motion/cohort=<c>/subjects.parquet`. The policy
-name is hashed into every fit that uses it, so two runs under different policies
-can never be mistaken for each other.
+Look at the kept/total per cohort before continuing. To try a different gate,
+**copy** the YAML and change its `name` — never edit `motion.yaml` in place, or
+outputs already on disk will claim a policy that no longer means what it says.
 
-To try a different gate, **copy the YAML** and change its `name` — do not edit
-`motion.yaml` in place, or old outputs will claim a policy that no longer means
-what it says.
+### PHASE 2 — DEFINE STATES (across cohorts)
 
-### Stage 3 — decompose
-
-`--censor-policy` is **required**. Pass `none` to fit on everything, which is a
-different analysis and is recorded as one.
+`--train` are the cohorts the fit sees; everything else is projected onto it.
+A cohort carrying the phenotype you want to predict should be **projected**,
+never trained on.
 
 ```bash
-# the windowed apertures: one array task per window size
-sbatch --array=0-3 slurm/04_decompose.sbatch harvardoxford 30 60 120 300 \
-  -- --censor-policy motion
-sbatch --array=0-3 slurm/04_decompose.sbatch yeo7         30 60 120 300 \
-  -- --censor-policy motion
-sbatch --array=0-3 slurm/04_decompose.sbatch networks     30 60 120 300 \
-  -- --censor-policy motion
+TRAIN="--train ds002837 cneuromod --project camcan"
+POL="--censor-policy motion"
 
-# the frame aperture: one task, because a frame has no window to vary
-sbatch --array=0-0 slurm/04_decompose.sbatch harvardoxford -1 \
-  -- --source activation --censor-policy motion
+# dimensionality reduction: PCA + UMAP coordinates
+#   windowed apertures -- one array task per window size
+for A in harvardoxford yeo7 networks; do
+  sbatch --array=0-3 slurm/dimensionality_reduction.sbatch $A 30 60 120 300 \
+    -- $TRAIN $POL
+done
+#   the frame aperture -- one task, a frame has no window to vary
+for A in harvardoxford yeo7 networks; do
+  sbatch --array=0-0 slurm/dimensionality_reduction.sbatch $A -1 \
+    -- --source activation $TRAIN $POL
+done
 ```
 
-Check the memory first — it is the training matrix, rows x features x 4 bytes:
-
-```bash
-$RUN python3 -m fmri_decomposition.cli decompose \
-    --atlas harvardoxford --window-s 30 --censor-policy motion --dry-run
-```
-
-**`decompose` skips a cell whose latents already exist.** That is what you want
-when resuming and *not* what you want when re-running with changed settings —
-pass `--overwrite`, or the job will finish in 20 seconds having done nothing.
-
-### Stage 4 — cluster
+Wait for those, then look before spending hours on the HMM:
 
 ```bash
 $RUN python3 -m fmri_decomposition.cli cluster --check \
     --atlas harvardoxford yeo7 networks --window-s 30 60 120 300 -1
+```
 
+```bash
+# clustering: coordinates -> brain-state labels, appended to the same files
 for A in harvardoxford yeo7 networks; do
-  sbatch slurm/04b_cluster.sbatch $A 30 60 120 300 -1
+  sbatch slurm/clustering.sbatch $A 30 60 120 300 -1 -- --train ds002837 cneuromod
 done
 ```
 
-Run `--check` first. This stage's cost is the HMM — hours at K=27 across a full
-grid — and finding a missing embedding after three of those have run is the
-expensive way to find out.
-
 **One job per atlas, never an array.** Every clusterer for an (atlas, aperture)
-appends to the same parquet file, and parquet cannot append — the file is
-rewritten. Two array tasks would each rename over the other's columns.
+appends to the same parquet, and parquet cannot append — the file is rewritten,
+so two array tasks would each rename over the other's columns.
 
-### Stage 5 — transitions
+### PHASE 3 — ANALYSE (the cohort with phenotype)
 
 ```bash
-$RUN python3 -m fmri_decomposition.cli transitions --check \
-    --window-s 30 60 120 300 -1
-sbatch slurm/05a_transitions.sbatch -- --window-s 30 60 120 300 -1
+$RUN python3 -m fmri_decomposition.cli transitions --check --window-s 30 60 120 300 -1
+sbatch slurm/brain_states_transitions.sbatch -- --window-s 30 60 120 300 -1
 ```
 
-No arguments needed beyond the apertures: the state sets are **discovered** from
-the latents schema, per (atlas, aperture), so a method you add later is picked up
-without editing anything.
-
-### Stage 6 — selection
+Then, once that finishes:
 
 ```bash
-sbatch --time=06:00:00 slurm/05_select.sbatch additional_HADS_anx_category
-sbatch --time=06:00:00 slurm/05_select.sbatch additional_HADS_dep_category
+for Y in additional_HADS_anx_category additional_HADS_dep_category; do
+  sbatch --time=06:00:00 slurm/model_selection.sbatch $Y
+done
 ```
 
-Writes `outputs/bstm_selection/target=<t>/` — `summary.csv` (the ranking),
-`scores.parquet` (every fit), `DESIGN.md` (what was compared and what was held
-fixed) and `figures/`.
+`model_selection` **wipes its target directory before writing** — back up a
+result you care about first.
 
-**This stage wipes its target directory before writing.** Back up a result you
-care about before re-running.
-
-### The whole thing, chained
-
-`sbatch` returns immediately, so stages run concurrently unless you say
-otherwise — and stage 3 rewrites the file stage 4 appends to. Let SLURM enforce
-the order:
+### Finally
 
 ```bash
-D=$(for A in harvardoxford yeo7 networks; do
-      sbatch --parsable --array=0-0 slurm/04_decompose.sbatch $A -1 \
-        -- --source activation --censor-policy motion --overwrite | cut -d';' -f1
+$RUN python3 -m fmri_decomposition.cli status | sed -n '/^======/,$p'
+column -s, -t outputs/bstm_selection/target=additional_HADS_anx_category/summary.csv | head -12
+```
+
+### PHASES 2-3 as one chained submission
+
+Phase 1 stays separate: its cohorts are independent and `submit_all.sh` already
+chains within each. Phases 2-3 are one dependency graph, and `sbatch` returns
+immediately, so without `--dependency` they would all start at once — and
+dimensionality reduction rewrites the very file clustering appends to.
+
+```bash
+source slurm/env.sh
+ATLASES="harvardoxford yeo7 networks"
+TRAIN="--train ds002837 cneuromod --project camcan"
+POL="--censor-policy motion"
+APERTURES="30 60 120 300 -1"
+
+D=$(for A in $ATLASES; do
+      sbatch --parsable --array=0-3 slurm/dimensionality_reduction.sbatch \
+        $A 30 60 120 300 -- $TRAIN $POL | cut -d';' -f1
+      sbatch --parsable --array=0-0 slurm/dimensionality_reduction.sbatch \
+        $A -1 -- --source activation $TRAIN $POL | cut -d';' -f1
     done | paste -sd:)
+[[ -n "$D" ]] || { echo "nothing submitted"; exit 1; }
 
-C=$(for A in harvardoxford yeo7 networks; do
+C=$(for A in $ATLASES; do
       sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$D \
-        slurm/04b_cluster.sbatch $A -1 | cut -d';' -f1
+        slurm/clustering.sbatch $A $APERTURES \
+        -- --train ds002837 cneuromod | cut -d';' -f1
     done | paste -sd:)
 
 T=$(sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$C \
-      slurm/05a_transitions.sbatch -- --window-s 30 60 120 300 -1 | cut -d';' -f1)
+      slurm/brain_states_transitions.sbatch -- --window-s $APERTURES | cut -d';' -f1)
 
 for Y in additional_HADS_anx_category additional_HADS_dep_category; do
   sbatch --kill-on-invalid-dep=yes --dependency=afterok:$T --time=06:00:00 \
-    slurm/05_select.sbatch $Y
+    slurm/model_selection.sbatch $Y
 done
+
+squeue -u $USER -o "%.12i %.32j %.9T %.11M %R"
 ```
 
 `--kill-on-invalid-dep=yes` cancels the dependents when something upstream fails,
-instead of leaving them pending for hours.
+rather than leaving them pending for hours on a dependency that will never be
+satisfied.
 
----
+Rough walltimes, measured: dimensionality reduction 8-50 min per atlas (UMAP
+transform on the largest cohort is the long pole), clustering ~25 min per atlas,
+transitions minutes, model selection ~90 min. End to end for phases 2-3, about
+three hours.
 
 ## 4. Adding a new cohort
 

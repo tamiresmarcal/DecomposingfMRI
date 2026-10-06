@@ -34,7 +34,7 @@ That is also why the output is `participants_qc.csv` and not a column added to
                           `diagnose` run. Never hand-edited; an edit here is
                           lost on the next finalize.
 
-Written by `fmri-decomp diagnose`, which `03_finalize.sbatch` already runs
+Written by `fmri-decomp diagnose`, which `finalize.sbatch` already runs
 after the extract array -- so the metrics appear without a separate step, and
 ISC is computed once rather than twice.
 

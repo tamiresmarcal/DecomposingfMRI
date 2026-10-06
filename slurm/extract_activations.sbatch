@@ -1,7 +1,7 @@
 #!/bin/bash
 # Stage 2 -- activation. One SLURM array task per shard of the run list.
 #
-#   sbatch --array=0-19 slurm/01_extract.sbatch config/ds002837.yaml
+#   sbatch --array=0-19 slurm/extract_activations.sbatch config/ds002837.yaml
 #
 # The array index and the array size are read from SLURM, so the same file
 # works for 4 subjects or 650. Set the array range to the number of shards you
@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-CONFIG="${1:?usage: sbatch 01_extract.sbatch <config.yaml> [extra cli args]}"
+CONFIG="${1:?usage: sbatch extract_activations.sbatch <config.yaml> [extra cli args]}"
 shift || true
 # Anything after the config is forwarded to `fmri-decomp extract`. The one you
 # will almost always need is --no-strict: a cohort with no fixed

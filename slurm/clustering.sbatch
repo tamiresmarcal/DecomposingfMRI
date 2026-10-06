@@ -1,62 +1,78 @@
 #!/bin/bash
-# Stage 5b -- rank state sets by how well their transitions predict a phenotype.
+# Stage 4b -- add brain-state definitions to latents that already exist.
 #
-#   sbatch slurm/05_select.sbatch additional_HADS_anx_category
-#   sbatch slurm/05_select.sbatch additional_HADS_dep_category -- --models ridge hgb lgbm
+#   sbatch slurm/clustering.sbatch harvardoxford 30 60 120 300
+#   sbatch slurm/clustering.sbatch yeo7 -1
+#   sbatch slurm/clustering.sbatch yeo7 30 -- --methods hmm --k 8
 #
-# --models defaults to `ridge hgb`, both of which are sklearn. `lgbm` needs
-# lightgbm, which containers/stage45.def pins but an older build of the image may
-# not carry; bstm_selection.make_model says so by name and offers hgb, the same
-# algorithm family. So lightgbm is NOT checked up front -- doing that blocked a
-# default run that never wanted it.
+# LOOK AT THE GRID FIRST, on a login node -- it fits nothing and takes seconds:
 #
-# ONE JOB, NOT AN ARRAY. The grid (state sets x models x fold seeds) is
-# parallelised inside the process with joblib, because every cell needs the same
-# handful of small tables in memory and splitting across nodes would re-read and
-# re-join them per task for no gain. Ask for cores, not array indices.
+#   fmri-decomp cluster --check --atlas harvardoxford yeo7 networks \
+#                       --window-s 15 30 60 120 300 -1
 #
-# COST. The fits are the whole cost and they scale as
-# state_sets x models x seeds x 5 folds. At 16 state sets, 2 models and 5 seeds
-# that is 800 fits; ridge is milliseconds each, boosting is seconds. Boosting
-# dominates, so --cpus-per-task is what buys walltime.
+# It prints, per (atlas, aperture), which cohorts and embeddings are there, how
+# many state columns a re-run would REPLACE, and what would be written. The HMM
+# is the cost here and it is hours at K=27 across a full grid; finding a missing
+# embedding after three of those have run is the expensive way to find out.
 #
-# MEMORY is not the constraint: every transitions table is ~100 KB, so the whole
-# grid is a few MB. 16G is already generous.
+# NOT AN ARRAY, and deliberately so. Every clusterer for a given
+# (atlas, aperture) is fitted on the SAME embedding block and the labels are
+# appended to the SAME parquet file. Two array tasks writing different state
+# columns into one file would race: each reads the file, adds its column, and
+# renames over the other's work, so the one that finishes second wins and the
+# first column is gone. One task per atlas, every aperture inside it.
+#
+# COST is the clusterers, and they are not alike. Threshold is a quantile
+# transform (seconds). MeanShift is O(n_fit^2) in the bandwidth search, capped
+# by --meanshift-fit-rows. HMM is Baum-Welch over the full sequence and is by
+# far the slowest at K=27 -- it dominates the walltime, so --hmm-iter is the
+# knob if this times out.
+#
+# MEMORY is small: only three embedding columns per row are ever loaded, never
+# the edges. Even Harvard-Oxford at 15 s is a few hundred MB.
+#
+# WHAT GETS WRITTEN. Label columns are APPENDED to
+# latents/atlas=<a>/window_s=<w>/cohort=<c>/data.parquet, with per-column
+# provenance in the schema metadata. The embeddings are not refitted, so this is
+# safe to re-run when a new clusterer is added -- it does not redo the ones that
+# already work.
 
-#SBATCH --job-name=fmridecomp_select
+#SBATCH --job-name=fmridecomp_cluster
 #SBATCH --account=rpp-aevans-ab
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=16G
-#SBATCH --time=03:00:00
-#SBATCH --output=slurm_logs/select_%j.out
-#SBATCH --error=slurm_logs/select_%j.err
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=32G
+#SBATCH --time=08:00:00
+#SBATCH --output=slurm_logs/cluster_%j.out
+#SBATCH --error=slurm_logs/cluster_%j.err
 
 set -euo pipefail
 
-TARGET="${1:?usage: sbatch 05_select.sbatch <phenotype_column> [-- extra args]}"
+ATLAS="${1:?usage: sbatch clustering.sbatch <atlas> <window_s> [...] [-- extra args]}"
 shift
 
-# Anything after a bare `--` is forwarded verbatim, e.g.
-#   sbatch slurm/05_select.sbatch <col> -- --models ridge hgb lgbm --seeds 0 1 2
-EXTRA=(); seen_sep=0
+# Window sizes up to a bare `--`; anything after it is forwarded verbatim.
+WINDOWS=(); EXTRA=(); seen_sep=0
 for a in "$@"; do
   if [[ ${seen_sep} -eq 1 ]]; then EXTRA+=("$a")
   elif [[ "$a" == "--" ]]; then seen_sep=1
-  # `${a!r}` would be python; in bash that is a bad substitution and the error
-  # handler would itself die with a confusing message instead of this one.
-  else echo "unexpected argument '$a' -- put extra args after a bare --" >&2
-       exit 1; fi
+  else WINDOWS+=("$a"); fi
 done
+if [[ ${#WINDOWS[@]} -eq 0 ]]; then
+  echo "give at least one window size (-1 is the activation aperture)" >&2
+  exit 1
+fi
 
-# The estimators are single-threaded by construction (see bstm_selection.make_model):
-# joblib owns the parallelism, and a threaded estimator inside a joblib worker
-# oversubscribes the node and runs slower than either alone.
-export OMP_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export OPENBLAS_NUM_THREADS=1
-export NUMBA_NUM_THREADS=1
+_ENV_SH="${SLURM_SUBMIT_DIR:-$PWD}/slurm/env.sh"
+[[ -f "$_ENV_SH" ]] && source "$_ENV_SH"
 
-echo "host=$(hostname) target=${TARGET} cpus=${SLURM_CPUS_PER_TASK:-1}"
+# hmmlearn and MeanShift both go through BLAS; one pool sized to the task beats
+# several fighting over the same cores.
+export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
+export MKL_NUM_THREADS="${OMP_NUM_THREADS}"
+export OPENBLAS_NUM_THREADS="${OMP_NUM_THREADS}"
+export NUMBA_NUM_THREADS="${OMP_NUM_THREADS}"
+
+echo "host=$(hostname) atlas=${ATLAS} windows=${WINDOWS[*]} cpus=${OMP_NUM_THREADS}"
 
 # Stages 4 and 5 need the OTHER image. containers/README.md: stages 2-3 run in
 # fmri_decomp.sif, stages 4-5 in fmri_decomp_stage45.sif, which is where Stan,
@@ -70,8 +86,6 @@ DEPS="sklearn"
 if [[ -n "${SIF}" ]]; then
   module load apptainer 2>/dev/null || module load apptainer/1.3.5
   BINDS="${FMRIDECOMP_BINDS:-/project,/scratch,/home}"
-  # --cleanenv keeps the host's PYTHONPATH out of the container, where it can
-  # shadow container packages with host builds for a different Python.
   RUN=(apptainer exec --cleanenv --bind "${BINDS}" --pwd "${PWD}" \
        "${SIF}" python3)
   # Fail in seconds rather than after the first fit, and name the module that is
@@ -145,9 +159,7 @@ else
   RUN=(python3)
 fi
 
-"${RUN[@]}" -m fmri_decomposition.cli select \
-    --target "${TARGET}" \
-    --n-jobs "${SLURM_CPUS_PER_TASK:-1}" \
-    ${EXTRA[@]+"${EXTRA[@]}"}
+"${RUN[@]}" -m fmri_decomposition.cli cluster \
+    --atlas "${ATLAS}" --window-s "${WINDOWS[@]}" ${EXTRA[@]+"${EXTRA[@]}"}
 
-echo "target=${TARGET} done"
+echo "atlas=${ATLAS} done"

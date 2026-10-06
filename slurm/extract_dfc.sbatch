@@ -1,8 +1,8 @@
 #!/bin/bash
 # Stage 3 -- DFC. Cheap and re-run often: it reads parquet, never the NIfTI.
 #
-#   sbatch --array=0-3 slurm/02_dfc.sbatch config/ds002837.yaml
-#   sbatch --array=0-3 slurm/02_dfc.sbatch config/ds002837.yaml 30 60
+#   sbatch --array=0-3 slurm/extract_dfc.sbatch config/ds002837.yaml
+#   sbatch --array=0-3 slurm/extract_dfc.sbatch config/ds002837.yaml 30 60
 #
 # Extra positional arguments restrict the window sizes, so re-running a single
 # window size after changing your mind costs one short job rather than a full
@@ -33,7 +33,7 @@
 
 set -euo pipefail
 
-CONFIG="${1:?usage: sbatch 02_dfc.sbatch <config.yaml> [window_s ...]}"
+CONFIG="${1:?usage: sbatch extract_dfc.sbatch <config.yaml> [window_s ...]}"
 shift || true
 WINDOWS=("$@")
 
