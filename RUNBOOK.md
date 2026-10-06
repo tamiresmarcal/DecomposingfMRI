@@ -138,14 +138,22 @@ RUN="apptainer exec --cleanenv --bind /project,/scratch,/home ${FMRIDECOMP_SIF45
 
 ### PHASE 1 — PREPARE (per cohort)
 
-One `activation_and_dfc.sh` per cohort. Each chains extract -> finalize -> dfc ->
-finalize with the right dependencies and an ISC gate between them, so the three
-can run at the same time without interfering.
+One `activation_and_dfc.sh` per cohort. Each chains
+extract -> finalize -> dfc -> finalize -> censor with the right dependencies and
+an ISC gate between them, so the three can run at the same time without
+interfering. When the last job of one exits, that cohort is completely prepared.
 
 ```bash
 ./slurm/activation_and_dfc.sh config/ds002837.yaml
 ./slurm/activation_and_dfc.sh config/cneuromod_friends.yaml
 ./slurm/activation_and_dfc.sh config/camcan_movie.yaml
+```
+
+The censor policy defaults to `config/censor/motion.yaml`. Override it without
+editing the script:
+
+```bash
+FMRIDECOMP_CENSOR=config/censor/strict.yaml ./slurm/activation_and_dfc.sh config/camcan_movie.yaml
 ```
 
 For a cohort you have never run, check it first — this is minutes against hours:
@@ -163,20 +171,31 @@ squeue -u $USER                       # empty = done
 $RUN python3 -m fmri_decomposition.cli status | sed -n '/^1  ACTIV/,/^3 /p'
 ```
 
-### Between the phases — censor
-
-Not an sbatch, and deliberately so. It is the one place a measurement becomes a
-decision, it takes seconds, and the numbers it prints are ones you should read
-rather than let scroll past in a job log. It also spans cohorts, so it does not
-belong in a per-cohort script.
+Then read the gate, which is the one number in phase 1 worth looking at by eye —
+it is a decision, not a measurement:
 
 ```bash
-$RUN python3 -m fmri_decomposition.cli censor --policy config/censor/motion.yaml
+grep -E 'kept|policy' slurm_logs/censor_*.out
 ```
 
-Look at the kept/total per cohort before continuing. To try a different gate,
-**copy** the YAML and change its `name` — never edit `motion.yaml` in place, or
-outputs already on disk will claim a policy that no longer means what it says.
+### Changing your mind about the gate
+
+Re-gating is cheap and needs **only** the censor step — nothing upstream is
+touched, because the threshold is the last thing phase 1 does and the stages
+that consume it select by name:
+
+```bash
+cp config/censor/motion.yaml config/censor/strict.yaml
+$EDITOR config/censor/strict.yaml                 # change `name:` too
+sbatch slurm/censor.sbatch config/camcan_movie.yaml config/censor/strict.yaml
+```
+
+Then rebuild phase 2 onward with `--censor-policy strict`. The old decision
+stays on disk beside the new one, so both remain reproducible.
+
+**Never edit a policy in place.** Outputs already written record the policy by
+*name*; editing the file they came from leaves them claiming a gate that no
+longer means what it says.
 
 ### PHASE 2 — DEFINE STATES (across cohorts)
 

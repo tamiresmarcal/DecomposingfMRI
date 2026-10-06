@@ -12,6 +12,13 @@
 set -euo pipefail
 
 CONFIG="${1:?usage: activation_and_dfc.sh <config.yaml> [n_extract_shards] [n_dfc_shards]}"
+
+# The censor policy this cohort is gated under. Overridable without editing this
+# script, because changing the gate is meant to be cheap:
+#   FMRIDECOMP_CENSOR=config/censor/strict.yaml ./slurm/activation_and_dfc.sh config/x.yaml
+# and re-gating after everything has run needs only `sbatch slurm/censor.sbatch`,
+# never this script again.
+CENSOR_POLICY="${FMRIDECOMP_CENSOR:-config/censor/motion.yaml}"
 N_EXTRACT="${2:-8}"   # see the sizing check below
 N_DFC="${3:-8}"
 
@@ -142,6 +149,16 @@ FINAL3_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --dependency
   "$HERE/finalize.sbatch" "$CONFIG" dfc)
 echo "   jobid ${FINAL3_ID}"
 
+# The subject gate only needs participants_qc.csv, which the ACTIVATION finalize
+# writes -- so this could run beside stage 3. It is gated on the dfc finalize
+# anyway, because the point of putting it here is that the cohort is completely
+# prepared when this script's last job exits, and five seconds of parallelism is
+# not worth a second meaning for "done".
+echo "== censor (${CENSOR_POLICY})"
+CENSOR_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --dependency=afterok:"${FINAL3_ID}" \
+  "$HERE/censor.sbatch" "$CONFIG" "${CENSOR_POLICY}")
+echo "   jobid ${CENSOR_ID}"
+
 cat <<EOF
 
 submitted. watch with:
@@ -151,7 +168,15 @@ submitted. watch with:
 per-subject QC (motion, timing, coverage, scrubbing, registration) is written by
 the activation finalize -- no separate step:
   outputs/meta/cohorts/cohort=<cohort>/participants_qc.csv
-It is measurement only. Thresholds belong with the models.
+It is measurement only. The threshold is applied by the censor job above, under
+a policy that is named and hashed:
+  outputs/censor/policy=<name>/cohort=<cohort>/subjects.parquet
+  grep -E 'kept|policy' slurm_logs/censor_${CENSOR_ID}.out
+
+to re-gate later, copy the policy and run ONLY the censor step -- nothing
+upstream is touched and the old decision stays on disk beside the new one:
+  cp config/censor/motion.yaml config/censor/strict.yaml   # edit `name:` too
+  sbatch slurm/censor.sbatch $CONFIG config/censor/strict.yaml
 
 stage 3's atlas x window plan -- rows, edge counts, estimated size, and any
 pair where every window would be rank_deficient -- is printed by array task 0

@@ -5,6 +5,7 @@ burns core-hours, so anything that must not reach a compute node has to fail
 here. tools/check_cohort.py is more thorough but nobody's submit script calls
 it.
 """
+import re
 from pathlib import Path
 
 import pytest
@@ -69,3 +70,50 @@ class TestPathCollisions:
 
     def test_no_runs_is_not_a_collision(self, cfg):
         assert _path_collisions(cfg, []) == []
+
+
+class TestDriverReferencesRealScripts:
+    """Every script activation_and_dfc.sh submits has to exist.
+
+    sbatch resolves the path at submit time, so a rename that misses one
+    reference fails only after the jobs before it are already queued -- and
+    `set -euo pipefail` then aborts the driver with half a chain submitted and
+    the rest of the dependency graph never built. Cheap to catch here instead.
+    """
+
+    SLURM = Path(__file__).resolve().parent.parent / "slurm"
+
+    @pytest.fixture
+    def submitted(self):
+        """The scripts the driver sbatches, in submission order.
+
+        Only the part before the closing heredoc: that text is documentation
+        printed to the user, and the commands quoted in it are deliberately
+        NOT what this script runs. Line continuations are folded first, since
+        every sbatch call here spans two lines.
+        """
+        body = (self.SLURM / "activation_and_dfc.sh").read_text().split("cat <<EOF")[0]
+        body = body.replace("\\\n", " ")
+        return re.findall(r'sbatch\b[^\n]*?"\$HERE/([A-Za-z0-9_.]+)"', body)
+
+    def test_every_submitted_script_exists(self, submitted):
+        assert submitted, "found no sbatch'd \"$HERE/<script>\" to check"
+        missing = sorted({n for n in submitted if not (self.SLURM / n).is_file()})
+        assert not missing, f"activation_and_dfc.sh submits missing script(s): {missing}"
+
+    def test_the_chain_covers_every_per_cohort_stage(self, submitted):
+        """The chain is the definition of "this cohort is prepared"."""
+        for script in ("extract_activations.sbatch", "finalize.sbatch",
+                       "extract_dfc.sbatch", "censor.sbatch"):
+            assert script in submitted, f"{script} dropped from the chain"
+
+    def test_censor_is_submitted_last(self, submitted):
+        """Re-gating is only cheap while nothing in the chain follows censor.
+
+        If a later job depended on the censor job, changing the policy would
+        mean re-running that too, and `sbatch censor.sbatch` alone would no
+        longer be the whole answer -- which is what README and RUNBOOK both
+        promise it is.
+        """
+        assert submitted[-1] == "censor.sbatch", \
+            f"submitted after censor: {submitted[submitted.index('censor.sbatch') + 1:]}"

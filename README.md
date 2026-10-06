@@ -27,8 +27,9 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      + ISC gate + participants_qc.csv
 1.2  extract_dfc.sbatch        (array)    parquet   -> windowed connectivity
      finalize.sbatch dfc          merge manifests
-3.5  fmri-decomp censor              participants_qc.csv + window flags
-                                     -> keep/drop, under a named policy
+3.5  censor.sbatch                  participants_qc.csv + window flags
+                                     -> keep/drop, under a named policy.
+                                     Last link of the per-cohort chain.
 4    dimensionality_reduction.sbatch             -> latents: PCA + UMAP coordinates, fit on
                                      the train cohorts, projected onto the rest.
                                      --source dfc      windowed edges, one fit
@@ -51,7 +52,7 @@ any  fmri-decomp status              read-only: what every stage holds, and the
                                      disagreements that span two of them
 ```
 
-`03_finalize` runs twice, taking the stage as an argument. The activation pass
+`finalize.sbatch` runs twice, taking the stage as an argument. The activation pass
 is where the ISC gate lives, and `--dependency=afterok` on the DFC array is
 what stops stage 3 from running on misaligned data.
 
@@ -356,8 +357,18 @@ fmri-decomp censor --policy config/censor/default.yaml \
     --stage dfc --atlas harvardoxford --window-s 30
 ```
 
-It reads only QC columns, never imaging data, and runs in seconds — so it is a
-login-node command, not a SLURM job. It writes:
+It reads only QC columns, never imaging data, and runs in seconds. It is the
+last link of the per-cohort chain, so `activation_and_dfc.sh` submits it for you
+(`slurm/censor.sbatch`, overridable with `FMRIDECOMP_CENSOR=<policy.yaml>`); run
+it by hand for a different gate, which is the only thing a change of mind costs:
+
+```bash
+sbatch slurm/censor.sbatch config/ds002837.yaml config/censor/strict.yaml
+```
+
+Being last is what makes that true — nothing upstream depends on the threshold,
+and consumers select by `--censor-policy <name>`, so re-gating never re-extracts
+anything. It writes:
 
 ```
 outputs/censor/policy=<name>/cohort=<c>/subjects.parquet
@@ -474,8 +485,15 @@ Then:
 ```
 
 That chains: extract array (20 tasks) → finalize + ISC gate → dfc array
-(8 tasks) → merge manifests, with `afterok` between each. It creates
-`slurm_logs/` itself.
+(8 tasks) → merge manifests → censor, with `afterok` between each. When its last
+job exits, that cohort is completely prepared. It creates `slurm_logs/` itself.
+
+The gate defaults to `config/censor/motion.yaml`; name another without editing
+the script:
+
+```bash
+FMRIDECOMP_CENSOR=config/censor/strict.yaml ./slurm/activation_and_dfc.sh config/ds002837.yaml
+```
 
 An interpreter is not optional: a login node's bare `python` cannot import
 `fmri_decomposition`, and neither can a compute node's. `activation_and_dfc.sh` checks
