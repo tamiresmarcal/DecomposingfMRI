@@ -4,9 +4,14 @@ Stages 2 (activation) and 3 (DFC) of the naturalistic-viewing pipeline.
 Cohort-specific knowledge lives in `config.py` and `cohort.py`; nothing
 downstream touches a filesystem path or a TR.
 
+**Running it from zero — including after a wipe, or for a new cohort — is
+[`RUNBOOK.md`](RUNBOOK.md).** This file is what the pieces are and how the
+outputs are laid out.
+
 ```bash
 pip install -e ".[test,atlases]"
 ./run_tests.sh                       # unit tests + synthetic end-to-end run
+fmri-decomp status                   # what is on disk, and what disagrees
 fmri-decomp validate  config/ds002837.yaml
 fmri-decomp extract   config/ds002837.yaml --n-jobs 8
 fmri-decomp dfc       config/ds002837.yaml --dry-run       # rows before compute
@@ -24,14 +29,26 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
      03_finalize.sbatch dfc          merge manifests
 3.5  fmri-decomp censor              participants_qc.csv + window flags
                                      -> keep/drop, under a named policy
-4    fmri-decomp decompose           windowed DFC -> latents, fit on some
-                                     cohorts and projected onto others
-5a   fmri-decomp transitions         latents -> per-subject brain-state
-                                     transition matrices, one per state set
+4    04_decompose.sbatch             -> latents: PCA + UMAP coordinates, fit on
+                                     the train cohorts, projected onto the rest.
+                                     --source dfc      windowed edges, one fit
+                                                       per --window-s
+                                     --source activation   per-TR frames, written
+                                                       to window_s=-1
+4b   04b_cluster.sbatch              latents -> brain-state LABELS, appended to
+                                     the same files. threshold / MeanShift / HMM
+                                     x pca3 / umap3. Every state definition lives
+                                     here; stage 4 defines none.
+5a   05a_transitions.sbatch          labels -> per-subject transition matrices,
+                                     one table per state set. The state sets are
+                                     discovered per (atlas, aperture).
 5b   05_select.sbatch                rank state sets by how well their
                                      transitions predict a phenotype column,
                                      against non-transition controls
                                      -> outputs/bstm_selection/target=<t>/
+
+any  fmri-decomp status              read-only: what every stage holds, and the
+                                     disagreements that span two of them
 ```
 
 `03_finalize` runs twice, taking the stage as an argument. The activation pass
@@ -64,8 +81,20 @@ outputs/
 │       ├── window_s=60/cohort=ds002837/task=500daysofsummer/sub=1/data.parquet
 │       └── window_s=120/cohort=cneuromod/task=s01e01a/sub=01/data.parquet
 │
-├── latents/                                      STAGE 4 — reserved, adds model=
-│   └── atlas=.../window_s=.../model=pca50/cohort=.../task=.../sub=.../
+├── censor/                                       STAGE 3.5 — the keep/drop decision
+│   └── policy=motion/cohort=camcan/subjects.parquet
+│
+├── latents/                                      STAGE 4 — coordinates, + STAGE 4b labels
+│   └── atlas=yeo7/window_s=30/cohort=camcan/data.parquet
+│       window_s=-1 is the per-TR aperture. The state-label columns stage 4b
+│       adds live INSIDE these files, with per-column provenance in the schema.
+│
+├── transitions/                                  STAGE 5a — one table per state set
+│   └── atlas=yeo7/window_s=30/states=HMM_pca3_8/cohort=camcan/subjects.parquet
+│
+├── bstm_selection/                               STAGE 5b — the ranking
+│   └── target=additional_HADS_anx_category/
+│       ├── summary.csv  scores.parquet  DESIGN.md  figures/  models/
 │
 └── meta/
     ├── atlas-harvardoxford_labels.csv            atlas-level: cohort-independent
