@@ -138,14 +138,14 @@ RUN="apptainer exec --cleanenv --bind /project,/scratch,/home ${FMRIDECOMP_SIF45
 
 ### PHASE 1 — PREPARE (per cohort)
 
-One `submit_all.sh` per cohort. Each chains extract -> finalize -> dfc ->
+One `activation_and_dfc.sh` per cohort. Each chains extract -> finalize -> dfc ->
 finalize with the right dependencies and an ISC gate between them, so the three
 can run at the same time without interfering.
 
 ```bash
-./slurm/submit_all.sh config/ds002837.yaml
-./slurm/submit_all.sh config/cneuromod_friends.yaml
-./slurm/submit_all.sh config/camcan_movie.yaml
+./slurm/activation_and_dfc.sh config/ds002837.yaml
+./slurm/activation_and_dfc.sh config/cneuromod_friends.yaml
+./slurm/activation_and_dfc.sh config/camcan_movie.yaml
 ```
 
 For a cohort you have never run, check it first — this is minutes against hours:
@@ -246,7 +246,7 @@ column -s, -t outputs/bstm_selection/target=additional_HADS_anx_category/summary
 
 ### PHASES 2-3 as one chained submission
 
-Phase 1 stays separate: its cohorts are independent and `submit_all.sh` already
+Phase 1 stays separate: its cohorts are independent and `activation_and_dfc.sh` already
 chains within each. Phases 2-3 are one dependency graph, and `sbatch` returns
 immediately, so without `--dependency` they would all start at once — and
 dimensionality reduction rewrites the very file clustering appends to.
@@ -295,7 +295,7 @@ three hours.
 ## 4. Adding a new cohort
 
 Stages 1–2.5 are per cohort, so a new cohort means one new config and one
-`submit_all.sh`. Stages 3–6 then re-run **for every cohort together**, because
+`activation_and_dfc.sh`. Stages 3–6 then re-run **for every cohort together**, because
 the fit spans them.
 
 1. **Write `config/<cohort>.yaml`.** Copy the closest existing one.

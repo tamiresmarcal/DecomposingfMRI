@@ -57,7 +57,7 @@ def leaf_filename(ses: str | None = None, run: str | None = None,
     sessions, two runs -- would now have both write to the same leaf, and the
     second would silently overwrite the first. So `validate` now fails on any
     such collision BEFORE anything is submitted (cli.py, cmd_validate). That
-    check was previously only in tools/check_cohort.py, which submit_all.sh
+    check was previously only in tools/check_cohort.py, which activation_and_dfc.sh
     does not run; making the name constant is what forces it onto the path
     everyone actually takes.
 

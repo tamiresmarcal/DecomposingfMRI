@@ -113,7 +113,7 @@ def _path_collisions(cfg, refs) -> list[str]:
     Load-bearing since leaf_filename became a constant `data.parquet`: the
     ses/run/acq entities used to make these paths differ by construction, and
     now nothing does. The same check exists in tools/check_cohort.py, but
-    slurm/submit_all.sh runs `validate`, not that -- so it has to be here too
+    slurm/activation_and_dfc.sh runs `validate`, not that -- so it has to be here too
     or the submit path has no guard at all.
 
     Only the activation path is tested. dfc_path adds `window_s=` above the

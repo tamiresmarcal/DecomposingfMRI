@@ -1,6 +1,6 @@
 """Guards on the submit path.
 
-slurm/submit_all.sh runs `fmri-decomp validate` and nothing else before it
+slurm/activation_and_dfc.sh runs `fmri-decomp validate` and nothing else before it
 burns core-hours, so anything that must not reach a compute node has to fail
 here. tools/check_cohort.py is more thorough but nobody's submit script calls
 it.

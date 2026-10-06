@@ -4,14 +4,14 @@
 #   extract array -> finalize+ISC gate -> dfc array -> merge dfc manifests
 #
 # Usage:
-#   ./slurm/submit_all.sh config/ds002837.yaml [n_extract_shards] [n_dfc_shards]
+#   ./slurm/activation_and_dfc.sh config/ds002837.yaml [n_extract_shards] [n_dfc_shards]
 #
 # Nothing runs if validation fails, and stage 3 does not start unless the ISC
 # alignment gate passes -- afterok, not afterany, on purpose.
 
 set -euo pipefail
 
-CONFIG="${1:?usage: submit_all.sh <config.yaml> [n_extract_shards] [n_dfc_shards]}"
+CONFIG="${1:?usage: activation_and_dfc.sh <config.yaml> [n_extract_shards] [n_dfc_shards]}"
 N_EXTRACT="${2:-8}"   # see the sizing check below
 N_DFC="${3:-8}"
 
@@ -115,7 +115,7 @@ if [[ -n "$N_RUNS" && -n "$N_ATLAS" && "$N_ATLAS" -gt 0 ]]; then
     echo "   WARNING: ${SLOTS} slots for ${N_JOBS_TOTAL} jobs -- $(( SLOTS - N_JOBS_TOTAL )) will idle."
     echo "            You are billed for the whole allocation and it queues slower."
     echo "            At --cpus-per-task=${CPUS}, ${SUGGEST} array task(s) is enough:"
-    echo "              ./slurm/submit_all.sh $CONFIG ${SUGGEST} ${N_DFC}"
+    echo "              ./slurm/activation_and_dfc.sh $CONFIG ${SUGGEST} ${N_DFC}"
     echo
     read -r -p "   submit anyway? [y/N] " reply
     [[ "$reply" == [yY]* ]] || { echo "   aborted."; exit 1; }

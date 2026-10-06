@@ -470,7 +470,7 @@ already exported in your shell wins over the file.
 Then:
 
 ```bash
-./slurm/submit_all.sh config/ds002837.yaml 20 8
+./slurm/activation_and_dfc.sh config/ds002837.yaml 20 8
 ```
 
 That chains: extract array (20 tasks) → finalize + ISC gate → dfc array
@@ -478,7 +478,7 @@ That chains: extract array (20 tasks) → finalize + ISC gate → dfc array
 `slurm_logs/` itself.
 
 An interpreter is not optional: a login node's bare `python` cannot import
-`fmri_decomposition`, and neither can a compute node's. `submit_all.sh` checks
+`fmri_decomposition`, and neither can a compute node's. `activation_and_dfc.sh` checks
 before submitting anything and refuses rather than treating the ImportError as
 a config problem — otherwise the pre-flight `validate` is skipped silently and
 the whole chain runs unvalidated. Or submit by hand:
