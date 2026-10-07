@@ -77,7 +77,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .io import STATE_K_BAND, latents_root, meta_dir
+from .io import STATE_COLUMN_RE, STATE_K_BAND, latents_root, meta_dir
 
 # The state-label columns this stage reads. K = 8 and 27 only: at 125 and 512
 # cells a subject's 74 transitions leave >99% of the matrix at exactly zero, so
@@ -85,7 +85,10 @@ from .io import STATE_K_BAND, latents_root, meta_dir
 # No fixed list. `--states` defaults to every state column found in the
 # schema, so a method added by stage 4b is picked up without being named here.
 # The convention is `<Method>_<embedding>_<K>`; anything matching it qualifies.
-STATE_SUFFIX_RE = r"^[A-Za-z]+_[a-z]+\d*_\d+$"
+#: `<Method>_<embedding>_<K>`. Imported rather than written out again: the
+#: pattern lived here, in `status` and inline in `cluster`, and all three had a
+#: letters-only method group that rejected `HMM1_pca3_8`.
+STATE_SUFFIX_RE = STATE_COLUMN_RE.pattern
 
 # Identity and ordering. `window_id` is the time order within (task, sub) and
 # is globally meaningful within a movie -- see windows.make_stimulus_grid.

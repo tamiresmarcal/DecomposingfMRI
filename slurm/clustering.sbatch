@@ -3,7 +3,8 @@
 #
 #   sbatch slurm/clustering.sbatch harvardoxford 30 60 120 300
 #   sbatch slurm/clustering.sbatch yeo7 -1
-#   sbatch slurm/clustering.sbatch yeo7 30 -- --methods hmm --k 8
+#   sbatch slurm/clustering.sbatch yeo7 30 -- --methods hmm1 --k 8
+#   sbatch slurm/clustering.sbatch networks -1 -- --embeddings pca3 raw14
 #
 # LOOK AT THE GRID FIRST, on a login node -- it fits nothing and takes seconds:
 #
@@ -24,12 +25,37 @@
 #
 # COST is the clusterers, and they are not alike. Threshold is a quantile
 # transform (seconds). MeanShift is O(n_fit^2) in the bandwidth search, capped
-# by --meanshift-fit-rows. HMM is Baum-Welch over the full sequence and is by
-# far the slowest at K=27 -- it dominates the walltime, so --hmm-iter is the
-# knob if this times out.
+# by --meanshift-fit-rows. The HMMs are Baum-Welch over the full sequence and
+# dominate the walltime.
 #
-# MEMORY is small: only three embedding columns per row are ever loaded, never
-# the edges. Even Harvard-Oxford at 15 s is a few hundred MB.
+# HMM2 IS THE EXPENSIVE ONE, BY TWO ORDERS OF MAGNITUDE. It is full covariance
+# (parameters grow with the square of the dimension, not linearly), 500
+# iterations against hmm1's 50, and --hmm2-restarts FULL FITS per state set
+# rather than one. 15 restarts x 10 iterations is a >150x multiplier on the
+# per-fit cost before covariance is counted.
+#
+# So MEASURE BEFORE COMMITTING TO THE GRID. One cheap cell tells you what the
+# walltime has to be:
+#
+#   sbatch slurm/clustering.sbatch yeo7 30 -- --methods hmm2 --k 10 \
+#          --hmm2-restarts 5
+#
+# then scale: cost is roughly linear in --hmm2-restarts and in --hmm2-iter, and
+# steeply worse in K and in the embedding's width. If it times out, lower
+# --hmm2-restarts first (5 still beats 1, which is what hmm1 does), and raise
+# #SBATCH --time rather than cutting --hmm2-iter -- 500 is the paper's number
+# and the log says `HIT THE 500-ITER CAP` when it was not enough.
+#
+# MEMORY is small: only the embedding columns are ever loaded, never the edges
+# -- three of them for pca3/umap3, or the atlas's feature count for a raw<N>
+# embedding (7, 14). Even Harvard-Oxford at 15 s is a few hundred MB.
+#
+# THE RAW ARM IS RAGGED ON PURPOSE. `raw<N>` exists only where
+# `decompose --passthrough-features` ran, which is the activation aperture on
+# the small atlases, so asking for it everywhere is fine: a cell without those
+# columns SKIPS that embedding and says so, and the job still exits 0. Only a
+# state set that was asked for and could not be written -- a degenerate K, or no
+# restart expressing all K states -- is a refusal, and that exits non-zero.
 #
 # WHAT GETS WRITTEN. Label columns are APPENDED to
 # latents/atlas=<a>/window_s=<w>/cohort=<c>/data.parquet, with per-column

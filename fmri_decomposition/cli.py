@@ -1,6 +1,6 @@
 """Command line: `fmri-decomp status | validate | extract | dfc | diagnose |
-censor | decompose | cluster | transitions | select | merge-manifests |
-fixture`.
+censor | decompose | cluster | transitions | select | state-means |
+merge-manifests | fixture`.
 
 Parallelism is at or below the deepest partition key, so each worker owns a
 distinct leaf and no locks are needed. Workers never write shared metadata --
@@ -695,6 +695,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="stage 5a: latents -> per-subject brain-state transition matrices")
     _transitions.add_arguments(t)
     t.set_defaults(func=cmd_transitions)
+
+    sm = sub.add_parser(
+        "state-means",
+        help="what each brain state looks like, in named network units")
+    from . import state_means as _state_means
+    _state_means.add_arguments(sm)
+    sm.set_defaults(func=lambda a: _state_means.run(a))
 
     m = sub.add_parser("merge-manifests", help="consolidate per-array-task manifests")
     m.add_argument("config")

@@ -20,15 +20,28 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 from pathlib import Path
 
 import pandas as pd
 
-from .io import STATE_K_BAND
+from .io import RAW_PREFIX, STATE_COLUMN_RE, STATE_K_BAND
 
-STATE_RE = re.compile(r"^[A-Za-z]+_[a-z]+\d*_\d+$")
+STATE_RE = STATE_COLUMN_RE
 EMBEDDINGS = {"pca3": "pca0/3", "umap3": "umap0/3"}
+
+
+def _embeddings_present(cols) -> list[str]:
+    """Which embeddings this file offers, raw<N> included.
+
+    pca3/umap3 are a fixed column list, so membership is a lookup. The raw
+    embedding is named by HOW MANY `raw/<name>` columns there are, which only
+    the file knows -- so it is counted here rather than looked up.
+    """
+    have = [e for e, c in EMBEDDINGS.items() if c in cols]
+    n_raw = sum(1 for c in cols if c.startswith(RAW_PREFIX))
+    if n_raw:
+        have.append(f"raw{n_raw}")
+    return have
 
 
 def _meta(path: Path, key: str):
@@ -108,7 +121,7 @@ def latents(root: Path) -> pd.DataFrame:
         rows.append({
             "atlas": _key(p, "atlas"), "window_s": _key(p, "window_s"),
             "cohort": _key(p, "cohort"), "rows": n,
-            "emb": ",".join(e for e, c in EMBEDDINGS.items() if c in cols) or "-",
+            "emb": ",".join(_embeddings_present(cols)) or "-",
             "censor": str(_meta(p, "censor_policy")),
             "source": str(_meta(p, "source") or "dfc"),
             "role": str(_meta(p, "role")),

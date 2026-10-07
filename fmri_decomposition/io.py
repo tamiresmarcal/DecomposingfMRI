@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -152,6 +153,41 @@ def _fmt_window(window_s: float) -> str:
 #            262,144, against a few hundred transitions -- >99% exactly zero for
 #            every subject, so there is no probability to correlate with.
 STATE_K_BAND = (3, 64)
+
+
+# Prefix for the input features `decompose --passthrough-features` writes into
+# the latents table beside the PCA/UMAP coordinates. One definition, because
+# `decompose` writes them and `cluster` resolves a `raw<N>` embedding from them,
+# and a prefix that drifted between the two would read as "no raw columns".
+#
+# The `<prefix><feature name>` form is deliberate: `raw/AM` keeps the network's
+# NAME, which is the whole reason this option exists -- a state mean over
+# `raw/AM .. raw/WM` says "high in autobiographical memory, low in working
+# memory", and the same mean over `pca0/14 .. pca13/14` says nothing until you
+# invert the rotation. The `/` matches the existing `pca0/3` style and cannot
+# collide with a transition cell (`i->j`) or an occupancy column (`occ_k`).
+RAW_PREFIX = "raw/"
+
+# Refuse `--passthrough-features` above this many features. The option is meant
+# for the activation source, where a row is 7, 14 or 111 parcels. On the dfc
+# source a row is 21, 91 or 6,105 EDGES, and the last would roughly double the
+# whole latents tree for an embedding no clusterer here can fit -- a
+# full-covariance HMM on 6,105 dimensions is 18.6M parameters per state.
+PASSTHROUGH_MAX_FEATURES = 200
+
+
+# `<Method>_<embedding>_<K>` -- the state-column convention stage 4b writes and
+# stages 5a, 5b and `status` parse. ONE definition, because there were two and
+# they are the kind of thing that silently disagrees: `status` had
+# `^[A-Za-z]+_[a-z]+\d*_\d+$` and `cluster` had the same pattern inline, and
+# BOTH rejected `HMM1_pca3_8` -- the method group was letters-only, so renaming
+# `HMM` to `HMM1`/`HMM2` would have left stage 5 reporting zero state sets with
+# the columns sitting in the files.
+#
+#   method      letters then letters-or-digits: HMM1, HMM2, MeanShift
+#   embedding   lowercase then optional digits: pca3, umap3, raw14
+#   K           digits
+STATE_COLUMN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*_[a-z]+\d*_\d+$")
 
 
 # Keys carried by the directory tree. They are deliberately NOT written as

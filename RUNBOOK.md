@@ -30,7 +30,8 @@ to the file stage 4 wrote.
          |                  (fit on the TRAIN cohorts, projected onto the rest)
          |
   4  cluster                coordinates -> brain-state LABELS
-         |                  (threshold / MeanShift / HMM x pca3 / umap3)
+         |                  (threshold / MeanShift / HMM1 / HMM2
+         |                   x pca3 / umap3 / raw<N>)
          |
   5  transitions            labels -> one transition matrix per subject
          |
@@ -213,26 +214,58 @@ for A in harvardoxford yeo7 networks; do
   sbatch --array=0-3 slurm/dimensionality_reduction.sbatch $A 30 60 120 300 \
     -- $TRAIN $POL
 done
-#   the frame aperture -- one task, a frame has no window to vary
-for A in harvardoxford yeo7 networks; do
-  sbatch --array=0-0 slurm/dimensionality_reduction.sbatch $A -1 \
-    -- --source activation $TRAIN $POL
-done
+#   the frame aperture -- one task, a frame has no window to vary.
+#   yeo7 and networks also get --passthrough-features, which writes the NAMED
+#   parcels beside the PCs so stage 4b can fit on them directly; and the extra
+#   --n-latents is the atlas's own width, which makes that PCA a lossless
+#   rotation. --umap-latents keeps UMAP at 3, where it belongs.
+sbatch --array=0-0 slurm/dimensionality_reduction.sbatch harvardoxford -1 \
+  -- --source activation $TRAIN $POL
+sbatch --array=0-0 slurm/dimensionality_reduction.sbatch yeo7 -1 \
+  -- --source activation $TRAIN $POL \
+     --n-latents 3 7 --umap-latents 3 --passthrough-features
+sbatch --array=0-0 slurm/dimensionality_reduction.sbatch networks -1 \
+  -- --source activation $TRAIN $POL \
+     --n-latents 3 14 --umap-latents 3 --passthrough-features
 ```
 
 Wait for those, then look before spending hours on the HMM:
 
 ```bash
 $RUN python3 -m fmri_decomposition.cli cluster --check \
-    --atlas harvardoxford yeo7 networks --window-s 30 60 120 300 -1
+    --atlas harvardoxford yeo7 networks --window-s 30 60 120 300 -1 \
+    --embeddings pca3 umap3 raw7 raw14
 ```
+
+`raw7` and `raw14` show as absent in most cells and that is correct — they exist
+only where passthrough ran. A missing raw embedding is skipped per cell, not an
+error.
+
+**Measure hmm2 before committing to the grid.** It is full covariance, 500
+iterations and 15 restarts, which is two orders of magnitude more expensive than
+hmm1. One cheap cell tells you what walltime the real run needs:
+
+```bash
+sbatch slurm/clustering.sbatch yeo7 30 -- --methods hmm2 --k 10 --hmm2-restarts 5
+sacct -X -n -o Elapsed,State --name=fmridecomp_cluster | head -1
+```
+
+Cost is roughly linear in `--hmm2-restarts` and `--hmm2-iter`, and steeply worse
+in K and in the embedding's width. Then:
 
 ```bash
 # clustering: coordinates -> brain-state labels, appended to the same files
 for A in harvardoxford yeo7 networks; do
-  sbatch slurm/clustering.sbatch $A 30 60 120 300 -1 -- --train ds002837 cneuromod
+  sbatch --time=24:00:00 slurm/clustering.sbatch $A 30 60 120 300 -1 \
+    -- --train ds002837 cneuromod --embeddings pca3 umap3 raw7 raw14
 done
 ```
+
+Two state definitions, on purpose. **HMM1** is the incumbent — diagonal
+covariance, 50 iterations, one fit — frozen so it stays a fixed baseline.
+**HMM2** is the estimator van der Meer et al. 2020 used. At matched K and
+embedding the only thing that differs is the estimator, so a difference in the
+stage-6 ranking is attributable to it.
 
 **One job per atlas, never an array.** Every clusterer for an (atlas, aperture)
 appends to the same parquet, and parquet cannot append — the file is rewritten,
@@ -282,6 +315,25 @@ result you care about first.
 $RUN python3 -m fmri_decomposition.cli status | sed -n '/^======/,$p'
 column -s, -t outputs/bstm_selection/target=additional_HADS_anx_category/summary.csv | head -12
 ```
+
+### Looking at a state rather than ranking it
+
+Everything above treats a state as an integer. This is the one command that
+says what the state *is* — one row per state, one column per named network:
+
+```bash
+$RUN python3 -m fmri_decomposition.cli state-means \
+    --atlas networks --window-s -1 --states HMM2_raw14_10 --csv states.csv
+```
+
+It works on a `pca<N>` state set too: the rotation is undone from the models
+`decompose` saved, exactly. On a reduced embedding like `pca3` it prints a NOTE
+saying the means are the state's position in that 3-D subspace rather than its
+mean over all the features — true, and the kind of thing a figure should not
+hide. UMAP state sets are refused rather than approximated, because UMAP has no
+inverse that recovers its input.
+
+This is the table van der Meer et al.'s Fig. 1 plots.
 
 ### PHASES 2-3 as one chained submission
 
@@ -441,7 +493,7 @@ $RUN python3 -c "
 import pandas as pd
 for w in ('30','60','120','300','-1'):
     d = pd.read_parquet(f'outputs/transitions/atlas=yeo7/window_s={w}/'
-                        f'states=HMM_pca3_8/cohort=<cohort>/subjects.parquet',
+                        f'states=HMM1_pca3_8/cohort=<cohort>/subjects.parquet',
                         columns=['n_transitions'])
     print(f'{w:>4}s  {d.n_transitions.mean():6.1f} +/- {d.n_transitions.std():.2f}')"
 ```

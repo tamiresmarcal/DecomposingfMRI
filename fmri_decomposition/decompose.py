@@ -91,7 +91,7 @@ import pandas as pd
 
 # Identity and QC carried into the latents. Everything else in a dfc file is
 # either an edge (dropped -- it is already in dfc/) or a partition key.
-from .io import latents_root
+from .io import PASSTHROUGH_MAX_FEATURES, RAW_PREFIX, latents_root
 
 IDENT = ["cohort", "role", "model_hash", "task", "sub", "window_id", "start_s",
          "stimulus_start_s", "n_tr_effective", "frac_good_frames",
@@ -318,6 +318,18 @@ def model_hash(meta: dict, features: list[str]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+def _umap_latents(args) -> list[int]:
+    """Which component counts UMAP is fitted at. Defaults to --n-latents.
+
+    They were one list, and that became a trap once `--n-latents 14` existed to
+    get a lossless rotation for the raw-dimension arm: UMAP was then fitted at
+    14 components too, which costs most of the stage's walltime and is not an
+    embedding anything asks for. UMAP's defaults are tuned for 2-3 components.
+    """
+    want = getattr(args, "umap_latents", None)
+    return list(want) if want else list(args.n_latents)
+
+
 def fit_meta(args, window_s, features: list[str]) -> dict:
     """The fit description carried into every output of this run.
 
@@ -340,6 +352,13 @@ def fit_meta(args, window_s, features: list[str]) -> dict:
             "censor_policy": args.censor_policy or None,
             "censor_policy_hash": censor_policy_hash(args),
             "seed": int(args.seed)}
+    # Both of these follow the same rule as `source` above: present only when
+    # they differ from the default, so adding them does NOT move the hash of any
+    # fit already on disk. An absent key means the default.
+    if getattr(args, "passthrough_features", False):
+        meta["passthrough_features"] = True
+    if _umap_latents(args) != list(args.n_latents):
+        meta["umap_latents"] = _umap_latents(args)
     if getattr(args, "source", "dfc") != "dfc":
         meta.update({
             "source": args.source,
@@ -399,7 +418,37 @@ def fit_models(X_train: np.ndarray, edges: list[str], args, meta: dict) -> dict:
     # container rather than to the scalar `meta` recorded it as.
     models = {**meta, "scaler": scaler, "pca": {}, "umap": {}, "edges": edges}
 
+    # Checked here, where `edges` is known, rather than in argparse, which
+    # cannot see how wide a row is until the shards have been read.
+    models["passthrough"] = bool(getattr(args, "passthrough_features", False))
+    if models["passthrough"] and len(edges) > PASSTHROUGH_MAX_FEATURES:
+        raise SystemExit(
+            f"--passthrough-features on {len(edges):,} features, over the "
+            f"{PASSTHROUGH_MAX_FEATURES} cap.\n"
+            f"  It writes every input feature into the latents table as a "
+            f"column, so this would add {len(edges):,} per row.\n"
+            f"  It is meant for --source activation, where a row is 7, 14 or "
+            f"111 parcels. Here a row is {len(edges):,} "
+            f"{'edges' if getattr(args, 'source', 'dfc') == 'dfc' else 'features'}.\n"
+            f"  Drop the flag, or use --source activation.")
+    if models["passthrough"]:
+        log(f"passthrough: {len(edges)} feature column(s) will be written as "
+            f"{RAW_PREFIX}<name>, SCALED (post-StandardScaler) so that "
+            f"raw{len(edges)} and pca{len(edges)} differ by a rotation only")
+
     for n in args.n_latents:
+        if n > len(edges):
+            # sklearn's own message names `min(n_samples, n_features)` without
+            # saying which, and on the activation source "n_features" is the
+            # atlas's parcel count -- the one thing the caller can act on.
+            raise SystemExit(
+                f"--n-latents {n} on an atlas with only {len(edges)} "
+                f"feature(s).\n"
+                f"  PCA cannot produce more components than the input has "
+                f"columns. {len(edges)} components IS the whole space "
+                f"(a lossless rotation), so {n} is asking for more "
+                f"information than exists.\n"
+                f"  Use --n-latents 3 {len(edges)} for this atlas.")
         models["pca"][n] = PCA(n_components=n, random_state=args.seed,
                                svd_solver="randomized").fit(Z)
         evr = models["pca"][n].explained_variance_ratio_
@@ -428,7 +477,7 @@ def fit_models(X_train: np.ndarray, edges: list[str], args, meta: dict) -> dict:
                    if args.umap_fit_rows and len(Z) > args.umap_fit_rows
                    else np.arange(len(Z)))
             log(f"fitting UMAP on {len(idx):,} of {len(Z):,} rows")
-            for n in args.n_latents:
+            for n in _umap_latents(args):
                 t0 = time.time()
                 models["umap"][n] = umap.UMAP(n_components=n,
                                               random_state=args.seed).fit(Z[idx])
@@ -462,6 +511,19 @@ def latents_for(ident: pd.DataFrame, X: np.ndarray, models: dict,
             arr = model.transform(Z)
             for j in range(n):
                 out[f"{kind}{j}/{n}"] = arr[:, j].astype(np.float32)
+    if models.get("passthrough"):
+        # Z, not X: the SCALED features. PCA is fitted on Z, so writing Z here
+        # makes `raw<N>` and `pca<N>` differ by exactly an orthonormal rotation
+        # (measured round-trip error ~1e-14), which is what lets a
+        # full-covariance HMM on one be the same model as on the other. Writing
+        # X instead would leave the two arms differing by a scaling as well,
+        # and the equivalence would no longer be exact.
+        #
+        # The scaler was fitted on the TRAIN cohorts and is applied to every
+        # cohort, projected ones included -- one transform everywhere, which is
+        # what makes a state mean comparable across cohorts at all.
+        for j, name in enumerate(models["edges"]):
+            out[f"{RAW_PREFIX}{name}"] = Z[:, j].astype(np.float32)
     return out[[c for c in IDENT if c in out.columns]
                + [c for c in out.columns if c not in IDENT]]
 
@@ -713,7 +775,24 @@ def add_arguments(p) -> None:
                         "3-D embedding")
     p.add_argument("--umap-fit-rows", type=int, default=30_000,
                    help="0 fits UMAP on every training row")
+    p.add_argument("--umap-latents", nargs="+", type=int, default=None,
+                   metavar="N",
+                   help="component counts to fit UMAP at. Default: the same as "
+                        "--n-latents. Set it when --n-latents carries a count "
+                        "that only PCA needs -- `--n-latents 3 14 "
+                        "--umap-latents 3` fits UMAP once, at 3, instead of "
+                        "also spending most of the stage on a 14-component "
+                        "UMAP nothing reads.")
     p.add_argument("--no-umap", action="store_true")
+    p.add_argument("--passthrough-features", action="store_true",
+                   help="also write the input features themselves into the "
+                        "latents table, as `raw/<name>` columns, scaled the "
+                        "same way PCA sees them. Stage 4b can then fit a "
+                        "clusterer on the NAMED parcels -- `raw/AM`, "
+                        "`raw/Motor` -- so a state mean is readable as a "
+                        "network pattern rather than a point in PC space. "
+                        f"Refused above {PASSTHROUGH_MAX_FEATURES} features; "
+                        "intended for --source activation.")
     p.add_argument("--censor-policy", required=True, metavar="NAME",
                    type=_censor_policy,
                    help="apply the stage 3.5 decision written by `fmri-decomp "

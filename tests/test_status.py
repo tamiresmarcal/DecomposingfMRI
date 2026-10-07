@@ -244,3 +244,56 @@ class TestBehindIgnoresSkippedK:
         latents(tmp_path, states=["Odd_pca3_x", "HMM_pca3_8"])
         found = S.latents(tmp_path)["states"].iloc[0]
         assert found == ["HMM_pca3_8"]
+
+
+class TestRenamedMethodsStillParse:
+    """`HMM` became `HMM1`/`HMM2`, and a digit in the method name broke every
+    consumer at once.
+
+    The pattern was written out three times -- here, in `transitions`, and
+    inline in `cluster` -- and all three had a letters-only method group, so
+    `HMM1_pca3_8` matched none of them. Nothing would have raised: stage 5 would
+    have reported zero state sets while the columns sat in the files.
+    """
+
+    NAMES = ["HMM_pca3_8", "HMM1_pca3_8", "HMM1_raw14_10", "HMM2_pca14_10",
+             "HMM2_raw7_27", "MeanShift_umap3_4", "ThresholdCluster_pca3_27"]
+
+    def test_status_matches_every_column_stage_4b_can_write(self):
+        for n in self.NAMES:
+            assert S.STATE_RE.match(n), n
+
+    def test_transitions_uses_the_same_pattern(self):
+        import re
+
+        from fmri_decomposition.transitions import STATE_SUFFIX_RE
+
+        for n in self.NAMES:
+            assert re.match(STATE_SUFFIX_RE, n), n
+
+    def test_cluster_finds_them_as_existing_state_columns(self, tmp_path):
+        from fmri_decomposition import cluster as C
+
+        latents(tmp_path, states=self.NAMES)
+        p = next((tmp_path / "latents").rglob("data.parquet"))
+        assert set(C._state_columns(p)) == set(self.NAMES)
+
+    def test_every_generated_column_name_parses(self):
+        """Not a hand-written list: whatever `column_name` produces for the
+        real clusterers, on every embedding in the default grid."""
+        import re
+
+        from fmri_decomposition import cluster as C
+        from fmri_decomposition.transitions import STATE_SUFFIX_RE
+
+        for method in C.CLUSTERERS:
+            for emb in list(C.EMBEDDINGS) + ["raw7", "raw14", "raw111"]:
+                for k in (3, 8, 10, 27, 64):
+                    n = C.column_name(method, emb, k)
+                    assert S.STATE_RE.match(n), n
+                    assert re.match(STATE_SUFFIX_RE, n), n
+
+    def test_non_state_columns_are_still_excluded(self):
+        for n in ["raw/AM", "raw/CogAC", "pca0/3", "umap0/3", "occ_0",
+                  "n_states_visited", "n_transitions", "0->0", "model_hash"]:
+            assert not S.STATE_RE.match(n), n

@@ -37,9 +37,10 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      --source activation   per-TR frames, written
                                                        to window_s=-1
 4b   clustering.sbatch              latents -> brain-state LABELS, appended to
-                                     the same files. threshold / MeanShift / HMM
-                                     x pca3 / umap3. Every state definition lives
-                                     here; stage 4 defines none.
+                                     the same files. threshold / MeanShift /
+                                     HMM1 / HMM2 x pca3 / umap3 / raw<N>.
+                                     Every state definition lives here;
+                                     stage 4 defines none.
 5a   brain_states_transitions.sbatch          labels -> per-subject transition matrices,
                                      one table per state set. The state sets are
                                      discovered per (atlas, aperture).
@@ -91,7 +92,7 @@ outputs/
 │       adds live INSIDE these files, with per-column provenance in the schema.
 │
 ├── transitions/                                  STAGE 5a — one table per state set
-│   └── atlas=yeo7/window_s=30/states=HMM_pca3_8/cohort=camcan/subjects.parquet
+│   └── atlas=yeo7/window_s=30/states=HMM1_pca3_8/cohort=camcan/subjects.parquet
 │
 ├── bstm_selection/                               STAGE 5b — the ranking
 │   └── target=additional_HADS_anx_category/
