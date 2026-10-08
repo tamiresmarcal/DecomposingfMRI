@@ -475,8 +475,10 @@ selects `usable[:limit]`, a sorted PREFIX, so lines 1-10 are byte-identical
 before and after. A pilot task that has not started yet still resolves to the
 subject it was queued for, and the `IDX >= N_SUBS` guard only loosens.
 
-Re-running the BIDS build is also a no-op for the 10 already linked: `link()`
-returns early when the destination exists and `--force` was not passed.
+Re-running the BIDS build leaves the 10 already linked completely alone:
+`link()` returns early when the destination exists and `--force` was not
+passed. Do NOT reach for `--force` here — it unlinks and re-creates every
+symlink, which is a window in which a live job can fail to resolve a path.
 
 What you give up by submitting early is sizing the big array from the pilot's
 real `seff`. That is a bounded risk -- the prereq checks already passed, so a

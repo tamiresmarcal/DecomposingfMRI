@@ -393,13 +393,40 @@ def main(argv=None) -> int:
         print("first few:", ", ".join(selected[:5]))
         return 0
 
-    if args.out.exists() and not args.force and any(args.out.glob("sub-*")):
+    # EXPANDING an existing root is the documented workflow -- --limit exists
+    # for a pilot, and the pilot is meant to be scaled up. What is dangerous is
+    # a root holding subjects this selection does NOT want, because fMRIPrep
+    # globs sub-* and never reads subjects.txt, so a leftover from an earlier
+    # run against different data WILL be picked up. So the refusal is about
+    # EXTRA subjects, not about any subject at all.
+    #
+    # This also makes expansion safe while an array job is still running
+    # against the same root: the already-linked subjects are left completely
+    # alone, because `link()` returns early when the destination exists and
+    # --force was not passed. --force would unlink and re-create them instead,
+    # which is a (small) window in which a live job can fail to resolve a path.
+    existing = {d.name[4:] for d in args.out.glob("sub-*") if d.is_dir()}
+    extra = sorted(existing - set(selected))
+    if extra and not args.force:
         print(
-            f"\nrefusing: {args.out} already has sub-* directories.\n"
-            "Re-run with --force to relink, or pick a different --out.",
+            f"\nrefusing: {args.out} holds {len(extra)} subject dir(s) that "
+            f"this selection does not include:\n"
+            f"    {', '.join(extra[:8])}{' ...' if len(extra) > 8 else ''}\n"
+            "fMRIPrep globs sub-* and does not read subjects.txt, so those "
+            "WOULD be processed.\n"
+            "Remove them, re-run with --force to relink the whole root, or "
+            "pick a different --out.",
             file=sys.stderr,
         )
         return 1
+    if existing:
+        adding = len(set(selected) - existing)
+        print(f"expanding an existing root: {len(existing)} subject(s) already "
+              f"linked, adding {adding}")
+        if not args.force:
+            print("  the existing links are left untouched (pass --force to "
+                  "relink them), so this is safe to run while a job is still "
+                  "reading this root")
 
     args.out.mkdir(parents=True, exist_ok=True)
     build(selected, args.camcan_bidssep, args.func_subdir, args.n_echoes,
