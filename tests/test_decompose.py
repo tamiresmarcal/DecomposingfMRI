@@ -40,10 +40,20 @@ class TestFitMetaIsHashStable:
     # here has to be deliberate: update the constant in the same commit, and say
     # in the message what moved.
     #
-    # Changed once, knowingly: `bins` left the payload when the quantile
-    # thresholding moved out of this stage into `cluster`. It had been
-    # 433fca34406aafde while `bins` was still part of the fit description.
-    DFC_HASH = "8c7c88dca4e6b719"
+    # Changed TWICE, knowingly:
+    #
+    #   433fca34406aafde  the original, while `bins` was part of the payload
+    #   8c7c88dca4e6b719  `bins` left, when quantile thresholding moved out of
+    #                     this stage into `cluster`
+    #   eacc79844d0ec658  `project_cohorts` left. It is a per-INVOCATION
+    #                     quantity, not a property of the fit -- only --train
+    #                     feeds the scaler, the PCA and the UMAP -- so two runs
+    #                     differing only in who else was projected produce the
+    #                     same model, and the hash claimed otherwise. While it
+    #                     was hashed, adding a cohort to a cell ALWAYS changed
+    #                     the hash, so no cohort could be skipped and every
+    #                     addition rewrote and re-clustered the whole cell.
+    DFC_HASH = "eacc79844d0ec658"
 
     def test_the_default_payload_is_unchanged(self):
         a = parse("--atlas", "yeo7", "--window-s", "30")
@@ -54,6 +64,32 @@ class TestFitMetaIsHashStable:
         meta = D.fit_meta(a, "30", EDGES)
         for k in ("source", "match_bandpass", "zscore_runs"):
             assert k not in meta
+
+    def test_the_project_list_is_not_part_of_the_fit_description(self):
+        """The fit sees only --train. A hash that moved with --project made two
+        identical fits look incomparable, and made every cohort addition a
+        cell-wide rewrite."""
+        a = parse("--atlas", "yeo7", "--window-s", "30")
+        assert "project_cohorts" not in D.fit_meta(a, "30", EDGES)
+
+    def test_two_project_lists_give_one_hash(self):
+        one = parse("--atlas", "yeo7", "--window-s", "30",
+                    "--project", "camcan")
+        two = parse("--atlas", "yeo7", "--window-s", "30",
+                    "--project", "camcan", "camcan_rest")
+        assert (D.model_hash(D.fit_meta(one, "30", EDGES), EDGES)
+                == D.model_hash(D.fit_meta(two, "30", EDGES), EDGES))
+
+    def test_the_train_list_still_does_move_it(self):
+        """The other half of the claim: --train IS the fit, so it must move the
+        hash. Dropping project_cohorts must not have made the payload
+        indifferent to who was fitted on."""
+        one = parse("--atlas", "yeo7", "--window-s", "30",
+                    "--train", "ds002837")
+        two = parse("--atlas", "yeo7", "--window-s", "30",
+                    "--train", "ds002837", "cneuromod")
+        assert (D.model_hash(D.fit_meta(one, "30", EDGES), EDGES)
+                != D.model_hash(D.fit_meta(two, "30", EDGES), EDGES))
 
     def test_the_payload_no_longer_describes_a_clustering(self):
         # `bins` configured the thresholding this stage used to do. It belongs to

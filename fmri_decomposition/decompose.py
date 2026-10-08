@@ -341,8 +341,22 @@ def fit_meta(args, window_s, features: list[str]) -> dict:
     re-run. Absent keys mean the default, which is the only way to extend a hash
     payload without invalidating what it has already stamped.
     """
+    # `project_cohorts` is NOT here, deliberately, and this is the same rule
+    # `stride_s` follows (see write_latents): a per-INVOCATION quantity does not
+    # belong in a description of the fit. Only `--train` feeds the fit -- the
+    # scaler, the PCA and the UMAP never see a projected cohort -- so two runs
+    # that differ only in who else was projected produce the SAME model, and a
+    # hash that said otherwise made them look incomparable. It is written
+    # beside the hash instead, where it is still recoverable.
+    #
+    # This one removal DOES move every hash already on disk, which the
+    # present-only-when-non-default rule above exists to avoid. It is accepted
+    # once, because the alternative is permanent: while the project list is
+    # hashed, adding a cohort to a cell always changes the hash, so no cohort
+    # can ever be skipped and every addition rewrites and re-clusters the whole
+    # cell.
     meta = {"stage": "latents", "atlas": args.atlas, "window_s": str(window_s),
-            "train_cohorts": list(args.train), "project_cohorts": list(args.project),
+            "train_cohorts": list(args.train),
             "n_latents": list(args.n_latents),
             "umap_fit_rows": int(args.umap_fit_rows), "no_umap": bool(args.no_umap),
             # In the fit description, therefore in model_hash: a PCA fit on
@@ -569,6 +583,84 @@ def write_latents(lat: pd.DataFrame, path: Path, models: dict, cohort: str) -> N
             tmp.unlink()
 
 
+def latents_model_hash(path: Path) -> str | None:
+    """The `model_hash` a latents file already carries, or None.
+
+    Read from the schema metadata without touching a row group, so deciding
+    whether a cohort needs rewriting costs one small read per cohort.
+    """
+    if not path.exists():
+        return None
+    import pyarrow.parquet as pq
+
+    md = pq.ParquetFile(path).schema_arrow.metadata or {}
+    raw = md.get(b"model_hash")
+    if raw is None:
+        return None
+    # write_latents json.dumps() EVERY metadata value, so the hash is on disk
+    # as `"abc123"` with the quotes, not as `abc123`. Comparing the raw bytes
+    # therefore never matches and every cohort looks stale -- which silently
+    # turns the per-cohort skip back into the cell-wide rewrite it replaced.
+    # Decoded the same way transitions._meta_value does, falling back to the
+    # bare string so a file written by some other path still reads.
+    try:
+        return json.loads(raw.decode())
+    except ValueError:
+        return raw.decode()
+
+
+def reuse_models(stem: Path, mhash: str, log=print) -> dict | None:
+    """The saved fit for this cell, if it is the SAME fit. Else None.
+
+    The manifest beside the models is what makes this checkable without
+    unpickling: it records the `model_hash` and the library versions the
+    objects were pickled under. A hash match says the fit is the one wanted;
+    the version check is separate because a pickled sklearn estimator is not
+    guaranteed to behave across versions, and silently applying one that does
+    not is worse than refitting.
+    """
+    manifest = stem.parent / f"{stem.name}_manifest.json"
+    if not manifest.exists():
+        return None
+    try:
+        man = json.loads(manifest.read_text())
+    except (ValueError, OSError):
+        return None
+    if man.get("model_hash") != mhash:
+        return None
+    from .io import _versions
+
+    want = {k: v for k, v in _versions().items() if k in ("numpy",)}
+    try:
+        import sklearn
+
+        want["sklearn"] = sklearn.__version__
+    except ImportError:
+        pass
+    have = man.get("library_versions") or {}
+    drift = {k: (have.get(k), v) for k, v in want.items() if have.get(k) != v}
+    if drift:
+        log(f"  saved fit matches model_hash {mhash} but was pickled under "
+            f"different libraries {drift} -- refitting rather than trusting it")
+        return None
+    for suffix in (".joblib", ".pkl"):
+        path = stem.with_suffix(suffix)
+        if not path.exists():
+            continue
+        try:
+            if suffix == ".joblib":
+                import joblib
+
+                return joblib.load(path)
+            import pickle
+
+            return pickle.loads(path.read_bytes())
+        except Exception as e:                       # a truncated or stale file
+            log(f"  could not load {path.name} ({type(e).__name__}) -- refitting")
+            return None
+    return None
+
+
 def dump_models(models: dict, path_stem: Path) -> Path:
     try:
         import joblib
@@ -588,12 +680,6 @@ def run_one(root: Path, window_s, args) -> None:
     stem = models_dir / f"decompose_atlas-{atlas}_window-{window_s}"
 
     cohorts = list(dict.fromkeys(args.train + args.project))
-    if not args.overwrite and all(
-            (out_dir / f"cohort={c}" / "data.parquet").exists() for c in cohorts):
-        log(f"window_s={window_s}: latents already exist for every cohort, "
-            f"skipping (--overwrite to redo)")
-        return
-
     source = source_of(args)
     first = source_shard_paths(root, atlas, window_s, args.train[0], source)
     if not first:
@@ -601,11 +687,40 @@ def run_one(root: Path, window_s, args) -> None:
                          f"{args.train[0]!r} at atlas={atlas} window_s={window_s}")
     features = source_feature_columns(first[0], source)
 
-    counts = {c: len(source_shard_paths(root, atlas, window_s, c, source))
-              for c in cohorts}
+    # The hash is computed from the config and the feature list alone, so WHICH
+    # cohorts need writing is known before a single row is read. That is what
+    # makes adding one cohort to a cell cheap: the others are left exactly as
+    # they are, rather than rewritten identically and stripped of the state
+    # columns stage 4b put in them.
+    meta = fit_meta(args, window_s, features)
+    mhash = model_hash(meta, features)
+    on_disk = {c: latents_model_hash(out_dir / f"cohort={c}" / "data.parquet")
+               for c in cohorts}
+    todo = [c for c in cohorts if args.overwrite or on_disk[c] != mhash]
+    keep = [c for c in cohorts if c not in todo]
+
     unit = "parcels" if source == "activation" else "edges"
     log(f"window_s={window_s}  source={source}  {len(features)} {unit}  "
-        f"shards: {counts}")
+        f"model_hash {mhash}")
+    if keep:
+        log(f"  already at this model_hash, left untouched: {', '.join(keep)}")
+    if not todo:
+        log(f"  nothing to write (--overwrite to redo)")
+        return
+    log(f"  to write: {', '.join(todo)}")
+
+    # Refit only when the saved fit for this cell is not the one wanted. The
+    # scaler/PCA/UMAP depend on `--train` and the settings, never on who is
+    # projected, so projecting a new cohort onto an existing fit needs no fit
+    # at all -- which is the difference between minutes and an hour at
+    # harvardoxford, on top of not disturbing the other cohorts.
+    models = None if args.overwrite else reuse_models(stem, mhash, log=log)
+    read_cohorts = list(dict.fromkeys(
+        todo if models is not None else list(args.train) + todo))
+
+    counts = {c: len(source_shard_paths(root, atlas, window_s, c, source))
+              for c in read_cohorts}
+    log(f"  shards: {counts}")
     if source == "activation":
         log(f"  frames: bandpass="
             f"{tuple(args.match_bandpass) if args.match_bandpass else 'as extracted'}"
@@ -628,7 +743,7 @@ def run_one(root: Path, window_s, args) -> None:
             f"or drop {window_s} from --window-s.")
 
     censors = {c: load_censor(root, args.censor_policy, atlas, window_s, c)
-               for c in cohorts}
+               for c in read_cohorts}
     if args.censor_policy:
         for c, cen in censors.items():
             gate = "subjects+windows" if cen["windows"] is not None else "subjects only"
@@ -639,55 +754,76 @@ def run_one(root: Path, window_s, args) -> None:
         log("WARNING: no --censor-policy. Every window in every shard enters "
             "the fit, including subjects `censor` would have dropped.")
 
-    log("loading training cohorts")
-    idents, blocks = [], []
-    stride_s = indep_factor = None
-    for cohort in args.train:
-        ident, X, stride_s, indep_factor = source_read_cohort(
-            root, atlas, window_s, cohort, features, args, censors[cohort])
-        ident, X = drop_nan_rows(ident, X)
-        log(f"  {cohort}: {len(X):,} rows, {ident['sub'].nunique()} subs, "
-            f"{X.nbytes / 1e9:.2f} GB")
-        idents.append(ident)
-        blocks.append(X)
-    X_train = np.vstack(blocks) if len(blocks) > 1 else blocks[0]
-    n_train = len(X_train)
-    del idents, blocks
-    gc.collect()
-    log(f"training matrix {X_train.shape} = {X_train.nbytes / 1e9:.2f} GB")
-
-    meta = fit_meta(args, window_s, features)
-    mhash = model_hash(meta, features)
     role_of = {c: ("train" if c in args.train else "projected") for c in cohorts}
-    log(f"model_hash {mhash}  roles {role_of}")
 
-    models = fit_models(X_train, features, args, meta={
-        **meta, "n_train_rows": int(n_train), "model_hash": mhash,
-        "fit_meta": meta, "role_of": role_of,
-        "stride_s": stride_s, "indep_factor": indep_factor})
-    del X_train
-    gc.collect()
+    if models is not None:
+        log(f"reusing the saved fit for model_hash {mhash} -- no refit, and "
+            f"the training cohorts are not re-read")
+        # role_of is per-invocation and the saved copy was written by the run
+        # that fitted, which may not have known about today's cohorts. Refresh
+        # it so a newly projected cohort is labelled `projected` rather than
+        # raising a KeyError in write_latents.
+        models["role_of"] = {**models.get("role_of", {}), **role_of}
+        n_train = int(models.get("n_train_rows") or 0)
+    else:
+        log("loading training cohorts")
+        idents, blocks = [], []
+        stride_s = indep_factor = None
+        for cohort in args.train:
+            ident, X, stride_s, indep_factor = source_read_cohort(
+                root, atlas, window_s, cohort, features, args, censors[cohort])
+            ident, X = drop_nan_rows(ident, X)
+            log(f"  {cohort}: {len(X):,} rows, {ident['sub'].nunique()} subs, "
+                f"{X.nbytes / 1e9:.2f} GB")
+            idents.append(ident)
+            blocks.append(X)
+        X_train = np.vstack(blocks) if len(blocks) > 1 else blocks[0]
+        n_train = len(X_train)
+        del idents, blocks
+        gc.collect()
+        log(f"training matrix {X_train.shape} = {X_train.nbytes / 1e9:.2f} GB")
+        log(f"model_hash {mhash}  roles {role_of}")
 
-    models_dir.mkdir(parents=True, exist_ok=True)
-    model_path = dump_models(models, stem)
-    log(f"models -> {model_path.relative_to(root)}")
+        models = fit_models(X_train, features, args, meta={
+            **meta, "n_train_rows": int(n_train), "model_hash": mhash,
+            "fit_meta": meta, "role_of": role_of,
+            "stride_s": stride_s, "indep_factor": indep_factor})
+        del X_train
+        gc.collect()
 
-    # A manifest beside the models, in the same spirit as io.write_manifest:
-    # readable without unpickling anything, and the place to look when two
-    # latents files disagree.
-    from . import __version__
-    (stem.parent / f"{stem.name}_manifest.json").write_text(json.dumps({
-        **meta, "model_hash": mhash, "n_train_rows": int(n_train),
-        "umap_fitted": bool(models.get("umap_fitted")),
-        "n_umap_components": sorted(models["umap"]),
-        "n_features": len(features), "role_of": role_of,
-        "shards": counts, "models_file": model_path.name,
-        "package_version": __version__,
-        "written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }, indent=2))
+        models_dir.mkdir(parents=True, exist_ok=True)
+        model_path = dump_models(models, stem)
+        log(f"models -> {model_path.relative_to(root)}")
 
-    # Second pass: one cohort in memory at a time.
-    for cohort in cohorts:
+        # A manifest beside the models, in the same spirit as io.write_manifest:
+        # readable without unpickling anything, and the place to look when two
+        # latents files disagree. `library_versions` is what lets a later run
+        # decide whether the pickle beside it can be trusted.
+        from . import __version__
+        from .io import _versions
+
+        libs = {"numpy": _versions()["numpy"]}
+        try:
+            import sklearn
+
+            libs["sklearn"] = sklearn.__version__
+        except ImportError:
+            pass
+        (stem.parent / f"{stem.name}_manifest.json").write_text(json.dumps({
+            **meta, "model_hash": mhash, "n_train_rows": int(n_train),
+            "project_cohorts": list(args.project),
+            "umap_fitted": bool(models.get("umap_fitted")),
+            "n_umap_components": sorted(models["umap"]),
+            "n_features": len(features), "role_of": role_of,
+            "shards": counts, "models_file": model_path.name,
+            "package_version": __version__, "library_versions": libs,
+            "written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }, indent=2))
+
+    # Second pass: one cohort in memory at a time. Only the cohorts that need
+    # it -- an untouched cohort keeps its file, and with it every state column
+    # stage 4b wrote into it.
+    for cohort in todo:
         ident, X, stride_s, indep_factor = source_read_cohort(
             root, atlas, window_s, cohort, features, args, censors[cohort])
         ident, X = drop_nan_rows(ident, X)
