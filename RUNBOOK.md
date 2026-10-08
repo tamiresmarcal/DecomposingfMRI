@@ -406,6 +406,24 @@ python tools/make_participants.py config/camcan_rest.yaml \
 ./slurm/activation_and_dfc.sh config/camcan_rest.yaml
 ```
 
+`config/camcan_rest.yaml` carries the window grid too, so `30 60 120 300` work
+at rest exactly as they do for the movie — they need stage 3 (`dfc`), which the
+activation-only route below skips. If you want them, add `dfc` to the chain and
+pass `--no-strict`, because `stimulus.durations_s` is empty until the volume
+count is confirmed and `dfc` then falls back to each subject's observed run
+length with a validation warning.
+
+Two things about the windowed apertures at rest, both arithmetic rather than
+opinion (the full tables are in the config):
+
+* A window holds **more** samples at rest than in the movie — TR 1.97 against
+  2.47, so 30 s is 15 TR here and 12 there. Rest edges are therefore the
+  **less** noisy of the two (Fisher-z SD 0.289 vs 0.333 at 30 s). A
+  movie-vs-rest difference in connectivity *variability* is partly this.
+* `harvardoxford` is rank-deficient at every window below 300 s (its floor is
+  219.7 s at this TR). The rows are still computed and flagged; edge-wise
+  analysis is fine, anything that inverts the matrix is not.
+
 For the state arm at rest, **project** rest into the state space already fitted
 on the movie, rather than fitting a second one:
 

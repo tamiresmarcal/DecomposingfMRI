@@ -33,38 +33,39 @@
 # a paper, which this repository's own convention says not to trust for a
 # value a file can state:
 #
-#     tr: 1.97              UNCONFIRMED  <- the one that silently rescales
-#     261 volumes           UNCONFIRMED  <- sets stimulus.durations_s
-#     single echo           LIKELY       <- Tamires reports one rest file per
-#                                          person, which is single-echo naming
-#                                          (the movie has five). Sets
-#                                          --n-echoes 0 at BIDS build. Still
-#                                          worth the one `ls` below, because a
-#                                          wrong value reports every subject as
-#                                          never having done the task.
-#     func subdir name      UNCONFIRMED  <- `func_rest`? movie's is `func_movie`,
-#                                          and ccfrail capitalises: func_Movie
+#     tr: 1.97              CONFIRMED (2026-10) from the sidecar on nibi:
+#                             RepetitionTime -> 1.97 in
+#                             func_rest/sub-CC110033/func/
+#                             sub-CC110033_task-Rest_bold.json
+#     func subdir name      CONFIRMED (2026-10)  `func_rest`, lower case --
+#                             unlike ccfrail/release002, which capitalises
+#                             (func_Movie). Confirmed from the path above.
+#     single echo           CONFIRMED (2026-10)  the filename is
+#                             sub-X_task-Rest_bold.nii.gz, with NO echo-
+#                             entity at all -- a different filename SHAPE
+#                             from the movie's five numbered echoes, not just
+#                             a different count. So --n-echoes 0.
+#     261 volumes           STILL UNCONFIRMED  <- the only one left. It sets
+#                             stimulus.durations_s and therefore the windowed
+#                             grid; it does NOT affect the activation-only
+#                             route. Read it after fMRIPrep (command below).
 #
-# Confirm all four in one go, on a login node, before building anything:
-#
-#   R=/project/6008063/tamires/cohorts/camcan/cc700/mri/pipeline/release004/BIDSsep
-#   ls $R | grep -i rest                        # the subdir name
-#   ls $R/func_rest/sub-CC110033/func/          # echo entity present or not
-#   python3 -c "import json,sys; d=json.load(open(sys.argv[1])); \
-#     print(d['RepetitionTime'], d.get('EchoTime'))" \
-#     $R/func_rest/sub-CC110033/func/sub-CC110033_task-Rest_bold.json
-#
-# Then, after fMRIPrep, the volume count -- the same check that stands as the
-# corruption check for the movie run:
+# The volume count, after fMRIPrep -- the same check that stands as the
+# corruption check for the movie run (one line of output means one shape, so
+# no truncated or partial writes):
 #
 #   python3 -c "import glob,nibabel as nib,collections; \
 #     print(collections.Counter(nib.load(f).shape for f in \
-#     glob.glob('<deriv>/sub-*/func/*task-Rest*desc-preproc_bold.nii.gz')))"
+#     glob.glob('/project/6008063/tamires/cohorts/camcan_rest_fmriprep/'
+#               'sub-*/func/*task-Rest*desc-preproc_bold.nii.gz')))"
 #
-# If the TR is not 1.97, FIX IT HERE FIRST. Nothing downstream will complain.
+# If it is 261 everywhere, set `stimulus.durations_s: {Rest: 514.17}` below
+# (261 * 1.97). If it varies by subject, LEAVE IT EMPTY -- an assumed fixed
+# duration where runs actually differ is worse than no duration, because the
+# window grid would then claim windows that some subjects never acquired.
 
 cohort: camcan_rest
-tr: 1.97                  # UNCONFIRMED -- see above
+tr: 1.97                  # CONFIRMED from the sidecar -- see above
 derivatives_root: /project/6008063/tamires/cohorts/camcan_rest_fmriprep
 output_root: /project/6008063/tamires/DecomposingfMRI/outputs
 space: MNI152NLin2009cAsym
@@ -150,27 +151,67 @@ stimulus:
   unit_of_analysis: run
 
 windows:
-  # The SAME grid as the movie, so that if a windowed-DFC state set is ever the
-  # one to compare, the aperture is not another difference between conditions.
+  # THE SAME GRID AS THE MOVIE, so that if a windowed state set is ever the one
+  # to compare, the aperture is not another difference between conditions.
   #
-  # Note that a window holds MORE samples here than in the movie, not fewer:
-  # rest's TR is 1.97 s against the movie's 2.47 s, so 30 s is 15 TR here
-  # against 12 there. The rest edges are the LESS noisy of the two
-  # (Fisher-z SD 1/sqrt(n-3): 0.29 against 0.33 at 30 s). That is the opposite
-  # of the usual cross-cohort problem and it still has to be accounted for --
-  # a rest-vs-movie difference in connectivity VARIABILITY is partly this.
-  # `n_tr_effective` is written per window, so it is known rather than guessed.
+  # These sizes are only used by stage 3 (`dfc`). The recommended route below
+  # is activation-only (`window_s = -1`) and reads none of them.
   sizes_s: [15, 30, 60, 120, 300]
   n_overlaps: 5
   drop_incomplete: true
   by_size:
     15:
       atlases: [yeo7, networks]     # never harvardoxford: 111 nodes, 8 samples
-  # 15 s at TR 1.97 is round(15/1.97) = 8 TR, still far below the rank floor
-  # ((n_nodes + 0.5) * tr): 14.8 s for yeo7, 28.6 s for networks, 219.7 s for
-  # harvardoxford. So yeo7 at 15 s is now ABOVE its floor here where it was
-  # below it in the movie -- another reason not to read a 15 s movie-vs-rest
-  # difference as neural.
+  #
+  # WHAT EACH SIZE ACTUALLY GIVES YOU HERE
+  # --------------------------------------
+  # Computed from TR 1.97 and an assumed 514.17 s run (261 volumes -- the one
+  # value still unconfirmed, so the window COUNTS move if it is wrong; the
+  # samples per window do not).
+  #
+  #   win   rest TR  rest windows | movie TR  movie windows
+  #    15      8        167       |    6          154
+  #    30     15         81       |   12           75
+  #    60     30         38       |   24           35
+  #   120     61         17       |   49           15
+  #   300    152          4       |  121            3
+  #
+  # A window holds MORE samples here than in the movie, not fewer: rest's TR is
+  # 1.97 s against 2.47 s. So the rest edges are the LESS noisy of the two --
+  # Fisher-z sampling SD 1/sqrt(n-3) per edge:
+  #
+  #   win    rest    movie
+  #    30    0.289   0.333
+  #    60    0.192   0.218
+  #   120    0.131   0.147
+  #   300    0.082   0.092
+  #
+  # That is the opposite of the usual cross-cohort problem and it still has to
+  # be accounted for: a rest-vs-movie difference in connectivity VARIABILITY is
+  # partly this, before any brain is involved. `n_tr_effective` is written per
+  # window, so the n that applies is known rather than guessed.
+  #
+  # RANK. The floor is (n_nodes + 0.5) * tr -- 14.8 s for yeo7, 28.6 s for
+  # networks, 219.7 s for harvardoxford at this TR (against 18.5 / 35.8 /
+  # 275.4 s in the movie). Checked against `windows.is_rank_deficient`:
+  #
+  #   win    yeo7   networks   harvardoxford
+  #    15     ok    DEFICIENT    DEFICIENT
+  #    30     ok       ok        DEFICIENT
+  #    60     ok       ok        DEFICIENT
+  #   120     ok       ok        DEFICIENT
+  #   300     ok       ok           ok
+  #
+  # `rank_policy: warn` still computes those cells and flags the rows, because
+  # the two questions differ: a rank-deficient window has a SINGULAR matrix,
+  # while each edge in it is still an ordinary two-variable correlation.
+  # Edge-wise: noisy, usable, flagged. Anything that inverts or decomposes the
+  # matrix -- precision, graphical lasso, PCA ON THE MATRIX -- is void, and the
+  # flag is what says so. Stage 4 does PCA on the edge VECTOR across windows,
+  # not on the matrix, so it is not affected.
+  #
+  # Note yeo7 at 15 s is ABOVE its floor here and was BELOW it in the movie.
+  # One more reason not to read a 15 s movie-vs-rest difference as neural.
 
 # --- known limitations -------------------------------------------------
 #
