@@ -115,6 +115,24 @@ EMBEDDINGS = {
     "umap3": ["umap0/3", "umap1/3", "umap2/3"],
 }
 
+# FAMILY names, which is what a command should normally say.
+#
+# `pca` and `umap` resolve to exactly one member each: only pca3 and umap3 are
+# clustering embeddings. `decompose --n-latents 3 14` also writes a
+# 14-component PCA, but that exists so `raw14` is a rotation of a FULL-RANK one
+# -- which is what lets `state-means` invert it -- and `pca14` is not a valid
+# embedding name. So there is no ambiguity to resolve for those two.
+#
+# `raw` is the one that needs resolving, and the only reason this exists. Its
+# width is a property of the atlas, not of the command -- raw7 on yeo7, raw14
+# on networks, absent on harvardoxford -- so a command naming `raw14` is
+# carrying a fact about the data that the cell can simply be asked. Forgetting
+# to name it was a silent omission: the run succeeded and the named-network arm
+# was just missing from the grid.
+EMBEDDING_FAMILIES = {"pca": ["pca3"], "umap": ["umap3"], "raw": None}
+
+DEFAULT_EMBEDDINGS = ["pca", "umap", "raw"]
+
 # Which cohorts a clusterer may be fitted on. Kept here rather than read from
 # the latents' own `role` column so that a mistake is visible in the command.
 DEFAULT_TRAIN = ["ds002837", "cneuromod"]
@@ -671,6 +689,42 @@ def _training_block(frames: dict, train: list[str], cols: list[str], args):
 RAW_EMB_RE = re.compile(r"^raw(\d+)$")
 
 
+def resolve_families(requested: list[str], paths: dict) -> list[str]:
+    """Family names -> the concrete embeddings present in THIS cell.
+
+    `raw` becomes whichever `raw<N>` the cohorts actually carry, read from the
+    files rather than assumed, and becomes nothing where passthrough never ran.
+    Exact names pass through untouched, so an existing command keeps working
+    and a request for one specific width is still a request for that width.
+
+    Order is preserved and duplicates dropped, so `--embeddings pca raw pca3`
+    is `pca3, raw<N>` and not `pca3, raw<N>, pca3`.
+    """
+    out: list[str] = []
+    for item in requested:
+        if item not in EMBEDDING_FAMILIES:
+            embedding_spec(item)                       # validate or raise
+            out.append(item)
+            continue
+        members = EMBEDDING_FAMILIES[item]
+        if members is not None:
+            out += members
+            continue
+        # `raw`: ask the cell. Every cohort must agree -- a fit on one cohort's
+        # matrix projected onto another's would silently relabel the axes if
+        # the widths differed.
+        widths = {len(raw_columns(pth)) for pth in paths.values()}
+        widths.discard(0)
+        if len(widths) > 1:
+            raise SystemExit(
+                f"the cohorts in this cell carry different numbers of raw "
+                f"features ({sorted(widths)}), so `--embeddings raw` cannot "
+                f"name one. Re-run `decompose --passthrough-features` for the "
+                f"whole cell, or ask for an exact raw<N>.")
+        out += [f"raw{w}" for w in widths]
+    return list(dict.fromkeys(out))
+
+
 def embedding_spec(emb: str) -> int | None:
     """`None` for a fixed embedding; the expected feature count for `raw<N>`.
 
@@ -684,10 +738,11 @@ def embedding_spec(emb: str) -> int | None:
     m = RAW_EMB_RE.match(emb)
     if not m:
         raise SystemExit(
-            f"unknown embedding {emb!r}. Choose from {sorted(EMBEDDINGS)}, or "
-            f"raw<N> -- the N named, scaled input features written by "
-            f"`decompose --passthrough-features`, e.g. raw7 for yeo7 or raw14 "
-            f"for the networks atlas.")
+            f"unknown embedding {emb!r}. Choose a FAMILY -- "
+            f"{sorted(EMBEDDING_FAMILIES)} -- which is resolved against each "
+            f"cell, or an exact name: {sorted(EMBEDDINGS)}, or raw<N>, the N "
+            f"named scaled features written by `decompose "
+            f"--passthrough-features` (raw7 for yeo7, raw14 for networks).")
     n = int(m.group(1))
     if n < 2:
         raise SystemExit(f"{emb!r}: a clusterer needs at least 2 dimensions.")
@@ -930,7 +985,8 @@ def append_columns(path: Path, new: dict[str, np.ndarray],
 
 
 # ------------------------------------------------------------------ run ---
-def _require_embeddings(paths: dict, args, atlas: str, window_s) -> None:
+def _require_embeddings(paths: dict, embeddings: list[str], atlas: str,
+                        window_s) -> None:
     """Every requested embedding present in every cohort, or stop.
 
     A hard failure rather than a skip, and the same reasoning as stage 4's UMAP
@@ -939,7 +995,7 @@ def _require_embeddings(paths: dict, args, atlas: str, window_s) -> None:
     at the point someone is reading results.
     """
     gaps = {}
-    for emb in args.embeddings:
+    for emb in embeddings:
         # `raw<N>` is exempt, and deliberately so: it exists only where
         # `decompose --passthrough-features` ran, which is the activation
         # aperture on the small atlases. The grid is RAGGED for it by design, so
@@ -967,7 +1023,7 @@ def _require_embeddings(paths: dict, args, atlas: str, window_s) -> None:
     raw = md.get(b"source")
     src = _json.loads(raw.decode()) if raw else "dfc"
     extra = " --source activation" if src == "activation" else ""
-    have = [e for e in args.embeddings if e not in gaps]
+    have = [e for e in embeddings if e not in gaps]
 
     lines = [f"  {emb}: {', '.join(cols)} not in cohort(s) {absent}"
              for emb, (cols, absent) in gaps.items()]
@@ -1001,7 +1057,8 @@ def run_one(root: Path, atlas: str, window_s, args):
     # inside the loop would still have failed, but only after the earlier
     # embedding's columns had been written -- leaving the file with half the state
     # sets it was asked for, which is the state this stage exists to avoid.
-    _require_embeddings(paths, args, atlas, window_s)
+    _require_embeddings(paths, resolve_families(args.embeddings, paths),
+                        atlas, window_s)
 
     # Which `decompose` fit produced these embeddings. Carried into the fit
     # cache and checked on the way back out: `fit_hash` describes the
@@ -1012,8 +1069,43 @@ def run_one(root: Path, atlas: str, window_s, args):
 
     cell_model_hash = latents_model_hash(paths[train[0]])
 
+    # WHICH COHORTS GET LABELLED, said rather than inferred. `train + project`,
+    # exactly as `decompose` says it -- two stages with the same train/project
+    # semantics should use the same vocabulary, and a stage that silently acts
+    # on whatever is in the directory cannot be asked for less.
+    project = getattr(args, "project", None)
+    if project:
+        unknown = [c for c in project if c not in paths]
+        if unknown:
+            raise SystemExit(
+                f"--project names cohort(s) with no latents at atlas={atlas} "
+                f"window_s={window_s}: {unknown}\n"
+                f"  this cell has {sorted(paths)}\n"
+                f"  run `decompose --project {' '.join(unknown)}` first, or "
+                f"fix the spelling.")
+        label = [c for c in paths if c in set(train) | set(project)]
+    else:
+        label = list(paths)
+    if len(label) < len(paths):
+        log(f"  labelling {label}; not asked for: "
+            f"{[c for c in paths if c not in label]}")
+
+    # Families resolved against THIS cell, because `raw`'s width is a property
+    # of the atlas and not of the command.
+    embeddings = resolve_families(args.embeddings, paths)
+    if embeddings != list(args.embeddings):
+        log(f"  embeddings {list(args.embeddings)} -> {embeddings}")
+    if not embeddings:
+        log(f"  atlas={atlas} window_s={window_s}: none of "
+            f"{list(args.embeddings)} resolves to anything here, skipped")
+        return [], [{"atlas": atlas, "window_s": str(window_s), "kind": "n/a",
+                     "method": "-", "embedding": ",".join(args.embeddings),
+                     "k": 0, "reason": "no requested embedding exists in this "
+                                       "cell", "search": None}]
+    require_methods_are_reachable(args.methods, embeddings, atlas, window_s)
+
     entries, skipped = [], []
-    for emb in args.embeddings:
+    for emb in embeddings:
         cols = embedding_columns(emb, paths)
         if cols is None:
             # Only reachable for a raw embedding: _require_embeddings above has
@@ -1127,6 +1219,8 @@ def run_one(root: Path, atlas: str, window_s, args):
 
                 written, kept = {}, []
                 for cohort, f in frames.items():
+                    if cohort not in label:
+                        continue
                     # A cohort already carrying THIS fit is left alone. Not an
                     # optimisation: append_columns rewrites the whole file, so
                     # relabelling a cohort that needs nothing would churn every
@@ -1175,6 +1269,51 @@ def run_one(root: Path, atlas: str, window_s, args):
                                 "fit_diagnostics":
                                     getattr(cl, "diagnostics", None) or None})
     return entries, skipped
+
+
+def _carries(method: str, emb: str) -> bool:
+    """Can this embedding carry this method at all? Pure compatibility."""
+    is_raw = embedding_spec(emb) is not None
+    n_dim = None if is_raw else len(EMBEDDINGS[emb])
+    if method in THREE_D_ONLY and (is_raw or n_dim != 3):
+        return False
+    return not (is_raw and method not in RAW_CAPABLE)
+
+
+def require_methods_are_reachable(methods: list[str], embeddings: list[str],
+                                  atlas: str, window_s) -> None:
+    """Stop when a requested METHOD has no embedding here that can carry it.
+
+    Per embedding this is already a recorded `n/a` skip, which is right: the
+    grid is deliberately ragged. But a method that applies to NONE of the
+    chosen embeddings is a different thing -- it produces nothing anywhere, the
+    run reports success, and the state set you asked for is simply missing from
+    the results. That is the failure worth being loud about, and it is knowable
+    before any fit.
+    """
+    unreachable = {m: [e for e in embeddings if not _carries(m, e)]
+                   for m in methods if not any(_carries(m, e)
+                                               for e in embeddings)}
+    if not unreachable:
+        return
+    lines = [f"atlas={atlas} window_s={window_s}: "
+             f"{len(unreachable)} requested method(s) cannot run on ANY of "
+             f"the chosen embeddings, so they would produce nothing:", ""]
+    for m, _ in unreachable.items():
+        why = ("defined on a 3-D embedding only" if m in THREE_D_ONLY
+               else "not comparable on raw features (Euclidean distance over "
+                    "correlated, unequally-scaled axes)")
+        lines.append(f"    {m}: {why}")
+    lines += [
+        "",
+        f"  chosen embeddings resolved to: {embeddings}",
+        f"  3-D embeddings here: "
+        f"{[e for e in embeddings if embedding_spec(e) is None] or '(none)'}",
+        "",
+        "  Add an embedding those methods can use -- `--embeddings pca umap "
+        "raw` covers everything this cell has -- or drop them from --methods.",
+    ]
+    raise SystemExit("\n".join(lines))
 
 
 def _methods_for(emb: str, args, atlas: str, window_s, skipped: list) -> list[str]:
@@ -1265,15 +1404,19 @@ def check_grid(root: Path, args) -> pd.DataFrame:
                              "rows": 0})
                 continue
             train = [c for c in args.train if c in paths]
-            have = [e for e in args.embeddings
+            # Resolved per cell, exactly as run_one does -- otherwise --check
+            # reports the FAMILY names as absent and the dry run disagrees with
+            # the real one, which is the one thing a dry run must not do.
+            wanted = resolve_families(args.embeddings, paths)
+            have = [e for e in wanted
                     if embedding_columns(e, paths) is not None]
             # A missing raw<N> does NOT make the cell un-ready: it exists only
             # where `decompose --passthrough-features` ran, so the grid is
             # ragged for it by design and stage 4b skips it per cell. Only an
             # absent pca3/umap3 means stage 4 is incomplete here.
-            missing = [e for e in args.embeddings
+            missing = [e for e in wanted
                        if e not in have and embedding_spec(e) is None]
-            missing_raw = [e for e in args.embeddings
+            missing_raw = [e for e in wanted
                            if e not in have and embedding_spec(e) is not None]
             existing = sorted({c for p in paths.values()
                                for c in _state_columns(p)})
@@ -1338,8 +1481,13 @@ def report_check(df: pd.DataFrame, args) -> int:
     print(f"\ngrid: {int(df['ok'].sum())}/{len(df)} (atlas, aperture) cell(s) "
           f"ready\n")
     print(df.to_string(index=False))
+    # The union over cells of what each cell resolved to, so a family name
+    # never reaches column_name() -- `MeanShift_raw_0` is not a column anyone
+    # will see.
+    resolved = sorted({e for v in df["embeddings"] if isinstance(v, str)
+                       for e in v.split(",") if e and e != "-"})
     planned = [column_name(m, e, k)
-               for e in args.embeddings
+               for e in resolved
                for m in args.methods
                if not (m in THREE_D_ONLY and embedding_spec(e) is not None)
                and not (embedding_spec(e) is not None and m not in RAW_CAPABLE)
@@ -1374,7 +1522,8 @@ def run(args) -> int:
     # `--embeddings` lost its argparse `choices` when raw<N> arrived, since the
     # valid set depends on the atlas, so this is where a typo is caught.
     for emb in args.embeddings:
-        embedding_spec(emb)
+        if emb not in EMBEDDING_FAMILIES:
+            embedding_spec(emb)
     root = Path(args.output_root) if args.output_root else _default_root()
     if not root.is_dir():
         raise SystemExit(f"output_root does not exist: {root}")
@@ -1464,22 +1613,35 @@ def add_arguments(p) -> None:
                         "cell with no latents is reported and skipped.")
     p.add_argument("--methods", nargs="+", default=list(CLUSTERERS),
                    choices=list(CLUSTERERS))
-    p.add_argument("--embeddings", nargs="+", default=list(EMBEDDINGS),
+    p.add_argument("--embeddings", nargs="+", default=list(DEFAULT_EMBEDDINGS),
                    metavar="EMB",
-                   help=f"{' '.join(sorted(EMBEDDINGS))}, or raw<N> -- the N "
-                        f"named, scaled input features from `decompose "
-                        f"--passthrough-features` (raw7 for yeo7, raw14 for "
-                        f"networks). A raw embedding is SKIPPED where it is "
-                        f"absent rather than fatal: it exists only at the "
-                        f"activation aperture on the small atlases, so the grid "
-                        f"is ragged for it by design. "
-                        f"Default: {' '.join(EMBEDDINGS)}")
+                   help=f"FAMILIES -- {' '.join(sorted(EMBEDDING_FAMILIES))} -- "
+                        f"resolved against each cell, which is what a command "
+                        f"should normally say. `raw` becomes whichever raw<N> "
+                        f"the cohorts carry (raw7 on yeo7, raw14 on networks, "
+                        f"nothing on harvardoxford), read from the files rather "
+                        f"than named in the command, since the width is a fact "
+                        f"about the atlas. An exact name still works "
+                        f"({' '.join(sorted(EMBEDDINGS))}, raw<N>) when one "
+                        f"specific width is the point. A family that resolves "
+                        f"to nothing in a cell is skipped and reported, never "
+                        f"fatal. "
+                        f"Default: {' '.join(DEFAULT_EMBEDDINGS)}")
     p.add_argument("--k", nargs="+", type=int, default=[8, 10, 27],
                    help="for methods that need one; meanshift discovers it. "
                         "10 is in the default grid because it is the K van der "
                         "Meer et al. 2020 selected, so hmm1 and hmm2 can be "
                         "compared at it; 8 and 27 are perfect cubes, which "
                         "`threshold` requires.")
+    p.add_argument("--project", nargs="*", default=None,
+                   help="cohorts to LABEL, beside --train which is always "
+                        "labelled. Default: every cohort in the cell, which is "
+                        "what you want for a full run. Name them to label a "
+                        "subset -- adding one cohort months later is "
+                        "`--project <it>`, and the rest keep the columns they "
+                        "have. Same vocabulary as `decompose`, deliberately. A "
+                        "name with no latents in the cell is refused rather "
+                        "than ignored.")
     p.add_argument("--refit", action="store_true",
                    help="ignore the saved fits under outputs/meta/clusterers/ "
                         "and fit again, relabelling every cohort. The cache is "

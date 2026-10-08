@@ -233,13 +233,18 @@ Wait for those, then look before spending hours on the HMM:
 
 ```bash
 $RUN python3 -m fmri_decomposition.cli cluster --check \
-    --atlas harvardoxford yeo7 networks --window-s 30 60 120 300 -1 \
-    --embeddings pca3 umap3 raw7 raw14
+    --atlas harvardoxford yeo7 networks --window-s 30 60 120 300 -1
 ```
 
-`raw7` and `raw14` show as absent in most cells and that is correct — they exist
-only where passthrough ran. A missing raw embedding is skipped per cell, not an
-error.
+`--embeddings` defaults to the families `pca umap raw`, resolved per cell:
+`raw` becomes `raw7` on yeo7, `raw14` on networks and nothing on
+harvardoxford, read from the files rather than named in the command. A family
+that resolves to nothing is skipped and reported, never an error. Pass an exact
+name (`raw14`) only when one specific width is the point.
+
+A method that can run on **none** of the chosen embeddings is a hard error, not
+a skip — `--methods threshold --embeddings raw` would otherwise produce nothing
+anywhere and still report success.
 
 **hmm2 costs two orders of magnitude more than hmm1**, and it is worth knowing
 exactly where that goes. Measured on `harvardoxford -1`, 691,434 training rows:
@@ -270,7 +275,7 @@ five-fold against one job per atlas:
 for A in harvardoxford yeo7 networks; do
   for W in 30 60 120 300 -1; do
     sbatch --time=24:00:00 slurm/clustering.sbatch $A $W \
-      -- --train ds002837 cneuromod --embeddings pca3 umap3 raw7 raw14
+      -- --train ds002837 cneuromod
   done
 done
 ```
@@ -582,7 +587,7 @@ D=$(for A in $ATLASES; do
 C=$(for A in $ATLASES; do
       sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$D \
         --time=24:00:00 slurm/clustering.sbatch $A -1 \
-        -- $TRAIN --embeddings pca3 umap3 raw7 raw14 | cut -d';' -f1
+        -- $TRAIN | cut -d';' -f1
     done | paste -sd:)
 
 T=$(sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$C \

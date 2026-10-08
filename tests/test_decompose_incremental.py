@@ -223,7 +223,7 @@ def cluster_args(**kw):
              train=["trainA", "trainB"], balance_train=False, refit=False,
              meanshift_quantile=0.2, meanshift_fit_rows=50_000, hmm_iter=5,
              hmm2_iter=5, hmm2_restarts=2, hmm2_jobs=1,
-             min_k=2, max_k=30)
+             min_k=2, max_k=30, project=None)
     d.update(kw)
     return argparse.Namespace(**d)
 
@@ -562,3 +562,56 @@ class TestTheDiffIsReadable:
                .split("def write_latents")[1].split("def ")[0])
         for key in D._NOT_FIT_KEYS:
             assert f'"{key}"' in src, key
+
+
+# --------------------------------------------------------------------------
+# `cluster --project`: which cohorts get labelled, SAID rather than inferred.
+# Before this, cluster acted on whatever cohorts happened to be in the
+# directory, so a subset could not be asked for and a stray cohort was
+# labelled silently.
+# --------------------------------------------------------------------------
+class TestClusterProject:
+    def test_the_default_still_labels_everything(self, cell):
+        entries, _ = run_cluster(cell)
+        assert set(entries[0]["states_used"]) == {"trainA", "trainB", "camcan"}
+
+    def test_a_subset_can_be_asked_for(self, cell):
+        """Her case: come back a month later and label only the new cohort."""
+        run(cell, ["camcan", "camcan_rest"])
+        entries, _ = run_cluster(cell, project=["camcan_rest"])
+        labelled = set(entries[0]["states_used"]) | set(
+            entries[0]["cohorts_kept"])
+        assert "camcan_rest" in set(entries[0]["states_used"])
+        assert "camcan" not in labelled      # not asked for, not touched
+
+    def test_train_is_labelled_without_being_named(self, cell):
+        """`train + project`, exactly as decompose says it -- the training
+        cohorts are part of the output and always get their columns."""
+        run(cell, ["camcan", "camcan_rest"])
+        entries, _ = run_cluster(cell, project=["camcan_rest"])
+        got = set(entries[0]["states_used"]) | set(entries[0]["cohorts_kept"])
+        assert {"trainA", "trainB", "camcan_rest"} <= got
+
+    def test_a_cohort_not_asked_for_keeps_the_columns_it_has(self, cell):
+        col = run_cluster(cell)[0][0]["column"]
+        before = pd.read_parquet(latents(cell, "camcan"))[col].to_numpy()
+        run(cell, ["camcan", "camcan_rest"])
+        run_cluster(cell, project=["camcan_rest"])
+        after = pd.read_parquet(latents(cell, "camcan"))[col].to_numpy()
+        assert np.array_equal(before, after)
+
+    def test_an_unknown_cohort_is_refused_not_ignored(self, cell):
+        """The typo protection there was no way to have before."""
+        with pytest.raises(SystemExit) as e:
+            run_cluster(cell, project=["camcan_rst"])
+        msg = str(e.value)
+        assert "camcan_rst" in msg
+        assert "decompose --project camcan_rst" in msg
+        assert "camcan" in msg               # lists what the cell has
+
+    def test_it_says_which_cohorts_it_left_out(self, cell, capsys):
+        run(cell, ["camcan", "camcan_rest"])
+        capsys.readouterr()
+        run_cluster(cell, project=["camcan_rest"])
+        out = capsys.readouterr().out
+        assert "not asked for" in out and "camcan" in out

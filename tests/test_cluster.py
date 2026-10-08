@@ -6,6 +6,7 @@ the fact that the projected cohort is never fitted on, and pin the threshold
 method reproducing what `decompose --bins` used to write before it moved here.
 """
 import argparse
+import json
 
 import numpy as np
 import pandas as pd
@@ -17,6 +18,7 @@ from fmri_decomposition import cluster as C
 def args(**kw):
     d = dict(methods=["threshold"], embeddings=["pca3"], k=[8],
              train=["a", "b"], balance_train=False, refit=False,
+             project=None,
              meanshift_quantile=0.2, meanshift_fit_rows=50_000, hmm_iter=5,
              hmm2_iter=5, hmm2_restarts=2,
              min_k=C.STATE_K_BAND[0], max_k=C.STATE_K_BAND[1])
@@ -803,3 +805,141 @@ class TestRestartsInParallel:
         out = cl.fit(X, 2, lengths=lengths)
         assert out.diagnostics["n_valid_restarts"] >= 1
         assert out.hmm is not None
+
+
+# ==========================================================================
+# Embedding FAMILIES, method reachability, and --project.
+# ==========================================================================
+def _latents_cell(tmp_path, raw_widths, cohorts=("a", "b", "c")):
+    """A cell with pca3/umap3 everywhere and `raw_widths[cohort]` raw columns."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from fmri_decomposition.io import RAW_PREFIX
+
+    paths = {}
+    for ci, c in enumerate(cohorts):
+        n = 60
+        d = {"cohort": [c] * n, "task": ["m"] * n,
+             "sub": [f"S{i // 20}" for i in range(n)],
+             "window_id": list(range(n))}
+        for pre in ("pca", "umap"):
+            for j in range(3):
+                d[f"{pre}{j}/3"] = list(np.linspace(0, 1, n) + j + ci)
+        for j in range(raw_widths.get(c, 0)):
+            d[f"{RAW_PREFIX}F{j}"] = list(np.linspace(0, 1, n) + j)
+        path = (tmp_path / "latents" / "atlas=mini" / "window_s=-1"
+                / f"cohort={c}" / "data.parquet")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        t = pa.Table.from_pandas(pd.DataFrame(d), preserve_index=False)
+        pq.write_table(t.replace_schema_metadata(
+            {b"model_hash": json.dumps("h0").encode(),
+             b"source": json.dumps("activation").encode()}), path)
+        paths[c] = path
+    return paths
+
+
+class TestEmbeddingFamilies:
+    def test_pca_and_umap_resolve_to_their_single_member(self, tmp_path):
+        paths = _latents_cell(tmp_path, {})
+        assert C.resolve_families(["pca"], paths) == ["pca3"]
+        assert C.resolve_families(["umap"], paths) == ["umap3"]
+
+    def test_there_is_no_wider_pca_to_resolve_to(self):
+        """`decompose --n-latents 3 14` writes a 14-component PCA, but it is
+        there so raw14 is a rotation of a FULL-RANK one -- which is what lets
+        state-means invert it -- and pca14 is not a clustering embedding. So
+        `pca` is unambiguous."""
+        assert C.EMBEDDING_FAMILIES["pca"] == ["pca3"]
+        with pytest.raises(SystemExit):
+            C.embedding_spec("pca14")
+
+    def test_raw_is_read_from_the_cell_not_from_the_command(self, tmp_path):
+        """The whole point: raw's width is a fact about the atlas -- raw7 on
+        yeo7, raw14 on networks -- so the command should not have to carry it."""
+        paths = _latents_cell(tmp_path, {"a": 7, "b": 7, "c": 7})
+        assert C.resolve_families(["raw"], paths) == ["raw7"]
+        paths = _latents_cell(tmp_path / "two", {"a": 14, "b": 14, "c": 14})
+        assert C.resolve_families(["raw"], paths) == ["raw14"]
+
+    def test_raw_resolves_to_nothing_where_passthrough_never_ran(self, tmp_path):
+        """harvardoxford. Not an error -- the grid is ragged for raw by
+        design."""
+        paths = _latents_cell(tmp_path, {})
+        assert C.resolve_families(["raw"], paths) == []
+        assert C.resolve_families(["pca", "raw"], paths) == ["pca3"]
+
+    def test_the_default_asks_for_everything_the_cell_has(self, tmp_path):
+        """The gap this closes: --methods defaulted to all four while
+        --embeddings defaulted to two of four, so forgetting raw14 gave a run
+        that succeeded with the named-network arm silently missing."""
+        assert C.DEFAULT_EMBEDDINGS == ["pca", "umap", "raw"]
+        paths = _latents_cell(tmp_path, {"a": 14, "b": 14, "c": 14})
+        assert C.resolve_families(C.DEFAULT_EMBEDDINGS, paths) == [
+            "pca3", "umap3", "raw14"]
+
+    def test_an_exact_name_still_works(self, tmp_path):
+        paths = _latents_cell(tmp_path, {"a": 14, "b": 14, "c": 14})
+        assert C.resolve_families(["raw14"], paths) == ["raw14"]
+        assert C.resolve_families(["pca3", "raw14"], paths) == ["pca3", "raw14"]
+
+    def test_order_is_kept_and_duplicates_dropped(self, tmp_path):
+        paths = _latents_cell(tmp_path, {"a": 7, "b": 7, "c": 7})
+        assert C.resolve_families(["raw", "pca", "pca3", "raw7"], paths) == [
+            "raw7", "pca3"]
+
+    def test_cohorts_disagreeing_on_width_is_refused(self, tmp_path):
+        """A fit on one cohort's matrix projected onto another's would silently
+        relabel the axes if the widths differed."""
+        paths = _latents_cell(tmp_path, {"a": 7, "b": 14, "c": 7})
+        with pytest.raises(SystemExit) as e:
+            C.resolve_families(["raw"], paths)
+        assert "different numbers of raw features" in str(e.value)
+        assert "[7, 14]" in str(e.value)
+
+    def test_a_typo_is_still_caught(self, tmp_path):
+        paths = _latents_cell(tmp_path, {})
+        with pytest.raises(SystemExit) as e:
+            C.resolve_families(["pcca"], paths)
+        assert "unknown embedding" in str(e.value)
+        assert "pca" in str(e.value)        # the families are offered
+
+
+class TestMethodsMustBeReachable:
+    def test_threshold_with_only_raw_is_refused(self):
+        """Per embedding this is an n/a skip, and rightly so. But a method that
+        applies to NONE of the chosen embeddings produces nothing anywhere
+        while the run reports success."""
+        with pytest.raises(SystemExit) as e:
+            C.require_methods_are_reachable(["threshold"], ["raw14"],
+                                            "networks", -1)
+        assert "threshold" in str(e.value)
+        assert "3-D embedding only" in str(e.value)
+
+    def test_meanshift_with_only_raw_is_refused(self):
+        with pytest.raises(SystemExit) as e:
+            C.require_methods_are_reachable(["meanshift"], ["raw7"], "yeo7", -1)
+        assert "not comparable on raw features" in str(e.value)
+
+    def test_it_names_what_to_do(self):
+        with pytest.raises(SystemExit) as e:
+            C.require_methods_are_reachable(["threshold"], ["raw14"], "a", -1)
+        msg = str(e.value)
+        assert "--embeddings pca umap raw" in msg
+        assert "drop them from --methods" in msg
+
+    def test_one_reachable_embedding_is_enough(self):
+        """The grid stays deliberately ragged: threshold on pca3 plus a
+        recorded n/a for threshold on raw14 is the correct outcome."""
+        C.require_methods_are_reachable(["threshold", "hmm2"],
+                                        ["pca3", "raw14"], "a", -1)
+
+    def test_the_hmms_reach_everything(self):
+        C.require_methods_are_reachable(["hmm1", "hmm2"], ["raw14"], "a", -1)
+
+    def test_carries_matches_the_per_cell_skip_rules(self):
+        assert C._carries("threshold", "pca3")
+        assert not C._carries("threshold", "raw14")
+        assert C._carries("meanshift", "umap3")
+        assert not C._carries("meanshift", "raw7")
+        assert C._carries("hmm2", "raw7") and C._carries("hmm2", "pca3")

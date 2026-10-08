@@ -4,7 +4,7 @@
 #   sbatch slurm/clustering.sbatch harvardoxford 30 60 120 300
 #   sbatch slurm/clustering.sbatch yeo7 -1
 #   sbatch slurm/clustering.sbatch yeo7 30 -- --methods hmm1 --k 8
-#   sbatch slurm/clustering.sbatch networks -1 -- --embeddings pca3 raw14
+#   sbatch slurm/clustering.sbatch networks -1 -- --project camcan_rest
 #
 # LOOK AT THE GRID FIRST, on a login node -- it fits nothing and takes seconds:
 #
