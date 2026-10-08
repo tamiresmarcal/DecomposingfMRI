@@ -16,12 +16,25 @@
 # is the cost here and it is hours at K=27 across a full grid; finding a missing
 # embedding after three of those have run is the expensive way to find out.
 #
-# NOT AN ARRAY, and deliberately so. Every clusterer for a given
-# (atlas, aperture) is fitted on the SAME embedding block and the labels are
-# appended to the SAME parquet file. Two array tasks writing different state
-# columns into one file would race: each reads the file, adds its column, and
-# renames over the other's work, so the one that finishes second wins and the
-# first column is gone. One task per atlas, every aperture inside it.
+# ONE WRITER PER CELL -- and a cell is an (atlas, APERTURE), not an atlas.
+# Every clusterer for one cell is fitted on the same embedding block and the
+# labels are appended to the SAME parquet file, which parquet cannot do in
+# place: the file is read, rewritten and renamed. Two jobs on one cell would
+# race -- each reads, each adds its column, and the one that renames second
+# wins, so the other's columns are gone.
+#
+# Different APERTURES are different files, so splitting by aperture is safe and
+# is usually what you want -- fifteen one-cell jobs schedule faster than three
+# long ones and finish in about a fifth of the wall-clock:
+#
+#   for A in harvardoxford yeo7 networks; do
+#     for W in 30 60 120 300 -1; do
+#       sbatch slurm/clustering.sbatch $A $W -- <args>
+#     done
+#   done
+#
+# What you must NOT do is split one cell by METHOD -- an hmm2-only job beside
+# an hmm1 job on the same (atlas, aperture) is exactly the race above.
 #
 # COST is the clusterers, and they are not alike. Threshold is a quantile
 # transform (seconds). MeanShift is O(n_fit^2) in the bandwidth search, capped
@@ -91,14 +104,29 @@ fi
 _ENV_SH="${SLURM_SUBMIT_DIR:-$PWD}/slurm/env.sh"
 [[ -f "$_ENV_SH" ]] && source "$_ENV_SH"
 
-# hmmlearn and MeanShift both go through BLAS; one pool sized to the task beats
-# several fighting over the same cores.
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
-export MKL_NUM_THREADS="${OMP_NUM_THREADS}"
-export OPENBLAS_NUM_THREADS="${OMP_NUM_THREADS}"
-export NUMBA_NUM_THREADS="${OMP_NUM_THREADS}"
+# BLAS GETS ONE THREAD, ON PURPOSE. This used to hand it every core, on the
+# reasoning that hmmlearn and MeanShift both go through BLAS so one big pool
+# beats several small ones. For hmmlearn that reasoning was simply wrong:
+# forward-backward is sequential over time and cannot be split, so one fit on
+# eight threads is no faster than on one -- measured at 4.37 s against 4.70 s,
+# i.e. slightly WORSE from contention.
+#
+# So the cores go to hmm2's restarts instead, which are independent fits, via
+# --hmm2-jobs below. Two settings have to agree for that to work: BLAS at one
+# thread here, and `inner_max_num_threads=1` on the joblib backend. Without
+# both, eight workers each start an eight-thread pool on eight cores.
+#
+# MeanShift is unaffected: its `n_jobs=-1` is joblib over seeds, not BLAS.
+#
+# (fmri_decomposition/cli.py already setdefault()s these to 1. An `export`
+# here BEATS a setdefault there, which is how a run ended up with eight idle
+# BLAS threads AND sequential restarts -- the worst of both.)
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMBA_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 
-echo "host=$(hostname) atlas=${ATLAS} windows=${WINDOWS[*]} cpus=${OMP_NUM_THREADS}"
+echo "host=$(hostname) atlas=${ATLAS} windows=${WINDOWS[*]} cpus=${SLURM_CPUS_PER_TASK:-1} (BLAS threads 1; the cores go to --hmm2-jobs)"
 
 # Stages 4 and 5 need the OTHER image. containers/README.md: stages 2-3 run in
 # fmri_decomp.sif, stages 4-5 in fmri_decomp_stage45.sif, which is where Stan,
@@ -185,7 +213,12 @@ else
   RUN=(python3)
 fi
 
+# --hmm2-jobs goes FIRST so a caller passing their own after `--` overrides it:
+# argparse takes the last occurrence. The default inside the CLI is
+# SLURM_CPUS_PER_TASK anyway, so this is belt and braces for a hand-run that
+# exports the variable differently.
 "${RUN[@]}" -m fmri_decomposition.cli cluster \
+    --hmm2-jobs "${SLURM_CPUS_PER_TASK:-1}" \
     --atlas "${ATLAS}" --window-s "${WINDOWS[@]}" ${EXTRA[@]+"${EXTRA[@]}"}
 
 echo "atlas=${ATLAS} done"

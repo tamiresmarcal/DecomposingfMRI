@@ -241,25 +241,45 @@ $RUN python3 -m fmri_decomposition.cli cluster --check \
 only where passthrough ran. A missing raw embedding is skipped per cell, not an
 error.
 
-**Measure hmm2 before committing to the grid.** It is full covariance, 500
-iterations and 15 restarts, which is two orders of magnitude more expensive than
-hmm1. One cheap cell tells you what walltime the real run needs:
+**hmm2 costs two orders of magnitude more than hmm1**, and it is worth knowing
+exactly where that goes. Measured on `harvardoxford -1`, 691,434 training rows:
+
+| | time | EM iterations | per iteration |
+|---|---|---|---|
+| `HMM1_pca3_8` | 77 s | 50 | 1.54 s |
+| `HMM1_pca3_27` | 695 s | 50 | 13.9 s |
+| `HMM2_pca3_8` | 12,631 s | 7,500 | 1.68 s |
+| `HMM2_pca3_10` | 19,032 s | 7,500 | 2.54 s |
+
+Per-iteration cost is the **same** — full covariance in 3-D is cheap. The whole
+gap is 15 restarts x 500 iterations against hmm1's single 50. So cost is linear
+in `--hmm2-restarts` and `--hmm2-iter`, roughly `K**1.8`, and linear in rows —
+which is why the `-1` aperture is the expensive one: it has a row per TR, where
+a windowed aperture has a row per window.
+
+The restarts run **in parallel** (`--hmm2-jobs`, defaulting to
+`SLURM_CPUS_PER_TASK`), because they are independent fits and a single hmmlearn
+fit is sequential over time. At 8 cores that turns a projected 29 h `K=27` cell
+into about 4 h for the same core-hours.
+
+**Split by aperture.** A cell is an (atlas, aperture) and different apertures are
+different files, so this is safe, schedules faster, and cuts wall-clock about
+five-fold against one job per atlas:
 
 ```bash
-sbatch slurm/clustering.sbatch yeo7 30 -- --methods hmm2 --k 10 --hmm2-restarts 5
-sacct -X -n -o Elapsed,State --name=fmridecomp_cluster | head -1
-```
-
-Cost is roughly linear in `--hmm2-restarts` and `--hmm2-iter`, and steeply worse
-in K and in the embedding's width. Then:
-
-```bash
-# clustering: coordinates -> brain-state labels, appended to the same files
 for A in harvardoxford yeo7 networks; do
-  sbatch --time=24:00:00 slurm/clustering.sbatch $A 30 60 120 300 -1 \
-    -- --train ds002837 cneuromod --embeddings pca3 umap3 raw7 raw14
+  for W in 30 60 120 300 -1; do
+    sbatch --time=24:00:00 slurm/clustering.sbatch $A $W \
+      -- --train ds002837 cneuromod --embeddings pca3 umap3 raw7 raw14
+  done
 done
 ```
+
+Do **not** split one cell by method — an hmm2-only job beside an hmm1 job on the
+same cell is two writers on one parquet file, and the second rename wins.
+
+A walltime kill is safe: columns are written per state set with an atomic
+rename, so whatever finished is on disk and a resubmit redoes only the rest.
 
 Two state definitions, on purpose. **HMM1** is the incumbent — diagonal
 covariance, 50 iterations, one fit — frozen so it stays a fixed baseline.

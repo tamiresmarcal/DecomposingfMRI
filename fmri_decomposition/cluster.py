@@ -344,6 +344,46 @@ class HMM1Cluster:
                         "the Viterbi path, which is a different quantity"}
 
 
+def _fit_one_restart(X, lengths, k: int, covariance_type: str, n_iter: int,
+                     seed: int) -> dict:
+    """One HMM2 initialisation. Module level so a loky worker can pickle it.
+
+    Returns the fitted model alongside its score rather than refitting the
+    winner in the parent: a 500-iteration fit is the whole cost here, and the
+    model itself is tiny (K x d x d covariances -- a few thousand floats at
+    K=27, d=14), so shipping it back through the pickle is free by comparison.
+    """
+    GaussianHMM = _import_gaussian_hmm()
+    m = GaussianHMM(n_components=k, covariance_type=covariance_type,
+                    n_iter=n_iter, random_state=seed)
+    try:
+        m.fit(X, lengths=lengths)
+        return {"seed": seed, "loglik": float(m.score(X, lengths)),
+                "states_expressed": int(np.unique(m.predict(X, lengths)).size),
+                "error": None, "model": m}
+    except (ValueError, np.linalg.LinAlgError) as e:
+        # A full-covariance state with too few rows assigned to it gives a
+        # singular covariance. That is a legitimate outcome of asking for more
+        # states than the data supports -- the same thing their K>=12 runs hit
+        # -- so it costs this restart and not the run.
+        return {"seed": seed, "loglik": None, "states_expressed": 0,
+                "error": f"{type(e).__name__}: {e}", "model": None}
+
+
+def _default_hmm2_jobs() -> int:
+    """How many restarts to fit at once.
+
+    SLURM_CPUS_PER_TASK, not os.cpu_count(): inside a job the latter reports
+    the NODE's core count, so -1 would launch dozens of workers on an
+    eight-core allocation and thrash.
+    """
+    n = os.environ.get("SLURM_CPUS_PER_TASK")
+    try:
+        return max(1, int(n))
+    except (TypeError, ValueError):
+        return 1
+
+
 class HMM2Cluster:
     """Gaussian HMM, FULL covariance, 500 iterations, N restarts, all-K-or-skip.
 
@@ -396,43 +436,67 @@ class HMM2Cluster:
     name = "HMM2"
 
     def __init__(self, n_iter=500, n_restarts=15, covariance_type="full",
-                 min_k=STATE_K_BAND[0], max_k=STATE_K_BAND[1]):
+                 min_k=STATE_K_BAND[0], max_k=STATE_K_BAND[1], n_jobs=None):
         self.n_iter, self.n_restarts = n_iter, n_restarts
         self.covariance_type = covariance_type
         self.min_k, self.max_k = min_k, max_k
+        # Execution detail, NOT a model setting -- see params(). It must never
+        # change a label, only how long they take to produce.
+        self.n_jobs = _default_hmm2_jobs() if n_jobs is None else int(n_jobs)
         self.diagnostics = {}
 
+    def _run_restarts(self, X, lengths, k) -> list[dict]:
+        """Every initialisation, in parallel where there are cores for it.
+
+        THE RESTARTS ARE THE PARALLEL AXIS, and for a while nothing used it. A
+        single hmmlearn fit is sequential over time -- forward-backward cannot
+        be split -- so giving one fit eight BLAS threads buys nothing; measured
+        at 4.37 s on one thread against 4.70 s on eight, i.e. slightly worse
+        from contention. The restarts, by contrast, are completely independent.
+        On a measured cell (691,434 training rows, K=27) the sequential loop
+        projects to ~29 h and eight-way restarts to ~4 h, for the same
+        core-hours.
+
+        `inner_max_num_threads=1` is the other half: without it each of eight
+        workers would start its own eight-thread BLAS pool on eight cores.
+        """
+        work = [(X, lengths, k, self.covariance_type, self.n_iter, seed)
+                for seed in range(self.n_restarts)]
+        if self.n_jobs <= 1 or self.n_restarts == 1:
+            return [_fit_one_restart(*w) for w in work]
+        from joblib import Parallel, delayed, parallel_backend
+
+        n_jobs = min(self.n_jobs, self.n_restarts)
+        with parallel_backend("loky", n_jobs=n_jobs, inner_max_num_threads=1):
+            return list(Parallel()(delayed(_fit_one_restart)(*w) for w in work))
+
     def fit(self, X, k, rng=None, lengths=None):
-        GaussianHMM = _import_gaussian_hmm()
-        attempts, best, best_ll = [], None, -np.inf
-        for seed in range(self.n_restarts):
-            m = GaussianHMM(n_components=k, covariance_type=self.covariance_type,
-                            n_iter=self.n_iter, random_state=seed)
-            try:
-                m.fit(X, lengths=lengths)
-                ll = float(m.score(X, lengths))
-                expressed = int(np.unique(m.predict(X, lengths)).size)
-                failure = None
-            except (ValueError, np.linalg.LinAlgError) as e:
-                # A full-covariance state with too few rows assigned to it gives
-                # a singular covariance. That is a legitimate outcome of asking
-                # for more states than the data supports -- the same thing their
-                # K>=12 runs hit -- so it costs this restart and not the run.
-                ll, expressed, failure = -np.inf, 0, f"{type(e).__name__}: {e}"
-            attempts.append({"seed": seed, "loglik": ll if np.isfinite(ll) else None,
-                             "states_expressed": expressed, "error": failure})
-            if expressed == k and ll > best_ll:
-                best, best_ll = m, ll
-        valid = [a for a in attempts if a["states_expressed"] == k]
-        lls = [a["loglik"] for a in valid if a["loglik"] is not None]
-        self.attempts = attempts
+        attempts = self._run_restarts(X, lengths, k)
+        valid = [a for a in attempts
+                 if a["states_expressed"] == k and a["loglik"] is not None]
+        # max over (loglik, -seed), not "first one that beats the record". With
+        # the restarts running in parallel their completion order is not their
+        # seed order, so a tie broken by arrival would make the winner -- and
+        # therefore every label written -- depend on scheduling. Lowest seed on
+        # an exact tie reproduces what the sequential loop did.
+        best_attempt = (max(valid, key=lambda a: (a["loglik"], -a["seed"]))
+                        if valid else None)
+        best = best_attempt["model"] if best_attempt else None
+        best_ll = best_attempt["loglik"] if best_attempt else -np.inf
+        lls = [a["loglik"] for a in valid]
+        # The models go no further: they are not JSON, and the one that won is
+        # already held as `self.hmm`.
+        self.attempts = [{x: y for x, y in a.items() if x != "model"}
+                         for a in attempts]
         self.diagnostics = {
             "n_restarts": self.n_restarts,
             "n_valid_restarts": len(valid),
+            "n_jobs": self.n_jobs,
             "states_expressed_per_restart": [a["states_expressed"] for a in attempts],
             "loglik_spread_across_restarts":
                 float(max(lls) - min(lls)) if len(lls) > 1 else 0.0,
             "loglik_best": float(best_ll) if np.isfinite(best_ll) else None,
+            "best_seed": best_attempt["seed"] if best_attempt else None,
             "restart_errors": [a["error"] for a in attempts if a["error"]][:3],
         }
         if best is None:
@@ -462,6 +526,12 @@ class HMM2Cluster:
         # Settings only -- see HMM1Cluster.params. The restart SEEDS are part of
         # the configuration (range(n_restarts), so reproducible from the count);
         # which one won is an outcome and lives in fit_diagnostics.
+        #
+        # `n_jobs` is DELIBERATELY ABSENT. It changes how long the fit takes and
+        # nothing else: the same labels come out whether the restarts ran one at
+        # a time or eight at a time, so a run on 8 cores and a run on 1 must
+        # carry the SAME fit_hash or the two stop being comparable for no
+        # reason. It is recorded in fit_diagnostics instead.
         return {"n_iter": self.n_iter, "n_restarts": self.n_restarts,
                 "covariance_type": self.covariance_type,
                 "restart_seeds": f"range({self.n_restarts})",
@@ -986,6 +1056,7 @@ def _opts(method: str, args) -> dict:
         return {"n_iter": args.hmm_iter}
     if method == "hmm2":
         return {"n_iter": args.hmm2_iter, "n_restarts": args.hmm2_restarts,
+                "n_jobs": args.hmm2_jobs,
                 "min_k": args.min_k, "max_k": args.max_k}
     return {}
 
@@ -1253,6 +1324,14 @@ def add_arguments(p) -> None:
                         "it a different estimator rather than a baseline.")
     p.add_argument("--hmm2-iter", type=int, default=500,
                    help="EM iterations for hmm2 (their `options.cyc = 500`).")
+    p.add_argument("--hmm2-jobs", type=int, default=None, metavar="N",
+                   help="restarts to fit at once. Default: SLURM_CPUS_PER_TASK, "
+                        "or 1 outside a job -- NOT os.cpu_count(), which "
+                        "reports the whole node and would thrash an 8-core "
+                        "allocation. The restarts are independent fits and a "
+                        "single hmmlearn fit is sequential over time, so this "
+                        "is where the cores go; it changes walltime only, never "
+                        "a label, and is kept out of fit_hash for that reason.")
     p.add_argument("--hmm2-restarts", type=int, default=15,
                    help="initialisations for hmm2, seeds range(N) (their "
                         "`HMMREPS = 15`). The best restart EXPRESSING ALL K "

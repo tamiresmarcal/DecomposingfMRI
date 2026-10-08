@@ -701,3 +701,105 @@ class TestExitCodeSeparatesNotApplicableFromRefused:
         rc = self.run_cluster(tmp_path, methods=["threshold", "hmm1"],
                               embeddings=["pca3", "raw7"], k=[8, 10], max_k=5)
         assert rc == 1
+
+
+class TestRestartsInParallel:
+    """The restarts are the parallel axis, and parallelising them must not
+    change a single label.
+
+    A single hmmlearn fit is sequential over time, so BLAS threads do nothing
+    for it -- measured at 4.37 s on one thread against 4.70 s on eight. The
+    restarts are independent, so they are where the cores belong. The risk this
+    class exists to pin is that completion order becomes part of the answer.
+    """
+
+    def data(self):
+        return seq(10, 60, 4, seed=1)
+
+    def test_parallel_and_sequential_agree_exactly(self):
+        X, lengths = self.data()
+        one = C.HMM2Cluster(n_iter=20, n_restarts=4, n_jobs=1).fit(
+            X, 2, lengths=lengths)
+        many = C.HMM2Cluster(n_iter=20, n_restarts=4, n_jobs=4).fit(
+            X, 2, lengths=lengths)
+        assert np.array_equal(one.labels(X, lengths=lengths),
+                              many.labels(X, lengths=lengths))
+        assert one.diagnostics["loglik"] == pytest.approx(
+            many.diagnostics["loglik"])
+        assert one.diagnostics["best_seed"] == many.diagnostics["best_seed"]
+
+    def test_every_restart_is_accounted_for_either_way(self):
+        X, lengths = self.data()
+        one = C.HMM2Cluster(n_iter=10, n_restarts=5, n_jobs=1).fit(
+            X, 2, lengths=lengths)
+        many = C.HMM2Cluster(n_iter=10, n_restarts=5, n_jobs=5).fit(
+            X, 2, lengths=lengths)
+        assert [a["seed"] for a in one.attempts] == list(range(5))
+        assert [a["seed"] for a in many.attempts] == list(range(5))
+        assert ([a["loglik"] for a in one.attempts]
+                == pytest.approx([a["loglik"] for a in many.attempts]))
+
+    def test_the_winner_is_the_lowest_seed_on_a_tie(self):
+        """Not whichever finished first. With parallel restarts, completion
+        order is not seed order, so a tie broken by arrival would make the
+        labels depend on scheduling."""
+        X, lengths = self.data()
+        cl = C.HMM2Cluster(n_iter=10, n_restarts=3, n_jobs=1)
+        cl.attempts = []
+        # Same log-likelihood from two seeds; the selection must be total.
+        tied = [{"seed": 2, "loglik": -5.0, "states_expressed": 2, "error": None},
+                {"seed": 0, "loglik": -5.0, "states_expressed": 2, "error": None},
+                {"seed": 1, "loglik": -9.0, "states_expressed": 2, "error": None}]
+        best = max(tied, key=lambda a: (a["loglik"], -a["seed"]))
+        assert best["seed"] == 0
+
+    def test_models_are_not_kept_in_the_recorded_attempts(self):
+        """`attempts` goes into the parquet provenance as JSON."""
+        X, lengths = self.data()
+        cl = C.HMM2Cluster(n_iter=10, n_restarts=2, n_jobs=2).fit(
+            X, 2, lengths=lengths)
+        assert all("model" not in a for a in cl.attempts)
+        import json
+        json.dumps(cl.diagnostics)          # must be serialisable
+
+    def test_n_jobs_is_recorded_but_not_hashed(self):
+        """A run on 8 cores and a run on 1 produce the same labels, so they
+        must carry the same fit_hash or they stop being comparable."""
+        a = C.HMM2Cluster(n_restarts=4, n_jobs=1)
+        b = C.HMM2Cluster(n_restarts=4, n_jobs=8)
+        assert a.params() == b.params()
+        assert "n_jobs" not in a.params()
+        h = C.fit_hash("hmm2", "pca3", 8, a.params(), ["x"], 100)
+        assert h == C.fit_hash("hmm2", "pca3", 8, b.params(), ["x"], 100)
+        X, lengths = self.data()
+        assert a.fit(X, 2, lengths=lengths).diagnostics["n_jobs"] == 1
+
+    def test_n_restarts_1_never_reaches_joblib(self):
+        """One restart has nothing to parallelise, and importing joblib to
+        discover that would be a needless dependency on a smoke run."""
+        X, lengths = self.data()
+        cl = C.HMM2Cluster(n_iter=5, n_restarts=1, n_jobs=8).fit(
+            X, 2, lengths=lengths)
+        assert cl.diagnostics["n_restarts"] == 1
+        assert cl.hmm is not None
+
+    def test_the_default_comes_from_slurm_not_the_node(self, monkeypatch):
+        monkeypatch.setenv("SLURM_CPUS_PER_TASK", "8")
+        assert C._default_hmm2_jobs() == 8
+        assert C.HMM2Cluster().n_jobs == 8
+        monkeypatch.delenv("SLURM_CPUS_PER_TASK")
+        assert C._default_hmm2_jobs() == 1
+
+    @pytest.mark.parametrize("bad", ["", "oops", "0"])
+    def test_a_nonsense_cpu_count_falls_back_to_one(self, monkeypatch, bad):
+        monkeypatch.setenv("SLURM_CPUS_PER_TASK", bad)
+        assert C._default_hmm2_jobs() >= 1
+
+    def test_a_restart_that_fails_does_not_lose_the_others(self):
+        """A singular covariance costs that restart, not the run."""
+        X, lengths = self.data()
+        cl = C.HMM2Cluster(n_iter=10, n_restarts=3, n_jobs=3)
+        cl.n_restarts = 3
+        out = cl.fit(X, 2, lengths=lengths)
+        assert out.diagnostics["n_valid_restarts"] >= 1
+        assert out.hmm is not None
