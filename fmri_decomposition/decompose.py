@@ -609,6 +609,96 @@ def latents_model_hash(path: Path) -> str | None:
         return raw.decode()
 
 
+def latents_fit_description(path: Path) -> tuple[dict, list[str]]:
+    """(the fit_meta a latents file was written with, its state columns).
+
+    Both come from the schema metadata, so this costs one small read. The
+    state columns are the `clusterers` block stage 4b writes -- what a rewrite
+    of this file would destroy.
+    """
+    if not path.exists():
+        return {}, []
+    import pyarrow.parquet as pq
+
+    schema = pq.ParquetFile(path).schema_arrow
+    md = schema.metadata or {}
+    stored = {}
+    for k, v in md.items():
+        key = k.decode()
+        if key in ("clusterers", "ARROW:schema", "pandas"):
+            continue
+        try:
+            stored[key] = json.loads(v.decode())
+        except ValueError:
+            stored[key] = v.decode()
+    cols = sorted(json.loads((md.get(b"clusterers") or b"{}").decode()))
+    return stored, cols
+
+
+def _fit_differences(stored: dict, meta: dict) -> list[str]:
+    """Which keys of the fit description changed, as readable lines.
+
+    The point is to name the FLAG that moved. A bare "the hash differs" sends
+    you to diff two 16-character strings; "n_latents: [3, 7] -> [2, 3, 5]"
+    says you forgot `--n-latents 3 7`.
+    """
+    out = []
+    for key in sorted(set(stored) | set(meta)):
+        if key not in meta and key not in stored:
+            continue
+        was, now = stored.get(key, "(absent)"), meta.get(key, "(absent)")
+        if was != now:
+            out.append(f"      {key}: {was!r} -> {now!r}")
+    return out
+
+
+def refuse_to_destroy_states(out_dir: Path, stale: list[str], meta: dict,
+                             window_s) -> None:
+    """Stop before rewriting a cohort whose state columns would be lost.
+
+    A rewrite here is not recoverable by re-running: `cluster` would have to
+    refit, and HMM2 at K=27 measured hours per cell. The commonest cause is a
+    FORGOTTEN FLAG -- omit `--passthrough-features` or `--n-latents 3 7` when
+    adding a cohort and the model_hash moves, every existing cohort looks
+    stale, and all of them are rewritten. So the refusal names the difference
+    rather than the hash.
+    """
+    at_risk = {}
+    for c in stale:
+        stored, cols = latents_fit_description(
+            out_dir / f"cohort={c}" / "data.parquet")
+        if cols:
+            at_risk[c] = (stored, cols)
+    if not at_risk:
+        return
+    first = next(iter(at_risk.values()))[0]
+    diff = _fit_differences(first, meta)
+    lines = [
+        f"window_s={window_s}: refusing to rewrite "
+        f"{len(at_risk)} cohort(s) that carry brain-state columns.",
+        "",
+        "  Rewriting a latents file REMOVES those columns -- parquet cannot "
+        "append, so stage 4b's labels live inside the file -- and getting them "
+        "back means re-fitting, which for HMM2 is hours per cell.",
+        "",
+    ]
+    for c, (_, cols) in at_risk.items():
+        lines.append(f"    cohort={c}: {len(cols)} state set(s), e.g. "
+                     f"{cols[:4]}")
+    lines += ["", "  They are stale because this run describes a DIFFERENT "
+                  "fit:"]
+    lines += diff or ["      (no readable difference -- the stored fit "
+                      "description is older than this provenance block)"]
+    lines += [
+        "",
+        "  If a flag above is missing from this command, add it back: the fit "
+        "is defined by the flags, so omitting one is a different model.",
+        "  If the change is intended, pass --overwrite to accept losing the "
+        "state columns and re-cluster afterwards.",
+    ]
+    raise SystemExit("\n".join(lines))
+
+
 def reuse_models(stem: Path, mhash: str, log=print) -> dict | None:
     """The saved fit for this cell, if it is the SAME fit. Else None.
 
@@ -712,6 +802,13 @@ def run_one(root: Path, window_s, args) -> None:
                for c in cohorts}
     todo = [c for c in cohorts if args.overwrite or on_disk[c] != mhash]
     keep = [c for c in cohorts if c not in todo]
+    # A cohort with NO file is new and free to write. One with a DIFFERENT hash
+    # is the dangerous case: it exists, it may carry state columns, and a
+    # rewrite deletes them.
+    if not args.overwrite:
+        refuse_to_destroy_states(
+            out_dir, [c for c in todo if on_disk[c] is not None], meta,
+            window_s)
 
     unit = "parcels" if source == "activation" else "edges"
     log(f"window_s={window_s}  source={source}  {len(features)} {unit}  "

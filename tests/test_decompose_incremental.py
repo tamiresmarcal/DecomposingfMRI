@@ -352,3 +352,78 @@ class TestClusterReusesItsFit:
 
         assert "meanshift" not in C.CACHEABLE
         assert C.CACHEABLE == C.SEQUENTIAL
+
+
+# --------------------------------------------------------------------------
+# The forgotten-flag footgun. The fit is defined by the flags, so omitting one
+# when adding a cohort moves model_hash, makes every existing cohort look
+# stale, and rewrites all of them -- deleting state columns that cost hours.
+# Measured: on yeo7, dropping --passthrough-features alone moves the hash.
+# --------------------------------------------------------------------------
+class TestForgottenFlagIsRefused:
+    @pytest.fixture
+    def with_states(self, cell):
+        from fmri_decomposition.cluster import append_columns
+
+        n = len(pd.read_parquet(latents(cell, "camcan")))
+        append_columns(latents(cell, "camcan"),
+                       {"HMM2_pca3_8": np.zeros(n, dtype=np.int32)},
+                       {"HMM2_pca3_8": {"method": "hmm2", "k": 8,
+                                        "fit_hash": "abc"}})
+        return cell
+
+    def test_a_changed_fit_is_refused_when_states_would_be_lost(self,
+                                                                with_states):
+        with pytest.raises(SystemExit) as e:
+            run(with_states, ["camcan"], n_latents=[3, 5])
+        msg = str(e.value)
+        assert "refusing to rewrite" in msg
+        assert "HMM2_pca3_8" in msg
+
+    def test_the_refusal_names_the_flag_that_moved(self, with_states):
+        """A bare "the hash differs" sends you to diff two 16-character
+        strings. This has to say which flag to put back."""
+        with pytest.raises(SystemExit) as e:
+            run(with_states, ["camcan"], n_latents=[3, 5])
+        msg = str(e.value)
+        assert "n_latents" in msg
+        assert "[3]" in msg and "[3, 5]" in msg
+
+    def test_it_points_at_both_ways_out(self, with_states):
+        with pytest.raises(SystemExit) as e:
+            run(with_states, ["camcan"], n_latents=[3, 5])
+        msg = str(e.value)
+        assert "add it back" in msg
+        assert "--overwrite" in msg
+
+    def test_nothing_is_written_before_it_refuses(self, with_states):
+        before = latents(with_states, "camcan").stat().st_mtime_ns
+        with pytest.raises(SystemExit):
+            run(with_states, ["camcan"], n_latents=[3, 5])
+        assert latents(with_states, "camcan").stat().st_mtime_ns == before
+
+    def test_overwrite_is_the_escape_hatch(self, with_states):
+        run(with_states, ["camcan"], n_latents=[3, 5], overwrite=True)
+        back = pd.read_parquet(latents(with_states, "camcan"))
+        assert "HMM2_pca3_8" not in back.columns      # as warned
+        assert "pca0/5" in back.columns
+
+    def test_a_cohort_with_no_state_columns_is_rewritten_freely(self, cell):
+        """Nothing to lose, so no refusal -- the guard is about destroying
+        work, not about the hash moving."""
+        run(cell, ["camcan"], n_latents=[3, 5])
+        assert "pca0/5" in pd.read_parquet(latents(cell, "camcan")).columns
+
+    def test_a_brand_new_cohort_is_never_blocked_by_it(self, with_states):
+        """The whole point of the change: adding a cohort with the SAME flags
+        must still just work, even with state columns present elsewhere."""
+        run(with_states, ["camcan", "camcan_rest"])
+        assert latents(with_states, "camcan_rest").exists()
+        assert "HMM2_pca3_8" in pd.read_parquet(
+            latents(with_states, "camcan")).columns
+
+    def test_the_stored_fit_description_is_readable(self, cell):
+        stored, cols = D.latents_fit_description(latents(cell, "camcan"))
+        assert stored["train_cohorts"] == ["trainA", "trainB"]
+        assert "project_cohorts" not in stored
+        assert cols == []
