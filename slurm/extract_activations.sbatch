@@ -1,7 +1,7 @@
 #!/bin/bash
 # Stage 2 -- activation. One SLURM array task per shard of the run list.
 #
-#   sbatch --array=0-19 slurm/01_extract.sbatch config/ds002837.yaml
+#   sbatch --array=0-19 slurm/extract_activations.sbatch config/ds002837.yaml
 #
 # The array index and the array size are read from SLURM, so the same file
 # works for 4 subjects or 650. Set the array range to the number of shards you
@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-CONFIG="${1:?usage: sbatch 01_extract.sbatch <config.yaml> [extra cli args]}"
+CONFIG="${1:?usage: sbatch extract_activations.sbatch <config.yaml> [extra cli args]}"
 shift || true
 # Anything after the config is forwarded to `fmri-decomp extract`. The one you
 # will almost always need is --no-strict: a cohort with no fixed
@@ -41,7 +41,7 @@ N_JOBS="${SLURM_CPUS_PER_TASK:-1}"
 # Per-user settings: interpreter, binds, cache paths. Optional and gitignored;
 # see slurm/env.sh.example. SLURM copies this script to a spool directory on
 # the compute node, so $BASH_SOURCE points there, not at the repo -- the
-# submit directory is what finds it. Sourced here as well as in submit_all.sh
+# submit directory is what finds it. Sourced here as well as in activation_and_dfc.sh
 # so a hand-submitted sbatch behaves identically.
 _ENV_SH="${SLURM_SUBMIT_DIR:-$PWD}/slurm/env.sh"
 [[ -f "$_ENV_SH" ]] && source "$_ENV_SH"

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Iterator, Sequence
+from typing import Sequence
 
 import numpy as np
 
@@ -30,10 +30,6 @@ class Window:
     window_id: int
     start_s: float
     end_s: float
-
-    @property
-    def duration_s(self) -> float:
-        return self.end_s - self.start_s
 
     def contains(self, stimulus_time_s: np.ndarray) -> np.ndarray:
         """Half-open membership test: start <= t < end.
@@ -127,11 +123,6 @@ def make_stimulus_grid(
     stride = stride_seconds(window_s, n_overlaps)
     k_max = n_windows(stimulus_duration_s, window_s, n_overlaps, drop_incomplete)
     return [Window(k, k * stride, k * stride + window_s) for k in range(k_max)]
-
-
-def iter_stimulus_grid(*args, **kwargs) -> Iterator[Window]:
-    """Generator form, for grids too large to materialise."""
-    yield from make_stimulus_grid(*args, **kwargs)
 
 
 def make_index_windows(

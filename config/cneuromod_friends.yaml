@@ -298,7 +298,7 @@ windows:
 #   fmri-decomp extract  config/cneuromod_friends.yaml --n-jobs 4 --limit 2
 #
 # --no-strict is NO LONGER needed: stimulus.durations_s is populated, so
-# `validate` passes clean and submit_all.sh does not prompt. If you ever see
+# `validate` passes clean and activation_and_dfc.sh does not prompt. If you ever see
 # the 48 "no stimulus duration configured" problems again, something dropped
 # durations_s -- do not answer y past it, put the durations back.
 #   python tools/check_cohort.py config/cneuromod_friends.yaml --checks outputs,parallel --limit 2

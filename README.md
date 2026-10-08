@@ -4,9 +4,14 @@ Stages 2 (activation) and 3 (DFC) of the naturalistic-viewing pipeline.
 Cohort-specific knowledge lives in `config.py` and `cohort.py`; nothing
 downstream touches a filesystem path or a TR.
 
+**Running it from zero — including after a wipe, or for a new cohort — is
+[`RUNBOOK.md`](RUNBOOK.md).** This file is what the pieces are and how the
+outputs are laid out.
+
 ```bash
 pip install -e ".[test,atlases]"
 ./run_tests.sh                       # unit tests + synthetic end-to-end run
+fmri-decomp status                   # what is on disk, and what disagrees
 fmri-decomp validate  config/ds002837.yaml
 fmri-decomp extract   config/ds002837.yaml --n-jobs 8
 fmri-decomp dfc       config/ds002837.yaml --dry-run       # rows before compute
@@ -17,21 +22,44 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
 
 ```
 0    fmriprep / afni_proc            outside this repo -- cohorts arrive preprocessed
-1.1  01_extract.sbatch    (array)    NIfTI     -> parcel timeseries
-     03_finalize.sbatch activation   merge manifests + coverage + L-R
+1.1  extract_activations.sbatch    (array)    NIfTI     -> parcel timeseries
+     finalize.sbatch activation   merge manifests + coverage + L-R
                                      + ISC gate + participants_qc.csv
-1.2  02_dfc.sbatch        (array)    parquet   -> windowed connectivity
-     03_finalize.sbatch dfc          merge manifests
-4    models                          join participants_qc.csv, apply thresholds
+1.2  extract_dfc.sbatch        (array)    parquet   -> windowed connectivity
+     finalize.sbatch dfc          merge manifests
+3.5  censor.sbatch                  participants_qc.csv + window flags
+                                     -> keep/drop, under a named policy.
+                                     Last link of the per-cohort chain.
+4    dimensionality_reduction.sbatch             -> latents: PCA + UMAP coordinates, fit on
+                                     the train cohorts, projected onto the rest.
+                                     --source dfc      windowed edges, one fit
+                                                       per --window-s
+                                     --source activation   per-TR frames, written
+                                                       to window_s=-1
+4b   clustering.sbatch              latents -> brain-state LABELS, appended to
+                                     the same files. threshold / MeanShift /
+                                     HMM1 / HMM2 x pca3 / umap3 / raw<N>.
+                                     Every state definition lives here;
+                                     stage 4 defines none.
+5a   brain_states_transitions.sbatch          labels -> per-subject transition matrices,
+                                     one table per state set. The state sets are
+                                     discovered per (atlas, aperture).
+5b   model_selection.sbatch                rank state sets by how well their
+                                     transitions predict a phenotype column,
+                                     against non-transition controls
+                                     -> outputs/bstm_selection/target=<t>/
+
+any  fmri-decomp status              read-only: what every stage holds, and the
+                                     disagreements that span two of them
 ```
 
-`03_finalize` runs twice, taking the stage as an argument. The activation pass
+`finalize.sbatch` runs twice, taking the stage as an argument. The activation pass
 is where the ISC gate lives, and `--dependency=afterok` on the DFC array is
 what stops stage 3 from running on misaligned data.
 
-There is no separate QC or exclusion step: the metrics are written by the
-activation finalize, and the thresholds that turn them into exclusions live
-with the models.
+No threshold appears in stages 1–3: they measure. `censor` is the one place a
+measurement becomes a decision, and it does so under a policy that is named,
+versioned and hashed into every row it writes — see below.
 
 ---
 
@@ -55,8 +83,20 @@ outputs/
 │       ├── window_s=60/cohort=ds002837/task=500daysofsummer/sub=1/data.parquet
 │       └── window_s=120/cohort=cneuromod/task=s01e01a/sub=01/data.parquet
 │
-├── latents/                                      STAGE 4 — reserved, adds model=
-│   └── atlas=.../window_s=.../model=pca50/cohort=.../task=.../sub=.../
+├── censor/                                       STAGE 3.5 — the keep/drop decision
+│   └── policy=motion/cohort=camcan/subjects.parquet
+│
+├── latents/                                      STAGE 4 — coordinates, + STAGE 4b labels
+│   └── atlas=yeo7/window_s=30/cohort=camcan/data.parquet
+│       window_s=-1 is the per-TR aperture. The state-label columns stage 4b
+│       adds live INSIDE these files, with per-column provenance in the schema.
+│
+├── transitions/                                  STAGE 5a — one table per state set
+│   └── atlas=yeo7/window_s=30/states=HMM1_pca3_8/cohort=camcan/subjects.parquet
+│
+├── bstm_selection/                               STAGE 5b — the ranking
+│   └── target=additional_HADS_anx_category/
+│       ├── summary.csv  scores.parquet  DESIGN.md  figures/  models/
 │
 └── meta/
     ├── atlas-harvardoxford_labels.csv            atlas-level: cohort-independent
@@ -123,6 +163,13 @@ d  = open_dataset(dfc_root(out, "harvardoxford", 30), stage="dfc")  # all cohort
 df = read_shard(path)      # one leaf, partition keys restored as columns
 ```
 
+One caveat that is quiet rather than loud: a key is recovered from the path
+*relative to the dataset root*, so a key at or above the root comes back as a
+column of **nulls** — `open_dataset(dfc_root(out, "harvardoxford", 30))` has no
+`atlas` and no `window_s`, and a filter on either matches zero rows without
+raising. Narrow with a filter, not with a deeper root, or backfill the keys the
+root swallowed (`notebooks/nbtools.py` does the latter).
+
 Every file also carries `cohort`, `task`, `sub`, `atlas` in its parquet
 key-value metadata, so a shard opened by hand is still self-identifying.
 
@@ -161,6 +208,12 @@ df = d.to_table(filter=(ds.field("cohort") == "ds002837")).to_pandas()
 # Columnar: selecting QC columns physically reads three columns, not the file.
 qc = d.to_table(columns=["window_id", "n_tr_effective", "frac_good_frames"]).to_pandas()
 ```
+
+`notebooks/` opens both stages this way: `01_activation.ipynb` for stage 2,
+`02_dfc.ipynb` for stage 3, sharing the loaders in `notebooks/nbtools.py`
+(inventory, partition-pruned reads, footer-based size estimates, and the
+participants / QC / phenotype join). `notebooks/README.md` has the container
+recipe and the memory arithmetic.
 
 ### The window grid is atlas-conditional
 
@@ -256,7 +309,7 @@ Two files, split by **who owns them**:
 | `meta/cohorts/cohort=<c>/participants_qc.csv` | pipeline | measurement | **nothing** — thresholds live with the models |
 
 `participants_qc.csv` is written by `fmri-decomp diagnose`, which
-`03_finalize.sbatch` already runs after the extract array. So the metrics
+`finalize.sbatch` already runs after the extract array. So the metrics
 appear without a separate step, and ISC is computed once for both the gate and
 the table. It is regenerated from scratch every run and must never be
 hand-edited.
@@ -287,7 +340,97 @@ is visible, and stops there.
 
 Since `dfc` walks the filesystem rather than `participants.csv`, it warns when
 it finds shards for excluded subjects instead of skipping them. The real filter
-is the join, at the models.
+is `censor`, below.
+
+### `censor` — stage 3.5, where a measurement becomes a decision
+
+Keeping thresholds out of the pipeline is right, and it leaves a gap: the claim
+still has to be made somewhere, and made inline in whatever notebook needs it,
+it gets made differently every time and travels with nothing. `censor` closes
+that gap with one step between measurement and modelling.
+
+```bash
+# Subjects only -- reads participants_qc.csv for every cohort that has one.
+fmri-decomp censor --policy config/censor/default.yaml
+
+# Also gate windows, for one atlas x aperture of the DFC path.
+fmri-decomp censor --policy config/censor/default.yaml \
+    --stage dfc --atlas harvardoxford --window-s 30
+```
+
+It reads only QC columns, never imaging data, and runs in seconds. It is the
+last link of the per-cohort chain, so `activation_and_dfc.sh` submits it for you
+(`slurm/censor.sbatch`, overridable with `FMRIDECOMP_CENSOR=<policy.yaml>`); run
+it by hand for a different gate, which is the only thing a change of mind costs:
+
+```bash
+sbatch slurm/censor.sbatch config/ds002837.yaml config/censor/strict.yaml
+```
+
+Being last is what makes that true — nothing upstream depends on the threshold,
+and consumers select by `--censor-policy <name>`, so re-gating never re-extracts
+anything. It writes:
+
+```
+outputs/censor/policy=<name>/cohort=<c>/subjects.parquet
+outputs/censor/policy=<name>/atlas=<a>/window_s=<w>/cohort=<c>/windows.parquet
+outputs/meta/censor/policy=<name>.json          # counts + what was skipped
+```
+
+Every row carries `keep`, a human-readable `reason` for the drops, and
+`policy` / `policy_hash`. Change a number, change the policy `name`, and the
+new outputs land **beside** the old ones: a sensitivity analysis is two files,
+not a re-run with different constants.
+
+Three things it deliberately does not do:
+
+* **It does not censor frames.** Per-TR censoring already happened at stage 2
+  and is in `good_frame`. Where it could not — ds002837, whose regressor and
+  image timelines cannot be reconciled — it cannot be recovered here either,
+  which is exactly why `max_mean_fd` at the subject level does the work there.
+* **It does not edit `participants.csv`.** That file is human curation and is
+  not the place for a threshold someone will want to move.
+* **It does not drop a cohort for a missing input.** A rule whose column is
+  absent or all-NaN is reported as `NOT APPLIED` and skipped rather than
+  failing every row. `best_lag_tr` is the live case: it is NaN for any task
+  with fewer than three subjects.
+
+#### How stage 4 consumes it
+
+`decompose` takes `--censor-policy NAME` and filters against exactly what
+`censor` wrote:
+
+```bash
+fmri-decomp decompose --atlas yeo7 --window-s 30 --censor-policy motion
+```
+
+A censored subject's shard is **skipped before the file is opened** — its rows
+are never read, never scaled, and never counted toward peak RSS, which is why
+the filter lives in the reader rather than after the concat.
+
+Three properties worth relying on:
+
+* **The policy is in `model_hash`.** A fit on censored rows and a fit on all
+  rows produce different hashes, so two latents files cannot claim to be
+  comparable when they are not. `censor_policy` and `censor_policy_hash` are
+  also written into every latents file's schema metadata and into the model
+  manifest.
+* **A named policy that was never run is a hard error**, naming the `censor`
+  command that would fix it. It never degrades to "no censoring" — that would
+  look identical in the log and be a different analysis.
+* **Omitting the flag prints a warning** and fits on everything. That is the
+  only way to run a tree that predates this stage.
+
+A policy with `subjects.parquet` but no `windows.parquet` for the requested
+atlas × aperture is the normal first-pass state, not an error: it gates whole
+subjects and says `subjects only` in the log.
+
+Window gating is only for the DFC path — the HMM path runs on stage 2
+activation, where `good_frame` is already per-TR. `drop_crosses_run_boundary`
+defaults to true because a transition across a run boundary is not a
+transition; `drop_rank_deficient` defaults to **false**, because rank
+deficiency makes the correlation *matrix* singular while each edge in it stays
+an ordinary two-variable correlation (see the aperture section above).
 
 #### ISC is computed per stimulus
 
@@ -339,22 +482,29 @@ already exported in your shell wins over the file.
 Then:
 
 ```bash
-./slurm/submit_all.sh config/ds002837.yaml 20 8
+./slurm/activation_and_dfc.sh config/ds002837.yaml 20 8
 ```
 
 That chains: extract array (20 tasks) → finalize + ISC gate → dfc array
-(8 tasks) → merge manifests, with `afterok` between each. It creates
-`slurm_logs/` itself.
+(8 tasks) → merge manifests → censor, with `afterok` between each. When its last
+job exits, that cohort is completely prepared. It creates `slurm_logs/` itself.
+
+The gate defaults to `config/censor/motion.yaml`; name another without editing
+the script:
+
+```bash
+FMRIDECOMP_CENSOR=config/censor/strict.yaml ./slurm/activation_and_dfc.sh config/ds002837.yaml
+```
 
 An interpreter is not optional: a login node's bare `python` cannot import
-`fmri_decomposition`, and neither can a compute node's. `submit_all.sh` checks
+`fmri_decomposition`, and neither can a compute node's. `activation_and_dfc.sh` checks
 before submitting anything and refuses rather than treating the ImportError as
 a config problem — otherwise the pre-flight `validate` is skipped silently and
 the whole chain runs unvalidated. Or submit by hand:
 
 ```bash
-sbatch --array=0-19 slurm/01_extract.sbatch config/ds002837.yaml
-sbatch --array=0-7  slurm/02_dfc.sbatch     config/ds002837.yaml 30 60
+sbatch --array=0-19 slurm/extract_activations.sbatch config/ds002837.yaml
+sbatch --array=0-7  slurm/extract_dfc.sbatch     config/ds002837.yaml 30 60
 ```
 
 Each array task takes `--shard $SLURM_ARRAY_TASK_ID/$SLURM_ARRAY_TASK_COUNT` and
@@ -374,6 +524,6 @@ atomic rename plus skip-if-exists means it redoes only what is missing.
 | `--account=def-aevans` | `--account=rpp-aevans-ab` | the legacy sbatch and the legacy data paths disagree — **check which allocation you mean to charge.** |
 
 Shared files (`manifest.json`, diagnostics, the atlas label CSVs) have exactly
-one writer, in `03_finalize.sbatch`. Array tasks write per-shard manifests into
+one writer, in `finalize.sbatch`. Array tasks write per-shard manifests into
 `meta/shards/`, merged afterwards by `fmri-decomp merge-manifests`. Never let
 workers write `_metadata` / `_common_metadata`.

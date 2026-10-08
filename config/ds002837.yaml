@@ -213,7 +213,7 @@ windows:
 #   fmri-decomp dfc      config/ds002837.yaml --n-jobs 4
 #   fmri-decomp diagnose config/ds002837.yaml
 #
-# Subject-level QC is NOT a separate step: `03_finalize.sbatch` runs
+# Subject-level QC is NOT a separate step: `finalize.sbatch` runs
 # `fmri-decomp diagnose` after the extract array, and that writes
 #   outputs/meta/cohorts/cohort=ds002837/participants_qc.csv
 # with one row per (sub, task) and one column block per failure mode:

@@ -1,7 +1,289 @@
-participant_id,sub,cohort,task,excluded,exclusion_reason
-sub-01,01,cneuromod,s01e02a,False,
-sub-02,02,cneuromod,s01e02a,False,
-sub-03,03,cneuromod,s01e02a,False,
-sub-04,04,cneuromod,s01e02a,False,
-sub-05,05,cneuromod,s01e02a,False,
-sub-06,06,cneuromod,s01e02a,False,
+participant_id,sub,cohort,task,excluded,exclusion_reason,end_movie
+sub-01,01,cneuromod,s01e01a,False,,882.08
+sub-01,01,cneuromod,s01e01b,False,,882.08
+sub-01,01,cneuromod,s01e02a,False,,718.18
+sub-01,01,cneuromod,s01e02b,False,,718.18
+sub-01,01,cneuromod,s01e03a,False,,703.28
+sub-01,01,cneuromod,s01e03b,False,,703.28
+sub-01,01,cneuromod,s01e04a,False,,749.47
+sub-01,01,cneuromod,s01e04b,False,,749.47
+sub-01,01,cneuromod,s01e05a,False,,697.32
+sub-01,01,cneuromod,s01e05b,False,,697.32
+sub-01,01,cneuromod,s01e06a,False,,727.12
+sub-01,01,cneuromod,s01e06b,False,,727.12
+sub-01,01,cneuromod,s01e07a,False,,734.57
+sub-01,01,cneuromod,s01e07b,False,,734.57
+sub-01,01,cneuromod,s01e08a,False,,709.24
+sub-01,01,cneuromod,s01e08b,False,,709.24
+sub-01,01,cneuromod,s01e09a,False,,697.32
+sub-01,01,cneuromod,s01e09b,False,,697.32
+sub-01,01,cneuromod,s01e10a,False,,739.04
+sub-01,01,cneuromod,s01e10b,False,,739.04
+sub-01,01,cneuromod,s01e11a,False,,710.73
+sub-01,01,cneuromod,s01e11b,False,,710.73
+sub-01,01,cneuromod,s01e12a,False,,701.79
+sub-01,01,cneuromod,s01e12b,False,,701.79
+sub-01,01,cneuromod,s01e13a,False,,697.32
+sub-01,01,cneuromod,s01e13b,False,,697.32
+sub-01,01,cneuromod,s01e14a,False,,731.59
+sub-01,01,cneuromod,s01e14b,False,,731.59
+sub-01,01,cneuromod,s01e15a,False,,710.73
+sub-01,01,cneuromod,s01e15b,False,,710.73
+sub-01,01,cneuromod,s01e16a,False,,719.67
+sub-01,01,cneuromod,s01e16b,False,,719.67
+sub-01,01,cneuromod,s01e17a,False,,719.67
+sub-01,01,cneuromod,s01e17b,False,,719.67
+sub-01,01,cneuromod,s01e18a,False,,740.53
+sub-01,01,cneuromod,s01e18b,False,,740.53
+sub-01,01,cneuromod,s01e19a,False,,685.4
+sub-01,01,cneuromod,s01e19b,False,,685.4
+sub-01,01,cneuromod,s01e20a,False,,685.4
+sub-01,01,cneuromod,s01e20b,False,,685.4
+sub-01,01,cneuromod,s01e21a,False,,710.73
+sub-01,01,cneuromod,s01e21b,False,,710.73
+sub-01,01,cneuromod,s01e22a,False,,706.26
+sub-01,01,cneuromod,s01e22b,False,,706.26
+sub-01,01,cneuromod,s01e23a,False,,688.38
+sub-01,01,cneuromod,s01e23b,False,,688.38
+sub-01,01,cneuromod,s01e24a,False,,767.35
+sub-01,01,cneuromod,s01e24b,False,,767.35
+sub-02,02,cneuromod,s01e01a,False,,882.08
+sub-02,02,cneuromod,s01e01b,False,,882.08
+sub-02,02,cneuromod,s01e02a,False,,718.18
+sub-02,02,cneuromod,s01e02b,False,,718.18
+sub-02,02,cneuromod,s01e03a,False,,703.28
+sub-02,02,cneuromod,s01e03b,False,,703.28
+sub-02,02,cneuromod,s01e04a,False,,749.47
+sub-02,02,cneuromod,s01e04b,False,,749.47
+sub-02,02,cneuromod,s01e05a,False,,697.32
+sub-02,02,cneuromod,s01e05b,False,,697.32
+sub-02,02,cneuromod,s01e06a,False,,727.12
+sub-02,02,cneuromod,s01e06b,False,,727.12
+sub-02,02,cneuromod,s01e07a,False,,734.57
+sub-02,02,cneuromod,s01e07b,False,,734.57
+sub-02,02,cneuromod,s01e08a,False,,709.24
+sub-02,02,cneuromod,s01e08b,False,,709.24
+sub-02,02,cneuromod,s01e09a,False,,697.32
+sub-02,02,cneuromod,s01e09b,False,,697.32
+sub-02,02,cneuromod,s01e10a,False,,739.04
+sub-02,02,cneuromod,s01e10b,False,,739.04
+sub-02,02,cneuromod,s01e11a,False,,710.73
+sub-02,02,cneuromod,s01e11b,False,,710.73
+sub-02,02,cneuromod,s01e12a,False,,701.79
+sub-02,02,cneuromod,s01e12b,False,,701.79
+sub-02,02,cneuromod,s01e13a,False,,697.32
+sub-02,02,cneuromod,s01e13b,False,,697.32
+sub-02,02,cneuromod,s01e14a,False,,731.59
+sub-02,02,cneuromod,s01e14b,False,,731.59
+sub-02,02,cneuromod,s01e15a,False,,710.73
+sub-02,02,cneuromod,s01e15b,False,,710.73
+sub-02,02,cneuromod,s01e16a,False,,719.67
+sub-02,02,cneuromod,s01e16b,False,,719.67
+sub-02,02,cneuromod,s01e17a,False,,719.67
+sub-02,02,cneuromod,s01e17b,False,,719.67
+sub-02,02,cneuromod,s01e18a,False,,740.53
+sub-02,02,cneuromod,s01e18b,False,,740.53
+sub-02,02,cneuromod,s01e19a,False,,685.4
+sub-02,02,cneuromod,s01e19b,False,,685.4
+sub-02,02,cneuromod,s01e20a,False,,685.4
+sub-02,02,cneuromod,s01e20b,False,,685.4
+sub-02,02,cneuromod,s01e21a,False,,710.73
+sub-02,02,cneuromod,s01e21b,False,,710.73
+sub-02,02,cneuromod,s01e22a,False,,706.26
+sub-02,02,cneuromod,s01e22b,False,,706.26
+sub-02,02,cneuromod,s01e23a,False,,688.38
+sub-02,02,cneuromod,s01e23b,False,,688.38
+sub-02,02,cneuromod,s01e24a,False,,767.35
+sub-02,02,cneuromod,s01e24b,False,,767.35
+sub-03,03,cneuromod,s01e01a,False,,882.08
+sub-03,03,cneuromod,s01e01b,False,,882.08
+sub-03,03,cneuromod,s01e02a,False,,718.18
+sub-03,03,cneuromod,s01e02b,False,,718.18
+sub-03,03,cneuromod,s01e03a,False,,703.28
+sub-03,03,cneuromod,s01e03b,False,,703.28
+sub-03,03,cneuromod,s01e04a,False,,749.47
+sub-03,03,cneuromod,s01e04b,False,,749.47
+sub-03,03,cneuromod,s01e05a,False,,697.32
+sub-03,03,cneuromod,s01e05b,False,,697.32
+sub-03,03,cneuromod,s01e06a,False,,727.12
+sub-03,03,cneuromod,s01e06b,False,,727.12
+sub-03,03,cneuromod,s01e07a,False,,734.57
+sub-03,03,cneuromod,s01e07b,False,,734.57
+sub-03,03,cneuromod,s01e08a,False,,709.24
+sub-03,03,cneuromod,s01e08b,False,,709.24
+sub-03,03,cneuromod,s01e09a,False,,697.32
+sub-03,03,cneuromod,s01e09b,False,,697.32
+sub-03,03,cneuromod,s01e10a,False,,739.04
+sub-03,03,cneuromod,s01e10b,False,,739.04
+sub-03,03,cneuromod,s01e11a,False,,710.73
+sub-03,03,cneuromod,s01e11b,False,,710.73
+sub-03,03,cneuromod,s01e12a,False,,701.79
+sub-03,03,cneuromod,s01e12b,False,,701.79
+sub-03,03,cneuromod,s01e13a,False,,697.32
+sub-03,03,cneuromod,s01e13b,False,,697.32
+sub-03,03,cneuromod,s01e14a,False,,731.59
+sub-03,03,cneuromod,s01e14b,False,,731.59
+sub-03,03,cneuromod,s01e15a,False,,710.73
+sub-03,03,cneuromod,s01e15b,False,,710.73
+sub-03,03,cneuromod,s01e16a,False,,719.67
+sub-03,03,cneuromod,s01e16b,False,,719.67
+sub-03,03,cneuromod,s01e17a,False,,719.67
+sub-03,03,cneuromod,s01e17b,False,,719.67
+sub-03,03,cneuromod,s01e18a,False,,740.53
+sub-03,03,cneuromod,s01e18b,False,,740.53
+sub-03,03,cneuromod,s01e19a,False,,685.4
+sub-03,03,cneuromod,s01e19b,False,,685.4
+sub-03,03,cneuromod,s01e20a,False,,685.4
+sub-03,03,cneuromod,s01e20b,False,,685.4
+sub-03,03,cneuromod,s01e21a,False,,710.73
+sub-03,03,cneuromod,s01e21b,False,,710.73
+sub-03,03,cneuromod,s01e22a,False,,706.26
+sub-03,03,cneuromod,s01e22b,False,,706.26
+sub-03,03,cneuromod,s01e23a,False,,688.38
+sub-03,03,cneuromod,s01e23b,False,,688.38
+sub-03,03,cneuromod,s01e24a,False,,767.35
+sub-03,03,cneuromod,s01e24b,False,,767.35
+sub-04,04,cneuromod,s01e01a,True,annex content not fetched (S3 credentials),882.08
+sub-04,04,cneuromod,s01e01b,True,annex content not fetched (S3 credentials),882.08
+sub-04,04,cneuromod,s01e02a,True,annex content not fetched (S3 credentials),718.18
+sub-04,04,cneuromod,s01e02b,True,annex content not fetched (S3 credentials),718.18
+sub-04,04,cneuromod,s01e03a,True,annex content not fetched (S3 credentials),703.28
+sub-04,04,cneuromod,s01e03b,True,annex content not fetched (S3 credentials),703.28
+sub-04,04,cneuromod,s01e04a,True,annex content not fetched (S3 credentials),749.47
+sub-04,04,cneuromod,s01e04b,True,annex content not fetched (S3 credentials),749.47
+sub-04,04,cneuromod,s01e05a,True,annex content not fetched (S3 credentials),697.32
+sub-04,04,cneuromod,s01e05b,True,annex content not fetched (S3 credentials),697.32
+sub-04,04,cneuromod,s01e06a,True,annex content not fetched (S3 credentials),727.12
+sub-04,04,cneuromod,s01e06b,True,annex content not fetched (S3 credentials),727.12
+sub-04,04,cneuromod,s01e07a,True,annex content not fetched (S3 credentials),734.57
+sub-04,04,cneuromod,s01e07b,True,annex content not fetched (S3 credentials),734.57
+sub-04,04,cneuromod,s01e08a,True,annex content not fetched (S3 credentials),709.24
+sub-04,04,cneuromod,s01e08b,True,annex content not fetched (S3 credentials),709.24
+sub-04,04,cneuromod,s01e09a,True,annex content not fetched (S3 credentials),697.32
+sub-04,04,cneuromod,s01e09b,True,annex content not fetched (S3 credentials),697.32
+sub-04,04,cneuromod,s01e10a,True,annex content not fetched (S3 credentials),739.04
+sub-04,04,cneuromod,s01e10b,True,annex content not fetched (S3 credentials),739.04
+sub-04,04,cneuromod,s01e11a,True,annex content not fetched (S3 credentials),710.73
+sub-04,04,cneuromod,s01e11b,True,annex content not fetched (S3 credentials),710.73
+sub-04,04,cneuromod,s01e12a,True,annex content not fetched (S3 credentials),701.79
+sub-04,04,cneuromod,s01e12b,True,annex content not fetched (S3 credentials),701.79
+sub-04,04,cneuromod,s01e13a,True,annex content not fetched (S3 credentials),697.32
+sub-04,04,cneuromod,s01e13b,True,annex content not fetched (S3 credentials),697.32
+sub-04,04,cneuromod,s01e14a,True,annex content not fetched (S3 credentials),731.59
+sub-04,04,cneuromod,s01e14b,True,annex content not fetched (S3 credentials),731.59
+sub-04,04,cneuromod,s01e15a,True,annex content not fetched (S3 credentials),710.73
+sub-04,04,cneuromod,s01e15b,True,annex content not fetched (S3 credentials),710.73
+sub-04,04,cneuromod,s01e16a,True,annex content not fetched (S3 credentials),719.67
+sub-04,04,cneuromod,s01e16b,True,annex content not fetched (S3 credentials),719.67
+sub-04,04,cneuromod,s01e17a,True,annex content not fetched (S3 credentials),719.67
+sub-04,04,cneuromod,s01e17b,True,annex content not fetched (S3 credentials),719.67
+sub-04,04,cneuromod,s01e18a,True,annex content not fetched (S3 credentials),740.53
+sub-04,04,cneuromod,s01e18b,True,annex content not fetched (S3 credentials),740.53
+sub-04,04,cneuromod,s01e19a,True,annex content not fetched (S3 credentials),685.4
+sub-04,04,cneuromod,s01e19b,True,annex content not fetched (S3 credentials),685.4
+sub-04,04,cneuromod,s01e20a,True,annex content not fetched (S3 credentials),685.4
+sub-04,04,cneuromod,s01e20b,True,annex content not fetched (S3 credentials),685.4
+sub-04,04,cneuromod,s01e21a,True,annex content not fetched (S3 credentials),710.73
+sub-04,04,cneuromod,s01e21b,True,annex content not fetched (S3 credentials),710.73
+sub-04,04,cneuromod,s01e22a,True,annex content not fetched (S3 credentials),706.26
+sub-04,04,cneuromod,s01e22b,True,annex content not fetched (S3 credentials),706.26
+sub-04,04,cneuromod,s01e23a,True,annex content not fetched (S3 credentials),688.38
+sub-04,04,cneuromod,s01e23b,True,annex content not fetched (S3 credentials),688.38
+sub-04,04,cneuromod,s01e24a,True,annex content not fetched (S3 credentials),767.35
+sub-04,04,cneuromod,s01e24b,True,annex content not fetched (S3 credentials),767.35
+sub-05,05,cneuromod,s01e01a,False,,882.08
+sub-05,05,cneuromod,s01e01b,False,,882.08
+sub-05,05,cneuromod,s01e02a,False,,718.18
+sub-05,05,cneuromod,s01e02b,False,,718.18
+sub-05,05,cneuromod,s01e03a,False,,703.28
+sub-05,05,cneuromod,s01e03b,False,,703.28
+sub-05,05,cneuromod,s01e04a,False,,749.47
+sub-05,05,cneuromod,s01e04b,False,,749.47
+sub-05,05,cneuromod,s01e05a,False,,697.32
+sub-05,05,cneuromod,s01e05b,False,,697.32
+sub-05,05,cneuromod,s01e06a,False,,727.12
+sub-05,05,cneuromod,s01e06b,False,,727.12
+sub-05,05,cneuromod,s01e07a,False,,734.57
+sub-05,05,cneuromod,s01e07b,False,,734.57
+sub-05,05,cneuromod,s01e08a,False,,709.24
+sub-05,05,cneuromod,s01e08b,False,,709.24
+sub-05,05,cneuromod,s01e09a,False,,697.32
+sub-05,05,cneuromod,s01e09b,False,,697.32
+sub-05,05,cneuromod,s01e10a,False,,739.04
+sub-05,05,cneuromod,s01e10b,False,,739.04
+sub-05,05,cneuromod,s01e11a,False,,710.73
+sub-05,05,cneuromod,s01e11b,False,,710.73
+sub-05,05,cneuromod,s01e12a,False,,701.79
+sub-05,05,cneuromod,s01e12b,False,,701.79
+sub-05,05,cneuromod,s01e13a,False,,697.32
+sub-05,05,cneuromod,s01e13b,False,,697.32
+sub-05,05,cneuromod,s01e14a,False,,731.59
+sub-05,05,cneuromod,s01e14b,False,,731.59
+sub-05,05,cneuromod,s01e15a,False,,710.73
+sub-05,05,cneuromod,s01e15b,False,,710.73
+sub-05,05,cneuromod,s01e16a,False,,719.67
+sub-05,05,cneuromod,s01e16b,False,,719.67
+sub-05,05,cneuromod,s01e17a,False,,719.67
+sub-05,05,cneuromod,s01e17b,False,,719.67
+sub-05,05,cneuromod,s01e18a,False,,740.53
+sub-05,05,cneuromod,s01e18b,False,,740.53
+sub-05,05,cneuromod,s01e19a,False,,685.4
+sub-05,05,cneuromod,s01e19b,False,,685.4
+sub-05,05,cneuromod,s01e20a,False,,685.4
+sub-05,05,cneuromod,s01e20b,False,,685.4
+sub-05,05,cneuromod,s01e21a,False,,710.73
+sub-05,05,cneuromod,s01e21b,False,,710.73
+sub-05,05,cneuromod,s01e22a,False,,706.26
+sub-05,05,cneuromod,s01e22b,False,,706.26
+sub-05,05,cneuromod,s01e23a,False,,688.38
+sub-05,05,cneuromod,s01e23b,False,,688.38
+sub-05,05,cneuromod,s01e24a,False,,767.35
+sub-05,05,cneuromod,s01e24b,False,,767.35
+sub-06,06,cneuromod,s01e01a,False,,882.08
+sub-06,06,cneuromod,s01e01b,False,,882.08
+sub-06,06,cneuromod,s01e02a,False,,718.18
+sub-06,06,cneuromod,s01e02b,False,,718.18
+sub-06,06,cneuromod,s01e03a,False,,703.28
+sub-06,06,cneuromod,s01e03b,False,,703.28
+sub-06,06,cneuromod,s01e04a,False,,749.47
+sub-06,06,cneuromod,s01e04b,False,,749.47
+sub-06,06,cneuromod,s01e05a,False,,697.32
+sub-06,06,cneuromod,s01e05b,False,,697.32
+sub-06,06,cneuromod,s01e06a,False,,727.12
+sub-06,06,cneuromod,s01e06b,False,,727.12
+sub-06,06,cneuromod,s01e07a,False,,734.57
+sub-06,06,cneuromod,s01e07b,False,,734.57
+sub-06,06,cneuromod,s01e08a,False,,709.24
+sub-06,06,cneuromod,s01e08b,False,,709.24
+sub-06,06,cneuromod,s01e09a,False,,697.32
+sub-06,06,cneuromod,s01e09b,False,,697.32
+sub-06,06,cneuromod,s01e10a,False,,739.04
+sub-06,06,cneuromod,s01e10b,False,,739.04
+sub-06,06,cneuromod,s01e11a,False,,710.73
+sub-06,06,cneuromod,s01e11b,False,,710.73
+sub-06,06,cneuromod,s01e12a,False,,701.79
+sub-06,06,cneuromod,s01e12b,False,,701.79
+sub-06,06,cneuromod,s01e13a,False,,697.32
+sub-06,06,cneuromod,s01e13b,False,,697.32
+sub-06,06,cneuromod,s01e14a,False,,731.59
+sub-06,06,cneuromod,s01e14b,False,,731.59
+sub-06,06,cneuromod,s01e15a,False,,710.73
+sub-06,06,cneuromod,s01e15b,False,,710.73
+sub-06,06,cneuromod,s01e16a,False,,719.67
+sub-06,06,cneuromod,s01e16b,False,,719.67
+sub-06,06,cneuromod,s01e17a,False,,719.67
+sub-06,06,cneuromod,s01e17b,False,,719.67
+sub-06,06,cneuromod,s01e18a,False,,740.53
+sub-06,06,cneuromod,s01e18b,False,,740.53
+sub-06,06,cneuromod,s01e19a,False,,685.4
+sub-06,06,cneuromod,s01e19b,False,,685.4
+sub-06,06,cneuromod,s01e20a,False,,685.4
+sub-06,06,cneuromod,s01e20b,False,,685.4
+sub-06,06,cneuromod,s01e21a,False,,710.73
+sub-06,06,cneuromod,s01e21b,False,,710.73
+sub-06,06,cneuromod,s01e22a,False,,706.26
+sub-06,06,cneuromod,s01e22b,False,,706.26
+sub-06,06,cneuromod,s01e23a,False,,688.38
+sub-06,06,cneuromod,s01e23b,False,,688.38
+sub-06,06,cneuromod,s01e24a,False,,767.35
+sub-06,06,cneuromod,s01e24b,False,,767.35

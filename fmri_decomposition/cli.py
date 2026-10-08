@@ -1,4 +1,6 @@
-"""Command line: `fmri-decomp validate | extract | dfc | diagnose | fixture`.
+"""Command line: `fmri-decomp status | validate | extract | dfc | diagnose |
+censor | decompose | cluster | transitions | select | state-means |
+merge-manifests | fixture`.
 
 Parallelism is at or below the deepest partition key, so each worker owns a
 distinct leaf and no locks are needed. Workers never write shared metadata --
@@ -111,7 +113,7 @@ def _path_collisions(cfg, refs) -> list[str]:
     Load-bearing since leaf_filename became a constant `data.parquet`: the
     ses/run/acq entities used to make these paths differ by construction, and
     now nothing does. The same check exists in tools/check_cohort.py, but
-    slurm/submit_all.sh runs `validate`, not that -- so it has to be here too
+    slurm/activation_and_dfc.sh runs `validate`, not that -- so it has to be here too
     or the submit path has no guard at all.
 
     Only the activation path is tested. dfc_path adds `window_s=` above the
@@ -381,7 +383,7 @@ def cmd_dfc(args) -> int:
 def cmd_diagnose(args) -> int:
     """Coverage, L-R, ISC, and the per-subject QC table.
 
-    `03_finalize.sbatch` runs this after the extract array, which is what makes
+    `finalize.sbatch` runs this after the extract array, which is what makes
     `participants_qc.csv` appear without a separate step in the chain. It also
     means ISC is computed once here and reused for both the gate and the QC
     table, rather than twice.
@@ -472,6 +474,63 @@ def _report_qc(df) -> None:
         print(f"    {'':<24} worst: {worst}")
 
 
+def cmd_censor(args) -> int:
+    """Stage 3.5: apply a named QC policy, so stage 4 reads a decision.
+
+    Kept out of `diagnose` on purpose. `diagnose` measures and must stay free
+    of thresholds; this applies them, and does so under a policy name that is
+    hashed into every row it writes.
+    """
+    from . import censor
+
+    if args.stage == "dfc" and not (args.atlas and args.window_s):
+        raise SystemExit("--stage dfc needs --atlas and --window-s")
+    return censor.run(args)
+
+
+def cmd_decompose(args) -> int:
+    from . import decompose
+
+    return decompose.run(args)
+
+
+def cmd_status(args) -> int:
+    """Read-only inventory of the whole output tree. Footers only."""
+    from . import status
+
+    return status.run(args)
+
+
+def cmd_cluster(args) -> int:
+    """Stage 4b: more ways of defining states, on latents already written.
+
+    Separate from `decompose` because the embeddings do not need refitting --
+    a sixth state definition must not mean redoing the five that work.
+    """
+    from . import cluster
+
+    return cluster.run(args)
+
+
+def cmd_select(args) -> int:
+    """Stage 5b: rank state sets by how well their transitions predict a
+    phenotype column. Parallel over (state set x model x fold seed)."""
+    from . import bstm_selection
+
+    return bstm_selection.run(args)
+
+
+def cmd_transitions(args) -> int:
+    """Stage 5a: one transition matrix per subject, per state set.
+
+    Separate from `decompose` because the grid is different: one decomposition
+    produces several state definitions, and each is its own state set.
+    """
+    from . import transitions
+
+    return transitions.run(args)
+
+
 def cmd_merge_manifests(args) -> int:
     """Consolidate per-array-task manifests into one, serially, after the array.
 
@@ -480,7 +539,7 @@ def cmd_merge_manifests(args) -> int:
     single-node job -- it writes the consolidated `manifest_<stage>.json`
     directly, and there is nothing here to merge.
 
-    Treating that as an error mattered: `03_finalize.sbatch` runs under
+    Treating that as an error mattered: `finalize.sbatch` runs under
     `set -euo pipefail`, so a non-zero exit here killed the job before
     `diagnose` ever ran, and the cohort silently got no participants_qc.csv.
     The two cases are distinguished by whether the consolidated manifest
@@ -582,6 +641,67 @@ def build_parser() -> argparse.ArgumentParser:
                    help="six 0-based column indices (negatives count from the end) "
                         "when the motion columns cannot be identified from the header")
     d.set_defaults(func=cmd_diagnose)
+
+    # Like `decompose`, no `config` positional: a policy is applied across
+    # cohorts at once, and lives in config/censor/ rather than a cohort YAML.
+    from . import censor as _censor
+
+    c = sub.add_parser(
+        "censor",
+        help="stage 3.5: apply a QC policy, writing per-subject and per-window "
+             "keep/drop for stage 4")
+    _censor.add_arguments(c)
+    c.set_defaults(func=cmd_censor)
+
+    # No `config` positional: a decomposition spans cohorts, so the train /
+    # project split cannot live in a per-cohort YAML.
+    from . import decompose as _decompose
+
+    dec = sub.add_parser(
+        "decompose",
+        help="stage 4: windowed DFC -> latents, fit on some cohorts and "
+             "projected onto others")
+    _decompose.add_arguments(dec)
+    dec.set_defaults(func=cmd_decompose)
+
+    from . import status as _status
+
+    st = sub.add_parser(
+        "status",
+        help="read-only: what every stage has on disk, and what disagrees")
+    _status.add_arguments(st)
+    st.set_defaults(func=cmd_status)
+
+    from . import cluster as _cluster
+
+    cl = sub.add_parser(
+        "cluster",
+        help="stage 4b: add brain-state definitions to latents that exist")
+    _cluster.add_arguments(cl)
+    cl.set_defaults(func=cmd_cluster)
+
+    from . import bstm_selection as _bstm_selection
+
+    sel = sub.add_parser(
+        "select",
+        help="stage 5b: which state set predicts a phenotype column best")
+    _bstm_selection.add_arguments(sel)
+    sel.set_defaults(func=cmd_select)
+
+    from . import transitions as _transitions
+
+    t = sub.add_parser(
+        "transitions",
+        help="stage 5a: latents -> per-subject brain-state transition matrices")
+    _transitions.add_arguments(t)
+    t.set_defaults(func=cmd_transitions)
+
+    sm = sub.add_parser(
+        "state-means",
+        help="what each brain state looks like, in named network units")
+    from . import state_means as _state_means
+    _state_means.add_arguments(sm)
+    sm.set_defaults(func=lambda a: _state_means.run(a))
 
     m = sub.add_parser("merge-manifests", help="consolidate per-array-task manifests")
     m.add_argument("config")

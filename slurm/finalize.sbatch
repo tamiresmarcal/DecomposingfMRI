@@ -6,7 +6,7 @@
 # (manifest.json, the diagnostics, and parquet's _metadata if you ever want it)
 # have exactly one writer, in a serial pass afterwards.
 #
-#   sbatch --dependency=afterok:<extract_jobid> slurm/03_finalize.sbatch config.yaml activation
+#   sbatch --dependency=afterok:<extract_jobid> slurm/finalize.sbatch config.yaml activation
 #
 # The `activation` pass also writes participants_qc.csv -- per-subject motion,
 # timing, coverage, scrubbing and registration metrics. That is why there is no
@@ -28,13 +28,13 @@
 
 set -euo pipefail
 
-CONFIG="${1:?usage: sbatch 03_finalize.sbatch <config.yaml> <activation|dfc>}"
+CONFIG="${1:?usage: sbatch finalize.sbatch <config.yaml> <activation|dfc>}"
 STAGE="${2:?stage must be 'activation' or 'dfc'}"
 
 # Per-user settings: interpreter, binds, cache paths. Optional and gitignored;
 # see slurm/env.sh.example. SLURM copies this script to a spool directory on
 # the compute node, so $BASH_SOURCE points there, not at the repo -- the
-# submit directory is what finds it. Sourced here as well as in submit_all.sh
+# submit directory is what finds it. Sourced here as well as in activation_and_dfc.sh
 # so a hand-submitted sbatch behaves identically.
 _ENV_SH="${SLURM_SUBMIT_DIR:-$PWD}/slurm/env.sh"
 [[ -f "$_ENV_SH" ]] && source "$_ENV_SH"

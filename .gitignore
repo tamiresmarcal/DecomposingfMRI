@@ -15,7 +15,12 @@ __pycache__/
 .fixture/
 .nilearn_data/
 slurm_logs/
-outputs/
+# Every output tree, not just the live one. `outputs/` alone matched ONLY that
+# name, so the rename this repo's own RUNBOOK recommends before a re-run --
+# `mv outputs outputs.old.$(date +%F)` -- produced an UNIGNORED directory full of
+# derived participant-level data (participants_qc.csv is per-subject motion;
+# latents are keyed by sub). One `git add -A` away from being pushed.
+outputs*/
 
 # Distribution / packaging
 .Python
@@ -88,6 +93,8 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+# plotly's iframe renderer writes one HTML file per figure beside the notebook
+iframe_figures/
 
 # IPython
 profile_default/
@@ -230,3 +237,18 @@ __marimo__/
 
 # per-user SLURM settings; see slurm/env.sh.example
 slurm/env.sh
+
+# Participant-level phenotype. NEVER COMMITTED.
+#
+# config/phenotype/<cohort>_phenotype.csv is age, sex and clinical scores for
+# named subjects -- "who the person is", in the words of the README beside it.
+# Cam-CAN's and CNeuroMod's data access agreements do not permit redistributing
+# participant-level data, and this repository is pushed to GitHub.
+#
+# The BUILDER is tracked (tools/make_phenotype.py) and the OUTPUT is not: the
+# recipe is the reproducible part, and anyone with their own data access can
+# re-run it. Same split as `outputs/`.
+#
+# `config/*_participants.csv` stays tracked on purpose -- ids, task and
+# exclusion reasons are facts about files, not about people.
+config/phenotype/*.csv

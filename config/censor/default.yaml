@@ -1,0 +1,58 @@
+# Censoring / QC-gating policy, applied BETWEEN stage 3 and stage 4.
+#
+# The pipeline deliberately applies no thresholds: stage 3 writes measurements
+# (mean_fd, frac_good_frames, n_tr_effective, rank_deficient) and stops. This
+# file is where a measurement becomes a decision, and it is versioned and
+# hashed so the decision travels with the data that rests on it.
+#
+# Change a number, change the `name`, and the outputs land beside the old ones
+# instead of overwriting them. A sensitivity analysis is then two policies, not
+# a re-run.
+
+name: default
+
+subject:
+  # Head motion. The one gate that does real work on ds002837, where per-frame
+  # censoring is impossible (the regressor and image timelines cannot be
+  # reconciled, see config/ds002837.yaml) so good_frame is all true and motion
+  # is otherwise uncorrected. The config names sub-12 (14.0% of frames would
+  # have been censored), sub-11 (9.9%) and sub-7 (5.2%) as the real cases.
+  max_mean_fd: 0.5
+
+  # Scrubbing survival. Identically 1.0 where censoring is off, so this is a
+  # no-op for ds002837 and load-bearing for the Cam-CAN cohorts.
+  min_frac_good_frames: 0.5
+
+  # Registration / coverage. A subject with many empty parcels did not have
+  # their brain where the atlas expected it.
+  max_frac_parcels_empty: 0.10
+
+  # Stimulus timing, from ISC. null disables it -- best_lag_tr is NaN for any
+  # task with fewer than 3 subjects, and dropping on NaN would silently remove
+  # whole cohorts.
+  max_abs_best_lag_tr: null
+
+  # Scan stopped early.
+  min_frac_stimulus_covered: 0.80
+
+window:
+  # Windows are only gated for the DFC path. The HMM path runs on stage 2
+  # activation, where good_frame is already per-TR.
+  min_frac_good_frames: 0.5
+
+  # null = no floor. Set this rather than drop_rank_deficient if what you care
+  # about is estimator noise: Fisher-z sampling SD is 1/sqrt(n-3), so n=12 is
+  # 0.333 and n=30 is 0.192.
+  min_n_tr_effective: null
+
+  # rank_deficient means the correlation MATRIX is singular. Each edge in it is
+  # still an ordinary two-variable correlation, so for edge-wise work these are
+  # noisy, not void -- kept by default. Set true if anything downstream
+  # inverts or decomposes the matrix.
+  drop_rank_deficient: false
+
+  # A transition across a run boundary is not a transition. Always true for
+  # anything that counts transitions.
+  drop_crosses_run_boundary: true
+
+  drop_crosses_clip_boundary: false

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,7 +58,7 @@ def leaf_filename(ses: str | None = None, run: str | None = None,
     sessions, two runs -- would now have both write to the same leaf, and the
     second would silently overwrite the first. So `validate` now fails on any
     such collision BEFORE anything is submitted (cli.py, cmd_validate). That
-    check was previously only in tools/check_cohort.py, which submit_all.sh
+    check was previously only in tools/check_cohort.py, which activation_and_dfc.sh
     does not run; making the name constant is what forces it onto the path
     everyone actually takes.
 
@@ -118,8 +119,75 @@ def dfc_path(output_root: str | Path, cohort: str, atlas: str, window_s: float,
     )
 
 
+def latents_root(output_root: str | Path, atlas: str, window_s=None,
+                 cohort: str | None = None) -> Path:
+    """Stage 4 output. Same key order as `dfc_root`, deliberately.
+
+    Latents are written per (atlas, window_s, cohort) because each window size
+    is an independent fit -- so the keys that select one fit are the ones above
+    cohort, exactly as in stage 3. `window_s` is accepted as a number or as the
+    string already in the path, since callers have it both ways.
+    """
+    p = Path(output_root) / "latents" / f"atlas={_key(atlas)}"
+    if window_s is not None:
+        w = window_s if isinstance(window_s, str) else _fmt_window(window_s)
+        p = p / f"window_s={_key(w)}"
+    return p if cohort is None else p / f"cohort={_key(cohort)}"
+
+
 def _fmt_window(window_s: float) -> str:
     return str(int(window_s)) if float(window_s).is_integer() else str(window_s)
+
+
+# The usable range for K, the number of brain states in a state set. One
+# definition, because three stages consult it and they had drifted apart: stage
+# 4b refused to WRITE K<3 while stage 5a happily built tables for K=2, so a
+# state set could be rejected and analysed in the same run.
+#
+#   floor 3  K=1 is a single cell, `0->0`=1.0 for every subject -- a constant.
+#            K=2 is four cells of which one is free given the row sums, so it is
+#            `switch_rate` under another name, and switch_rate is already a
+#            summary feature. Neither earns a slot in the selection grid.
+#   ceiling 64
+#            at K=125 a subject's matrix is 15,625 cells and at 512 it is
+#            262,144, against a few hundred transitions -- >99% exactly zero for
+#            every subject, so there is no probability to correlate with.
+STATE_K_BAND = (3, 64)
+
+
+# Prefix for the input features `decompose --passthrough-features` writes into
+# the latents table beside the PCA/UMAP coordinates. One definition, because
+# `decompose` writes them and `cluster` resolves a `raw<N>` embedding from them,
+# and a prefix that drifted between the two would read as "no raw columns".
+#
+# The `<prefix><feature name>` form is deliberate: `raw/AM` keeps the network's
+# NAME, which is the whole reason this option exists -- a state mean over
+# `raw/AM .. raw/WM` says "high in autobiographical memory, low in working
+# memory", and the same mean over `pca0/14 .. pca13/14` says nothing until you
+# invert the rotation. The `/` matches the existing `pca0/3` style and cannot
+# collide with a transition cell (`i->j`) or an occupancy column (`occ_k`).
+RAW_PREFIX = "raw/"
+
+# Refuse `--passthrough-features` above this many features. The option is meant
+# for the activation source, where a row is 7, 14 or 111 parcels. On the dfc
+# source a row is 21, 91 or 6,105 EDGES, and the last would roughly double the
+# whole latents tree for an embedding no clusterer here can fit -- a
+# full-covariance HMM on 6,105 dimensions is 18.6M parameters per state.
+PASSTHROUGH_MAX_FEATURES = 200
+
+
+# `<Method>_<embedding>_<K>` -- the state-column convention stage 4b writes and
+# stages 5a, 5b and `status` parse. ONE definition, because there were two and
+# they are the kind of thing that silently disagrees: `status` had
+# `^[A-Za-z]+_[a-z]+\d*_\d+$` and `cluster` had the same pattern inline, and
+# BOTH rejected `HMM1_pca3_8` -- the method group was letters-only, so renaming
+# `HMM` to `HMM1`/`HMM2` would have left stage 5 reporting zero state sets with
+# the columns sitting in the files.
+#
+#   method      letters then letters-or-digits: HMM1, HMM2, MeanShift
+#   embedding   lowercase then optional digits: pca3, umap3, raw14
+#   K           digits
+STATE_COLUMN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*_[a-z]+\d*_\d+$")
 
 
 # Keys carried by the directory tree. They are deliberately NOT written as
@@ -159,6 +227,35 @@ def open_dataset(root: str | Path, stage: str = "dfc"):
     import pyarrow.dataset as pads
 
     return pads.dataset(str(root), format="parquet", partitioning=hive_partitioning(stage))
+
+
+def read_file(path: str | Path, columns: list[str] | None = None):
+    """One parquet FILE -> pyarrow Table. Never a dataset, never partitioning.
+
+    `pq.read_table` and `pd.read_parquet` both build a ParquetDataset, which
+    infers hive partitioning from the directory names even for a single file. For
+    a path like `.../cohort=camcan/data.parquet` that invents a `cohort`
+    partition field and tries to merge it with the file's own `cohort` COLUMN --
+    see PARTITION_KEYS below on why a duplicated key is a trap. The merge raises
+
+        ArrowTypeError: Unable to merge: Field cohort has incompatible types:
+        string vs dictionary<values=string, indices=int32, ordered=0>
+
+    and it is VERSION-DEPENDENT: pyarrow 18 (the analysis container) raises,
+    pyarrow 25 does not, so it passes every local test and fails on the cluster.
+    `ParquetFile` opens the one file through the parquet reader with no dataset
+    layer, so there is nothing to infer and nothing to merge.
+
+    Use this anywhere a single latents or shard file is read whole, or read with
+    a projection that includes a partition key.
+    """
+    import pyarrow.parquet as pq
+
+    f = pq.ParquetFile(path)
+    if columns is None:
+        return f.read()
+    have = set(f.schema_arrow.names)
+    return f.read(columns=[c for c in columns if c in have])
 
 
 def read_shard(path: str | Path):

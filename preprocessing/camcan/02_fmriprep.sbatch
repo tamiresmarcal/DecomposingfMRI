@@ -53,7 +53,7 @@ export FS_LICENSE
 # Compute nodes have NO outbound network. fMRIPrep downloads its normalisation
 # templates through TemplateFlow at run time; with no cache and no network it
 # does not fail fast, it HANGS on an HTTP timeout and dies hours in. Same trap
-# as NILEARN_DATA in slurm/01_extract.sbatch.
+# as NILEARN_DATA in slurm/extract_activations.sbatch.
 export TEMPLATEFLOW_HOME="${TEMPLATEFLOW_HOME:-/project/6008063/tamires/templateflow}"
 # Check for a real IMAGE, not just the directory. TemplateFlow lays down the
 # whole tpl-* skeleton on first import and downloads the actual files lazily,

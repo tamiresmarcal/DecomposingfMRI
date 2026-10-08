@@ -1,8 +1,8 @@
 #!/bin/bash
 # Stage 3 -- DFC. Cheap and re-run often: it reads parquet, never the NIfTI.
 #
-#   sbatch --array=0-3 slurm/02_dfc.sbatch config/ds002837.yaml
-#   sbatch --array=0-3 slurm/02_dfc.sbatch config/ds002837.yaml 30 60
+#   sbatch --array=0-3 slurm/extract_dfc.sbatch config/ds002837.yaml
+#   sbatch --array=0-3 slurm/extract_dfc.sbatch config/ds002837.yaml 30 60
 #
 # Extra positional arguments restrict the window sizes, so re-running a single
 # window size after changing your mind costs one short job rather than a full
@@ -33,7 +33,7 @@
 
 set -euo pipefail
 
-CONFIG="${1:?usage: sbatch 02_dfc.sbatch <config.yaml> [window_s ...]}"
+CONFIG="${1:?usage: sbatch extract_dfc.sbatch <config.yaml> [window_s ...]}"
 shift || true
 WINDOWS=("$@")
 
@@ -41,7 +41,7 @@ N_JOBS="${SLURM_CPUS_PER_TASK:-1}"
 # Per-user settings: interpreter, binds, cache paths. Optional and gitignored;
 # see slurm/env.sh.example. SLURM copies this script to a spool directory on
 # the compute node, so $BASH_SOURCE points there, not at the repo -- the
-# submit directory is what finds it. Sourced here as well as in submit_all.sh
+# submit directory is what finds it. Sourced here as well as in activation_and_dfc.sh
 # so a hand-submitted sbatch behaves identically.
 _ENV_SH="${SLURM_SUBMIT_DIR:-$PWD}/slurm/env.sh"
 [[ -f "$_ENV_SH" ]] && source "$_ENV_SH"

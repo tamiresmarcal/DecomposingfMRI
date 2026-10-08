@@ -4,14 +4,21 @@
 #   extract array -> finalize+ISC gate -> dfc array -> merge dfc manifests
 #
 # Usage:
-#   ./slurm/submit_all.sh config/ds002837.yaml [n_extract_shards] [n_dfc_shards]
+#   ./slurm/activation_and_dfc.sh config/ds002837.yaml [n_extract_shards] [n_dfc_shards]
 #
 # Nothing runs if validation fails, and stage 3 does not start unless the ISC
 # alignment gate passes -- afterok, not afterany, on purpose.
 
 set -euo pipefail
 
-CONFIG="${1:?usage: submit_all.sh <config.yaml> [n_extract_shards] [n_dfc_shards]}"
+CONFIG="${1:?usage: activation_and_dfc.sh <config.yaml> [n_extract_shards] [n_dfc_shards]}"
+
+# The censor policy this cohort is gated under. Overridable without editing this
+# script, because changing the gate is meant to be cheap:
+#   FMRIDECOMP_CENSOR=config/censor/strict.yaml ./slurm/activation_and_dfc.sh config/x.yaml
+# and re-gating after everything has run needs only `sbatch slurm/censor.sbatch`,
+# never this script again.
+CENSOR_POLICY="${FMRIDECOMP_CENSOR:-config/censor/motion.yaml}"
 N_EXTRACT="${2:-8}"   # see the sizing check below
 N_DFC="${3:-8}"
 
@@ -33,7 +40,7 @@ ACCOUNT_ARG=()
 # ------------------------------------------------------------ interpreter ---
 # This script runs on a LOGIN node, but `validate` imports fmri_decomposition,
 # which the login node's bare `python` cannot do. Pick the interpreter exactly
-# the way slurm/01_extract.sbatch does, so the pre-flight check actually runs.
+# the way slurm/extract_activations.sbatch does, so the pre-flight check actually runs.
 #
 # Everything here happens in a subshell where needed: sbatch exports the
 # submitting shell's environment to the job, and a venv activated here would
@@ -100,7 +107,7 @@ fi
 N_RUNS="$(sed -n 's/.*runs_discovered=\([0-9]*\).*/\1/p' <<<"$VALIDATE_OUT")"
 N_ATLAS="$(sed -n "s/^atlases=\[\(.*\)\] config_hash.*/\1/p" <<<"$VALIDATE_OUT" \
            | tr ',' '\n' | grep -c .)"
-CPUS="$(sed -n 's/^#SBATCH --cpus-per-task=\([0-9]*\).*/\1/p' "$HERE/01_extract.sbatch" | head -1)"
+CPUS="$(sed -n 's/^#SBATCH --cpus-per-task=\([0-9]*\).*/\1/p' "$HERE/extract_activations.sbatch" | head -1)"
 CPUS="${CPUS:-1}"
 
 if [[ -n "$N_RUNS" && -n "$N_ATLAS" && "$N_ATLAS" -gt 0 ]]; then
@@ -115,7 +122,7 @@ if [[ -n "$N_RUNS" && -n "$N_ATLAS" && "$N_ATLAS" -gt 0 ]]; then
     echo "   WARNING: ${SLOTS} slots for ${N_JOBS_TOTAL} jobs -- $(( SLOTS - N_JOBS_TOTAL )) will idle."
     echo "            You are billed for the whole allocation and it queues slower."
     echo "            At --cpus-per-task=${CPUS}, ${SUGGEST} array task(s) is enough:"
-    echo "              ./slurm/submit_all.sh $CONFIG ${SUGGEST} ${N_DFC}"
+    echo "              ./slurm/activation_and_dfc.sh $CONFIG ${SUGGEST} ${N_DFC}"
     echo
     read -r -p "   submit anyway? [y/N] " reply
     [[ "$reply" == [yY]* ]] || { echo "   aborted."; exit 1; }
@@ -124,23 +131,33 @@ fi
 
 echo "== stage 2: ${N_EXTRACT} array task(s)"
 EXTRACT_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --array=0-$((N_EXTRACT - 1)) \
-  "$HERE/01_extract.sbatch" "$CONFIG" ${EXTRA_EXTRACT[@]+"${EXTRA_EXTRACT[@]}"})
+  "$HERE/extract_activations.sbatch" "$CONFIG" ${EXTRA_EXTRACT[@]+"${EXTRA_EXTRACT[@]}"})
 echo "   jobid ${EXTRACT_ID}"
 
 echo "== finalize stage 2 (manifest merge + diagnostics + ISC gate)"
 FINAL2_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --dependency=afterok:"${EXTRACT_ID}" \
-  "$HERE/03_finalize.sbatch" "$CONFIG" activation)
+  "$HERE/finalize.sbatch" "$CONFIG" activation)
 echo "   jobid ${FINAL2_ID}"
 
 echo "== stage 3: ${N_DFC} array task(s), gated on the diagnostics passing"
 DFC_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --dependency=afterok:"${FINAL2_ID}" \
-  --array=0-$((N_DFC - 1)) "$HERE/02_dfc.sbatch" "$CONFIG")
+  --array=0-$((N_DFC - 1)) "$HERE/extract_dfc.sbatch" "$CONFIG")
 echo "   jobid ${DFC_ID}"
 
 echo "== finalize stage 3"
 FINAL3_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --dependency=afterok:"${DFC_ID}" \
-  "$HERE/03_finalize.sbatch" "$CONFIG" dfc)
+  "$HERE/finalize.sbatch" "$CONFIG" dfc)
 echo "   jobid ${FINAL3_ID}"
+
+# The subject gate only needs participants_qc.csv, which the ACTIVATION finalize
+# writes -- so this could run beside stage 3. It is gated on the dfc finalize
+# anyway, because the point of putting it here is that the cohort is completely
+# prepared when this script's last job exits, and five seconds of parallelism is
+# not worth a second meaning for "done".
+echo "== censor (${CENSOR_POLICY})"
+CENSOR_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable --dependency=afterok:"${FINAL3_ID}" \
+  "$HERE/censor.sbatch" "$CONFIG" "${CENSOR_POLICY}")
+echo "   jobid ${CENSOR_ID}"
 
 cat <<EOF
 
@@ -151,7 +168,15 @@ submitted. watch with:
 per-subject QC (motion, timing, coverage, scrubbing, registration) is written by
 the activation finalize -- no separate step:
   outputs/meta/cohorts/cohort=<cohort>/participants_qc.csv
-It is measurement only. Thresholds belong with the models.
+It is measurement only. The threshold is applied by the censor job above, under
+a policy that is named and hashed:
+  outputs/censor/policy=<name>/cohort=<cohort>/subjects.parquet
+  grep -E 'kept|policy' slurm_logs/censor_${CENSOR_ID}.out
+
+to re-gate later, copy the policy and run ONLY the censor step -- nothing
+upstream is touched and the old decision stays on disk beside the new one:
+  cp config/censor/motion.yaml config/censor/strict.yaml   # edit `name:` too
+  sbatch slurm/censor.sbatch $CONFIG config/censor/strict.yaml
 
 stage 3's atlas x window plan -- rows, edge counts, estimated size, and any
 pair where every window would be rank_deficient -- is printed by array task 0
@@ -160,5 +185,5 @@ before it starts writing:
 
 a timed-out or preempted task is safe to resubmit as-is; skip-if-exists means
 it redoes only the shards that are missing:
-  sbatch --array=0-$((N_EXTRACT - 1)) $HERE/01_extract.sbatch $CONFIG
+  sbatch --array=0-$((N_EXTRACT - 1)) $HERE/extract_activations.sbatch $CONFIG
 EOF
