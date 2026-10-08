@@ -677,6 +677,20 @@ def run_one(root: Path, window_s, args) -> None:
     atlas = args.atlas
     out_dir = latents_root(root, atlas, window_s)
     models_dir = root / "meta" / "models"
+    # KEYED BY (atlas, window) AND NOT BY model_hash, unlike stage 4b's
+    # clusterer cache. So one output root holds ONE fit per cell: changing
+    # `--train` overwrites the previous fit's objects rather than sitting
+    # beside them.
+    #
+    # That is safe, not silent -- `reuse_models` compares the manifest's
+    # model_hash and refits on a mismatch, and every latents file carries the
+    # hash it was written with, so nothing can read a model that did not make
+    # it. What it costs is co-residency: two training splits at one (atlas,
+    # aperture) cannot both keep their artefacts here, and each run evicts the
+    # other's. Use a separate --output-root for a second split. Adding the hash
+    # to this name would fix it and would also move where `state_means` looks
+    # (state_means.load_models builds the same stem), so it is a change to make
+    # deliberately rather than in passing.
     stem = models_dir / f"decompose_atlas-{atlas}_window-{window_s}"
 
     cohorts = list(dict.fromkeys(args.train + args.project))
