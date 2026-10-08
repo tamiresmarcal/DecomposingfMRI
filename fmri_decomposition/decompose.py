@@ -635,20 +635,41 @@ def latents_fit_description(path: Path) -> tuple[dict, list[str]]:
     return stored, cols
 
 
+# Written into a latents file BESIDE the fit description (see write_latents),
+# so they are not part of it and must not appear in a diff of it. Without this
+# the one useful line -- the flag that moved -- is buried under ten entries
+# reading `-> '(absent)'` for things that were never in `fit_meta` to begin
+# with. Keep in step with write_latents' metadata block.
+_NOT_FIT_KEYS = frozenset({
+    "cohort", "role", "model_hash", "umap_fitted", "n_umap_components",
+    "n_train_rows", "package_version", "written_utc", "stride_s",
+    "indep_factor",
+})
+
+
 def _fit_differences(stored: dict, meta: dict) -> list[str]:
     """Which keys of the fit description changed, as readable lines.
 
     The point is to name the FLAG that moved. A bare "the hash differs" sends
     you to diff two 16-character strings; "n_latents: [3, 7] -> [2, 3, 5]"
     says you forgot `--n-latents 3 7`.
+
+    A key in `stored` but absent from `meta` is kept, not filtered: that is
+    exactly the forgotten-flag case, because `fit_meta` writes a key only when
+    it differs from its default. `passthrough_features: True -> (absent)` is
+    the message someone needs most.
     """
     out = []
-    for key in sorted(set(stored) | set(meta)):
-        if key not in meta and key not in stored:
-            continue
+    for key in sorted((set(stored) | set(meta)) - _NOT_FIT_KEYS):
         was, now = stored.get(key, "(absent)"), meta.get(key, "(absent)")
         if was != now:
             out.append(f"      {key}: {was!r} -> {now!r}")
+    # In the hash payload but not in fit_meta, so the loop above cannot see it.
+    from . import __version__
+
+    if stored.get("package_version") not in (None, __version__):
+        out.append(f"      package_version: "
+                   f"{stored['package_version']!r} -> {__version__!r}")
     return out
 
 

@@ -13,6 +13,7 @@ cohort is byte-for-byte untouched, that a column written between the two runs
 survives, and that the fit is not repeated.
 """
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -427,3 +428,52 @@ class TestForgottenFlagIsRefused:
         assert stored["train_cohorts"] == ["trainA", "trainB"]
         assert "project_cohorts" not in stored
         assert cols == []
+
+
+class TestTheDiffIsReadable:
+    """The refusal is only useful if the flag that moved is findable in it.
+
+    A latents file carries ten keys BESIDE the fit description -- cohort, role,
+    stride_s, model_hash, written_utc and so on -- and comparing those against
+    a fit_meta that never had them produced ten lines of `-> '(absent)'` with
+    the one real difference buried in the middle.
+    """
+
+    def test_only_the_real_difference_is_listed(self, tmp_path):
+        stored = {"n_latents": [3], "atlas": "mini", "cohort": "camcan",
+                  "role": "projected", "stride_s": 2.0, "indep_factor": 1,
+                  "model_hash": "abc", "n_train_rows": 480,
+                  "umap_fitted": False, "n_umap_components": [],
+                  "written_utc": "2026-10-08T00:00:00Z"}
+        meta = {"n_latents": [3, 5], "atlas": "mini"}
+        assert D._fit_differences(stored, meta) == [
+            "      n_latents: [3] -> [3, 5]"]
+
+    def test_a_flag_dropped_from_the_command_is_shown(self):
+        """fit_meta writes a key only when it differs from its default, so a
+        key present on disk and absent now IS the forgotten flag -- the case
+        this message exists for."""
+        out = D._fit_differences({"passthrough_features": True}, {})
+        assert out == ["      passthrough_features: True -> '(absent)'"]
+
+    def test_a_flag_newly_added_is_shown_too(self):
+        out = D._fit_differences({}, {"passthrough_features": True})
+        assert out == ["      passthrough_features: '(absent)' -> True"]
+
+    def test_identical_descriptions_differ_in_nothing(self):
+        d = {"n_latents": [3], "atlas": "mini", "written_utc": "whenever"}
+        assert D._fit_differences(d, {"n_latents": [3], "atlas": "mini"}) == []
+
+    def test_a_package_version_change_is_reported(self):
+        """It is in the hash payload but not in fit_meta, so the generic loop
+        cannot see it -- and a version bump really does move every hash."""
+        out = D._fit_differences({"package_version": "0.0.1-ancient"}, {})
+        assert len(out) == 1 and "package_version" in out[0]
+
+    def test_the_excluded_keys_match_what_write_latents_adds(self):
+        """If write_latents gains a per-file key and this set does not, the
+        diff starts showing it as a difference that cannot be acted on."""
+        src = (Path(D.__file__).read_text()
+               .split("def write_latents")[1].split("def ")[0])
+        for key in D._NOT_FIT_KEYS:
+            assert f'"{key}"' in src, key
