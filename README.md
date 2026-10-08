@@ -117,11 +117,17 @@ outputs/
 │   │                  plus a manifest recording its model_hash and the library
 │   │                  versions it was pickled under. A later run projecting a
 │   │                  NEW cohort loads this instead of refitting.
-│   └── clusterers/    STAGE 4b — the fitted clusterer per fit_hash, so labelling
-│                      a cohort added later costs a forward pass instead of the
-│                      ~24 h HMM2 fit. Keyed by fit_hash AND checked against the
-│                      latents' model_hash and the pickling libraries; a mismatch
-│                      means refit, never silent reuse.
+│   └── clusterers/    STAGE 4b — the fitted clusterer per RECIPE, so labelling a
+│                      cohort added later costs a forward pass instead of the
+│                      ~24 h HMM2 fit. Keyed by `recipe_hash` (method, embedding,
+│                      K asked for, constructor options, training rows) because
+│                      that is computable BEFORE a fit; `fit_hash` describes what
+│                      came out and cannot look anything up. Checked against the
+│                      latents' model_hash, the pickling libraries, and its own
+│                      fit_hash on reload; any mismatch means refit, never
+│                      silent reuse. This is also what fixes MeanShift's K: the
+│                      object is reused, so the discovered K cannot drift
+│                      between runs.
 │
 ├── static_fc/                                    STAGE 3b — one FC per subject
 │   └── atlas=harvardoxford/cohort=camcan/subjects.parquet

@@ -765,15 +765,34 @@ def fit_hash(method: str, embedding: str, k, params: dict, train: list[str],
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
-# Methods whose `params()` is settings-only BEFORE the fit, so `fit_hash` can be
-# computed in advance and a saved fit looked up by it.
-#
-# Not all of them: MeanShiftCluster.params() reports `quantile_used`,
-# `bandwidth` and `fit_rows`, and ThresholdCluster.params() reports
-# `bins_per_axis` -- every one of those is set DURING fit, so their hash does
-# not exist until the work is already done. That is no loss: those two are
-# seconds to minutes, and the fit worth not repeating is the HMM's.
-CACHEABLE = SEQUENTIAL
+# Constructor options that change how long a fit takes and nothing about its
+# result, so they must not enter the cache key -- the same reasoning that keeps
+# `n_jobs` out of `fit_hash` (see HMM2Cluster.params).
+_OPTS_NOT_IN_RECIPE = frozenset({"n_jobs"})
+
+
+def recipe_hash(method: str, embedding: str, k, opts: dict, train: list[str],
+                n_rows: int, balanced: bool = False) -> str:
+    """What was ASKED FOR, as opposed to what came out. The cache key.
+
+    `fit_hash` describes the FITTED model: it carries `cl.params()`, which for
+    MeanShift reports the discovered bandwidth and the quantile the search
+    settled on, and for Threshold reports bins_per_axis. Those do not exist
+    until the fit has run, so `fit_hash` cannot be used to look a fit UP --
+    only to describe one afterwards.
+    This is the other half: the method, the embedding, the K asked for, the
+    constructor options, and the training rows. All known in advance, for every
+    method. Same recipe over the same rows -> the same fit, so this is what the
+    saved clusterer is filed under.
+    """
+    payload = json.dumps(
+        {"method": method, "embedding": embedding, "k": k,
+         "opts": {k2: v for k2, v in sorted(opts.items())
+                  if k2 not in _OPTS_NOT_IN_RECIPE},
+         "train": sorted(train), "n_train_rows": n_rows,
+         "balanced": balanced},
+        sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def _cluster_libs() -> dict[str, str]:
@@ -845,6 +864,18 @@ def load_clusterer(path: Path, model_hash: str | None, log=print):
             f"-- refitting rather than trusting it)")
         return None
     return blob.get("clusterer")
+
+
+def blob_fit_hash(path: Path) -> str | None:
+    """The `fit_hash` recorded beside a cached clusterer, for the reload check."""
+    if not path.exists():
+        return None
+    try:
+        import joblib
+
+        return joblib.load(path).get("fit_hash")
+    except Exception:                                            # noqa: BLE001
+        return None
 
 
 def column_fit_hash(path: Path, col: str) -> str | None:
@@ -1022,17 +1053,16 @@ def run_one(root: Path, atlas: str, window_s, args):
                 # these exact training rows can be labelled rather than refitted.
                 # That is the difference between adding a cohort in minutes and
                 # adding it in a day.
-                reused = None
-                if method in CACHEABLE:
-                    pre = fit_hash(method, emb, k, cl.params(), train,
-                                   len(Xtr), balanced=bool(args.balance_train))
-                    cache = clusterer_cache_path(root, atlas, window_s, pre)
-                    if not args.refit:
-                        reused = load_clusterer(cache, cell_model_hash, log=log)
+                recipe = recipe_hash(method, emb, k, _opts(method, args),
+                                     train, len(Xtr),
+                                     balanced=bool(args.balance_train))
+                cache = clusterer_cache_path(root, atlas, window_s, recipe)
+                reused = (None if args.refit
+                          else load_clusterer(cache, cell_model_hash, log=log))
                 if reused is not None:
                     cl = reused
                     log(f"  {column_name(method, emb, cl.k_found)}"
-                        f"{'':<12} reusing the cached fit {pre} "
+                        f"{'':<12} reusing the cached fit {recipe} "
                         f"-- labelling only, no refit")
                 elif method in SEQUENTIAL:
                     cl.fit(Xtr, k, lengths=len_tr)
@@ -1071,13 +1101,29 @@ def run_one(root: Path, atlas: str, window_s, args):
                 col = column_name(method, emb, cl.k_found)
                 h = fit_hash(method, emb, cl.k_found, cl.params(), train,
                              len(Xtr), balanced=bool(args.balance_train))
-                if method in CACHEABLE and reused is None:
+                if reused is None:
+                    # Filed under the RECIPE, so the next run can find it, and
+                    # carrying the fit_hash so a reload can be checked against
+                    # what the fit actually produced.
                     save_clusterer(
-                        clusterer_cache_path(root, atlas, window_s, h), cl,
-                        {"model_hash": cell_model_hash, "method": method,
+                        cache, cl,
+                        {"model_hash": cell_model_hash, "fit_hash": h,
+                         "recipe_hash": recipe, "method": method,
                          "embedding": emb, "k": int(cl.k_found),
                          "train": sorted(train), "n_train_rows": len(Xtr),
                          "column": col}, log=log)
+                elif blob_fit_hash(cache) not in (None, h):
+                    # The reloaded object produced a different fit_hash from
+                    # the one saved beside it. That should be impossible --
+                    # params() and k_found come out of the pickle -- so it means
+                    # the pickle no longer behaves as it did, which is exactly
+                    # what must not pass silently.
+                    raise SystemExit(
+                        f"{col}: the cached fit {recipe} reloaded to a "
+                        f"DIFFERENT model.\n"
+                        f"  saved fit_hash {blob_fit_hash(cache)}\n"
+                        f"  reloaded as    {h}\n"
+                        f"  Delete {cache} and re-run with --refit.")
 
                 written, kept = {}, []
                 for cohort, f in frames.items():

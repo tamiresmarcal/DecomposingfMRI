@@ -242,11 +242,41 @@ class TestClusterReusesItsFit:
         return cell, entries
 
     def test_the_first_run_fits_and_caches(self, clustered):
+        """Filed under the RECIPE, not the fit_hash -- the recipe is what a
+        later run can compute before fitting, which is what makes a lookup
+        possible at all. The fit_hash is recorded INSIDE, for the reload
+        check."""
+        import joblib
+
+        from fmri_decomposition import cluster as C
+
         cell, entries = clustered
         assert entries and not entries[0]["fit_reused"]
         cached = list((cell / "meta" / "clusterers").glob("*.joblib"))
         assert len(cached) == 1
-        assert entries[0]["fit_hash"] in cached[0].name
+        blob = joblib.load(cached[0])
+        a = cluster_args()
+        recipe = C.recipe_hash("hmm2", "pca3", 3, C._opts("hmm2", a),
+                               ["trainA", "trainB"], blob["n_train_rows"])
+        assert recipe in cached[0].name
+        assert blob["fit_hash"] == entries[0]["fit_hash"]
+        assert blob["recipe_hash"] == recipe
+
+    def test_a_reload_that_changed_the_model_is_refused(self, clustered):
+        """params() and k_found come out of the pickle, so a reloaded fit must
+        reproduce its own fit_hash. If it does not, the pickle no longer
+        behaves as it did -- which must not pass silently."""
+        import joblib
+
+        cell, _ = clustered
+        cached = next((cell / "meta" / "clusterers").glob("*.joblib"))
+        blob = joblib.load(cached)
+        blob["fit_hash"] = "not-what-it-will-reload-as"
+        joblib.dump(blob, cached)
+        with pytest.raises(SystemExit) as e:
+            run_cluster(cell)
+        assert "reloaded to a DIFFERENT model" in str(e.value)
+        assert "--refit" in str(e.value)
 
     def test_a_second_run_reuses_it(self, clustered, capsys):
         cell, _ = clustered
@@ -345,14 +375,69 @@ class TestClusterReusesItsFit:
         assert "unreadable cache" in capsys.readouterr().out
         assert not entries[0]["fit_reused"]
 
-    def test_meanshift_is_not_cached(self, cell):
-        """Its params() reports quantile_used and bandwidth, both set DURING
-        fit, so its fit_hash does not exist until the work is done. No loss --
-        it is seconds, and the fit worth not repeating is the HMM's."""
+    def test_every_method_is_cacheable_including_meanshift(self, cell):
+        """The cache is keyed by the RECIPE -- what was asked for -- not by
+        fit_hash, which carries what came out. MeanShift's discovered bandwidth
+        and Threshold's bins_per_axis do not exist before the fit, so they can
+        describe a fit but cannot look one up. The recipe can, for every
+        method."""
         from fmri_decomposition import cluster as C
 
-        assert "meanshift" not in C.CACHEABLE
-        assert C.CACHEABLE == C.SEQUENTIAL
+        a = cluster_args(methods=["meanshift"])
+        h = C.recipe_hash("meanshift", "pca3", None, C._opts("meanshift", a),
+                          ["trainA"], 1000)
+        assert len(h) == 16
+        # Same recipe, same hash, every time -- that is the whole property.
+        assert h == C.recipe_hash("meanshift", "pca3", None,
+                                  C._opts("meanshift", a), ["trainA"], 1000)
+
+    def test_the_recipe_ignores_options_that_only_change_speed(self):
+        """n_jobs changes how long the restarts take and nothing about the
+        labels, so a run on 8 cores must find the fit a run on 1 core saved."""
+        from fmri_decomposition import cluster as C
+
+        one = cluster_args(hmm2_jobs=1)
+        eight = cluster_args(hmm2_jobs=8)
+        assert (C.recipe_hash("hmm2", "pca3", 3, C._opts("hmm2", one),
+                              ["trainA"], 1000)
+                == C.recipe_hash("hmm2", "pca3", 3, C._opts("hmm2", eight),
+                                 ["trainA"], 1000))
+
+    def test_the_recipe_does_move_with_a_real_setting(self):
+        from fmri_decomposition import cluster as C
+
+        few = cluster_args(hmm2_restarts=2)
+        many = cluster_args(hmm2_restarts=15)
+        assert (C.recipe_hash("hmm2", "pca3", 3, C._opts("hmm2", few),
+                              ["trainA"], 1000)
+                != C.recipe_hash("hmm2", "pca3", 3, C._opts("hmm2", many),
+                                 ["trainA"], 1000))
+
+    def test_the_recipe_moves_with_the_training_rows(self):
+        """A different training set IS a different fit -- for MeanShift it can
+        even discover a different K -- so it must not reuse the old one."""
+        from fmri_decomposition import cluster as C
+
+        a = cluster_args()
+        o = C._opts("meanshift", a)
+        assert (C.recipe_hash("meanshift", "pca3", None, o, ["trainA"], 1000)
+                != C.recipe_hash("meanshift", "pca3", None, o, ["trainA"], 2000))
+        assert (C.recipe_hash("meanshift", "pca3", None, o, ["trainA"], 1000)
+                != C.recipe_hash("meanshift", "pca3", None, o,
+                                 ["trainA", "trainB"], 1000))
+
+    def test_meanshift_reuses_its_fit_so_k_cannot_drift(self, cell, capsys):
+        """Her question: how is the same number of clusters guaranteed? Within
+        one fit it is trivial -- one object labels everyone. Across runs it is
+        now guaranteed by reusing that object, not by trusting the search to
+        land in the same place twice."""
+        first, _ = run_cluster(cell, methods=["meanshift"], k=[None])
+        capsys.readouterr()
+        second, _ = run_cluster(cell, methods=["meanshift"], k=[None])
+        assert "reusing the cached fit" in capsys.readouterr().out
+        assert second[0]["fit_reused"]
+        assert second[0]["k"] == first[0]["k"]
+        assert second[0]["column"] == first[0]["column"]
 
 
 # --------------------------------------------------------------------------
