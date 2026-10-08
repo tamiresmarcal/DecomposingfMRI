@@ -392,7 +392,11 @@ the four checks before building anything.
 python3 preprocessing/camcan/01_build_bids.py --task Rest --n-echoes 0 \
     --func-subdir func_rest -o /project/.../camcan_rest_bids \
     --dataset-name "Cam-CAN CC700 rest (BIDS view for fMRIPrep)" --limit 10
-sbatch preprocessing/camcan/02_fmriprep.sbatch        # adjust its roots first
+# the SAME fMRIPrep script as the movie -- four variables, no edit
+BIDS_ROOT=/project/.../camcan_rest_bids \
+OUT_ROOT=/project/.../camcan_rest_fmriprep \
+WORK_ROOT=/project/.../work/camcan_rest_fmriprep \
+TASK_ID=Rest sbatch --array=0-9 preprocessing/camcan/02_fmriprep.sbatch
 
 # then the ordinary per-cohort phase 1
 python tools/check_cohort.py config/camcan_rest.yaml

@@ -24,6 +24,18 @@ BIDS_ROOT="${BIDS_ROOT:-/project/6008063/tamires/cohorts/camcan_bids}"
 OUT_ROOT="${OUT_ROOT:-/project/6008063/tamires/cohorts/camcan_fmriprep}"
 WORK_ROOT="${WORK_ROOT:-/project/6008063/tamires/work/camcan_fmriprep}"
 
+# WHICH TASK. Overridable because Cam-CAN's rest scan goes through this exact
+# script, with its own three roots above and its own output tree -- see
+# config/camcan_rest.yaml. It is NOT a default anyone should change in place:
+# the task picked here and the `tr:` in the cohort config have to agree, and
+# nothing downstream can detect a disagreement.
+#
+#   BIDS_ROOT=/.../camcan_rest_bids \
+#   OUT_ROOT=/.../camcan_rest_fmriprep \
+#   WORK_ROOT=/.../work/camcan_rest_fmriprep \
+#   TASK_ID=Rest sbatch --array=0-9 preprocessing/camcan/02_fmriprep.sbatch
+TASK_ID="${TASK_ID:-Movie}"
+
 # ---------------------------------------------------------------- prereqs ---
 # All of these are checked BEFORE the module loads, because every one of them
 # fails late and confusingly otherwise. A wrong licence path costs you a queue
@@ -116,13 +128,13 @@ fi
 MEM_MB=$(( MEM_MB * 9 / 10 ))
 NCPU="${SLURM_CPUS_PER_TASK:-8}"
 
-echo "cpus=$NCPU  mem=${MEM_MB}MB  work=$WORK"
+echo "cpus=$NCPU  mem=${MEM_MB}MB  work=$WORK  task=$TASK_ID"
 echo "started $(date -Is)"
 
 set +e
 fmriprep "$BIDS_ROOT" "$OUT_ROOT" participant \
   --participant-label "$SUB" \
-  --task-id Movie \
+  --task-id "$TASK_ID" \
   -w "$WORK" \
   --fs-license-file "$FS_LICENSE" \
   --nprocs "$NCPU" --omp-nthreads 4 --mem-mb "$MEM_MB" \
@@ -139,11 +151,14 @@ echo "finished $(date -Is) with status $STATUS"
 # WHY EACH FLAG, since every one of them is a decision someone will want to
 # revisit rather than a magic incantation:
 #
-#   --task-id Movie        Cam-CAN's TR DIFFERS BY TASK -- movie 2.47 s,
-#                          sensorimotor 1.97 s. The pipeline config carries one
-#                          `tr:`, so mixing tasks would silently rescale every
-#                          time column. Rest is also present in the archive but
-#                          is not naturalistic viewing, so it is not built here.
+#   --task-id $TASK_ID     Cam-CAN's TR DIFFERS BY TASK -- movie 2.47 s, rest
+#                          and sensorimotor 1.97 s. A pipeline config carries
+#                          one `tr:`, so ONE task per fMRIPrep output tree is
+#                          the rule, and mixing them would silently rescale
+#                          every time column downstream. Rest goes through this
+#                          same script with TASK_ID=Rest and its own three
+#                          roots; it is a separate cohort, not a second task of
+#                          the movie one (config/camcan_rest.yaml).
 #   --fs-no-reconall       We need volumetric parcels in MNI, never surfaces.
 #                          This is roughly 3 h/subject instead of 12.
 #   --output-spaces        MNI152NLin2009cAsym:res-2 -- the SAME space

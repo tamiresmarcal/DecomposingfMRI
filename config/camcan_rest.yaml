@@ -35,7 +35,13 @@
 #
 #     tr: 1.97              UNCONFIRMED  <- the one that silently rescales
 #     261 volumes           UNCONFIRMED  <- sets stimulus.durations_s
-#     single echo           UNCONFIRMED  <- sets --n-echoes 0 at BIDS build
+#     single echo           LIKELY       <- Tamires reports one rest file per
+#                                          person, which is single-echo naming
+#                                          (the movie has five). Sets
+#                                          --n-echoes 0 at BIDS build. Still
+#                                          worth the one `ls` below, because a
+#                                          wrong value reports every subject as
+#                                          never having done the task.
 #     func subdir name      UNCONFIRMED  <- `func_rest`? movie's is `func_movie`,
 #                                          and ccfrail capitalises: func_Movie
 #
@@ -210,7 +216,14 @@ windows:
 #          --func-subdir func_rest -o /.../camcan_rest_bids \
 #          --dataset-name "Cam-CAN CC700 rest (BIDS view for fMRIPrep)" \
 #          --limit 10
-#      sbatch preprocessing/camcan/02_fmriprep.sbatch      # adjust roots first
+#      BIDS_ROOT=/.../camcan_rest_bids \
+#      OUT_ROOT=/.../camcan_rest_fmriprep \
+#      WORK_ROOT=/.../work/camcan_rest_fmriprep \
+#      TASK_ID=Rest sbatch --array=0-9 preprocessing/camcan/02_fmriprep.sbatch
+#
+#    The SAME fMRIPrep script as the movie, with four variables set. One task
+#    per output tree is the rule -- TASK_ID and this file's `tr:` have to
+#    agree, and nothing downstream can detect a disagreement.
 #
 # 1. check, then extract:
 #      python tools/check_cohort.py config/camcan_rest.yaml
