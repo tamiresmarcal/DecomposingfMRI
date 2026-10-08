@@ -49,6 +49,16 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      against non-transition controls
                                      -> outputs/bstm_selection/target=<t>/
 
+3b   static_fc.sbatch                parcel timeseries -> ONE correlation
+                                     matrix per subject. Reads stage 2 through
+                                     the same function the window_s=-1 state
+                                     arm reads, so the two differ only in the
+                                     MODEL. -> outputs/static_fc/
+5c   benchmark.sbatch                transitions vs static FC, movie vs rest,
+                                     on one shared subject set and one
+                                     covariate block per condition
+                                     -> outputs/bstm_benchmark/target=<t>/
+
 any  fmri-decomp status              read-only: what every stage holds, and the
                                      disagreements that span two of them
 ```
@@ -94,9 +104,21 @@ outputs/
 ├── transitions/                                  STAGE 5a — one table per state set
 │   └── atlas=yeo7/window_s=30/states=HMM1_pca3_8/cohort=camcan/subjects.parquet
 │
+├── static_fc/                                    STAGE 3b — one FC per subject
+│   └── atlas=harvardoxford/cohort=camcan/subjects.parquet
+│       Edge columns named <parcel_i>__<parcel_j>, stage 3's convention, plus
+│       n_tr_used / frac_good_frames: the reliability of the row AND the
+│       data-quantity covariate stage 5c controls on.
+│
 ├── bstm_selection/                               STAGE 5b — the ranking
 │   └── target=additional_HADS_anx_category/
 │       ├── summary.csv  scores.parquet  DESIGN.md  figures/  models/
+│
+├── bstm_benchmark/                               STAGE 5c — the comparison
+│   └── target=additional_HADS_anx_category/
+│       ├── contrasts.csv  the table to read first: cells vs fc, cells vs
+│       │                  occupancy, movie vs rest, each against the floor
+│       └── summary.csv  scores.parquet  DESIGN.md  figures/
 │
 └── meta/
     ├── atlas-harvardoxford_labels.csv            atlas-level: cohort-independent

@@ -520,6 +520,27 @@ def cmd_select(args) -> int:
     return bstm_selection.run(args)
 
 
+def cmd_static_fc(args) -> int:
+    """Stage 3b: the upper triangle of one correlation matrix per subject.
+
+    Reads stage 2 through `frames.read_cohort`, so the edges come from exactly
+    the frames the `window_s = -1` state arm is fitted on. That identity is the
+    point: it makes the benchmark's difference a difference between models.
+    """
+    from . import static_fc
+
+    return static_fc.run(args)
+
+
+def cmd_benchmark(args) -> int:
+    """Stage 5c: is the transition matrix better than a static one, and does
+    the movie beat rest? Every arm on one subject set, one covariate block per
+    condition, one scoring function."""
+    from . import bstm_benchmark
+
+    return bstm_benchmark.run(args)
+
+
 def cmd_transitions(args) -> int:
     """Stage 5a: one transition matrix per subject, per state set.
 
@@ -695,6 +716,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="stage 5a: latents -> per-subject brain-state transition matrices")
     _transitions.add_arguments(t)
     t.set_defaults(func=cmd_transitions)
+
+    from . import static_fc as _static_fc
+
+    sf = sub.add_parser(
+        "static-fc",
+        help="stage 3b: one connectivity matrix per subject -- the benchmark's "
+             "control arm")
+    _static_fc.add_arguments(sf)
+    sf.set_defaults(func=cmd_static_fc)
+
+    from . import bstm_benchmark as _bstm_benchmark
+
+    bm = sub.add_parser(
+        "benchmark",
+        help="stage 5c: transitions vs static FC, movie vs rest, one table")
+    _bstm_benchmark.add_arguments(bm)
+    bm.set_defaults(func=cmd_benchmark)
 
     sm = sub.add_parser(
         "state-means",

@@ -1,0 +1,238 @@
+# Cam-CAN CC700 -- RESTING STATE. The benchmark's second condition.
+# https://camcan-archive.mrc-cbu.cam.ac.uk/dataaccess/
+#
+# WHY THIS IS A SEPARATE COHORT AND NOT A SECOND TASK IN camcan_movie.yaml
+# -----------------------------------------------------------------------
+# Because a cohort config carries ONE `tr:`, and Cam-CAN's differs by task --
+# movie 2.47 s, rest 1.97 s, sensorimotor 1.97 s. Adding `Rest` to
+# camcan_movie.yaml's `include_tasks` would rescale every time column in the
+# rest output by 2.47/1.97 = 1.25 without erroring anywhere: `time_s`,
+# `stimulus_time_s`, every window boundary, `mean_dwell_s`, `switches_per_min`.
+# The movie config says so in its own comment, and this file is the
+# consequence of it.
+#
+# Being a separate cohort is also what makes the benchmark work. `cohort=` is
+# a partition key, so movie and rest sit side by side in ONE output tree, and
+# `decompose --project camcan_rest` can put rest into the state space already
+# fitted on the movie. See "HOW TO RUN" at the bottom.
+#
+# WHAT THIS CONDITION IS FOR
+# --------------------------
+# The naturalistic-viewing claim needs a control that is not another movie. If
+# brain-state transitions predict HADS as well at rest as under the film, the
+# stimulus is not load-bearing -- and a 10-minute rest scan is an instrument
+# every clinical site already has. That is a better result for the project than
+# it first sounds, and it is only a result if rest is measured the same way.
+#
+# ------------------------------------------------------------------------
+# VALUES NOT YET CONFIRMED FROM THE FILES -- READ THIS BEFORE THE FULL RUN
+# ------------------------------------------------------------------------
+# Every number in camcan_movie.yaml was read off disk. Three here were NOT.
+# They come from Cam-CAN's own description of the protocol (Taylor et al.,
+# NeuroImage 2017, 144:262-269 -- rest, eyes closed, 8 min 40 s), and that is
+# a paper, which this repository's own convention says not to trust for a
+# value a file can state:
+#
+#     tr: 1.97              UNCONFIRMED  <- the one that silently rescales
+#     261 volumes           UNCONFIRMED  <- sets stimulus.durations_s
+#     single echo           UNCONFIRMED  <- sets --n-echoes 0 at BIDS build
+#     func subdir name      UNCONFIRMED  <- `func_rest`? movie's is `func_movie`,
+#                                          and ccfrail capitalises: func_Movie
+#
+# Confirm all four in one go, on a login node, before building anything:
+#
+#   R=/project/6008063/tamires/cohorts/camcan/cc700/mri/pipeline/release004/BIDSsep
+#   ls $R | grep -i rest                        # the subdir name
+#   ls $R/func_rest/sub-CC110033/func/          # echo entity present or not
+#   python3 -c "import json,sys; d=json.load(open(sys.argv[1])); \
+#     print(d['RepetitionTime'], d.get('EchoTime'))" \
+#     $R/func_rest/sub-CC110033/func/sub-CC110033_task-Rest_bold.json
+#
+# Then, after fMRIPrep, the volume count -- the same check that stands as the
+# corruption check for the movie run:
+#
+#   python3 -c "import glob,nibabel as nib,collections; \
+#     print(collections.Counter(nib.load(f).shape for f in \
+#     glob.glob('<deriv>/sub-*/func/*task-Rest*desc-preproc_bold.nii.gz')))"
+#
+# If the TR is not 1.97, FIX IT HERE FIRST. Nothing downstream will complain.
+
+cohort: camcan_rest
+tr: 1.97                  # UNCONFIRMED -- see above
+derivatives_root: /project/6008063/tamires/cohorts/camcan_rest_fmriprep
+output_root: /project/6008063/tamires/DecomposingfMRI/outputs
+space: MNI152NLin2009cAsym
+participants: /project/6008063/tamires/DecomposingfMRI/config/camcan_rest_participants.csv
+
+# All three, so every arm of the benchmark exists at rest too. The FC arm needs
+# them to compare like with like across atlases, and the state arm needs
+# whichever atlas `select` ended up choosing.
+atlases: [harvardoxford, yeo7, networks]
+
+discovery:
+  backend: glob
+  bold_glob: "sub-*/func/sub-*_task-*_space-MNI152NLin2009cAsym_res-2_desc-preproc_bold.nii.gz"
+  mask_glob: "sub-{sub}_task-{task}_space-MNI152NLin2009cAsym_res-2_desc-brain_mask.nii.gz"
+  # The task filter is a CORRECTNESS requirement, exactly as in the movie
+  # config and for the same reason: one `tr:` per config. If the rest
+  # derivatives root ever also holds Movie or SMT, this line is what stops them
+  # being read at 1.97 s.
+  include_tasks: [Rest]
+
+confounds:
+  format: fmriprep_tsv
+  strategy: 24hmp
+  confounds_glob: "sub-*_task-*_desc-confounds_timeseries.tsv"
+  fd_column: framewise_displacement
+  fd_threshold: 0.5
+  dilate_tr: 1
+  # DELIBERATELY IDENTICAL TO THE MOVIE CONFIG, and that is the whole point.
+  #
+  # The benchmark's movie-vs-rest contrast is only interpretable if the two
+  # conditions were censored by the same rule. A different fd_threshold here
+  # would remove a different amount of data from the same subjects, and since
+  # fewer frames mean noisier edges and noisier state sequences, the contrast
+  # would partly measure the QC rule.
+  #
+  # So: whatever camcan_movie.yaml's fd_threshold becomes after the FD
+  # distribution is looked at (its own comment flags 0.5 as provisional for an
+  # 18-88 lifespan cohort), CHANGE IT IN BOTH FILES TOGETHER.
+  #
+  # Expect rest to lose MORE frames than the movie regardless. Eyes-closed rest
+  # produces more motion and more drowsiness than watching a film, which is a
+  # real difference between the conditions and not something to correct away --
+  # `frac_good_frames` is written per subject and `benchmark` controls on it.
+
+filtering:
+  already_applied: false
+  bandpass: [0.01, 0.1]
+  detrend: true
+  standardize: false
+  # Same band as the movie config, again for comparability. fMRIPrep does not
+  # filter, so this pipeline applies it, and `static-fc` / the `-1` state arm
+  # additionally harmonise the band at read time (frames.py's
+  # --match-bandpass). Both conditions therefore reach the model with the same
+  # frequency content.
+
+runs:
+  mode: concat             # one rest run per subject
+
+trim:
+  column: null
+
+stimulus:
+  # EMPTY ON PURPOSE, unlike the movie config -- and it costs nothing on the
+  # path this cohort is actually for.
+  #
+  # Rest has no stimulus. `timing_source: identity` makes stimulus time equal
+  # acquisition time from scan onset, so a "stimulus grid" here is just a grid
+  # of time bins, which is meaningful for rest and is what every sliding-window
+  # rest dFC study uses.
+  #
+  # Only stage 3 (`dfc`) reads a duration, and it falls back to the OBSERVED
+  # run length when this is absent (dfc.py:247-249), with a validation warning
+  # that `--no-strict` passes. Stage 2 (`extract`), the `window_s = -1` state
+  # arm and `static-fc` never read it at all -- so the recommended route below
+  # needs nothing here.
+  #
+  # Set it to {Rest: <n_volumes * tr>} once the volume count is confirmed
+  # (261 * 1.97 = 514.17 s if the protocol numbers hold). That removes the
+  # warning and pins the window grid to the protocol rather than to whatever
+  # each subject's file happens to contain.
+  durations_s: {}
+  timing_source: identity
+  unit_of_analysis: run
+
+windows:
+  # The SAME grid as the movie, so that if a windowed-DFC state set is ever the
+  # one to compare, the aperture is not another difference between conditions.
+  #
+  # Note that a window holds MORE samples here than in the movie, not fewer:
+  # rest's TR is 1.97 s against the movie's 2.47 s, so 30 s is 15 TR here
+  # against 12 there. The rest edges are the LESS noisy of the two
+  # (Fisher-z SD 1/sqrt(n-3): 0.29 against 0.33 at 30 s). That is the opposite
+  # of the usual cross-cohort problem and it still has to be accounted for --
+  # a rest-vs-movie difference in connectivity VARIABILITY is partly this.
+  # `n_tr_effective` is written per window, so it is known rather than guessed.
+  sizes_s: [15, 30, 60, 120, 300]
+  n_overlaps: 5
+  drop_incomplete: true
+  by_size:
+    15:
+      atlases: [yeo7, networks]     # never harvardoxford: 111 nodes, 8 samples
+  # 15 s at TR 1.97 is round(15/1.97) = 8 TR, still far below the rank floor
+  # ((n_nodes + 0.5) * tr): 14.8 s for yeo7, 28.6 s for networks, 219.7 s for
+  # harvardoxford. So yeo7 at 15 s is now ABOVE its floor here where it was
+  # below it in the movie -- another reason not to read a 15 s movie-vs-rest
+  # difference as neural.
+
+# --- known limitations -------------------------------------------------
+#
+# NO FIELDMAPS, same as the movie: Cam-CAN shipped none, so distortion
+# correction is estimated from the T1w (--use-syn-sdc). Identical treatment in
+# both conditions, which is what matters here.
+#
+# SINGLE ECHO (to confirm). The movie is five-echo and gets multi-echo
+# combination, which improves tSNR, especially in orbitofrontal and anterior
+# temporal regions. If rest is single-echo then the two conditions differ in
+# tSNR by acquisition, before anything else -- a real, unavoidable confound of
+# this comparison, and one to state in any write-up rather than adjust away.
+# It argues for reading the movie-vs-rest contrast as directional evidence
+# ("rest does/does not reach the movie") and not as an effect size.
+#
+# DROWSINESS. Eyes-closed rest in an 18-88 cohort includes sleep onset, which
+# changes state dynamics genuinely and differently by age. There is no
+# eye-tracking or EEG in this release to detect it. A rest state sequence with
+# long dwell times may be sleep, and nothing in this pipeline can tell.
+
+# --- participants CSV -------------------------------------------------
+#   python tools/make_participants.py config/camcan_rest.yaml \
+#       -o config/camcan_rest_participants.csv
+#
+# DO NOT merge Age and Sex into this file. It is TRACKED (the movie's
+# equivalent is in the repository), the repository is pushed to GitHub, and
+# age/sex for named Cam-CAN participants is exactly what the data access
+# agreement does not permit redistributing. The generated file carries ids and
+# exclusion flags only -- keep it that way.
+#
+# Nothing needs them here anyway: `select` and `benchmark` read covariates from
+# --pheno, which points at the release tables on the cluster. camcan_movie.yaml
+# still suggests merging them in; that suggestion predates the constraint and
+# should go.
+#
+# The subject ids are the same CCIDs as the movie's, which is what lets
+# `benchmark` intersect the two conditions onto one subject set.
+
+# --- HOW TO RUN -------------------------------------------------------
+#
+# 0. preprocess (stage 1, hers -- the expensive part, ~50 min/subject):
+#      python3 preprocessing/camcan/01_build_bids.py --task Rest --n-echoes 0 \
+#          --func-subdir func_rest -o /.../camcan_rest_bids \
+#          --dataset-name "Cam-CAN CC700 rest (BIDS view for fMRIPrep)" \
+#          --limit 10
+#      sbatch preprocessing/camcan/02_fmriprep.sbatch      # adjust roots first
+#
+# 1. check, then extract:
+#      python tools/check_cohort.py config/camcan_rest.yaml
+#      sbatch slurm/activation_and_dfc.sh camcan_rest      # or extract alone
+#
+# 2. THE RECOMMENDED ROUTE -- project rest into the movie's state space, so the
+#    states are held FIXED and only the dynamics differ between conditions:
+#      fmri-decomp decompose --atlas <a> --window-s -1 \
+#          --train ds002837 cneuromod --project camcan camcan_rest
+#      fmri-decomp cluster   --atlas <a> --window-s -1 ...
+#      fmri-decomp transitions --cohorts camcan_rest ...
+#
+#    An INDEPENDENT rest fit is the other reading of "the same pipeline for
+#    rest", and it needs a separate --output-root: the fitted objects are saved
+#    as decompose_atlas-<a>_window-<w>.joblib, keyed by cell and not by
+#    model_hash, so training a second model in the same tree would overwrite
+#    the movie's and break `state-means` for it.
+#
+# 3. the FC arm, which needs none of stages 3-5:
+#      fmri-decomp static-fc --atlas harvardoxford yeo7 networks \
+#          --cohorts camcan camcan_rest
+#
+# 4. the comparison:
+#      fmri-decomp benchmark --target additional_HADS_anx_category \
+#          --conditions movie=camcan rest=camcan_rest

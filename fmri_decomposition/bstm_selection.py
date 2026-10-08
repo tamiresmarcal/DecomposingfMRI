@@ -706,24 +706,27 @@ def describe_blocks(sample_table: Path, args) -> list[str]:
     return out
 
 
-def _wipe(out: Path) -> None:
+def _wipe(out: Path, parent: str = "bstm_selection") -> None:
     """Empty the target folder before writing a new run into it.
 
     Everything here is regenerated, so a leftover is never a leftover you can
     trust: a run with a shorter `--features` would otherwise leave figures and
     joblib artifacts describing arms it never scored, with nothing saying so.
 
-    `out` is always <root>/bstm_selection/target=<target>, and the target comes
-    from the command line, so the name is checked before anything is removed --
-    a `/` or `..` in it would make this delete something else entirely.
+    `out` is always <root>/<parent>/target=<target>, and the target comes from
+    the command line, so the name is checked before anything is removed -- a
+    `/` or `..` in it would make this delete something else entirely. `parent`
+    is named by the caller rather than inferred, so a stage that gets the path
+    wrong is refused instead of clearing a tree it does not own.
     """
     import shutil
 
     name = out.name
     if not name.startswith("target=") or "/" in name or ".." in name:
         raise SystemExit(f"refusing to clear {out} -- unexpected folder name")
-    if out.parent.name != "bstm_selection":
-        raise SystemExit(f"refusing to clear {out} -- unexpected parent")
+    if out.parent.name != parent:
+        raise SystemExit(f"refusing to clear {out} -- expected a {parent}/ "
+                         f"parent, found {out.parent.name!r}")
     if not out.exists():
         return
     n = sum(1 for _ in out.rglob("*") if _.is_file())

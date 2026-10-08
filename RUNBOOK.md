@@ -355,6 +355,120 @@ inverse that recovers its input.
 
 This is the table van der Meer et al.'s Fig. 1 plots.
 
+### PHASE 4 — BENCHMARK (is any of it better than the obvious alternatives?)
+
+Phases 1–3 answer *which* state set predicts best. They cannot answer whether
+the whole idea beats the thing it is supposed to improve on. Two arms exist for
+that, and both are cheap next to what you have already run:
+
+| arm | what it is | what it costs |
+|---|---|---|
+| static FC | one correlation matrix per subject, flattened | one pass over stage 2 |
+| rest | the same pipeline on the resting-state scan | fMRIPrep + stage 2 |
+
+**The static-FC arm, movie only.** Nothing new to preprocess:
+
+```bash
+sbatch slurm/static_fc.sbatch camcan
+```
+
+One table per (atlas, cohort) under `outputs/static_fc/`. It reads stage 2
+through the *same function* the `window_s = -1` state arm reads
+(`frames.read_cohort`) — same band-pass, same per-run z-score, same
+`good_frame` gate. That identity is the point: a difference between the arms is
+then a difference between **models**, not between preprocessing.
+
+**The rest arm.** Rest is a separate cohort, because Cam-CAN's TR differs by
+task (movie 2.47 s, rest 1.97 s) and a cohort config carries one `tr:`. Adding
+`Rest` to `camcan_movie.yaml`'s `include_tasks` would rescale every time column
+by 1.25 and error nowhere.
+
+`config/camcan_rest.yaml` is written and **has four values I could not confirm
+from the files** — the TR among them. Read the block at the top of it and run
+the four checks before building anything.
+
+```bash
+# stage 1, the expensive part (~50 min/subject, same as the movie)
+python3 preprocessing/camcan/01_build_bids.py --task Rest --n-echoes 0 \
+    --func-subdir func_rest -o /project/.../camcan_rest_bids \
+    --dataset-name "Cam-CAN CC700 rest (BIDS view for fMRIPrep)" --limit 10
+sbatch preprocessing/camcan/02_fmriprep.sbatch        # adjust its roots first
+
+# then the ordinary per-cohort phase 1
+python tools/check_cohort.py config/camcan_rest.yaml
+python tools/make_participants.py config/camcan_rest.yaml \
+    -o config/camcan_rest_participants.csv
+./slurm/activation_and_dfc.sh config/camcan_rest.yaml
+```
+
+For the state arm at rest, **project** rest into the state space already fitted
+on the movie, rather than fitting a second one:
+
+```bash
+for A in harvardoxford yeo7 networks; do
+  sbatch --array=0-0 slurm/dimensionality_reduction.sbatch $A -1 \
+    -- --source activation --train ds002837 cneuromod \
+       --project camcan camcan_rest --censor-policy motion
+done
+# then clustering + transitions exactly as in phase 2-3, with camcan_rest
+# present in the cell. `cluster` fits on --train and predicts everything else.
+```
+
+That holds the **states fixed** across conditions, so movie-vs-rest is a
+difference in dynamics and not in what a state means. An independent rest fit
+is the other reading of "the same pipeline for rest" and needs a separate
+`--output-root`: the fitted objects are saved as
+`decompose_atlas-<a>_window-<w>.joblib`, keyed by cell and not by `model_hash`,
+so a second fit in the same tree overwrites the movie's and breaks
+`state-means` for it.
+
+**Then the comparison:**
+
+```bash
+sbatch slurm/static_fc.sbatch camcan camcan_rest
+for Y in additional_HADS_anx_category additional_HADS_dep_category; do
+  sbatch slurm/benchmark.sbatch $Y
+done
+```
+
+```bash
+column -s, -t outputs/bstm_benchmark/target=additional_HADS_anx_category/contrasts.csv
+```
+
+`contrasts.csv` is the table to read first. Each row is a difference of
+out-of-fold scores with **both** sides' seed spreads beside it:
+
+```
+cells vs fc          the headline. If this is negative, one static matrix
+                     predicts better than a transition matrix and the
+                     dynamics are not the biomarker.
+cells vs occupancy   if this is negative, the signal is time spent per state
+                     and needs no transition matrix at all.
+cells vs covariates  age and sex predict HADS on their own; this is the floor.
+movie vs rest        if ~0, the stimulus is not load-bearing — and a rest
+                     scan is the cheaper instrument.
+```
+
+Three properties make it a benchmark rather than four separate runs, and each
+is pinned by a test:
+
+1. **One subject set.** Every arm in every condition is scored on the
+   intersection, taken before any fit. Otherwise rest could win by being
+   measured on the subjects who have a usable rest scan.
+2. **One covariate block per condition**, shared by every arm: `Age`, `Sex`,
+   and `frac_good_frames` / `n_tr_used` from that condition's static-FC table.
+   Deliberately *not* `select`'s `n_transitions`, which exists only for a
+   transition matrix and would adjust one arm for its data quantity and the
+   other for nothing.
+3. **One scoring function** — `bstm_selection.score_once`, imported.
+
+What it does **not** do: test anything. The arms share their folds, so the two
+scores are dependent and the usual tests do not apply. `delta` is descriptive.
+And the best of many arms is biased upward even when nothing is real, so the
+thing to quote is the **order** and the spread, never the number.
+
+`benchmark` wipes its target directory before writing, like `model_selection`.
+
 ### PHASES 2-3 as one chained submission
 
 Phase 1 stays separate: its cohorts are independent and `activation_and_dfc.sh` already
