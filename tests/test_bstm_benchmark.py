@@ -5,9 +5,10 @@ has a test here, because each is the kind of thing that silently stops being
 true: an arm quietly scored on more subjects than its rival, a covariate that
 exists for one arm only, a second copy of the CV loop that drifts.
 
-And `contrasts` is tested for naming `bstm:cells` explicitly, since a row
-reading "the best BSTM arm beat static FC" when the winner was occupancy
-reports the opposite of what happened.
+This stage computes no differences between arms -- the arms share their folds,
+so a delta between two rows has no standard error any usual test supplies. The
+deliverable is the one table, and `TestTheOneTable` pins that every arm and
+condition reaches it as a row.
 """
 import argparse
 
@@ -17,16 +18,6 @@ import pytest
 
 from fmri_decomposition import bstm_benchmark as B
 from fmri_decomposition import static_fc as S
-
-
-def summary(rows):
-    """A `summary.csv` frame, with the columns `contrasts` reads filled in."""
-    d = pd.DataFrame(rows)
-    for c, default in (("std", 0.0), ("min", 0.0), ("max", 0.0),
-                       ("count", 5), ("n", 90), ("n_features", 1), ("K", 8)):
-        if c not in d.columns:
-            d[c] = default
-    return d
 
 
 class TestParseConditions:
@@ -153,86 +144,6 @@ class TestCovariateBlock:
             B.covariate_block(pheno, q, ["A"], ["mean_fd"], [])
         assert "mean_fd" in str(e.value)
         assert "static FC" in str(e.value)
-
-
-class TestContrasts:
-    def rows(self, cells=0.30, occ=0.10, fc=0.20, base=0.05):
-        return summary([
-            {"model": "ridge", "condition": "movie", "arm": "bstm:cells",
-             "atlas": "a", "window_s": "-1", "states": "HMM2_pca3_8",
-             "mean": cells, "std": 0.01},
-            {"model": "ridge", "condition": "movie", "arm": "bstm:occupancy",
-             "atlas": "a", "window_s": "-1", "states": "HMM2_pca3_8",
-             "mean": occ, "std": 0.02},
-            {"model": "ridge", "condition": "movie", "arm": "fc:edges",
-             "atlas": "a", "window_s": "static", "states": "fc_edges",
-             "mean": fc, "std": 0.03},
-            {"model": "ridge", "condition": "movie", "arm": "(covariates only)",
-             "atlas": "-", "window_s": "-", "states": "-", "mean": base,
-             "std": 0.01}])
-
-    def test_cells_versus_fc_is_the_first_row(self):
-        c = B.contrasts(self.rows(), ["movie"])
-        assert c["contrast"].iloc[0] == "cells vs fc"
-
-    def test_the_delta_is_a_minus_b(self):
-        c = B.contrasts(self.rows(cells=0.30, fc=0.20), ["movie"])
-        r = c[c["contrast"] == "cells vs fc"].iloc[0]
-        assert r["delta"] == pytest.approx(0.10)
-
-    def test_the_covariate_floor_is_the_comparison_for_both_arms(self):
-        c = B.contrasts(self.rows(), ["movie"])
-        got = c.set_index("contrast")["score_b"]
-        assert got["cells vs covariates"] == pytest.approx(0.05)
-        assert got["fc vs covariates"] == pytest.approx(0.05)
-
-    def test_the_controls_are_compared_against_cells_by_name(self):
-        c = B.contrasts(self.rows(), ["movie"])
-        assert "cells vs occupancy" in set(c["contrast"])
-
-    def test_no_best_bstm_row_when_cells_already_wins(self):
-        """It would duplicate `cells vs fc` under a different name."""
-        c = B.contrasts(self.rows(cells=0.30, occ=0.10), ["movie"])
-        assert "best bstm vs fc" not in set(c["contrast"])
-
-    def test_a_control_beating_cells_gets_its_own_row_and_is_named(self):
-        """The case the explicit naming exists for: if occupancy wins, the
-        signal is time spent and the transition claim does not hold."""
-        c = B.contrasts(self.rows(cells=0.10, occ=0.40), ["movie"])
-        r = c[c["contrast"] == "best bstm vs fc"].iloc[0]
-        assert "occupancy" in r["a"]
-
-    def test_conditions_are_compared_within_an_arm(self):
-        rows = pd.concat([self.rows(), summary([
-            {"model": "ridge", "condition": "rest", "arm": "bstm:cells",
-             "atlas": "a", "window_s": "-1", "states": "HMM2_pca3_8",
-             "mean": 0.08, "std": 0.04},
-            {"model": "ridge", "condition": "rest", "arm": "(covariates only)",
-             "atlas": "-", "window_s": "-", "states": "-", "mean": 0.05,
-             "std": 0.01}])], ignore_index=True)
-        c = B.contrasts(rows, ["movie", "rest"])
-        r = c[c["contrast"] == "movie vs rest"]
-        assert len(r) == 1
-        assert r["delta"].iloc[0] == pytest.approx(0.22)
-
-    def test_both_spreads_travel_with_the_delta(self):
-        """A difference of 0.02 between two arms whose seed spread is 0.05 is
-        not a result, and the table has to make that visible."""
-        c = B.contrasts(self.rows(), ["movie"])
-        r = c[c["contrast"] == "cells vs fc"].iloc[0]
-        assert r["spread_a"] == pytest.approx(0.01)
-        assert r["spread_b"] == pytest.approx(0.03)
-
-    def test_an_fc_only_run_still_reports_against_the_floor(self):
-        rows = summary([
-            {"model": "ridge", "condition": "movie", "arm": "fc:edges",
-             "atlas": "a", "window_s": "static", "states": "fc_edges",
-             "mean": 0.2, "std": 0.01},
-            {"model": "ridge", "condition": "movie", "arm": "(covariates only)",
-             "atlas": "-", "window_s": "-", "states": "-", "mean": 0.05,
-             "std": 0.01}])
-        c = B.contrasts(rows, ["movie"])
-        assert set(c["contrast"]) == {"fc vs covariates"}
 
 
 class TestWipeRefusesTheWrongTree:
@@ -434,3 +345,70 @@ class TestTaskFilter:
             B.assemble(root, {"movie": "cA", "rest": "cB"}, pheno,
                        bench_args(root, tasks=["m"]))
         assert "--tasks ['m']" in str(e.value)
+
+
+# --------------------------------------------------------------------------
+# The one table IS the deliverable now, so it gets an end-to-end test rather
+# than a unit test of a formatter: every arm and every condition has to arrive
+# as a row, carrying enough to be read against the row above it.
+# --------------------------------------------------------------------------
+class TestTheOneTable:
+    def run_it(self, two_conditions, tmp_path, **kw):
+        root, pheno, subs = two_conditions
+        ph = tmp_path / "pheno.csv"
+        pd.DataFrame({"CCID": pheno["sub"],
+                      "Age": pheno["Age"], "Sex": pheno["Sex"],
+                      "hads": [["Normal", "Mild", "Moderate", "Severe"][int(v)]
+                               for v in pheno["y"]]}).to_csv(ph, index=False)
+        a = bench_args(root, target="hads", pheno=[f"{ph}:,"], id_col="CCID",
+                       ordinal_levels=["Normal", "Mild", "Moderate", "Severe"],
+                       arms=["cells", "occupancy", "fc"], n_jobs=1, show=20,
+                       **kw)
+        assert B.run(a) == 0
+        out = root / "bstm_benchmark" / "target=hads"
+        return pd.read_csv(out / "summary.csv"), out
+
+    def test_every_arm_and_condition_is_a_row(self, two_conditions, tmp_path):
+        d, _ = self.run_it(two_conditions, tmp_path)
+        got = set(zip(d["condition"], d["arm"]))
+        for cond in ("movie", "rest"):
+            for arm in ("bstm:cells", "bstm:occupancy", "fc:edges",
+                        "(covariates only)"):
+                assert (cond, arm) in got, (cond, arm)
+
+    def test_the_columns_needed_to_read_two_rows_against_each_other(
+            self, two_conditions, tmp_path):
+        d, _ = self.run_it(two_conditions, tmp_path)
+        # mean to compare, std because a gap smaller than the seed spread is
+        # not a result, n and n_features because an arm with more of either is
+        # not comparable on mean alone.
+        for c in ("model", "condition", "arm", "atlas", "window_s", "states",
+                  "mean", "std", "min", "max", "count", "n", "n_features"):
+            assert c in d.columns, c
+
+    def test_it_is_sorted_best_first_within_a_model(self, two_conditions,
+                                                    tmp_path):
+        d, _ = self.run_it(two_conditions, tmp_path)
+        for _, g in d.groupby("model"):
+            assert g["mean"].is_monotonic_decreasing
+
+    def test_no_delta_column_is_computed(self, two_conditions, tmp_path):
+        """Deliberate. The arms share their folds, so a difference between two
+        rows is dependent and has no standard error the usual tests supply; a
+        `delta` column invites being read as one."""
+        d, out = self.run_it(two_conditions, tmp_path)
+        assert not [c for c in d.columns if "delta" in c or "contrast" in c]
+        assert not (out / "contrasts.csv").exists()
+
+    def test_the_arms_share_one_subject_count(self, two_conditions, tmp_path):
+        d, _ = self.run_it(two_conditions, tmp_path)
+        assert d["n"].nunique() == 1
+
+    def test_design_and_manifest_travel_with_the_table(self, two_conditions,
+                                                       tmp_path):
+        d, out = self.run_it(two_conditions, tmp_path)
+        note = (out / "DESIGN.md").read_text()
+        assert "movie (cohort=cA)" in note and "rest (cohort=cB)" in note
+        assert "NOT a test" in note
+        assert (out / "scores.parquet").exists()
+        assert (out / "figures" / "arms_by_condition.png").exists()

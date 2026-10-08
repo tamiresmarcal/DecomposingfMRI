@@ -54,9 +54,9 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      the same function the window_s=-1 state
                                      arm reads, so the two differ only in the
                                      MODEL. -> outputs/static_fc/
-5c   benchmark.sbatch                transitions vs static FC, movie vs rest,
-                                     on one shared subject set and one
-                                     covariate block per condition
+5c   benchmark.sbatch                transitions and static FC, every arm in
+                                     ONE summary table, on one shared subject
+                                     set and one covariate block per condition
                                      -> outputs/bstm_benchmark/target=<t>/
 
 any  fmri-decomp status              read-only: what every stage holds, and the
@@ -114,11 +114,13 @@ outputs/
 │   └── target=additional_HADS_anx_category/
 │       ├── summary.csv  scores.parquet  DESIGN.md  figures/  models/
 │
-├── bstm_benchmark/                               STAGE 5c — the comparison
+├── bstm_benchmark/                               STAGE 5c — one table, every arm
 │   └── target=additional_HADS_anx_category/
-│       ├── contrasts.csv  the table to read first: cells vs fc, cells vs
-│       │                  occupancy, movie vs rest, each against the floor
-│       └── summary.csv  scores.parquet  DESIGN.md  figures/
+│       ├── summary.csv  `select`'s shape plus `arm` and `condition`, so a
+│       │                static-FC row and a transition row sit side by side.
+│       │                No delta column: the arms share folds, so a
+│       │                difference between rows is not a test.
+│       └── scores.parquet  DESIGN.md  figures/
 │
 └── meta/
     ├── atlas-harvardoxford_labels.csv            atlas-level: cohort-independent

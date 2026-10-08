@@ -6,12 +6,16 @@
 
 writes, per target,
 
-    outputs/bstm_benchmark/target=<t>/DESIGN.md       what was compared
+    outputs/bstm_benchmark/target=<t>/DESIGN.md       what was scored
     outputs/bstm_benchmark/target=<t>/scores.parquet  every (arm, condition, model, seed)
-    outputs/bstm_benchmark/target=<t>/summary.csv     the ranking, readable
-    outputs/bstm_benchmark/target=<t>/contrasts.csv   the comparisons that matter
+    outputs/bstm_benchmark/target=<t>/summary.csv     ONE TABLE, every arm in it
     outputs/bstm_benchmark/target=<t>/figures/*.png
     outputs/meta/bstm_benchmark/target=<t>.json       manifest
+
+`summary.csv` is the deliverable: the same shape as `select`'s, with `arm` and
+`condition` as two extra columns, so a static-FC row and a transition-matrix
+row sit side by side and are read off against each other by eye. This stage
+computes no differences between rows -- see "WHY NO DELTA COLUMN" below.
 
 HOW THIS DIFFERS FROM `select`
 ------------------------------
@@ -25,8 +29,8 @@ to improve on. Two axes `select` does not have:
     condition   the SAME subjects, scanned under movie and at rest
     arm         transition cells | occupancy | dynamics | static FC | covariates
 
-so the questions it can answer are the ones that decide whether the project has
-a result:
+so the rows the one table has to carry side by side are the ones that decide
+whether the project has a result:
 
     bstm vs fc      within a condition. If one static correlation matrix
                     predicts as well as a transition matrix, the dynamics are
@@ -67,11 +71,18 @@ the best of N arms is biased upward even when nothing is real. The honest
 reading is the ORDER and the spread across fold seeds. An arm whose rank
 changes with the seed has not won; it has been sampled.
 
-And `contrasts.csv` reports differences of out-of-fold scores on the same
-subjects, which is a descriptive comparison, not a test. There is no p-value
-here on purpose: the folds are shared between arms, so the two scores are
-dependent and the usual tests do not apply. A corrected resampled t-test or a
-proper nested comparison is a separate piece of work.
+WHY NO DELTA COLUMN
+-------------------
+This stage deliberately stops at the table. It does not subtract one arm's
+score from another's, because the arms SHARE their folds: the two scores are
+dependent, so a difference between them has no standard error that any of the
+usual tests supply, and a `delta` column invites being read as one. Reading two
+rows and their seed spreads off the same table is the honest version of the
+same comparison, and it is what the table is laid out for.
+
+A real test -- a corrected resampled t-test, or a nested comparison -- is a
+separate piece of work and belongs in whatever writes it up, with the
+dependence handled explicitly.
 """
 
 from __future__ import annotations
@@ -417,113 +428,6 @@ def assemble(root: Path, conditions: dict[str, str], pheno: pd.DataFrame,
     return data, pd.DataFrame(meta), per_cond
 
 
-CONTRAST_ORDER = ["cells vs fc", "cells vs covariates", "fc vs covariates",
-                  "cells vs occupancy", "cells vs dynamics",
-                  "best bstm vs fc", "best bstm vs covariates"]
-
-
-def _best(g: pd.DataFrame, arm: str) -> pd.Series | None:
-    """The best-scoring cell of one arm, or None if the arm is absent.
-
-    "Best" rather than a named state set because choosing the state set is what
-    `select` is for; pinning one here would redo that choice by hand, and badly
-    -- on a different subject set.
-    """
-    h = g[g["arm"] == arm]
-    return g.loc[h["mean"].idxmax()] if len(h) else None
-
-
-def _label(r: pd.Series | None) -> str:
-    if r is None:
-        return "-"
-    bits = [r["arm"], str(r["atlas"])]
-    if r["states"] not in ("-", "fc_edges"):
-        bits.append(str(r["states"]))
-    return " ".join(bits)
-
-
-def contrasts(summary: pd.DataFrame, conditions: list[str]) -> pd.DataFrame:
-    """The comparisons the benchmark exists to make, as a table.
-
-    `bstm:cells` is named explicitly and NOT folded into "the best BSTM arm".
-    The hypothesis is the transition matrix; occupancy and dynamics are its
-    controls, and a row reading "the best BSTM arm beat static FC" when the
-    winner was occupancy would report the opposite of what happened -- the
-    signal would be time spent per state, which needs no transition matrix.
-    `best bstm vs fc` is kept as a separate row, below the named ones, for the
-    weaker claim that something in the state description beats static FC.
-    """
-    rows = []
-    s = summary[summary["arm"] != "(covariates only)"]
-    base = (summary[summary["arm"] == "(covariates only)"]
-            .set_index(["condition", "model"])["mean"])
-
-    def add(contrast, cond, model, a, b, score_b=None, label_b=None):
-        if a is None:
-            return
-        sb = b["mean"] if b is not None else score_b
-        if sb is None or not np.isfinite(sb):
-            return
-        rows.append({"contrast": contrast, "condition": cond, "model": model,
-                     "a": _label(a), "b": label_b or _label(b),
-                     "score_a": a["mean"], "score_b": sb,
-                     "delta": a["mean"] - sb, "spread_a": a["std"],
-                     "spread_b": b["std"] if b is not None else np.nan})
-
-    for (model, cond), g in s.groupby(["model", "condition"]):
-        cells = _best(g, "bstm:cells")
-        fc = _best(g, "fc:edges")
-        floor = base.get((cond, model), np.nan)
-        bstm = g[g["arm"].str.startswith("bstm:")]
-        best_bstm = g.loc[bstm["mean"].idxmax()] if len(bstm) else None
-
-        add("cells vs fc", cond, model, cells, fc)
-        add("cells vs covariates", cond, model, cells, None, floor,
-            "(covariates only)")
-        add("fc vs covariates", cond, model, fc, None, floor,
-            "(covariates only)")
-        for ctrl in ("occupancy", "dynamics"):
-            add(f"cells vs {ctrl}", cond, model, cells, _best(g, f"bstm:{ctrl}"))
-        if best_bstm is not None and cells is not None and \
-                best_bstm["arm"] != "bstm:cells":
-            # Only worth a row when the winner is NOT cells; otherwise it
-            # duplicates `cells vs fc` with a different name.
-            add("best bstm vs fc", cond, model, best_bstm, fc)
-            add("best bstm vs covariates", cond, model, best_bstm, None, floor,
-                "(covariates only)")
-
-    # Across conditions, within an arm. Each side is that condition's best cell
-    # of that arm, so this is "the best movie result against the best rest
-    # result", which is the comparison a reader means by "does rest do as well".
-    for model, g in s.groupby("model"):
-        for arm, h in g.groupby("arm"):
-            best = {c: _best(h[h["condition"] == c], arm) for c in conditions}
-            for i, ca in enumerate(conditions):
-                for cb in conditions[i + 1:]:
-                    a, b = best.get(ca), best.get(cb)
-                    if a is None or b is None:
-                        continue
-                    rows.append({"contrast": f"{ca} vs {cb}", "condition": "-",
-                                 "model": model, "a": f"{_label(a)} @{ca}",
-                                 "b": f"{_label(b)} @{cb}",
-                                 "score_a": a["mean"], "score_b": b["mean"],
-                                 "delta": a["mean"] - b["mean"],
-                                 "spread_a": a["std"], "spread_b": b["std"]})
-
-    cols = ["contrast", "condition", "model", "a", "b", "score_a", "score_b",
-            "delta", "spread_a", "spread_b"]
-    if not rows:
-        return pd.DataFrame(columns=cols)
-    d = pd.DataFrame(rows)
-    # Named contrasts first, in the order they are meant to be read, then the
-    # cross-condition ones. Sorting alphabetically would put "best bstm vs fc"
-    # above "cells vs fc", which inverts the point.
-    rank = {c: i for i, c in enumerate(CONTRAST_ORDER)}
-    d["_r"] = d["contrast"].map(lambda c: rank.get(c, len(rank)))
-    return (d.sort_values(["model", "_r", "contrast", "condition"])
-            .drop(columns=["_r"])[cols])
-
-
 def design_note(args, meta: pd.DataFrame, per_cond: dict, n_jobs: int) -> str:
     lines = [
         f"# benchmark -- {args.target}", "",
@@ -560,8 +464,9 @@ def design_note(args, meta: pd.DataFrame, per_cond: dict, n_jobs: int) -> str:
                      f"{r.n_features} | {r.n_covariates} | {r.n} |")
     lines += [
         "", "## Reading this", "",
-        "* The scores are out-of-fold and the arms share their folds, so "
-        "`contrasts.csv` is a descriptive difference, not a test.",
+        "* The scores are out-of-fold and the arms share their folds, so a "
+        "difference between two rows is dependent and is NOT a test. This "
+        "stage computes none on purpose; read the rows and their spreads.",
         "* The best of many arms is biased upward. Quote the ORDER and the "
         "spread across fold seeds, never the number.",
         f"* Quality covariates were read from the static-FC table of atlas "
@@ -628,18 +533,12 @@ def run(args) -> int:
                .agg(["mean", "std", "min", "max", "count"]).reset_index()
                .sort_values(["model", "mean"], ascending=[True, False]))
     summary.to_csv(out / "summary.csv", index=False)
-    con = contrasts(summary, list(conditions))
-    con.to_csv(out / "contrasts.csv", index=False)
 
     print()
     for model, g in summary.groupby("model"):
         print(f"=== {model}  ({metric_name(model)}) ===")
         print(g.drop(columns=["model", "states"]).head(args.show)
                .to_string(index=False))
-        print()
-    if len(con):
-        print("=== contrasts (descriptive differences on shared folds) ===")
-        print(con.to_string(index=False))
         print()
 
     note = design_note(args, meta, per_cond, len(jobs))

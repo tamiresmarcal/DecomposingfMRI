@@ -432,22 +432,32 @@ done
 ```
 
 ```bash
-column -s, -t outputs/bstm_benchmark/target=additional_HADS_anx_category/contrasts.csv
+column -s, -t outputs/bstm_benchmark/target=additional_HADS_anx_category/summary.csv
 ```
 
-`contrasts.csv` is the table to read first. Each row is a difference of
-out-of-fold scores with **both** sides' seed spreads beside it:
+**One table, every arm in it.** Same shape as `select`'s `summary.csv`, with
+`arm` and `condition` as two extra columns, sorted best-first within each
+model — so a static-FC row and a transition-matrix row sit side by side and
+are read off against each other by eye:
 
 ```
-cells vs fc          the headline. If this is negative, one static matrix
-                     predicts better than a transition matrix and the
-                     dynamics are not the biomarker.
-cells vs occupancy   if this is negative, the signal is time spent per state
-                     and needs no transition matrix at all.
-cells vs covariates  age and sex predict HADS on their own; this is the floor.
-movie vs rest        if ~0, the stimulus is not load-bearing — and a rest
-                     scan is the cheaper instrument.
+model  condition  arm                 atlas          window_s  mean    std    n
+ridge  movie      bstm:cells          harvardoxford  -1        ...     ...    ...
+ridge  movie      fc:edges            harvardoxford  static    ...     ...    ...
+ridge  rest       bstm:cells          harvardoxford  -1        ...     ...    ...
+ridge  movie      (covariates only)   -              -         ...     ...    ...
 ```
+
+Read `std` next to every `mean`: a gap between two arms that is smaller than
+either one's spread across fold seeds is not a result. And `(covariates only)`
+is the floor every other row has to clear — age and sex predict HADS on their
+own.
+
+This stage computes **no differences between rows**, on purpose. The arms share
+their folds, so two scores are dependent: a difference between them has no
+standard error that any of the usual tests supplies, and a `delta` column
+invites being read as one. A real test belongs in the write-up, with the
+dependence handled explicitly.
 
 Three properties make it a benchmark rather than four separate runs, and each
 is pinned by a test:
