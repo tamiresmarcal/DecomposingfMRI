@@ -45,6 +45,15 @@
 #                             entity at all -- a different filename SHAPE
 #                             from the movie's five numbered echoes, not just
 #                             a different count. So --n-echoes 0.
+#     652 usable subjects   CONFIRMED (2026-10) by 01_build_bids.py over the
+#                             whole BIDSsep tree: 652 have a T1w AND a rest
+#                             run, 1 was skipped ("did not do the task"), 0
+#                             were incomplete. That is MORE than the movie's
+#                             649 with a complete five-echo set, so rest is
+#                             not the binding constraint on the shared sample
+#                             -- the movie is, at 648 completed. Expect the
+#                             intersection the two selection trees are scored
+#                             on to be bounded near 648, not near 652.
 #     261 volumes           STILL UNCONFIRMED  <- the only one left. It sets
 #                             stimulus.durations_s and therefore the windowed
 #                             grid; it does NOT affect the activation-only
@@ -277,6 +286,11 @@ windows:
 #          --func-subdir func_rest -o /.../camcan_rest_bids \
 #          --dataset-name "Cam-CAN CC700 rest (BIDS view for fMRIPrep)" \
 #          --limit 10
+#
+#    --limit takes a sorted PREFIX of the usable list, so re-running without it
+#    later leaves the first 10 lines of subjects.txt unchanged. The pilot's
+#    array indices 0-9 therefore still name the same subjects afterwards, and
+#    the full run is --array=10-651 rather than a resubmission from 0.
 #      BIDS_ROOT=/.../camcan_rest_bids \
 #      OUT_ROOT=/.../camcan_rest_fmriprep \
 #      WORK_ROOT=/.../work/camcan_rest_fmriprep \
