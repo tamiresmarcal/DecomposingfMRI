@@ -54,10 +54,10 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      the same function the window_s=-1 state
                                      arm reads, so the two differ only in the
                                      MODEL. -> outputs/static_fc/
-5c   benchmark.sbatch                transitions and static FC, every arm in
-                                     ONE summary table, on one shared subject
-                                     set and one covariate block per condition
-                                     -> outputs/bstm_benchmark/target=<t>/
+5b'  fcm_selection.sbatch            rank STATIC connectivity models the way
+                                     5b ranks state sets, every cohort in one
+                                     `cohort` column
+                                     -> outputs/fcm_selection/target=<t>/
 
 any  fmri-decomp status              read-only: what every stage holds, and the
                                      disagreements that span two of them
@@ -110,16 +110,21 @@ outputs/
 │       n_tr_used / frac_good_frames: the reliability of the row AND the
 │       data-quantity covariate stage 5c controls on.
 │
-├── bstm_selection/                               STAGE 5b — the ranking
+├── bstm_selection/                               STAGE 5b — the movie ranking
 │   └── target=additional_HADS_anx_category/
 │       ├── summary.csv  scores.parquet  DESIGN.md  figures/  models/
 │
-├── bstm_benchmark/                               STAGE 5c — one table, every arm
+├── resting_bstm_selection/                       STAGE 5b — the rest ranking
+│   └── target=additional_HADS_anx_category/       `select --cohort camcan_rest
+│       ├── summary.csv  scores.parquet  DESIGN.md figures/  models/
+│                                                   --output-name <this>`
+│                                                  Same script, same shape.
+│
+├── fcm_selection/                                STAGE 5b' — static FC
 │   └── target=additional_HADS_anx_category/
-│       ├── summary.csv  `select`'s shape plus `arm` and `condition`, so a
-│       │                static-FC row and a transition row sit side by side.
-│       │                No delta column: the arms share folds, so a
-│       │                difference between rows is not a test.
+│       ├── summary.csv  same columns, with `cohort` in place of `window_s`
+│       │                and `K`. No delta column anywhere: the arms share
+│       │                folds, so a difference between rows is not a test.
 │       └── scores.parquet  DESIGN.md  figures/
 │
 └── meta/

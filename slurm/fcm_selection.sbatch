@@ -1,55 +1,66 @@
 #!/bin/bash
-# Stage 5b -- rank state sets by how well their transitions predict a phenotype.
+# Stage 5b' -- rank STATIC connectivity models. The third selection tree.
 #
-#   sbatch slurm/model_selection.sbatch additional_HADS_anx_category
-#   sbatch slurm/model_selection.sbatch additional_HADS_dep_category -- --models ridge hgb lgbm
+#   sbatch slurm/fcm_selection.sbatch additional_HADS_anx_category
+#   sbatch slurm/fcm_selection.sbatch additional_HADS_anx_category \
+#       -- --cohorts camcan camcan_rest --models ridge hgb
 #
-# THE RESTING-STATE RUN IS THIS SCRIPT. Same grid, same covariates, same CV --
-# another cohort and another folder, so the two rankings sit in separate trees
-# of identical structure instead of overwriting one another:
+# THREE TREES, ONE SHAPE, read side by side:
 #
-#   sbatch slurm/model_selection.sbatch $Y -- \
-#       --cohort camcan_rest --output-name resting_bstm_selection
+#   outputs/bstm_selection/          sbatch slurm/model_selection.sbatch $Y
+#   outputs/resting_bstm_selection/  sbatch slurm/model_selection.sbatch $Y \
+#                                      -- --cohort camcan_rest \
+#                                         --output-name resting_bstm_selection
+#   outputs/fcm_selection/           this
 #
-# The third tree, static connectivity, is slurm/fcm_selection.sbatch. All three
-# are separate RUNS on whoever each has, so if a gap between their summary.csv
-# files is going to be read as a result, pass the SAME --restrict-subjects file
-# to all three and check `n` matches.
+# They are separate RUNS, so each uses whoever it has. If a gap between their
+# summary.csv files is going to be read as a result, pass the SAME
+# --restrict-subjects file to all three and check `n` matches.
 #
-# --models defaults to `ridge hgb`, both of which are sklearn. `lgbm` needs
-# lightgbm, which containers/stage45.def pins but an older build of the image may
-# not carry; bstm_selection.make_model says so by name and offers hgb, the same
-# algorithm family. So lightgbm is NOT checked up front -- doing that blocked a
-# default run that never wanted it.
+# WHAT HAS TO EXIST FIRST: stage 3b, for every cohort named.
+#   sbatch slurm/static_fc.sbatch camcan camcan_rest
+# The static-FC table is also where frac_good_frames and n_tr_used come from,
+# which are covariates here and have no equivalent in the state trees.
 #
-# ONE JOB, NOT AN ARRAY. The grid (state sets x models x fold seeds) is
+# --models defaults to `ridge` ALONE here, unlike model_selection's `ridge hgb`:
+# a tree ensemble on 6,105 features against ~600 subjects is both slow and badly
+# matched. Add hgb or lgbm deliberately. `lgbm` needs lightgbm, which
+# containers/stage45.def pins but an older build of the image may not carry;
+# bstm_selection.make_model says so by name and offers hgb, the same algorithm
+# family. So lightgbm is NOT checked up front -- doing that blocked a default
+# run that never wanted it.
+#
+# ONE JOB, NOT AN ARRAY. The grid (cells x arms x models x fold seeds) is
 # parallelised inside the process with joblib, because every cell needs the same
-# handful of small tables in memory and splitting across nodes would re-read and
-# re-join them per task for no gain. Ask for cores, not array indices.
+# phenotype join in memory and splitting across nodes would re-read and re-join
+# it per task for no gain. Ask for cores, not array indices.
 #
-# COST. The fits are the whole cost and they scale as
-# state_sets x models x seeds x 5 folds. At 16 state sets, 2 models and 5 seeds
-# that is 800 fits; ridge is milliseconds each, boosting is seconds. Boosting
-# dominates, so --cpus-per-task is what buys walltime.
+# COST. Fits scale as cells x arms x models x seeds x 5 folds, where a cell is
+# one (cohort, atlas). The width is what differs from model_selection:
+# harvardoxford is 6,105 edges against ~600 subjects. RidgeCV over 25 alphas on
+# that is seconds per fold; HistGradientBoosting is MINUTES per fold, which is
+# why --models defaults to ridge alone. Add hgb deliberately and raise --time.
 #
-# MEMORY is not the constraint: every transitions table is ~100 KB, so the whole
-# grid is a few MB. 16G is already generous.
+# MEMORY is bigger than model_selection's for the same reason -- a transitions
+# table is ~100 KB and a harvardoxford FC table is ~15 MB -- but still small.
+# It goes mostly on loky pickling each matrix to each worker, so peak is
+# roughly n_jobs x the largest cell. 32G is generous.
 
-#SBATCH --job-name=fmridecomp_select
+#SBATCH --job-name=fmridecomp_fcmselect
 #SBATCH --account=rpp-aevans-ab
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=16G
+#SBATCH --mem=32G
 #SBATCH --time=03:00:00
-#SBATCH --output=slurm_logs/select_%j.out
-#SBATCH --error=slurm_logs/select_%j.err
+#SBATCH --output=slurm_logs/fcm_select_%j.out
+#SBATCH --error=slurm_logs/fcm_select_%j.err
 
 set -euo pipefail
 
-TARGET="${1:?usage: sbatch model_selection.sbatch <phenotype_column> [-- extra args]}"
+TARGET="${1:?usage: sbatch fcm_selection.sbatch <phenotype_column> [-- extra args]}"
 shift
 
 # Anything after a bare `--` is forwarded verbatim, e.g.
-#   sbatch slurm/model_selection.sbatch <col> -- --models ridge hgb lgbm --seeds 0 1 2
+#   sbatch slurm/fcm_selection.sbatch <col> -- --cohorts camcan camcan_rest
 EXTRA=(); seen_sep=0
 for a in "$@"; do
   if [[ ${seen_sep} -eq 1 ]]; then EXTRA+=("$a")
@@ -77,7 +88,9 @@ echo "host=$(hostname) target=${TARGET} cpus=${SLURM_CPUS_PER_TASK:-1}"
 # `ModuleNotFoundError: hmmlearn` minutes in, so FMRIDECOMP_SIF45 wins here and
 # FMRIDECOMP_SIF is the fallback for anyone who keeps one image.
 SIF="${FMRIDECOMP_SIF45:-${FMRIDECOMP_SIF:-}}"
-DEPS="sklearn"
+# matplotlib is a HARD requirement here: this stage always writes its two
+# figures and has no flag to skip them.
+DEPS="sklearn matplotlib"
 
 if [[ -n "${SIF}" ]]; then
   module load apptainer 2>/dev/null || module load apptainer/1.3.5
@@ -157,7 +170,10 @@ else
   RUN=(python3)
 fi
 
-"${RUN[@]}" -m fmri_decomposition.cli select \
+# --cohorts goes in FIRST so a caller's own --cohorts after `--` overrides it:
+# argparse keeps the last value for a repeated option.
+"${RUN[@]}" -m fmri_decomposition.cli fcm-select \
+    --cohorts camcan camcan_rest \
     --target "${TARGET}" \
     --n-jobs "${SLURM_CPUS_PER_TASK:-1}" \
     ${EXTRA[@]+"${EXTRA[@]}"}

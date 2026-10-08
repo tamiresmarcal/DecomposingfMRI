@@ -5,14 +5,31 @@
     fmri-decomp select --target additional_HADS_anx_category \\
         --models ridge hgb lgbm --n-jobs 16
 
-writes, per target,
+    # the resting-state ranking -- same code, same grid, another cohort and
+    # another folder
+    fmri-decomp select --target additional_HADS_anx_category \\
+        --cohort camcan_rest --output-name resting_bstm_selection
 
-    outputs/bstm_selection/target=<t>/DESIGN.md       what was compared and fixed
-    outputs/bstm_selection/target=<t>/scores.parquet  every (state set, arm, model, seed)
-    outputs/bstm_selection/target=<t>/summary.csv     the ranking, readable
-    outputs/bstm_selection/target=<t>/figures/*.png   the comparison plots
-    outputs/bstm_selection/target=<t>/models/*.joblib refit artifacts for the top N
-    outputs/meta/bstm_selection/target=<t>.json       manifest
+writes, per target, under `--output-name` (default `bstm_selection`),
+
+    outputs/<name>/target=<t>/DESIGN.md       what was compared and fixed
+    outputs/<name>/target=<t>/scores.parquet  every (state set, arm, model, seed)
+    outputs/<name>/target=<t>/summary.csv     the ranking, readable
+    outputs/<name>/target=<t>/figures/*.png   the comparison plots
+    outputs/<name>/target=<t>/models/*.joblib refit artifacts for the top N
+    outputs/meta/<name>/target=<t>.json       manifest
+
+THREE TREES, ONE SHAPE
+----------------------
+`bstm_selection` (movie states), `resting_bstm_selection` (rest states) and
+`fcm_selection` (static connectivity) are read side by side, so they share a
+`summary.csv` shape -- `n` included, without which two scores are not
+comparable. The first two are THIS script under two `--output-name` values;
+only the third is separate code, because its features come from another stage.
+
+They are separate RUNS, so each uses whichever subjects it has.
+`--restrict-subjects`, passed the same file everywhere, is what puts them on
+one sample when a gap between their tables is going to be read as a result.
 
 THE TARGET FOLDER IS WIPED BEFORE EACH RUN. Everything in it is regenerated, so
 a leftover from a previous grid is never a leftover you can trust -- a smaller
@@ -357,6 +374,28 @@ def read_phenotype(specs: list[str], id_col: str, target: str,
     return pheno
 
 
+def read_subject_list(path: str) -> set[str]:
+    """One subject id per line, or a CSV with a `sub` column.
+
+    Shared by every selection tree, because its whole purpose is that the
+    trees agree on who was scored -- two implementations of "read a list of
+    ids" is exactly the kind of thing that drifts on whitespace or case.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise SystemExit(f"--restrict-subjects {path}: no such file")
+    lines = p.read_text().splitlines()
+    if lines and "sub" in [c.strip().lower() for c in lines[0].split(",")]:
+        d = pd.read_csv(p)
+        vals = d[[c for c in d.columns if c.strip().lower() == "sub"][0]]
+    else:
+        vals = pd.Series([ln.strip() for ln in lines if ln.strip()])
+    out = set(vals.astype(str).str.strip().str.upper())
+    if not out:
+        raise SystemExit(f"--restrict-subjects {path}: no ids in it")
+    return out
+
+
 def _label_axes(d: pd.DataFrame) -> pd.DataFrame:
     """Add the axis columns the figures read, for scored rows and baselines alike.
 
@@ -545,6 +584,21 @@ def run(args) -> int:
     pheno = read_phenotype(args.pheno, args.id_col, args.target,
                            args.covariates, args.categorical,
                            levels=args.ordinal_levels)
+    # Applied to the PHENOTYPE rather than to each transition table: every
+    # state set reaches the model through an inner join on this frame, so
+    # restricting it once restricts every arm identically and there is no
+    # path that can miss it.
+    if getattr(args, "restrict_subjects", None):
+        keep = read_subject_list(args.restrict_subjects)
+        before = len(pheno)
+        pheno = pheno[pheno["sub"].isin(keep)]
+        if pheno.empty:
+            raise SystemExit(
+                f"--restrict-subjects {args.restrict_subjects}: none of its "
+                f"{len(keep):,} id(s) has a usable {args.target}.\n"
+                f"  list e.g.      {sorted(keep)[:3]}\n"
+                f"  phenotype e.g. {sorted(set(pheno['sub']))[:3] or '(none)'}")
+        log(f"  --restrict-subjects: {before:,} -> {len(pheno):,} subject(s)")
 
     log(f"{len(sets)} state set(s) x {len(args.models)} model(s) x "
         f"{len(args.seeds)} seed(s)")
@@ -606,20 +660,41 @@ def run(args) -> int:
     scores_df = pd.DataFrame(rows).merge(
         meta, on=["atlas", "window_s", "states", "K", "features", "p_norm"],
         how="left")
+    # A baseline row carries atlas="(baseline)", so it matches no meta row and
+    # its `n` arrives NaN. It is not unknown: the baseline is fitted on exactly
+    # the subjects of the state set at its aperture, and `n` now sits in the
+    # summary precisely so a reader can check two tables were scored on the
+    # same sample. NaN there would defeat the column it was added for.
+    n_at = meta.groupby("window_s")["n"].max()
+    base = scores_df["kind"] == "base"
+    scores_df.loc[base, "n"] = scores_df.loc[base, "window_s"].map(n_at)
+    scores_df.loc[base, "n_features"] = 0
+    scores_df["n"] = scores_df["n"].astype("Int64")
+    scores_df["n_features"] = scores_df["n_features"].astype("Int64")
     # one readable label per arm, used by every figure and the ranking
     scores_df["arm"] = (scores_df["features"]
                         + np.where(scores_df["p_norm"] == "-", "",
                                    " [" + scores_df["p_norm"] + "]"))
     scores_df = _label_axes(scores_df)
 
-    out = root / "bstm_selection" / f"target={args.target}"
-    _wipe(out)
+    # The FOLDER is a flag, so the same code serves movie and rest without a
+    # second copy of it. `select --cohort camcan_rest --output-name
+    # resting_bstm_selection` is the whole of the resting-state arm: the grid,
+    # the covariates, the CV and the figures are identical, and only the cohort
+    # whose transition tables are read differs.
+    out = root / args.output_name / f"target={args.target}"
+    _wipe(out, parent=args.output_name)
     (out / "figures").mkdir(parents=True, exist_ok=True)
     (out / "models").mkdir(parents=True, exist_ok=True)
     scores_df.to_parquet(out / "scores.parquet", index=False)
 
+    # `n` and `n_features` are GROUPING keys rather than dropped columns: a
+    # row's score is not comparable with another's without them, and these
+    # tables are now read beside resting_bstm_selection's and fcm_selection's.
+    # Both are constant within a group, so grouping on them changes no number.
     summary = (scores_df.groupby(["model", "arm", "atlas", "window_s", "K",
-                                  "states"], dropna=False)["score"]
+                                  "states", "n", "n_features"],
+                                 dropna=False)["score"]
                .agg(["mean", "std", "min", "max", "count"]).reset_index()
                .sort_values(["model", "mean"], ascending=[True, False]))
     summary.to_csv(out / "summary.csv", index=False)
@@ -638,10 +713,11 @@ def run(args) -> int:
     saved = _save_models(scores_df, data, out / "models", args.save_top,
                          args.covariates)
 
-    mf = meta_dir(root) / "bstm_selection" / f"target={args.target}.json"
+    mf = meta_dir(root) / args.output_name / f"target={args.target}.json"
     mf.parent.mkdir(parents=True, exist_ok=True)
     mf.write_text(json.dumps(
         {"target": args.target, "cohort": args.cohort, "models": args.models,
+         "restrict_subjects": getattr(args, "restrict_subjects", None),
          "seeds": args.seeds, "features": args.features,
          "p_norm": args.p_norm, "covariates": args.covariates,
          # Read off the state sets that ran, for the same reason DESIGN.md's
@@ -1032,7 +1108,21 @@ def add_arguments(p) -> None:
     p.add_argument("--covariates", nargs="+",
                    default=["Age", "Sex", "n_transitions"])
     p.add_argument("--categorical", nargs="+", default=["Sex"])
-    p.add_argument("--cohort", default="camcan")
+    p.add_argument("--cohort", default="camcan",
+                   help="whose transition tables to rank. The resting-state "
+                        "run is this flag plus --output-name.")
+    p.add_argument("--output-name", default="bstm_selection",
+                   metavar="FOLDER",
+                   help="the folder under outputs/ to write into (default "
+                        "bstm_selection). Use resting_bstm_selection with "
+                        "--cohort camcan_rest, so the two rankings sit in "
+                        "separate trees of identical structure instead of "
+                        "overwriting one another.")
+    p.add_argument("--restrict-subjects", default=None, metavar="FILE",
+                   help="one subject id per line, or a CSV with a `sub` "
+                        "column. Pass the SAME file to every tree so a gap "
+                        "between their tables cannot be a difference in who "
+                        "was scored.")
     p.add_argument("--atlas", nargs="*", default=None)
     p.add_argument("--window-s", nargs="*", default=None)
     p.add_argument("--n-jobs", type=int, default=-1,

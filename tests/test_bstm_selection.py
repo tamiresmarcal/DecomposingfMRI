@@ -236,3 +236,69 @@ class TestOrdinalLevelCoding:
         msg = str(e.value)
         assert "entirely empty" in msg and "Age" in msg
         assert "join matched nothing" not in msg
+
+
+# --------------------------------------------------------------------------
+# Three trees, one shape. `bstm_selection` and `resting_bstm_selection` are
+# THIS script under two --output-name values, so the thing to pin is that the
+# folder is genuinely a parameter and that the tables carry what a reader needs
+# to check two of them were scored on the same sample.
+# --------------------------------------------------------------------------
+class TestThreeTreesOneShape:
+    def test_the_output_folder_is_a_parameter(self):
+        import argparse
+
+        p = argparse.ArgumentParser()
+        B.add_arguments(p)
+        a = p.parse_args(["--target", "t"])
+        assert a.output_name == "bstm_selection"
+        b = p.parse_args(["--target", "t", "--cohort", "camcan_rest",
+                          "--output-name", "resting_bstm_selection"])
+        assert b.output_name == "resting_bstm_selection"
+        assert b.cohort == "camcan_rest"
+
+    def test_wipe_will_not_clear_a_tree_it_was_not_told_to_own(self, tmp_path):
+        """`--output-name` reaches `_wipe`, which empties the folder before
+        writing. A typo there must refuse, not delete someone else's tree."""
+        out = tmp_path / "resting_bstm_selection" / "target=t"
+        out.mkdir(parents=True)
+        (out / "keep.csv").write_text("x")
+        with pytest.raises(SystemExit):
+            B._wipe(out, parent="bstm_selection")
+        assert (out / "keep.csv").exists()
+        B._wipe(out, parent="resting_bstm_selection")
+        assert not out.exists()
+
+
+class TestRestrictSubjects:
+    def test_one_id_per_line(self, tmp_path):
+        p = tmp_path / "k.txt"
+        p.write_text("CC110033\n cc110045 \n\n")
+        assert B.read_subject_list(str(p)) == {"CC110033", "CC110045"}
+
+    def test_a_csv_with_a_sub_column(self, tmp_path):
+        p = tmp_path / "k.csv"
+        p.write_text("sub,excluded\nCC110033,False\nCC110045,False\n")
+        assert B.read_subject_list(str(p)) == {"CC110033", "CC110045"}
+
+    def test_ids_are_upper_cased_and_stripped_like_every_other_join(self,
+                                                                   tmp_path):
+        """`build` upper-cases the transition tables' `sub`, so a list that was
+        not normalised the same way would match nothing and read as an id
+        mismatch in the data."""
+        p = tmp_path / "k.txt"
+        p.write_text("cc110033\n")
+        assert B.read_subject_list(str(p)) == {"CC110033"}
+
+    def test_a_missing_file_is_refused_by_name(self, tmp_path):
+        with pytest.raises(SystemExit) as e:
+            B.read_subject_list(str(tmp_path / "nope.txt"))
+        assert "no such file" in str(e.value)
+
+    def test_an_empty_list_is_refused_rather_than_emptying_the_run(self,
+                                                                  tmp_path):
+        p = tmp_path / "k.txt"
+        p.write_text("\n  \n")
+        with pytest.raises(SystemExit) as e:
+            B.read_subject_list(str(p))
+        assert "no ids" in str(e.value)

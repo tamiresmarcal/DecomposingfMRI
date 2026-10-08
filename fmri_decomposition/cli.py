@@ -525,20 +525,28 @@ def cmd_static_fc(args) -> int:
 
     Reads stage 2 through `frames.read_cohort`, so the edges come from exactly
     the frames the `window_s = -1` state arm is fitted on. That identity is the
-    point: it makes the benchmark's difference a difference between models.
+    point: it makes the gap between fcm_selection and bstm_selection a gap
+    between models rather than between preprocessing.
     """
     from . import static_fc
 
     return static_fc.run(args)
 
 
-def cmd_benchmark(args) -> int:
-    """Stage 5c: is the transition matrix better than a static one, and does
-    the movie beat rest? Every arm on one subject set, one covariate block per
-    condition, one scoring function."""
-    from . import bstm_benchmark
+def cmd_fcm_select(args) -> int:
+    """Stage 5b': rank static connectivity models the way `select` ranks state
+    sets, into a third tree of the same shape.
 
-    return bstm_benchmark.run(args)
+    Three trees, one shape, read side by side:
+      bstm_selection          `select --cohort camcan`
+      resting_bstm_selection  `select --cohort camcan_rest --output-name ...`
+      fcm_selection           this
+    Only this one is separate code; its features come from stage 3b rather
+    than stage 5a.
+    """
+    from . import fcm_selection
+
+    return fcm_selection.run(args)
 
 
 def cmd_transitions(args) -> int:
@@ -721,18 +729,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     sf = sub.add_parser(
         "static-fc",
-        help="stage 3b: one connectivity matrix per subject -- the benchmark's "
-             "control arm")
+        help="stage 3b: one connectivity matrix per subject -- what "
+             "fcm-select ranks")
     _static_fc.add_arguments(sf)
     sf.set_defaults(func=cmd_static_fc)
 
-    from . import bstm_benchmark as _bstm_benchmark
+    from . import fcm_selection as _fcm_selection
 
-    bm = sub.add_parser(
-        "benchmark",
-        help="stage 5c: transitions vs static FC, movie vs rest, one table")
-    _bstm_benchmark.add_arguments(bm)
-    bm.set_defaults(func=cmd_benchmark)
+    fs = sub.add_parser(
+        "fcm-select",
+        help="stage 5b': how well STATIC connectivity predicts a phenotype "
+             "-- the third tree beside bstm_selection")
+    _fcm_selection.add_arguments(fs)
+    fs.set_defaults(func=cmd_fcm_select)
 
     sm = sub.add_parser(
         "state-means",

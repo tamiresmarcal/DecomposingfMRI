@@ -355,16 +355,17 @@ inverse that recovers its input.
 
 This is the table van der Meer et al.'s Fig. 1 plots.
 
-### PHASE 4 — BENCHMARK (is any of it better than the obvious alternatives?)
+### PHASE 4 — THE OTHER TWO TREES (is any of it better than the alternatives?)
 
-Phases 1–3 answer *which* state set predicts best. They cannot answer whether
-the whole idea beats the thing it is supposed to improve on. Two arms exist for
-that, and both are cheap next to what you have already run:
+Phase 3 answers *which movie state set* predicts best. It cannot answer whether
+the whole idea beats what it is supposed to improve on. Two more rankings do,
+each written to its own tree with the same `summary.csv` shape, and both cheap
+next to what you have already run:
 
-| arm | what it is | what it costs |
+| tree | what it is | what it costs |
 |---|---|---|
-| static FC | one correlation matrix per subject, flattened | one pass over stage 2 |
-| rest | the same pipeline on the resting-state scan | fMRIPrep + stage 2 |
+| `fcm_selection` | one correlation matrix per subject, flattened | one pass over stage 2 |
+| `resting_bstm_selection` | the same pipeline on the rest scan | fMRIPrep + stage 2 |
 
 **The static-FC arm, movie only.** Nothing new to preprocess:
 
@@ -426,62 +427,55 @@ is the other reading of "the same pipeline for rest" and needs a separate
 so a second fit in the same tree overwrites the movie's and breaks
 `state-means` for it.
 
-**Then the comparison:**
+**Then the three rankings.** The same `summary.csv` shape three times, read
+side by side:
 
 ```bash
 sbatch slurm/static_fc.sbatch camcan camcan_rest
+
 for Y in additional_HADS_anx_category additional_HADS_dep_category; do
-  sbatch slurm/benchmark.sbatch $Y
+  # 1. movie states                       -> outputs/bstm_selection/
+  sbatch slurm/model_selection.sbatch $Y
+
+  # 2. rest states -- the SAME script, another cohort and another folder
+  #                                       -> outputs/resting_bstm_selection/
+  sbatch slurm/model_selection.sbatch $Y -- \
+      --cohort camcan_rest --output-name resting_bstm_selection
+
+  # 3. static connectivity, both conditions in one `cohort` column
+  #                                       -> outputs/fcm_selection/
+  sbatch slurm/fcm_selection.sbatch $Y
 done
 ```
 
 ```bash
-column -s, -t outputs/bstm_benchmark/target=additional_HADS_anx_category/summary.csv
+for T in bstm_selection resting_bstm_selection fcm_selection; do
+  echo "== $T"
+  column -s, -t outputs/$T/target=additional_HADS_anx_category/summary.csv | head -6
+done
 ```
 
-**One table, every arm in it.** Same shape as `select`'s `summary.csv`, with
-`arm` and `condition` as two extra columns, sorted best-first within each
-model — so a static-FC row and a transition-matrix row sit side by side and
-are read off against each other by eye:
+Every table has `model arm atlas n n_features mean std min max count`, sorted
+best-first. What to read:
 
-```
-model  condition  arm                 atlas          window_s  mean    std    n
-ridge  movie      bstm:cells          harvardoxford  -1        ...     ...    ...
-ridge  movie      fc:edges            harvardoxford  static    ...     ...    ...
-ridge  rest       bstm:cells          harvardoxford  -1        ...     ...    ...
-ridge  movie      (covariates only)   -              -         ...     ...    ...
-```
+* `mean` against the `(covariates only)` row in its own table — that is the
+  floor, and age and sex predict HADS on their own.
+* `std` next to every `mean`. A gap smaller than either arm's spread across
+  fold seeds is not a result.
+* **`n` first, always.** These are three separate runs on whoever each one
+  has, so two tables can differ in sample as well as in score. If they differ
+  and the gap matters, pass the same `--restrict-subjects` file to all three
+  and re-run.
+* In `fcm_selection`, `edges` against `global`. `global` is a subject's mean
+  and SD over every edge — two numbers with no topology in them. If it matches
+  `edges`, the pattern is not what is being measured; the amount is.
 
-Read `std` next to every `mean`: a gap between two arms that is smaller than
-either one's spread across fold seeds is not a result. And `(covariates only)`
-is the floor every other row has to clear — age and sex predict HADS on their
-own.
+None of the three subtracts one row from another, on purpose. The arms share
+their folds, so a difference between two scores is dependent and has no
+standard error the usual tests supply. A real test belongs in the write-up.
 
-This stage computes **no differences between rows**, on purpose. The arms share
-their folds, so two scores are dependent: a difference between them has no
-standard error that any of the usual tests supplies, and a `delta` column
-invites being read as one. A real test belongs in the write-up, with the
-dependence handled explicitly.
-
-Three properties make it a benchmark rather than four separate runs, and each
-is pinned by a test:
-
-1. **One subject set.** Every arm in every condition is scored on the
-   intersection, taken before any fit. Otherwise rest could win by being
-   measured on the subjects who have a usable rest scan.
-2. **One covariate block per condition**, shared by every arm: `Age`, `Sex`,
-   and `frac_good_frames` / `n_tr_used` from that condition's static-FC table.
-   Deliberately *not* `select`'s `n_transitions`, which exists only for a
-   transition matrix and would adjust one arm for its data quantity and the
-   other for nothing.
-3. **One scoring function** — `bstm_selection.score_once`, imported.
-
-What it does **not** do: test anything. The arms share their folds, so the two
-scores are dependent and the usual tests do not apply. `delta` is descriptive.
-And the best of many arms is biased upward even when nothing is real, so the
-thing to quote is the **order** and the spread, never the number.
-
-`benchmark` wipes its target directory before writing, like `model_selection`.
+Each tree **wipes its target directory before writing** — back up a result you
+care about first.
 
 ### PHASES 2-3 as one chained submission
 

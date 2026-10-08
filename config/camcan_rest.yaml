@@ -1,4 +1,4 @@
-# Cam-CAN CC700 -- RESTING STATE. The benchmark's second condition.
+# Cam-CAN CC700 -- RESTING STATE. The second brain-state tree.
 # https://camcan-archive.mrc-cbu.cam.ac.uk/dataaccess/
 #
 # WHY THIS IS A SEPARATE COHORT AND NOT A SECOND TASK IN camcan_movie.yaml
@@ -11,10 +11,10 @@
 # The movie config says so in its own comment, and this file is the
 # consequence of it.
 #
-# Being a separate cohort is also what makes the benchmark work. `cohort=` is
+# Being a separate cohort is also what makes the comparison work. `cohort=` is
 # a partition key, so movie and rest sit side by side in ONE output tree, and
-# `decompose --project camcan_rest` can put rest into the state space already
-# fitted on the movie. See "HOW TO RUN" at the bottom.
+# `decompose --project camcan_rest` puts rest into the state space already
+# fitted for the movie. See "HOW TO RUN" at the bottom.
 #
 # WHAT THIS CONDITION IS FOR
 # --------------------------
@@ -70,9 +70,8 @@ output_root: /project/6008063/tamires/DecomposingfMRI/outputs
 space: MNI152NLin2009cAsym
 participants: /project/6008063/tamires/DecomposingfMRI/config/camcan_rest_participants.csv
 
-# All three, so every arm of the benchmark exists at rest too. The FC arm needs
-# them to compare like with like across atlases, and the state arm needs
-# whichever atlas `select` ended up choosing.
+# All three, so rest is rankable on the same axes the movie is. fcm_selection
+# compares atlases, and the state tree needs whichever atlas `select` chose.
 atlases: [harvardoxford, yeo7, networks]
 
 discovery:
@@ -94,8 +93,8 @@ confounds:
   dilate_tr: 1
   # DELIBERATELY IDENTICAL TO THE MOVIE CONFIG, and that is the whole point.
   #
-  # The benchmark's movie-vs-rest contrast is only interpretable if the two
-  # conditions were censored by the same rule. A different fd_threshold here
+  # Reading resting_bstm_selection beside bstm_selection is only meaningful if
+  # the two conditions were censored by the same rule. A different fd_threshold here
   # would remove a different amount of data from the same subjects, and since
   # fewer frames mean noisier edges and noisier state sequences, the contrast
   # would partly measure the QC rule.
@@ -107,7 +106,8 @@ confounds:
   # Expect rest to lose MORE frames than the movie regardless. Eyes-closed rest
   # produces more motion and more drowsiness than watching a film, which is a
   # real difference between the conditions and not something to correct away --
-  # `frac_good_frames` is written per subject and `benchmark` controls on it.
+  # `frac_good_frames` is written per subject and fcm_selection controls on
+  # it.
 
 filtering:
   already_applied: false
@@ -201,13 +201,13 @@ windows:
 # agreement does not permit redistributing. The generated file carries ids and
 # exclusion flags only -- keep it that way.
 #
-# Nothing needs them here anyway: `select` and `benchmark` read covariates from
-# --pheno, which points at the release tables on the cluster. camcan_movie.yaml
+# Nothing needs them here anyway: `select` and `fcm-select` read covariates
+# from --pheno, which points at the release tables on the cluster. camcan_movie.yaml
 # still suggests merging them in; that suggestion predates the constraint and
 # should go.
 #
-# The subject ids are the same CCIDs as the movie's, which is what lets
-# `benchmark` intersect the two conditions onto one subject set.
+# The subject ids are the same CCIDs as the movie's, which is what lets one
+# --restrict-subjects file put all three selection trees on the same sample.
 
 # --- HOW TO RUN -------------------------------------------------------
 #
@@ -246,6 +246,8 @@ windows:
 #      fmri-decomp static-fc --atlas harvardoxford yeo7 networks \
 #          --cohorts camcan camcan_rest
 #
-# 4. the comparison:
-#      fmri-decomp benchmark --target additional_HADS_anx_category \
-#          --conditions movie=camcan rest=camcan_rest
+# 4. the two new rankings:
+#      fmri-decomp select --target additional_HADS_anx_category \
+#          --cohort camcan_rest --output-name resting_bstm_selection
+#      fmri-decomp fcm-select --target additional_HADS_anx_category \
+#          --cohorts camcan camcan_rest

@@ -22,7 +22,7 @@ atlases = ["nilearn>=0.10"]        # only needed to fetch/resample built-in atla
 bids = ["pybids>=0.16"]
 test = ["pytest>=7.4"]
 # Stages 5b/5c. sklearn is the estimators and the CV; matplotlib is a HARD
-# requirement of `benchmark`, which always writes its two figures and has no
+# requirement of `fcm-select`, which always writes its two figures and has no
 # flag to skip them. Both already live in containers/stage45.def, which is how
 # the cluster gets them -- this extra is for a local install.
 model = ["scikit-learn>=1.3", "matplotlib>=3.7"]

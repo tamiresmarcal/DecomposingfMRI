@@ -1,10 +1,11 @@
-"""Stage 3b -- the benchmark's control arm.
+"""Stage 3b -- what fcm_selection ranks.
 
 The claim the module is built on is that its edges come from the SAME frames
 the `window_s = -1` state arm is fitted on, so that a difference between the
 two arms is a difference between models. `test_edges_equal_pearson_on_the_very_
-frames_the_state_arm_reads` is that claim; if it ever fails, the benchmark is
-comparing preprocessing and the headline result means nothing.
+frames_the_state_arm_reads` is that claim; if it ever fails, fcm_selection
+and bstm_selection differ in preprocessing as well as in model, and reading one
+table against the other means nothing.
 """
 import json
 

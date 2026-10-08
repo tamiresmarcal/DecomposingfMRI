@@ -1,12 +1,12 @@
 #!/bin/bash
-# Stage 3b -- one connectivity matrix per subject. The benchmark's control arm.
+# Stage 3b -- one connectivity matrix per subject. What fcm_selection ranks.
 #
 #   sbatch slurm/static_fc.sbatch camcan camcan_rest
 #   sbatch slurm/static_fc.sbatch camcan -- --atlas yeo7 --pool subject
 #
 # Cohorts are positional; anything after a bare `--` is forwarded verbatim.
-# --atlas defaults to all three below, which is what the benchmark wants: it
-# compares atlases, and an atlas missing at rest silently drops that arm.
+# --atlas defaults to all three below, which is what fcm_selection wants: it
+# compares atlases, and one missing at rest silently drops that row.
 #
 # WHAT IT COSTS. One pass over the stage-2 parquet per (atlas, cohort), then a
 # correlation per subject. The correlation is nothing -- 160 x 111 is
@@ -23,10 +23,11 @@
 # file -- the same one-writer-per-cell constraint as stage 4b, and here the
 # cell is the whole cohort.
 #
-# THIS MUST USE THE SAME FRAME SETTINGS AS THE STATE ARM. --match-bandpass and
-# --zscore-runs default to exactly what `decompose` defaults to, which is why
-# the two arms are comparable at all. If you passed either flag to `decompose`,
-# pass the same here, or the benchmark compares preprocessing.
+# THIS MUST USE THE SAME FRAME SETTINGS AS THE STATE TREES. --match-bandpass
+# and --zscore-runs default to exactly what `decompose` defaults to, which is
+# why fcm_selection and bstm_selection are comparable at all. If you passed
+# either flag to `decompose`, pass the same here, or the two trees differ in
+# preprocessing as well as in model.
 
 #SBATCH --job-name=fmridecomp_staticfc
 #SBATCH --account=rpp-aevans-ab

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""STAGE 3b -- one connectivity matrix per subject. The benchmark's control arm.
+"""STAGE 3b -- one connectivity matrix per subject. What fcm_selection ranks.
 
     fmri-decomp static-fc --atlas harvardoxford yeo7 networks \\
         --cohorts camcan camcan_rest
@@ -54,7 +54,7 @@ WHAT IS STORED, AND WHAT IS NOT
 -------------------------------
 Raw r, not Fisher z, exactly as stage 3 stores it: arctanh is invertible and
 costs nothing at load time, so the file keeps the measurement and the model
-step chooses the transform. `benchmark` applies Fisher z by default.
+step chooses the transform. `fcm-select` applies Fisher z by default.
 
 An edge is NaN when either parcel is empty under that subject's brain mask, or
 constant. NaN is kept, not filled: which subject lost which parcel is a
@@ -80,8 +80,8 @@ POOL_CHOICES = ("task", "subject")
 
 # What travels beside the edges. `n_tr_used` is the n that every edge in the row
 # was computed over, so it is the reliability column AND the data-quantity
-# covariate the benchmark controls on -- a subject who lost half their frames to
-# motion has noisier edges, and noise attenuates prediction.
+# covariate fcm_selection controls on -- a subject who lost half their frames
+# to motion has noisier edges, and noise attenuates prediction.
 QC_COLUMNS = ["n_tasks", "n_tr_total", "n_tr_good", "n_tr_used",
               "frac_good_frames", "n_edges_nan"]
 
