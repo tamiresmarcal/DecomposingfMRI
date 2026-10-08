@@ -206,3 +206,149 @@ class TestWhenItDoesRewrite:
         assert man["project_cohorts"] == ["camcan"]
         assert "project_cohorts" not in man["fit_meta"] if "fit_meta" in man \
             else True
+
+
+# --------------------------------------------------------------------------
+# The other half: `cluster` must not refit when the fit it needs is already
+# saved. That fit is the expensive one -- HMM2 measured ~24 h per atlas at
+# K=27 -- so "adding a cohort is cheap" is false until this holds.
+# --------------------------------------------------------------------------
+def cluster_args(**kw):
+    import argparse
+
+    from fmri_decomposition import cluster as C
+
+    d = dict(methods=["hmm2"], embeddings=["pca3"], k=[3],
+             train=["trainA", "trainB"], balance_train=False, refit=False,
+             meanshift_quantile=0.2, meanshift_fit_rows=50_000, hmm_iter=5,
+             hmm2_iter=5, hmm2_restarts=2, hmm2_jobs=1,
+             min_k=2, max_k=30)
+    d.update(kw)
+    return argparse.Namespace(**d)
+
+
+def run_cluster(root, **kw):
+    from fmri_decomposition import cluster as C
+
+    return C.run_one(root, "mini", "-1", cluster_args(**kw))
+
+
+class TestClusterReusesItsFit:
+    @pytest.fixture
+    def clustered(self, cell, capsys):
+        entries, _ = run_cluster(cell)
+        capsys.readouterr()
+        return cell, entries
+
+    def test_the_first_run_fits_and_caches(self, clustered):
+        cell, entries = clustered
+        assert entries and not entries[0]["fit_reused"]
+        cached = list((cell / "meta" / "clusterers").glob("*.joblib"))
+        assert len(cached) == 1
+        assert entries[0]["fit_hash"] in cached[0].name
+
+    def test_a_second_run_reuses_it(self, clustered, capsys):
+        cell, _ = clustered
+        entries, _ = run_cluster(cell)
+        assert entries[0]["fit_reused"]
+        assert "reusing the cached fit" in capsys.readouterr().out
+
+    def test_a_cohort_already_at_this_fit_is_not_relabelled(self, clustered):
+        """append_columns rewrites the whole file, so relabelling a cohort that
+        needs nothing would churn every file in the cell on every run."""
+        cell, entries = clustered
+        col = entries[0]["column"]
+        before = {c: latents(cell, c).stat().st_mtime_ns
+                  for c in ("trainA", "trainB", "camcan")}
+        run_cluster(cell)
+        for c, t in before.items():
+            assert latents(cell, c).stat().st_mtime_ns == t, c
+
+    def test_a_cohort_added_afterwards_is_labelled_without_a_refit(
+            self, clustered, capsys):
+        """THE POINT OF THE WHOLE CHANGE. Project rest, then cluster: rest gets
+        the labels and nothing is fitted again."""
+        cell, entries = clustered
+        col = entries[0]["column"]
+        run(cell, ["camcan", "camcan_rest"])          # decompose: rest only
+        capsys.readouterr()
+        new, _ = run_cluster(cell)
+        out = capsys.readouterr().out
+        assert "reusing the cached fit" in out
+        assert new[0]["fit_reused"]
+        # Only the new cohort was labelled, and it did get states.
+        assert list(new[0]["states_used"]) == ["camcan_rest"]
+        assert new[0]["states_used"]["camcan_rest"] >= 1
+        assert sorted(new[0]["cohorts_kept"]) == ["camcan", "trainA", "trainB"]
+        assert col in pd.read_parquet(latents(cell, "camcan_rest")).columns
+
+    def test_the_labels_are_the_same_model_not_a_new_one(self, clustered):
+        """A reused fit has to give the identical labels for a cohort it
+        already labelled -- otherwise 'reuse' is a different model wearing the
+        same fit_hash."""
+        cell, entries = clustered
+        col = entries[0]["column"]
+        before = pd.read_parquet(latents(cell, "camcan"))[col].to_numpy()
+        run_cluster(cell, refit=False)
+        # force a relabel from the cached fit by clearing the column's hash
+        from fmri_decomposition.cluster import append_columns
+
+        append_columns(latents(cell, "camcan"), {col: before.astype(np.int32)},
+                       {col: {"method": "hmm2", "fit_hash": "cleared"}})
+        run_cluster(cell)
+        after = pd.read_parquet(latents(cell, "camcan"))[col].to_numpy()
+        assert np.array_equal(before, after)
+
+    def test_refit_ignores_the_cache(self, clustered, capsys):
+        cell, _ = clustered
+        entries, _ = run_cluster(cell, refit=True)
+        assert not entries[0]["fit_reused"]
+        assert "reusing the cached fit" not in capsys.readouterr().out
+
+    def test_a_cache_from_other_latents_is_refused(self, clustered, capsys):
+        """fit_hash describes the CLUSTERING, not the embedding underneath, so
+        without the model_hash guard a cached fit could be applied to latents
+        from a different decompose run with the same row count."""
+        import joblib
+
+        cell, _ = clustered
+        cached = next((cell / "meta" / "clusterers").glob("*.joblib"))
+        blob = joblib.load(cached)
+        blob["model_hash"] = "a-different-decompose-fit"
+        joblib.dump(blob, cached)
+        capsys.readouterr()
+        entries, _ = run_cluster(cell)
+        assert "refitting" in capsys.readouterr().out
+        assert not entries[0]["fit_reused"]
+
+    def test_a_cache_from_other_libraries_is_refused(self, clustered, capsys):
+        import joblib
+
+        cell, _ = clustered
+        cached = next((cell / "meta" / "clusterers").glob("*.joblib"))
+        blob = joblib.load(cached)
+        blob["libs"] = {**blob["libs"], "numpy": "0.0.0-not-real"}
+        joblib.dump(blob, cached)
+        capsys.readouterr()
+        entries, _ = run_cluster(cell)
+        out = capsys.readouterr().out
+        assert "different libraries" in out and "refitting" in out
+        assert not entries[0]["fit_reused"]
+
+    def test_an_unreadable_cache_refits_rather_than_raising(self, clustered,
+                                                            capsys):
+        cell, _ = clustered
+        next((cell / "meta" / "clusterers").glob("*.joblib")).write_text("junk")
+        capsys.readouterr()
+        entries, _ = run_cluster(cell)
+        assert "unreadable cache" in capsys.readouterr().out
+        assert not entries[0]["fit_reused"]
+
+    def test_meanshift_is_not_cached(self, cell):
+        """Its params() reports quantile_used and bandwidth, both set DURING
+        fit, so its fit_hash does not exist until the work is done. No loss --
+        it is seconds, and the fit worth not repeating is the HMM's."""
+        from fmri_decomposition import cluster as C
+
+        assert "meanshift" not in C.CACHEABLE
+        assert C.CACHEABLE == C.SEQUENTIAL

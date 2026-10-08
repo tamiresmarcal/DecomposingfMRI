@@ -16,7 +16,7 @@ from fmri_decomposition import cluster as C
 
 def args(**kw):
     d = dict(methods=["threshold"], embeddings=["pca3"], k=[8],
-             train=["a", "b"], balance_train=False,
+             train=["a", "b"], balance_train=False, refit=False,
              meanshift_quantile=0.2, meanshift_fit_rows=50_000, hmm_iter=5,
              hmm2_iter=5, hmm2_restarts=2,
              min_k=C.STATE_K_BAND[0], max_k=C.STATE_K_BAND[1])

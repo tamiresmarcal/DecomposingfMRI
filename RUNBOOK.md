@@ -606,85 +606,58 @@ above**, because HMM2 at K=27 ran ~4 h on 8 cores and three atlases of
 fails, instead of leaving them pending for hours on a dependency that will
 never be satisfied.
 
-#### STOP — read this before submitting 4.6
+#### Adding rest to the shared state space
 
-Adding rest to the shared state space **costs a full re-run of `decompose` and
-`cluster` for the movie as well**. There is no incremental path. Two facts
-force it, both checked rather than assumed:
+Rest joins as a **projected** cohort, so it never defines states of its own —
+and since `decompose` and `cluster` both reuse what they already have, adding it
+costs minutes rather than repeating the fits.
 
-1. `cluster` does not append in place — parquet cannot — it reads the latents
-   file, adds the label columns, writes a temp and renames
-   (`cluster.py:50`, `append_columns`). `decompose` writes that same path, and
-   its skip is **all-or-nothing across the whole cell**:
+That was not true before this was built, and the two reasons are worth knowing
+because they are the shape of the whole stage:
 
-   ```python
-   cohorts = list(dict.fromkeys(args.train + args.project))       # decompose.py:590
-   if not args.overwrite and all((out_dir / f"cohort={c}" / "data.parquet").exists()
-                                 for c in cohorts):
-       return                                                     # skip
-   # otherwise: for cohort in cohorts: write_latents(...)          # :689-701
-   ```
+* `cluster` cannot append in place — parquet cannot — so it reads each latents
+  file, adds label columns, writes a temp and renames. `decompose` writes the
+  same path. A `decompose` run therefore **removes the state columns** from any
+  cohort it rewrites.
+* `decompose` used to skip only when *every* cohort in `train + project`
+  already had a file, and otherwise rewrote all of them. One missing cohort
+  rewrote the training cohorts too.
 
-   So one missing cohort — `camcan_rest` — makes it rewrite **every** cohort in
-   the cell, the training ones included. Rest being merely *projected* does not
-   limit what gets rewritten: there is no per-cohort skip.
+Both now work per cohort:
 
-   What that costs is TIME, not findings. The scaler, PCA and the HMM all run
-   from fixed seeds on the same rows, so the re-run reproduces the same state
-   labels; what changes is the `model_hash` stamped on them. So nothing has to
-   be re-decided — the ~24 h × 3 atlases of HMM2 work simply has to be spent
-   again.
-2. You cannot bolt rest on by itself. `project_cohorts` is inside the
-   `model_hash` payload (`decompose.fit_meta` → `model_hash`), so
-   `--project camcan_rest` alone stamps rest's latents with a different hash
-   from camcan's — verified: `9f92d969e4b08e63` vs `c654440ff27211b3` for an
-   otherwise identical fit. `transitions --check` then reports the cell as not
-   comparable across cohorts, which is exactly the check that exists to catch
-   "state 5 is not the same state in two cohorts". Here it would be a false
-   alarm — the fit really is identical, since only `--train` feeds it — but the
-   check cannot know that, and silencing it is not the answer.
+| | what it skips | what forces it |
+|---|---|---|
+| `decompose` | a cohort whose file already carries this `model_hash`; and the fit itself, when the saved one matches | `--overwrite` |
+| `cluster` | the fit, when one is cached for this `fit_hash`; and a cohort already carrying that `fit_hash` | `--refit` |
 
-**The practical consequence: do the two cohorts in ONE decompose + cluster
-run, not two.** If the movie's clustering is allowed to finish and rest is
-added afterwards, that clustering is paid for twice. Letting it finish buys the
-movie answer sooner; cancelling and re-submitting with `--project camcan
-camcan_rest` once rest's stage 2 exists pays for it once. Both are defensible —
-it is a time-versus-compute trade, and the labels come out the same either way.
+Two guards on the caches, both refusing rather than approximating: a cached
+clusterer records the `model_hash` of the latents it was fitted on, and both
+caches record the library versions they were pickled under. A mismatch means
+refit, because a pickled sklearn or hmmlearn estimator is not guaranteed to
+behave across versions.
 
-So **never start 4.6 while a `cluster` job is running**, and sequence it:
+So the sequence is just:
 
 ```bash
-squeue -u $USER -n fmridecomp_cluster      # must be empty
+squeue -u $USER -n fmridecomp_cluster      # wait for any clustering to drain
+
+for A in harvardoxford yeo7 networks; do
+  sbatch --array=0-0 slurm/dimensionality_reduction.sbatch $A -1 \
+    -- --source activation --train ds002837 cneuromod \
+       --project camcan camcan_rest --censor-policy motion
+done
+# then clustering, which will reuse every fit and label only camcan_rest
 ```
 
-1. Let the movie's clustering finish.
-2. **Bank the movie result** — `transitions`, then `select`. Those write their
-   own trees, so they survive what comes next:
-   ```bash
-   sbatch slurm/brain_states_transitions.sbatch -- --window-s -1
-   # then
-   sbatch slurm/model_selection.sbatch $Y
-   ```
-   If you want to keep that exact ranking to compare against, copy it aside
-   first — the re-run regenerates the same paths:
-   ```bash
-   cp -r outputs/bstm_selection outputs/bstm_selection_movie_only
-   ```
-3. Only then run 4.6, which redoes the movie's decompose + cluster alongside
-   rest's and leaves both cohorts in one shared state space.
+You should see `already at this model_hash, left untouched: ...` from
+`decompose` and `reusing the cached fit ... labelling only, no refit` from
+`cluster`. If you see `loading training cohorts` or a K= line taking hours,
+something did not match — check the `model_hash` line before letting it run.
 
-**If that re-run is too expensive**, the alternative is to give rest its own
-`--output-root`, so it gets an independent fit and nothing in the movie tree is
-touched. The cost is the other way round: the states are then rest-specific, so
-a movie-vs-rest comparison is between two different state definitions rather
-than one definition measured twice.
-
-Nothing in 4.5 (`static-fc`, `fcm_selection`) is affected either way — it reads
-stage 2 and writes `outputs/static_fc/`, never `outputs/latents/`. It can run
-beside a clustering job safely.
-
-`--embeddings` and `--train` in 4.6 must match what phase 2 used, since the
-same run regenerates the movie's state columns.
+**One caveat that applies to the cohort you add next, not to rest.** The fit
+caches are written by the run that fits. A cell clustered *before* this change
+has no cached clusterer, so the first run after it still fits once. That is the
+re-run rest pays for; everything after it is cheap.
 
 #### 4.7 — read the three tables
 

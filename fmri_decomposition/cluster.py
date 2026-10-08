@@ -765,6 +765,98 @@ def fit_hash(method: str, embedding: str, k, params: dict, train: list[str],
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+# Methods whose `params()` is settings-only BEFORE the fit, so `fit_hash` can be
+# computed in advance and a saved fit looked up by it.
+#
+# Not all of them: MeanShiftCluster.params() reports `quantile_used`,
+# `bandwidth` and `fit_rows`, and ThresholdCluster.params() reports
+# `bins_per_axis` -- every one of those is set DURING fit, so their hash does
+# not exist until the work is already done. That is no loss: those two are
+# seconds to minutes, and the fit worth not repeating is the HMM's.
+CACHEABLE = SEQUENTIAL
+
+
+def _cluster_libs() -> dict[str, str]:
+    """What a pickled clusterer was produced by, for the staleness guard."""
+    import numpy
+
+    libs = {"numpy": numpy.__version__}
+    for mod in ("sklearn", "hmmlearn"):
+        try:
+            libs[mod] = __import__(mod).__version__
+        except ImportError:
+            pass
+    return libs
+
+
+def clusterer_cache_path(root: Path, atlas: str, window_s, h: str) -> Path:
+    return (Path(root) / "meta" / "clusterers"
+            / f"atlas-{atlas}_window-{window_s}_{h}.joblib")
+
+
+def save_clusterer(path: Path, cl, meta: dict, log=print) -> None:
+    """Persist a fitted clusterer so a later cohort can be labelled, not refit.
+
+    Best effort: a cell that cannot write the cache has still done the work and
+    must not fail for being unable to save a shortcut.
+    """
+    try:
+        import joblib
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+        joblib.dump({"clusterer": cl, "libs": _cluster_libs(), **meta}, tmp)
+        os.replace(tmp, path)
+    except Exception as e:                                       # noqa: BLE001
+        log(f"      (could not cache the fit: {type(e).__name__}: {e})")
+
+
+def load_clusterer(path: Path, model_hash: str | None, log=print):
+    """A saved clusterer, if it is safe to apply here. Else None.
+
+    Two guards, both refusing rather than approximating:
+
+    * `model_hash` of the latents it was fitted on. `fit_hash` does not carry
+      it -- it describes the CLUSTERING, not the embedding underneath -- so
+      without this check a saved fit could be applied to latents from a
+      different `decompose` run that happened to have the same row count.
+    * the libraries it was pickled under. A pickled hmmlearn or sklearn
+      estimator is not guaranteed to behave across versions, and silently
+      applying one that does not is worse than spending the fit again.
+    """
+    if not path.exists():
+        return None
+    try:
+        import joblib
+
+        blob = joblib.load(path)
+    except Exception as e:                                       # noqa: BLE001
+        log(f"      (ignoring unreadable cache {path.name}: {type(e).__name__})")
+        return None
+    if model_hash is not None and blob.get("model_hash") != model_hash:
+        log(f"      (cached fit was made on model_hash "
+            f"{blob.get('model_hash')}, these latents are {model_hash} -- "
+            f"refitting)")
+        return None
+    want, have = _cluster_libs(), blob.get("libs") or {}
+    drift = {k: (have.get(k), v) for k, v in want.items() if have.get(k) != v}
+    if drift:
+        log(f"      (cached fit was pickled under different libraries {drift} "
+            f"-- refitting rather than trusting it)")
+        return None
+    return blob.get("clusterer")
+
+
+def column_fit_hash(path: Path, col: str) -> str | None:
+    """The `fit_hash` a latents file already records for one state column."""
+    import pyarrow.parquet as pq
+
+    md = pq.ParquetFile(path).schema_arrow.metadata or {}
+    block = json.loads((md.get(b"clusterers") or b"{}").decode())
+    entry = block.get(col) or {}
+    return entry.get("fit_hash")
+
+
 def append_columns(path: Path, new: dict[str, np.ndarray],
                    provenance: dict) -> None:
     """Add label columns to a latents file, carrying per-column provenance.
@@ -880,6 +972,15 @@ def run_one(root: Path, atlas: str, window_s, args):
     # sets it was asked for, which is the state this stage exists to avoid.
     _require_embeddings(paths, args, atlas, window_s)
 
+    # Which `decompose` fit produced these embeddings. Carried into the fit
+    # cache and checked on the way back out: `fit_hash` describes the
+    # CLUSTERING, not the embedding underneath, so without this a cached fit
+    # could be applied to latents from a different decompose run that happened
+    # to have the same row count.
+    from .decompose import latents_model_hash
+
+    cell_model_hash = latents_model_hash(paths[train[0]])
+
     entries, skipped = [], []
     for emb in args.embeddings:
         cols = embedding_columns(emb, paths)
@@ -915,7 +1016,25 @@ def run_one(root: Path, atlas: str, window_s, args):
             for k in ks:
                 cl = CLUSTERERS[method](**_opts(method, args))
                 t0 = time.time()
-                if method in SEQUENTIAL:
+                # Look the fit up BEFORE doing it. For the HMMs every component
+                # of `fit_hash` is known in advance -- k is given and `params()`
+                # is settings-only -- so a cell that has already been fitted on
+                # these exact training rows can be labelled rather than refitted.
+                # That is the difference between adding a cohort in minutes and
+                # adding it in a day.
+                reused = None
+                if method in CACHEABLE:
+                    pre = fit_hash(method, emb, k, cl.params(), train,
+                                   len(Xtr), balanced=bool(args.balance_train))
+                    cache = clusterer_cache_path(root, atlas, window_s, pre)
+                    if not args.refit:
+                        reused = load_clusterer(cache, cell_model_hash, log=log)
+                if reused is not None:
+                    cl = reused
+                    log(f"  {column_name(method, emb, cl.k_found)}"
+                        f"{'':<12} reusing the cached fit {pre} "
+                        f"-- labelling only, no refit")
+                elif method in SEQUENTIAL:
                     cl.fit(Xtr, k, lengths=len_tr)
                 else:
                     cl.fit(Xtr, k)
@@ -952,9 +1071,24 @@ def run_one(root: Path, atlas: str, window_s, args):
                 col = column_name(method, emb, cl.k_found)
                 h = fit_hash(method, emb, cl.k_found, cl.params(), train,
                              len(Xtr), balanced=bool(args.balance_train))
+                if method in CACHEABLE and reused is None:
+                    save_clusterer(
+                        clusterer_cache_path(root, atlas, window_s, h), cl,
+                        {"model_hash": cell_model_hash, "method": method,
+                         "embedding": emb, "k": int(cl.k_found),
+                         "train": sorted(train), "n_train_rows": len(Xtr),
+                         "column": col}, log=log)
 
-                written = {}
+                written, kept = {}, []
                 for cohort, f in frames.items():
+                    # A cohort already carrying THIS fit is left alone. Not an
+                    # optimisation: append_columns rewrites the whole file, so
+                    # relabelling a cohort that needs nothing would churn every
+                    # file in the cell on every run.
+                    if (not args.refit
+                            and column_fit_hash(paths[cohort], col) == h):
+                        kept.append(cohort)
+                        continue
                     X = f[cols].to_numpy(float)
                     lab = (cl.labels(X, lengths=_seq_lengths(f))
                            if method in SEQUENTIAL else cl.labels(X))
@@ -981,6 +1115,8 @@ def run_one(root: Path, atlas: str, window_s, args):
                              f"  loglik spread {d['loglik_spread_across_restarts']:.1f}")
                 if d.get("stopped_early") is False:
                     extra += f"  HIT THE {d['n_iter_cap']}-ITER CAP"
+                if kept:
+                    extra += f"  kept {kept} (already at this fit_hash)"
                 log(f"  {col:<28} K={cl.k_found:<4} {time.time()-t0:>5.1f}s  "
                     f"states used per cohort {written}{extra}")
                 entries.append({"atlas": atlas, "window_s": str(window_s),
@@ -988,7 +1124,8 @@ def run_one(root: Path, atlas: str, window_s, args):
                                 "embedding": emb, "n_dim": len(cols),
                                 "k": int(cl.k_found),
                                 "fit_hash": h, "train_cohorts": train,
-                                "states_used": written,
+                                "states_used": written, "cohorts_kept": kept,
+                                "fit_reused": bool(reused is not None),
                                 "fit_diagnostics":
                                     getattr(cl, "diagnostics", None) or None})
     return entries, skipped
@@ -1297,6 +1434,13 @@ def add_arguments(p) -> None:
                         "Meer et al. 2020 selected, so hmm1 and hmm2 can be "
                         "compared at it; 8 and 27 are perfect cubes, which "
                         "`threshold` requires.")
+    p.add_argument("--refit", action="store_true",
+                   help="ignore the saved fits under outputs/meta/clusterers/ "
+                        "and fit again, relabelling every cohort. The cache is "
+                        "keyed by fit_hash AND by the latents' model_hash, and "
+                        "refuses itself when the libraries it was pickled "
+                        "under have moved, so this is for forcing the issue "
+                        "rather than for correctness.")
     p.add_argument("--train", nargs="+", default=DEFAULT_TRAIN,
                    help="cohorts a clusterer may be FITTED on, MERGED into one "
                         "fit; every cohort present is then labelled from it")

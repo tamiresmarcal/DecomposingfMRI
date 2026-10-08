@@ -32,6 +32,11 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      Last link of the per-cohort chain.
 4    dimensionality_reduction.sbatch             -> latents: PCA + UMAP coordinates, fit on
                                      the train cohorts, projected onto the rest.
+                                     PER COHORT: one whose file already carries
+                                     this model_hash is left untouched, and the
+                                     saved fit is reused rather than redone, so
+                                     adding a cohort does not disturb the others
+                                     or the state columns 4b put in them.
                                      --source dfc      windowed edges, one fit
                                                        per --window-s
                                      --source activation   per-TR frames, written
@@ -39,6 +44,9 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
 4b   clustering.sbatch              latents -> brain-state LABELS, appended to
                                      the same files. threshold / MeanShift /
                                      HMM1 / HMM2 x pca3 / umap3 / raw<N>.
+                                     The HMM fits are CACHED by fit_hash, so a
+                                     cohort added later is labelled from the
+                                     saved fit instead of refitting it.
                                      Every state definition lives here;
                                      stage 4 defines none.
 5a   brain_states_transitions.sbatch          labels -> per-subject transition matrices,
@@ -103,6 +111,17 @@ outputs/
 │
 ├── transitions/                                  STAGE 5a — one table per state set
 │   └── atlas=yeo7/window_s=30/states=HMM1_pca3_8/cohort=camcan/subjects.parquet
+│
+├── meta/
+│   ├── models/        STAGE 4 — the fitted scaler/PCA/UMAP per (atlas, aperture),
+│   │                  plus a manifest recording its model_hash and the library
+│   │                  versions it was pickled under. A later run projecting a
+│   │                  NEW cohort loads this instead of refitting.
+│   └── clusterers/    STAGE 4b — the fitted clusterer per fit_hash, so labelling
+│                      a cohort added later costs a forward pass instead of the
+│                      ~24 h HMM2 fit. Keyed by fit_hash AND checked against the
+│                      latents' model_hash and the pickling libraries; a mismatch
+│                      means refit, never silent reuse.
 │
 ├── static_fc/                                    STAGE 3b — one FC per subject
 │   └── atlas=harvardoxford/cohort=camcan/subjects.parquet
