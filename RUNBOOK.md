@@ -614,8 +614,26 @@ force it, both checked rather than assumed:
 
 1. `cluster` does not append in place — parquet cannot — it reads the latents
    file, adds the label columns, writes a temp and renames
-   (`cluster.py:50`, `append_columns`). `decompose` writes that same path. So a
-   `decompose` run at `-1` **deletes every state column** in that cell.
+   (`cluster.py:50`, `append_columns`). `decompose` writes that same path, and
+   its skip is **all-or-nothing across the whole cell**:
+
+   ```python
+   cohorts = list(dict.fromkeys(args.train + args.project))       # decompose.py:590
+   if not args.overwrite and all((out_dir / f"cohort={c}" / "data.parquet").exists()
+                                 for c in cohorts):
+       return                                                     # skip
+   # otherwise: for cohort in cohorts: write_latents(...)          # :689-701
+   ```
+
+   So one missing cohort — `camcan_rest` — makes it rewrite **every** cohort in
+   the cell, the training ones included. Rest being merely *projected* does not
+   limit what gets rewritten: there is no per-cohort skip.
+
+   What that costs is TIME, not findings. The scaler, PCA and the HMM all run
+   from fixed seeds on the same rows, so the re-run reproduces the same state
+   labels; what changes is the `model_hash` stamped on them. So nothing has to
+   be re-decided — the ~24 h × 3 atlases of HMM2 work simply has to be spent
+   again.
 2. You cannot bolt rest on by itself. `project_cohorts` is inside the
    `model_hash` payload (`decompose.fit_meta` → `model_hash`), so
    `--project camcan_rest` alone stamps rest's latents with a different hash
@@ -625,6 +643,13 @@ force it, both checked rather than assumed:
    "state 5 is not the same state in two cohorts". Here it would be a false
    alarm — the fit really is identical, since only `--train` feeds it — but the
    check cannot know that, and silencing it is not the answer.
+
+**The practical consequence: do the two cohorts in ONE decompose + cluster
+run, not two.** If the movie's clustering is allowed to finish and rest is
+added afterwards, that clustering is paid for twice. Letting it finish buys the
+movie answer sooner; cancelling and re-submitting with `--project camcan
+camcan_rest` once rest's stage 2 exists pays for it once. Both are defensible —
+it is a time-versus-compute trade, and the labels come out the same either way.
 
 So **never start 4.6 while a `cluster` job is running**, and sequence it:
 
