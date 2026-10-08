@@ -150,6 +150,26 @@ stimulus:
   timing_source: identity
   unit_of_analysis: run
 
+  # NO SHARED STIMULUS, SO NO ALIGNMENT GATE. This is the one line without
+  # which phase 1 cannot run for rest at all.
+  #
+  # `diagnose` computes inter-subject correlation and FAILS (exit 2) when the
+  # median |best_lag| exceeds this many TRs, and `activation_and_dfc.sh` chains
+  # stage 3 and the censor step behind it with --dependency=afterok. For the
+  # movie that is exactly right: a misaligned run makes every `window_id` mean
+  # a different moment per subject, and ISC is what detects it.
+  #
+  # At rest there is nothing shared to correlate, so the best lag is noise and
+  # its median lands somewhere in the middle of the +-30 TR search. Left at
+  # 1.0, every rest run FAILS a check that was never meaningful here, and the
+  # failure cancels the rest of the chain.
+  #
+  # null = measure it, write isc_alignment.csv, gate nothing. Worth reading
+  # afterwards in the other direction: rest ISC should be near ZERO, and a
+  # resting cohort whose subjects correlate strongly is a finding -- a task
+  # mislabelled as rest, or a shared artifact -- not a pass.
+  isc_gate_tr: null
+
 windows:
   # THE SAME GRID AS THE MOVIE, so that if a windowed state set is ever the one
   # to compare, the aperture is not another difference between conditions.

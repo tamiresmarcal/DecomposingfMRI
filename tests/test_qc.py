@@ -1,5 +1,7 @@
 """Per-subject QC metrics and the ISC grouping they depend on."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -344,3 +346,51 @@ class TestAbsentData:
         note = _note("", "no activation shard on disk -- this run was "
                          "discovered but never extracted")
         assert "never extracted" in note
+
+
+class TestIscGateNotApplicable:
+    """A cohort with no shared stimulus has no alignment for ISC to check.
+
+    `diagnose` exits 2 on a FAIL and `activation_and_dfc.sh` chains stage 3
+    behind it with --dependency=afterok, so leaving the gate at its default
+    for a resting-state cohort cancels the rest of phase 1 over a fact about
+    the DESIGN rather than about the data.
+    """
+
+    def test_a_null_gate_loads_as_none(self, tmp_path):
+        import yaml
+
+        from fmri_decomposition.config import load_config
+
+        base = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "config"
+             / "camcan_rest.yaml").read_text())
+        assert base["stimulus"]["isc_gate_tr"] is None
+        p = tmp_path / "c.yaml"
+        p.write_text(yaml.safe_dump(base))
+        assert load_config(p).stimulus.isc_gate_tr is None
+
+    def test_the_movie_cohort_still_has_a_real_gate(self):
+        import yaml
+
+        cfg = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "config"
+             / "camcan_movie.yaml").read_text())
+        # Unset there, so it keeps the 1.0 default rather than being disabled
+        # by this change.
+        assert cfg.get("stimulus", {}).get("isc_gate_tr", 1.0) == 1.0
+
+    def test_rest_like_lags_would_fail_a_default_gate(self):
+        """Why the null is needed and not just a larger threshold: with nothing
+        shared to correlate, the best lag is noise over the search range."""
+        rng = np.random.default_rng(0)
+        isc = pd.DataFrame({"best_lag_tr": rng.integers(-30, 31, size=200)})
+        ok, _ = isc_gate(isc, 1.0)
+        assert not ok
+
+    def test_an_infinite_threshold_passes_anything_finite(self):
+        """How `diagnose` reports the measurement without gating on it."""
+        isc = pd.DataFrame({"best_lag_tr": [-29.0, 0.0, 30.0]})
+        ok, msg = isc_gate(isc, float("inf"))
+        assert ok
+        assert "median |best_lag|" in msg

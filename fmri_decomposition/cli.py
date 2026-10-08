@@ -430,6 +430,17 @@ def cmd_diagnose(args) -> int:
         return 0
     print("ISC alignment ->", write_diagnostic(
         isc, cfg.output_root, "isc_alignment.csv", cohort=cfg.cohort))
+    if cfg.stimulus.isc_gate_tr is None:
+        # Measured and written, deliberately NOT gated -- see
+        # StimulusConfig.isc_gate_tr. A cohort with no shared stimulus has no
+        # alignment for ISC to check, so a FAIL here would cancel stage 3 for
+        # a fact about the design rather than about the data.
+        ok, msg = isc_gate(isc, float("inf"))
+        print(f"ISC gate NOT APPLIED (stimulus.isc_gate_tr is null -- this "
+              f"cohort has no shared stimulus): {msg}")
+        print("  rest ISC should be near zero; a strongly correlated resting "
+              "cohort is a finding, not a pass.")
+        return 0
     ok, msg = isc_gate(isc, cfg.stimulus.isc_gate_tr)
     print(("PASS " if ok else "FAIL ") + msg)
     return 0 if ok else 2

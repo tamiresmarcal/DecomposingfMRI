@@ -359,112 +359,231 @@ This is the table van der Meer et al.'s Fig. 1 plots.
 
 Phase 3 answers *which movie state set* predicts best. It cannot answer whether
 the whole idea beats what it is supposed to improve on. Two more rankings do,
-each written to its own tree with the same `summary.csv` shape, and both cheap
-next to what you have already run:
+each in its own tree with the same `summary.csv` shape:
 
 | tree | what it is | what it costs |
 |---|---|---|
 | `fcm_selection` | one correlation matrix per subject, flattened | one pass over stage 2 |
 | `resting_bstm_selection` | the same pipeline on the rest scan | fMRIPrep + stage 2 |
 
-**The static-FC arm, movie only.** Nothing new to preprocess:
+`fcm_selection` on the movie alone needs nothing new preprocessed:
 
 ```bash
+git pull
 sbatch slurm/static_fc.sbatch camcan
+sbatch slurm/fcm_selection.sbatch additional_HADS_anx_category -- --cohorts camcan
 ```
 
-One table per (atlas, cohort) under `outputs/static_fc/`. It reads stage 2
-through the *same function* the `window_s = -1` state arm reads
-(`frames.read_cohort`) — same band-pass, same per-run z-score, same
-`good_frame` gate. That identity is the point: a difference between the arms is
-then a difference between **models**, not between preprocessing.
+Everything below is the rest arm, which starts at fMRIPrep.
 
-**The rest arm.** Rest is a separate cohort, because Cam-CAN's TR differs by
-task (movie 2.47 s, rest 1.97 s) and a cohort config carries one `tr:`. Adding
-`Rest` to `camcan_movie.yaml`'s `include_tasks` would rescale every time column
-by 1.25 and error nowhere.
-
-`config/camcan_rest.yaml` is written and **has four values I could not confirm
-from the files** — the TR among them. Read the block at the top of it and run
-the four checks before building anything.
+#### 4.0 — pull, and set the environment once
 
 ```bash
-# stage 1, the expensive part (~50 min/subject, same as the movie)
-python3 preprocessing/camcan/01_build_bids.py --task Rest --n-echoes 0 \
-    --func-subdir func_rest -o /project/.../camcan_rest_bids \
-    --dataset-name "Cam-CAN CC700 rest (BIDS view for fMRIPrep)" --limit 10
-# the SAME fMRIPrep script as the movie -- four variables, no edit
-BIDS_ROOT=/project/.../camcan_rest_bids \
-OUT_ROOT=/project/.../camcan_rest_fmriprep \
-WORK_ROOT=/project/.../work/camcan_rest_fmriprep \
-TASK_ID=Rest sbatch --array=0-9 preprocessing/camcan/02_fmriprep.sbatch
+cd /project/6008063/tamires/DecomposingfMRI
+git pull
+source slurm/env.sh                 # FMRIDECOMP_SIF, FMRIDECOMP_SIF45, binds, account
+```
 
-# then the ordinary per-cohort phase 1
-python tools/check_cohort.py config/camcan_rest.yaml
+**Containers.** Two images, one boundary (`containers/README.md`):
+
+| stages | image | env var |
+|---|---|---|
+| 1 (fMRIPrep) | none — `module load StdEnv/2023 fmriprep/25.1.1` | — |
+| 2–3, 3b | `fmri_decomp.sif` | `FMRIDECOMP_SIF` |
+| 4–5 | `fmri_decomp_stage45.sif` | `FMRIDECOMP_SIF45` |
+
+Every `slurm/*.sbatch` picks the right one itself and refuses early, by name,
+if the image cannot import what it needs. Stage 1 uses no container at all —
+it is a cluster module.
+
+`$RUN` below means the stage 2–3 interpreter, for the few read-only commands
+that run on a login node:
+
+```bash
+RUN="apptainer exec --bind ${FMRIDECOMP_BINDS:-/project,/scratch,/home} --pwd $PWD $FMRIDECOMP_SIF python3"
+```
+
+#### 4.1 — confirm the rest acquisition (login node, seconds)
+
+Three of four values are already confirmed in `config/camcan_rest.yaml`
+(TR 1.97, `func_rest`, single-echo). This re-checks them on one subject and
+costs nothing:
+
+```bash
+R=/project/6008063/tamires/cohorts/camcan/cc700/mri/pipeline/release004/BIDSsep
+ls $R/func_rest/sub-CC110033/func/
+python3 -c "import json;print(json.load(open('$R/func_rest/sub-CC110033/func/sub-CC110033_task-Rest_bold.json'))['RepetitionTime'])"
+```
+
+Expect one `_bold.nii.gz` with **no** `echo-` in the name, and `1.97`.
+
+#### 4.2 — build the rest BIDS tree (login node, seconds)
+
+Symlinks only, so it costs no disk. Pilot on 10 first:
+
+```bash
+python3 preprocessing/camcan/01_build_bids.py \
+    --task Rest --n-echoes 0 --func-subdir func_rest \
+    -o /project/6008063/tamires/cohorts/camcan_rest_bids \
+    --dataset-name "Cam-CAN CC700 rest (BIDS view for fMRIPrep)" \
+    --limit 10
+```
+
+It prints `usable subjects` and a breakdown of what it skipped. **0 usable is
+never a fact about the data** — it is a wrong `--func-subdir`, `--n-echoes` or
+`--task`, and the script refuses rather than exiting 0. When the count looks
+right, drop `--limit 10` and re-run to take all of them.
+
+#### 4.3 — fMRIPrep the rest scans (the one slow step)
+
+Prereqs are already satisfied from the movie run — same `TEMPLATEFLOW_HOME`,
+same FreeSurfer licence — and the script checks both before the module loads.
+
+```bash
+export REST_BIDS=/project/6008063/tamires/cohorts/camcan_rest_bids
+export REST_OUT=/project/6008063/tamires/cohorts/camcan_rest_fmriprep
+export REST_WORK=/project/6008063/tamires/work/camcan_rest_fmriprep
+
+# pilot: the first 10 lines of subjects.txt
+BIDS_ROOT=$REST_BIDS OUT_ROOT=$REST_OUT WORK_ROOT=$REST_WORK TASK_ID=Rest \
+  sbatch --array=0-9 preprocessing/camcan/02_fmriprep.sbatch
+```
+
+The allocation is in the script: **8 CPUs, 8G/CPU (64G), 8 h**, one array task
+per subject. That walltime was sized for the five-echo movie; single-echo rest
+has no echo combination to do, so expect well under it — check the pilot's
+`finished ... with status 0` lines before scaling up.
+
+```bash
+seff <jobid>_0            # what the pilot actually used
+N=$(wc -l < $REST_BIDS/subjects.txt)
+BIDS_ROOT=$REST_BIDS OUT_ROOT=$REST_OUT WORK_ROOT=$REST_WORK TASK_ID=Rest \
+  sbatch --array=10-$((N-1))%60 preprocessing/camcan/02_fmriprep.sbatch
+```
+
+`%60` caps concurrent tasks. Raise it if the queue is empty; it is there
+because each subject's nipype work dir holds tens of thousands of files and the
+inode quota is the real limit, not CPU.
+
+Then the only value still unconfirmed — the volume count:
+
+```bash
+$RUN -c "import glob,nibabel as nib,collections; \
+print(collections.Counter(nib.load(f).shape for f in \
+glob.glob('$REST_OUT/sub-*/func/*task-Rest*desc-preproc_bold.nii.gz')))"
+```
+
+**One line of output means one shape**, which is also the corruption check. If
+it is 261 everywhere, set `stimulus.durations_s: {Rest: 514.17}` in
+`config/camcan_rest.yaml`. If it varies, leave it empty — an assumed fixed
+duration where runs differ makes the window grid claim windows some subjects
+never acquired.
+
+#### 4.4 — phase 1 for rest (extract, QC, censor)
+
+```bash
 python tools/make_participants.py config/camcan_rest.yaml \
     -o config/camcan_rest_participants.csv
+python3 tools/check_cohort.py config/camcan_rest.yaml
 ./slurm/activation_and_dfc.sh config/camcan_rest.yaml
 ```
 
-`config/camcan_rest.yaml` carries the window grid too, so `30 60 120 300` work
-at rest exactly as they do for the movie — they need stage 3 (`dfc`), which the
-activation-only route below skips. If you want them, add `dfc` to the chain and
-pass `--no-strict`, because `stimulus.durations_s` is empty until the volume
-count is confirmed and `dfc` then falls back to each subject's observed run
-length with a validation warning.
+Two prompts to expect, both from the chain script and both `y` here:
 
-Two things about the windowed apertures at rest, both arithmetic rather than
-opinion (the full tables are in the config):
+* *"validate reported problem(s) … continue with --no-strict?"* — the missing
+  `stimulus.durations_s`, which is expected until 4.3 confirms it. `dfc` falls
+  back to each file's observed length.
+* a shard-sizing warning, if the default 8 array tasks over-provisions. It
+  prints the number to use; re-run with it.
 
-* A window holds **more** samples at rest than in the movie — TR 1.97 against
-  2.47, so 30 s is 15 TR here and 12 there. Rest edges are therefore the
-  **less** noisy of the two (Fisher-z SD 0.289 vs 0.333 at 30 s). A
-  movie-vs-rest difference in connectivity *variability* is partly this.
-* `harvardoxford` is rank-deficient at every window below 300 s (its floor is
-  219.7 s at this TR). The rows are still computed and flagged; edge-wise
-  analysis is fine, anything that inverts the matrix is not.
+`config/camcan_rest.yaml` sets **`isc_gate_tr: null`**, which is the one line
+without which this chain cannot run at all. `diagnose` exits 2 when ISC
+alignment fails and stage 3 is chained behind it with `--dependency=afterok`;
+at rest there is nothing shared to correlate, so the best lag is noise and the
+gate would FAIL on a fact about the design. ISC is still computed and written —
+read it the other way round: rest ISC should be near **zero**, and a resting
+cohort whose subjects correlate strongly is a finding, not a pass.
 
-For the state arm at rest, **project** rest into the state space already fitted
-on the movie, rather than fitting a second one:
+This also gives you the windowed apertures (`30 60 120 300`) at rest, since the
+chain runs `dfc`. For activation-only, skip `activation_and_dfc.sh` and submit
+its first two links by hand:
 
 ```bash
-for A in harvardoxford yeo7 networks; do
-  sbatch --array=0-0 slurm/dimensionality_reduction.sbatch $A -1 \
-    -- --source activation --train ds002837 cneuromod \
-       --project camcan camcan_rest --censor-policy motion
-done
-# then clustering + transitions exactly as in phase 2-3, with camcan_rest
-# present in the cell. `cluster` fits on --train and predicts everything else.
+E=$(sbatch --parsable --array=0-7 slurm/extract_activations.sbatch \
+      config/camcan_rest.yaml --no-strict)
+F=$(sbatch --parsable --dependency=afterok:$E slurm/finalize.sbatch \
+      config/camcan_rest.yaml activation)
+sbatch --dependency=afterok:$F slurm/censor.sbatch \
+      config/camcan_rest.yaml config/censor/motion.yaml
 ```
 
-That holds the **states fixed** across conditions, so movie-vs-rest is a
-difference in dynamics and not in what a state means. An independent rest fit
-is the other reading of "the same pipeline for rest" and needs a separate
-`--output-root`: the fitted objects are saved as
-`decompose_atlas-<a>_window-<w>.joblib`, keyed by cell and not by `model_hash`,
-so a second fit in the same tree overwrites the movie's and breaks
-`state-means` for it.
+#### 4.5 — the FC tree (both conditions)
 
-**Then the three rankings.** The same `summary.csv` shape three times, read
-side by side:
+Independent of everything in 4.6, and the cheaper half:
 
 ```bash
 sbatch slurm/static_fc.sbatch camcan camcan_rest
-
+# then, once it finishes
 for Y in additional_HADS_anx_category additional_HADS_dep_category; do
-  # 1. movie states                       -> outputs/bstm_selection/
-  sbatch slurm/model_selection.sbatch $Y
-
-  # 2. rest states -- the SAME script, another cohort and another folder
-  #                                       -> outputs/resting_bstm_selection/
-  sbatch slurm/model_selection.sbatch $Y -- \
-      --cohort camcan_rest --output-name resting_bstm_selection
-
-  # 3. static connectivity, both conditions in one `cohort` column
-  #                                       -> outputs/fcm_selection/
   sbatch slurm/fcm_selection.sbatch $Y
 done
 ```
+
+`static_fc.sbatch` asks for 4 CPUs / 32G / 3 h; `fcm_selection.sbatch` for
+16 CPUs / 32G / 3 h. Both are single jobs, not arrays — each (atlas, cohort)
+writes one `subjects.parquet`, so an array would race to write one file.
+
+#### 4.6 — the rest state tree
+
+Rest joins the cell as a **projected** cohort, so the states stay the movie's
+and only the dynamics differ. `--project` gains `camcan_rest`; `--train` does
+not change:
+
+```bash
+source slurm/env.sh
+ATLASES="harvardoxford yeo7 networks"
+TRAIN="--train ds002837 cneuromod"
+PROJ="--project camcan camcan_rest"
+POL="--censor-policy motion"
+
+D=$(for A in $ATLASES; do
+      sbatch --parsable --array=0-0 slurm/dimensionality_reduction.sbatch $A -1 \
+        -- --source activation $TRAIN $PROJ $POL | cut -d';' -f1
+    done | paste -sd:)
+
+C=$(for A in $ATLASES; do
+      sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$D \
+        --time=24:00:00 slurm/clustering.sbatch $A -1 \
+        -- $TRAIN --embeddings pca3 umap3 raw7 raw14 | cut -d';' -f1
+    done | paste -sd:)
+
+T=$(sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$C \
+      slurm/brain_states_transitions.sbatch -- --window-s -1 | cut -d';' -f1)
+
+for Y in additional_HADS_anx_category additional_HADS_dep_category; do
+  sbatch --kill-on-invalid-dep=yes --dependency=afterok:$T \
+    slurm/model_selection.sbatch $Y -- \
+      --cohort camcan_rest --output-name resting_bstm_selection
+done
+
+squeue -u $USER -o "%.12i %.32j %.9T %.11M %R"
+```
+
+Allocations come from the scripts: decompose 4 CPUs / 64G / 6 h (raised here is
+rarely needed at `-1`), clustering 8 CPUs / 32G / 8 h — **override to 24 h as
+above**, because HMM2 at K=27 ran ~4 h on 8 cores and three atlases of
+`harvardoxford -1` are the long pole. Transitions 4 CPUs / 16G / 2 h.
+
+`--kill-on-invalid-dep=yes` cancels the dependents when something upstream
+fails, instead of leaving them pending for hours on a dependency that will
+never be satisfied.
+
+Re-running `decompose` at `-1` **rewrites the latents file** that clustering
+appends to, so the dependency above is not optional — and the movie's existing
+state columns in that cell are regenerated by the same run, which is why
+`--embeddings` and `--train` must match what phase 2 used.
+
+#### 4.7 — read the three tables
 
 ```bash
 for T in bstm_selection resting_bstm_selection fcm_selection; do
@@ -476,16 +595,33 @@ done
 Every table has `model arm atlas n n_features mean std min max count`, sorted
 best-first. What to read:
 
-* `mean` against the `(covariates only)` row in its own table — that is the
+* `mean` against the `(covariates only)` row **in its own table** — that is the
   floor, and age and sex predict HADS on their own.
 * `std` next to every `mean`. A gap smaller than either arm's spread across
   fold seeds is not a result.
-* **`n` first, always.** These are three separate runs on whoever each one
-  has, so two tables can differ in sample as well as in score. If they differ
-  and the gap matters, pass the same `--restrict-subjects` file to all three
-  and re-run.
-* In `fcm_selection`, `edges` against `global`. `global` is a subject's mean
-  and SD over every edge — two numbers with no topology in them. If it matches
+* **`n` first, always.** These are three separate runs on whoever each one has,
+  so two tables can differ in sample as well as in score. If they differ and
+  the gap matters, build one id list and pass it to all three:
+
+  ```bash
+  $RUN tools/shared_subjects.py --cohorts camcan camcan_rest \
+      -o shared_subjects.txt
+  ```
+
+  It prints a count per (tree, cohort) so a tree that contributed nothing is
+  visible, and refuses rather than silently skipping one. Then:
+
+  ```bash
+  sbatch slurm/model_selection.sbatch $Y -- \
+      --restrict-subjects shared_subjects.txt
+  sbatch slurm/model_selection.sbatch $Y -- --cohort camcan_rest \
+      --output-name resting_bstm_selection \
+      --restrict-subjects shared_subjects.txt
+  sbatch slurm/fcm_selection.sbatch $Y -- \
+      --restrict-subjects shared_subjects.txt
+  ```
+* In `fcm_selection`, `edges` against `global`. `global` is a subject's mean and
+  SD over every edge — two numbers with no topology in them. If it matches
   `edges`, the pattern is not what is being measured; the amount is.
 
 None of the three subtracts one row from another, on purpose. The arms share

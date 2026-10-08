@@ -104,7 +104,24 @@ class StimulusConfig:
     timing_source: str = "identity"       # identity | from_events | from_scans |
     #                                       from_log | from_paper | from_isc
     unit_of_analysis: str = "run"         # run | clip (HCP is clip-based)
-    isc_gate_tr: float = 1.0              # refuse stage 3 if median |lag| exceeds
+    isc_gate_tr: float | None = 1.0       # refuse stage 3 if median |lag| exceeds
+    # `null` means THIS COHORT HAS NO SHARED STIMULUS, so inter-subject
+    # correlation is not an alignment check and must not gate anything.
+    #
+    # The gate exists because a misaligned naturalistic run makes every
+    # `window_id` mean a different moment per subject, and ISC detects that:
+    # two subjects watching the same film correlate, and the lag at which they
+    # correlate best is the misalignment. At REST there is nothing shared to
+    # correlate, so the best lag is noise and its median is whatever half the
+    # search range happens to be -- a FAIL that says nothing about the data.
+    # Left at 1.0, that FAIL propagates through `--dependency=afterok` and
+    # cancels stage 3 and the censor step for a resting-state cohort.
+    #
+    # ISC is still COMPUTED and written to isc_alignment.csv when this is
+    # null, because the measurement is cheap and informative in the other
+    # direction: rest ISC should be near zero, and a resting cohort that
+    # correlates strongly across subjects is a finding (a task mislabelled as
+    # rest, or a shared artifact), not a pass.
 
 
 @dataclass
