@@ -456,9 +456,35 @@ has no echo combination to do, so expect well under it — check the pilot's
 
 ```bash
 seff <jobid>_0            # what the pilot actually used
+
+# expand subjects.txt from the pilot's 10 to all of them
+python3 preprocessing/camcan/01_build_bids.py \
+    --task Rest --n-echoes 0 --func-subdir func_rest -o $REST_BIDS \
+    --dataset-name "Cam-CAN CC700 rest (BIDS view for fMRIPrep)"
+
 N=$(wc -l < $REST_BIDS/subjects.txt)
 BIDS_ROOT=$REST_BIDS OUT_ROOT=$REST_OUT WORK_ROOT=$REST_WORK TASK_ID=Rest \
   sbatch --array=10-$((N-1))%60 preprocessing/camcan/02_fmriprep.sbatch
+```
+
+**This is safe to do while the pilot is still running**, and the reason is
+worth knowing rather than trusting. Each array task reads `subjects.txt` at
+startup (`sed -n "$((IDX+1))p"`), so rewriting the file mid-flight could in
+principle hand a pending task a different subject. It cannot here: `--limit`
+selects `usable[:limit]`, a sorted PREFIX, so lines 1-10 are byte-identical
+before and after. A pilot task that has not started yet still resolves to the
+subject it was queued for, and the `IDX >= N_SUBS` guard only loosens.
+
+Re-running the BIDS build is also a no-op for the 10 already linked: `link()`
+returns early when the destination exists and `--force` was not passed.
+
+What you give up by submitting early is sizing the big array from the pilot's
+real `seff`. That is a bounded risk -- the prereq checks already passed, so a
+systematic problem would have failed the pilot in seconds -- but if the pilot
+turns out to fail for a data reason, cancel and look before re-queueing:
+
+```bash
+scancel <big_jobid>
 ```
 
 `%60` caps concurrent tasks. Raise it if the queue is empty; it is there
