@@ -255,7 +255,9 @@ class TestTheTable:
                                for v in pheno["y"]]}).to_csv(ph, index=False)
         a = args(root, cohorts=["cA", "cB"], pheno=[f"{ph}:,"], **kw)
         assert F.run(a) == 0
-        out = root / "fcm_selection" / "task=movie" / "target=hads"
+        # From the args, not hardcoded, so a test that varies --task reads the
+        # folder that run actually wrote.
+        out = root / a.output_name / f"task={a.task}" / f"target={a.target}"
         return pd.read_csv(out / "summary.csv"), out
 
     def test_a_conditions_cohorts_sit_in_one_table_as_a_cohort_column(
@@ -304,6 +306,37 @@ class TestTheTable:
         assert out.parent.name == "task=movie"
         assert out.parent.parent.name == "fcm_selection"
         assert out.name == "target=hads"
+
+    def test_run_and_target_are_the_first_two_columns(self, one_cell,
+                                                      tmp_path):
+        """The path says which of the four rankings a table is, and a path is
+        not in the table. Without these, a concatenation of the four
+        summary.csv files -- the only way to read them against each other --
+        has no column saying where a row came from. First, so `head` shows
+        them."""
+        d, out = self.run_it(one_cell, tmp_path)
+        assert list(d.columns[:2]) == ["run", "target"]
+        assert d["run"].unique().tolist() == ["fcm movie"]
+        assert d["target"].unique().tolist() == ["hads"]
+        long = pd.read_csv(out / "scores.csv")
+        assert list(long.columns[:2]) == ["run", "target"]
+
+    def test_the_run_label_is_built_from_the_path_it_is_written_to(
+            self, one_cell, tmp_path):
+        """So it can never disagree with where the file sits."""
+        d, out = self.run_it(one_cell, tmp_path, task="rest")
+        assert out.parent.name == "task=rest"
+        assert d["run"].unique().tolist() == ["fcm rest"]
+
+    def test_lgbm_is_available_here_the_same_way_it_is_in_bstm(self, one_cell,
+                                                              tmp_path):
+        """Both stages build estimators through bstm_selection.make_model, so
+        --models lgbm needs no separate wiring -- only lightgbm installed."""
+        pytest.importorskip("lightgbm")
+        d, _ = self.run_it(one_cell, tmp_path, models=["ridge", "lgbm"])
+        assert set(d["model"]) == {"ridge", "lgbm"}
+        for arm in ("edges", "global", "(covariates only)"):
+            assert ((d["model"] == "lgbm") & (d["arm"] == arm)).any(), arm
 
     def test_only_task_and_target_are_directories(self, one_cell, tmp_path):
         """The two keys in the PATH are the two that identify the ranking.

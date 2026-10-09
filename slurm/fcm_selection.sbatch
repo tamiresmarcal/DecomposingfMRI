@@ -32,11 +32,25 @@
 #
 # --models defaults to `ridge` ALONE here, unlike model_selection's `ridge hgb`:
 # a tree ensemble on 6,105 features against ~600 subjects is both slow and badly
-# matched. Add hgb or lgbm deliberately. `lgbm` needs lightgbm, which
-# containers/stage45.def pins but an older build of the image may not carry;
-# bstm_selection.make_model says so by name and offers hgb, the same algorithm
-# family. So lightgbm is NOT checked up front -- doing that blocked a default
-# run that never wanted it.
+# matched. Add hgb or lgbm deliberately -- and RAISE --time when you do:
+#
+#   sbatch --time=12:00:00 slurm/fcm_selection.sbatch $Y -- \
+#       --cohorts camcan --task movie --pheno "${PHENO[@]}" \
+#       --models ridge lgbm
+#
+# Both stages build estimators through bstm_selection.make_model, so lgbm here
+# is the same estimator with the same fixed hyperparameters as in select-bstm;
+# nothing extra is wired. `lgbm` needs lightgbm, which containers/stage45.def
+# pins but an older build of the image may not carry; make_model says so by
+# name and offers hgb, the same algorithm family. So lightgbm is NOT checked up
+# front -- doing that blocked a default run that never wanted it.
+#
+# WATCH FOR A CONSTANT. make_model fixes min_child_samples=30, so a training
+# fold under ~40 subjects admits no split and the model predicts the training
+# mean for everyone. Every arm then scores IDENTICALLY, which reads as "no arm
+# wins" and is really "this model never ran". Both stages print a WARNING
+# naming the model when that happens; at n~600 it cannot, but
+# --restrict-subjects can take n down far enough.
 #
 # ONE JOB, NOT AN ARRAY. The grid (cells x arms x models x fold seeds) is
 # parallelised inside the process with joblib, because every cell needs the same

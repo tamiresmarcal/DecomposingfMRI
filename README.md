@@ -140,6 +140,8 @@ outputs/
 │   ├── task=movie/target=additional_HADS_anx_category/
 │   └── task=rest/ target=additional_HADS_anx_category/
 │       ├── summary.csv  scores.csv  DESIGN.md  figures/  models/
+│       First two columns: `run` ("bstm movie") and `target`, so the four
+│       tables can be concatenated and still say which is which.
 │       task= and target= are the ONLY directory keys in the two selection
 │       trees. atlas, window_s, K, states and cohort are COLUMNS of
 │       summary.csv -- the comparison is rows you can sort, not a join

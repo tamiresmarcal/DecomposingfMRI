@@ -82,8 +82,10 @@ import numpy as np
 import pandas as pd
 
 from . import static_fc as _sfc
-from .bstm_selection import (ORDINAL_LEVELS, _wipe, log, metric_name,
-                             read_phenotype, read_subject_list, score_once)
+from .bstm_selection import (CONSTANT_COLUMNS, ORDINAL_LEVELS, _wipe,
+                             label_the_run, log, metric_name, read_phenotype,
+                             read_subject_list, score_once,
+                             warn_if_a_model_never_split)
 from .io import meta_dir
 
 ARMS = ["edges", "global"]
@@ -337,16 +339,23 @@ def run(args) -> int:
     # CSV for the same reason as select-bstm's: this grid is smaller still
     # (cohorts x atlases x arms x models x seeds x folds), it is read by eye,
     # and nothing reads it programmatically.
-    scores_df.to_csv(out / "scores.csv", index=False)
+    label_the_run(scores_df, args.output_name, args.task,
+                  args.target).to_csv(out / "scores.csv", index=False)
 
     summary = (scores_df.groupby(["model", "cohort", "arm", "atlas", "n",
                                   "n_features"], dropna=False)["score"]
                .agg(["mean", "std", "min", "max", "count"]).reset_index()
                .sort_values(["model", "mean"], ascending=[True, False]))
+    # `run` and `target` first, the same two columns select-bstm writes, so a
+    # concatenation of the four summary.csv files says which run each row is
+    # from without the directory it came out of.
+    summary = label_the_run(summary, args.output_name, args.task, args.target)
     summary.to_csv(out / "summary.csv", index=False)
 
     print()
-    for model, g in summary.groupby("model"):
+    for w in warn_if_a_model_never_split(summary):
+        log(w)
+    for model, g in summary.drop(columns=CONSTANT_COLUMNS).groupby("model"):
         print(f"=== {model}  ({metric_name(model)}) ===")
         print(g.drop(columns=["model"]).head(args.show).to_string(index=False))
         print()

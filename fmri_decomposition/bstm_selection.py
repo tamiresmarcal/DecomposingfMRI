@@ -44,6 +44,11 @@ one csv you can sort, not a join across directories. The two keys that ARE
 directories are the two that identify which ranking it is, and the two a run
 is given on the command line.
 
+Those two are ALSO the first two columns of every table, as `run` ("bstm
+movie") and `target`. A path is not in a table, so without them a
+concatenation of the four -- which is the only way to read them against each
+other -- has no column saying where a row came from.
+
 This script produces both bstm rows; only `select-fcm` is separate code,
 because its features come from another stage.
 
@@ -719,7 +724,8 @@ def run(args) -> int:
     # it is ~200 KB either way. parquet bought 180 KB and cost the ability to
     # open it. Nothing reads it programmatically; `summary.csv` beside it is
     # the aggregate, and this is the per-fold long form behind it.
-    scores_df.to_csv(out / "scores.csv", index=False)
+    label_the_run(scores_df, args.output_name, args.task,
+                  args.target).to_csv(out / "scores.csv", index=False)
 
     # `n` and `n_features` are GROUPING keys rather than dropped columns: a
     # row's score is not comparable with another's without them, and these
@@ -730,9 +736,12 @@ def run(args) -> int:
                                  dropna=False)["score"]
                .agg(["mean", "std", "min", "max", "count"]).reset_index()
                .sort_values(["model", "mean"], ascending=[True, False]))
+    summary = label_the_run(summary, args.output_name, args.task, args.target)
     summary.to_csv(out / "summary.csv", index=False)
     print()
-    for model, g in summary.groupby("model"):
+    for w in warn_if_a_model_never_split(summary):
+        log(w)
+    for model, g in summary.drop(columns=CONSTANT_COLUMNS).groupby("model"):
         print(f"=== {model}  ({metric_name(model)}) ===")
         print(g.drop(columns=["model", "states"])
                .head(args.show).to_string(index=False))
@@ -814,6 +823,68 @@ def describe_blocks(sample_table: Path, args) -> list[str]:
             "are kept: ridge is untroubled by it, and dropping one would make",
             "`dynamics` something other than \"every scalar\".",
             ""]
+    return out
+
+
+def run_label(output_name: str, task: str) -> str:
+    """"bstm movie", "fcm rest" -- which of the four rankings a row is from.
+
+    The tree and the task are in the PATH, and a path is not in the table. So
+    the moment the four summary.csv files are concatenated -- which is the only
+    way to read them against each other -- every row has to say which run
+    produced it or the stack is unreadable. Written as one column rather than
+    two because that is how it is read: "bstm movie beat fcm movie".
+
+    Derived from the same two values that build the path, so it can never
+    disagree with where the file sits.
+    """
+    return f"{output_name.replace('_selection', '')} {task}"
+
+
+def label_the_run(df: pd.DataFrame, output_name: str, task: str,
+                  target: str) -> pd.DataFrame:
+    """Put `run` and `target` first, so `head` on the csv shows them.
+
+    Constant down the file, deliberately. They cost a few bytes a row and they
+    are what makes a row self-describing once it is out of its directory --
+    pasted into a notebook, concatenated with the other three, or mailed to
+    someone who does not have the tree.
+    """
+    df = df.copy()
+    df.insert(0, "run", run_label(output_name, task))
+    df.insert(1, "target", target)
+    return df
+
+
+#: `run` and `target` are constant within a file, so printing them in every
+#: console row is noise -- the run already logs its own output path.
+CONSTANT_COLUMNS = ["run", "target"]
+
+
+def warn_if_a_model_never_split(summary: pd.DataFrame) -> list[str]:
+    """A boosting model that predicted a constant scores every arm the same.
+
+    This is the failure that looks exactly like a result: a full table, every
+    arm present, and one model's mean/std/min/max byte-identical down its
+    whole block. It happens when no split is admissible -- `min_samples_leaf`
+    / `min_child_samples` is 30, so a training fold under ~40 subjects cannot
+    produce one -- and the model then predicts the training mean for everyone.
+    The score of a constant prediction carries no information about the
+    features, so ranking arms by it is ranking noise.
+
+    A warning rather than a refusal: the run is cheap to read once it says
+    this, and the fix (more subjects, or a smaller leaf minimum) is the
+    caller's call, not this function's.
+    """
+    out = []
+    for model, g in summary.groupby("model"):
+        if len(g) > 1 and g["mean"].nunique(dropna=False) == 1:
+            out.append(
+                f"WARNING: every arm scores identically under {model!r} "
+                f"({g['mean'].iloc[0]:+.4f}). That model predicted a CONSTANT "
+                f"-- at n={int(g['n'].max())} a training fold is too small "
+                f"for its leaf minimum to allow any split -- so its ranking "
+                f"of the arms is noise. Read the other model(s), or raise n.")
     return out
 
 

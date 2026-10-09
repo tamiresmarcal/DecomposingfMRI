@@ -728,8 +728,20 @@ for T in bstm_selection fcm_selection; do
 done
 ```
 
-Every table has `model arm atlas n n_features mean std min max count`, sorted
-best-first. What to read:
+Every table starts with `run` and `target` — `fcm movie`, `bstm rest` — so the
+four can be concatenated and still say which is which:
+
+```bash
+Y=additional_HADS_anx_category
+head -1 outputs/bstm_selection/task=movie/target=$Y/summary.csv > all.csv
+for T in bstm_selection fcm_selection; do for K in movie rest; do
+  tail -n +2 outputs/$T/task=$K/target=$Y/summary.csv >> all.csv
+done; done
+column -s, -t all.csv | head -20
+```
+
+After those two, every table has `model arm atlas n n_features mean std min max
+count`, sorted best-first. What to read:
 
 * `mean` against the `(covariates only)` row **in its own table** — that is the
   floor, and age and sex predict HADS on their own.
@@ -769,6 +781,10 @@ best-first. What to read:
 * In `fcm_selection`, `edges` against `global`. `global` is a subject's mean and
   SD over every edge — two numbers with no topology in them. If it matches
   `edges`, the pattern is not what is being measured; the amount is.
+* **Identical `mean`, `std`, `min` and `max` down a whole model's block** means
+  that model predicted a constant and never split, so its ordering of the arms
+  is noise. Both selection stages now say so by name when it happens. It needs
+  a training fold under ~40 subjects to occur, so it is a small-`n` symptom.
 
 None of the four subtracts one row from another, on purpose. The arms share
 their folds, so a difference between two scores is dependent and has no

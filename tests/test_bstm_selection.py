@@ -240,6 +240,74 @@ class TestOrdinalLevelCoding:
         assert "join matched nothing" not in msg
 
 
+class TestTheRunAndTargetColumns:
+    """The path says which ranking a table is; a path is not in the table."""
+
+    def test_the_label_pairs_the_tree_with_the_task(self):
+        assert B.run_label("bstm_selection", "movie") == "bstm movie"
+        assert B.run_label("bstm_selection", "rest") == "bstm rest"
+        assert B.run_label("fcm_selection", "movie") == "fcm movie"
+        assert B.run_label("fcm_selection", "rest") == "fcm rest"
+
+    def test_an_unusual_tree_name_still_gets_a_label(self):
+        """`--output-name` is a flag, so the label cannot assume the two
+        names this project ships."""
+        assert B.run_label("pilot", "movie") == "pilot movie"
+
+    def test_run_and_target_go_first_and_the_rest_keeps_its_order(self):
+        d = pd.DataFrame({"model": ["ridge"], "mean": [0.1]})
+        got = B.label_the_run(d, "bstm_selection", "rest", "hads")
+        assert list(got.columns) == ["run", "target", "model", "mean"]
+        assert got["run"].iloc[0] == "bstm rest"
+        assert got["target"].iloc[0] == "hads"
+
+    def test_it_does_not_mutate_what_it_was_given(self):
+        """`scores_df` is labelled on the way to csv and then handed to
+        _figures and _save_models, which key on their own columns."""
+        d = pd.DataFrame({"model": ["ridge"], "mean": [0.1]})
+        B.label_the_run(d, "bstm_selection", "rest", "hads")
+        assert list(d.columns) == ["model", "mean"]
+
+
+class TestConstantPredictionWarning:
+    """A model that predicted a constant scores every arm identically.
+
+    The full table, every arm present, and one model's block byte-identical
+    down its length -- which reads as "no arm beats any other" and is really
+    "this model never split".
+    """
+
+    def test_identical_scores_across_arms_are_called_out(self):
+        d = pd.DataFrame({"model": ["lgbm"] * 3,
+                          "arm": ["a", "b", "c"],
+                          "n": [40, 40, 40],
+                          "mean": [-0.37, -0.37, -0.37]})
+        w = B.warn_if_a_model_never_split(d)
+        assert len(w) == 1
+        assert "lgbm" in w[0] and "CONSTANT" in w[0] and "n=40" in w[0]
+
+    def test_a_model_that_differentiates_is_silent(self):
+        d = pd.DataFrame({"model": ["ridge"] * 3,
+                          "arm": ["a", "b", "c"],
+                          "n": [600, 600, 600],
+                          "mean": [0.11, 0.09, 0.02]})
+        assert B.warn_if_a_model_never_split(d) == []
+
+    def test_one_arm_is_not_evidence_of_anything(self):
+        """A single row is trivially constant, which is not this failure."""
+        d = pd.DataFrame({"model": ["lgbm"], "arm": ["a"], "n": [600],
+                          "mean": [0.1]})
+        assert B.warn_if_a_model_never_split(d) == []
+
+    def test_each_model_is_judged_on_its_own_block(self):
+        d = pd.DataFrame({"model": ["lgbm"] * 2 + ["ridge"] * 2,
+                          "arm": ["a", "b"] * 2,
+                          "n": [600] * 4,
+                          "mean": [-0.37, -0.37, 0.11, 0.02]})
+        w = B.warn_if_a_model_never_split(d)
+        assert len(w) == 1 and "lgbm" in w[0]
+
+
 class TestRestrictSubjects:
     def test_one_id_per_line(self, tmp_path):
         p = tmp_path / "k.txt"
