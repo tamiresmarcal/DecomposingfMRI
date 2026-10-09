@@ -98,7 +98,15 @@ not one. The `:?` form fails immediately and says so.
 
 ```bash
 RUN="apptainer exec --cleanenv --bind /project,/scratch,/home ${FMRIDECOMP_SIF45:?source slurm/env.sh}"
+RUN23="apptainer exec --cleanenv --bind /project,/scratch,/home --pwd $PWD ${FMRIDECOMP_SIF:?source slurm/env.sh}"
 ```
+
+**`$RUN23` is the OTHER image**, and `tools/*.py` need it: a bare `python3` on a
+login node has no pandas, so `tools/make_participants.py` and
+`tools/check_cohort.py` die on `ModuleNotFoundError: No module named 'pandas'`
+before doing anything. They are stage 1-2 tools, so they take the stage 2-3
+image -- the same `fmri_decomp.sif` that `slurm/activation_and_dfc.sh` runs its
+own pre-flight check in.
 
 The sbatch scripts source `env.sh` themselves, so only your interactive commands
 need this.
@@ -182,7 +190,7 @@ For a cohort you have never run, check it first — this is minutes against hour
 
 ```bash
 $RUN python3 -m fmri_decomposition.cli validate config/<cohort>.yaml
-python3 tools/check_cohort.py config/<cohort>.yaml --all --limit 3
+$RUN23 python3 tools/check_cohort.py config/<cohort>.yaml --all --limit 3
 ```
 
 **Wait for all three to finish** before going on. Phase 2 fits across cohorts,
@@ -553,9 +561,9 @@ never acquired.
 #### 4.4 — phase 1 for rest (extract, QC, censor)
 
 ```bash
-python tools/make_participants.py config/camcan_rest.yaml \
+$RUN23 python3 tools/make_participants.py config/camcan_rest.yaml \
     -o config/camcan_rest_participants.csv
-python3 tools/check_cohort.py config/camcan_rest.yaml
+$RUN23 python3 tools/check_cohort.py config/camcan_rest.yaml
 ./slurm/activation_and_dfc.sh config/camcan_rest.yaml
 ```
 
@@ -865,7 +873,7 @@ the fit spans them.
 
    ```bash
    $RUN python3 -m fmri_decomposition.cli validate config/<cohort>.yaml
-   python3 tools/check_cohort.py config/<cohort>.yaml --all --limit 3
+   $RUN23 python3 tools/check_cohort.py config/<cohort>.yaml --all --limit 3
    ```
 
 4. **Stages 1–2.5** for the new cohort only.
