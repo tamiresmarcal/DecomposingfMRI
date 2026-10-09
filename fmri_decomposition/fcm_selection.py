@@ -83,7 +83,8 @@ import pandas as pd
 
 from . import static_fc as _sfc
 from .bstm_selection import (CONSTANT_COLUMNS, ORDINAL_LEVELS, _wipe,
-                             label_the_run, log, metric_name, read_phenotype,
+                             label_the_run, log, metric_name,
+                             one_row_per_subject, read_phenotype,
                              read_subject_list, score_once,
                              warn_if_a_model_never_split)
 from .io import meta_dir
@@ -114,33 +115,6 @@ def discover(root: Path, cohorts: list[str], atlases: list[str] | None
                 f"--atlas harvardoxford yeo7 networks")
         cells += [(cohort, a) for a in found]
     return cells
-
-
-def one_row_per_subject(d: pd.DataFrame, what: str,
-                        tasks: list[str] | None = None) -> pd.DataFrame:
-    """Refuse a table with several rows for one subject rather than guess.
-
-    A cohort where a subject watches several films has one row per (task, sub).
-    Silently keeping the first would make this a ranking of whichever task
-    sorted first.
-    """
-    if tasks:
-        before = sorted(d["task"].unique())
-        d = d[d["task"].isin(tasks)]
-        if d.empty:
-            raise SystemExit(f"--tasks {tasks} matches no row of {what}; "
-                             f"it has {before}")
-    dup = d["sub"].duplicated(keep=False)
-    if not dup.any():
-        return d
-    raise SystemExit(
-        f"{what} has {int(dup.sum())} row(s) for the same subject across "
-        f"task(s) {sorted(d.loc[dup, 'task'].unique())[:6]}.\n"
-        f"  This stage scores one row per subject and will not pick one or "
-        f"average them.\n"
-        f"  * --tasks <one task> to choose, or\n"
-        f"  * re-run `static-fc --pool subject`, which concatenates a "
-        f"subject's tasks into a single correlation.")
 
 
 def blocks(d: pd.DataFrame, transform: str, max_missing: float
@@ -217,8 +191,10 @@ def build(root: Path, cells: list[tuple[str, str]], pheno: pd.DataFrame,
     for cohort, atlas in cells:
         d = _sfc.read_cohort_table(root, atlas, cohort)
         d["sub"] = d["sub"].astype(str).str.strip().str.upper()
-        d = one_row_per_subject(d, f"static_fc atlas={atlas} cohort={cohort}",
-                                args.tasks)
+        d = one_row_per_subject(
+            d, f"static_fc atlas={atlas} cohort={cohort}", args.tasks,
+            remedy=("re-run `static-fc --pool subject`, which concatenates a "
+                    "subject's tasks into a single correlation",))
         if keep is not None:
             d = d[d["sub"].isin(keep)]
         d = d[d["sub"].isin(set(pheno["sub"]))].sort_values("sub")

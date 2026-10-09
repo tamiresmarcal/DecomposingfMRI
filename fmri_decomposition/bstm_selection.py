@@ -536,8 +536,45 @@ def to_cond(block: np.ndarray, n_transitions: np.ndarray, K: int) -> np.ndarray:
                      where=rs > 0).reshape(len(block), K * K)
 
 
+def one_row_per_subject(d: pd.DataFrame, what: str,
+                        tasks: list[str] | None = None, *,
+                        remedy: tuple[str, ...] = ()) -> pd.DataFrame:
+    """Refuse a table with several rows for one subject rather than guess.
+
+    A subject scanned at more than one task -- Cam-CAN watching a film AND
+    lying at rest, CNeuroMod watching ~300 runs -- has one row per (task, sub).
+    Both selection stages score ONE row per subject, so without this the same
+    person lands in the train and the test fold of the same split: leakage,
+    an `n` that is a multiple of the real sample, and a ranking of whichever
+    task happened to sort first. Nothing downstream could tell.
+
+    It lives here rather than in fcm_selection because both stages need it and
+    fcm already imports from this module. `remedy` is the caller's stage-
+    specific advice, appended to the shared part of the message.
+    """
+    if tasks:
+        before = sorted(d["task"].unique())
+        d = d[d["task"].isin(tasks)]
+        if d.empty:
+            raise SystemExit(f"--keep-tasks {tasks} matches no row of {what}; "
+                             f"it has {before}")
+    dup = d["sub"].duplicated(keep=False)
+    if not dup.any():
+        return d
+    lines = [
+        f"{what} has {int(dup.sum())} row(s) for the same subject across "
+        f"task(s) {sorted(d.loc[dup, 'task'].unique())[:6]}.",
+        "  This stage scores one row per subject and will not pick one or "
+        "average them.",
+        "  * --keep-tasks <one task> to choose, or",
+    ]
+    lines += [f"  * {r}" for r in remedy]
+    raise SystemExit("\n".join(lines).rstrip(", or"))
+
+
 def build(table: Path, pheno: pd.DataFrame, covariates: list[str],
-          feature_sets: list[str], p_norms: list[str]):
+          feature_sets: list[str], p_norms: list[str],
+          tasks: list[str] | None = None):
     """One state set -> ({feature set: matrix}, covariates-only matrix, y, sizes).
 
     Covariates are prepended to every feature set, so each one has to beat the
@@ -556,6 +593,12 @@ def build(table: Path, pheno: pd.DataFrame, covariates: list[str],
     # have not been seen to fail, so this is precaution, not a repair.
     t = read_file(table).to_pandas()
     t["sub"] = t["sub"].astype(str).str.strip().str.upper()
+    # BEFORE the join, so a cohort holding two conditions is refused rather
+    # than quietly doubling every subject. The merge below is on `sub` alone.
+    t = one_row_per_subject(
+        t, str(table), tasks,
+        remedy=("re-run `transitions` for one task, if the cohort really "
+                "should be split",))
     d = t.merge(pheno, on="sub", how="inner", suffixes=("", "_pheno"))
     if d.empty:
         raise SystemExit(
@@ -638,7 +681,8 @@ def run(args) -> int:
     for t in sets.itertuples():
         key = (t.atlas, t.window_s, t.states)
         mats, C, y, widths, n = build(t.path, pheno, args.covariates,
-                                      args.features, args.p_norm)
+                                      args.features, args.p_norm,
+                                      getattr(args, "tasks", None))
         data[key] = (mats, C, y)
         for (fs, nm), w in widths.items():
             meta.append({"atlas": t.atlas, "window_s": t.window_s_num,
@@ -760,6 +804,7 @@ def run(args) -> int:
     mf.parent.mkdir(parents=True, exist_ok=True)
     mf.write_text(json.dumps(
         {"target": args.target, "task": args.task,
+         "keep_tasks": getattr(args, "tasks", None),
          "cohort": args.cohort, "models": args.models,
          "restrict_subjects": getattr(args, "restrict_subjects", None),
          "seeds": args.seeds, "features": args.features,
@@ -1240,6 +1285,18 @@ def add_arguments(p) -> None:
                         "condition, rather than a second tree with a different "
                         "name. Change it only for a run that is not one of "
                         "these conditions at all.")
+    p.add_argument("--keep-tasks", nargs="*", default=None, dest="tasks",
+                   help="a ROW filter: keep only rows whose `task` column is "
+                        "one of these. Needed where a cohort holds more than "
+                        "one condition -- Cam-CAN's movie and rest are the "
+                        "same people in one cohort, so "
+                        "`--keep-tasks Movie --task movie` is the movie "
+                        "ranking. Same flag, same name and same meaning as "
+                        "`select-fcm`'s. Distinct from --task, which names "
+                        "the output partition: these take the BIDS task "
+                        "labels as the data spells them (Movie, Rest), while "
+                        "--task is yours to choose. Without it a cohort with "
+                        "two conditions is REFUSED, not silently doubled.")
     p.add_argument("--restrict-subjects", default=None, metavar="FILE",
                    help="one subject id per line, or a CSV with a `sub` "
                         "column. Pass the SAME file to every tree so a gap "

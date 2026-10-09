@@ -240,6 +240,16 @@ class CohortConfig:
     tr: float
     derivatives_root: Path
     output_root: Path
+    #: Per-task TR overrides, for a cohort scanned at more than one TR. Cam-CAN's
+    #: movie is 2.47s and its rest is 1.97s and they are the SAME PEOPLE, so they
+    #: are one cohort with two tasks rather than two cohorts. `tr` above stays the
+    #: default for any task not named here, so every single-TR config is
+    #: unchanged. Read it through `tr_for(task)`, never `cfg.tr` directly, in any
+    #: code that has a task in hand.
+    #:
+    #: It has to live here rather than beside `tr` because a dataclass cannot put
+    #: a defaulted field before a non-defaulted one.
+    tr_by_task: dict[str, float] = field(default_factory=dict)
     space: str = "MNI152NLin2009cAsym"
     smoothing_fwhm: float | None = None
     denoising_method: str | None = None
@@ -261,6 +271,27 @@ class CohortConfig:
                 "task-*_bold.json omits RepetitionTime (a BIDS violation), so "
                 "the config value is mandatory, not a convenience."
             )
+        bad = {t: v for t, v in self.tr_by_task.items()
+               if v is None or float(v) <= 0}
+        if bad:
+            raise ConfigError(
+                f"tr_by_task has non-positive TR(s) {bad}. Same rule as `tr`: "
+                f"a TR is what every window size and dwell time is computed "
+                f"from, so it is mandatory and checked, not a convenience.")
+        self.tr_by_task = {str(t): float(v)
+                           for t, v in self.tr_by_task.items()}
+        # A per-task TR for a task this cohort does not discover runs nothing
+        # and is almost always a typo in the task label -- `rest` for `Rest`.
+        # Silently keeping it would leave the real Rest runs on the default TR.
+        if self.tr_by_task and self.discovery.include_tasks:
+            unknown = sorted(set(self.tr_by_task) - set(self.discovery.include_tasks))
+            if unknown:
+                raise ConfigError(
+                    f"tr_by_task names task(s) {unknown}, which "
+                    f"discovery.include_tasks does not include "
+                    f"({self.discovery.include_tasks}). A per-task TR that "
+                    f"matches no task is silently never applied, and the runs "
+                    f"it was meant for would use tr={self.tr}.")
         self.derivatives_root = Path(self.derivatives_root)
         self.output_root = Path(self.output_root)
         if self.participants is not None:
@@ -279,10 +310,58 @@ class CohortConfig:
                 )
 
     # -- derived ---------------------------------------------------------
-    def window_tr(self, window_s: float) -> int:
+    def tr_for(self, task: str | None = None) -> float:
+        """This task's TR, or the cohort default.
+
+        Every stage from `decompose` on reads TR out of each shard's own
+        metadata (see frames.read_tr), because "these frames were acquired at
+        that TR" is a property of the file. So this is only for stages 1-2 and
+        the validators -- all of which are per-RUN and therefore always have a
+        task to pass.
+
+        `task=None` means "no task in hand", which is honest only when the
+        cohort has one TR. If a per-task override exists, asking without a task
+        is a bug in the caller, not a value to guess: the answer would silently
+        be the default for a run that is not at the default.
+        """
+        if task is not None:
+            d = self.tr_by_task.get(task)
+            if d is not None:
+                return float(d)
+            return float(self.tr)
+        if self.tr_by_task:
+            raise ConfigError(
+                f"cohort {self.cohort!r} sets tr_by_task "
+                f"{ {k: float(v) for k, v in self.tr_by_task.items()} } but the "
+                f"TR was asked for without naming a task. Pass the task -- "
+                f"otherwise a run at an overridden TR would silently get "
+                f"tr={self.tr}.")
+        return float(self.tr)
+
+    def trs(self) -> dict[str | None, float]:
+        """Every distinct TR this cohort acquires, keyed by task.
+
+        For the validators, which have to report a per-task quantity -- the
+        rank-deficiency floor is (n_nodes + 0.5) x tr, so it genuinely differs
+        between a 2.47s movie and a 1.97s rest.
+        """
+        if not self.tr_by_task:
+            return {None: float(self.tr)}
+        # Keyed by every task the cohort discovers, so a report says
+        # "Movie 2.47" rather than "default 2.47" and the reader does not have
+        # to work out which tasks the default covers. Only a cohort with no
+        # include_tasks -- discover whatever is there -- falls back to None.
+        if self.discovery.include_tasks:
+            return {t: self.tr_for(t)
+                    for t in sorted(self.discovery.include_tasks)}
+        out = {t: float(v) for t, v in sorted(self.tr_by_task.items())}
+        out[None] = float(self.tr)
+        return out
+
+    def window_tr(self, window_s: float, task: str | None = None) -> int:
         from .windows import window_tr_from_seconds
 
-        return window_tr_from_seconds(window_s, self.tr)
+        return window_tr_from_seconds(window_s, self.tr_for(task))
 
     def stimulus_duration_s(self, task: str, fallback: float | None = None) -> float:
         d = self.stimulus.durations_s.get(task)

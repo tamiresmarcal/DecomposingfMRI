@@ -269,6 +269,95 @@ class TestProcessRun:
         assert len(pd.read_parquet(entry.path)) == 471
 
 
+class TestPerTaskTR:
+    """One cohort, two TRs -- the same people scanned twice.
+
+    Cam-CAN's movie is 2.47s and its rest is 1.97s. They are one cohort with
+    two tasks rather than two cohorts, so TR is per task. Everything from
+    `decompose` on already reads TR out of each shard's own metadata
+    (frames.read_tr), so this only governs stages 1-2 and the validators --
+    all of which are per-RUN and so always have a task to pass.
+    """
+
+    def over(self, tmp_path):
+        return cfg_for(tmp_path, tr=2.47, tr_by_task={"Rest": 1.97},
+                       discovery={"include_tasks": ["Movie", "Rest"]})
+
+    def test_a_named_task_gets_its_own_tr(self, tmp_path):
+        c = self.over(tmp_path)
+        assert c.tr_for("Rest") == 1.97
+        assert c.tr_for("Movie") == 2.47
+
+    def test_an_unnamed_task_gets_the_cohort_default(self, tmp_path):
+        """`tr` stays the default, so every single-TR config is untouched."""
+        c = cfg_for(tmp_path, tr=1.0)
+        assert c.tr_for("anything") == 1.0
+        assert c.tr_for() == 1.0
+        assert c.trs() == {None: 1.0}
+
+    def test_asking_without_a_task_refuses_when_overrides_exist(self, tmp_path):
+        """The dangerous case: a caller that forgets the task would silently
+        get 2.47 for a run acquired at 1.97, mis-scaling every window and every
+        time column. Refuse instead of guessing."""
+        with pytest.raises(ConfigError, match="without naming a task"):
+            self.over(tmp_path).tr_for()
+
+    def test_a_per_task_tr_for_an_undiscovered_task_is_refused(self, tmp_path):
+        """`rest` for `Rest` would be silently never applied, leaving the real
+        Rest runs on the movie's TR."""
+        with pytest.raises(ConfigError, match="include_tasks does not include"):
+            cfg_for(tmp_path, tr=2.47, tr_by_task={"rest": 1.97},
+                    discovery={"include_tasks": ["Movie", "Rest"]})
+
+    def test_a_non_positive_override_is_refused_like_tr_itself(self, tmp_path):
+        with pytest.raises(ConfigError, match="non-positive"):
+            cfg_for(tmp_path, tr=2.47, tr_by_task={"Rest": 0},
+                    discovery={"include_tasks": ["Movie", "Rest"]})
+
+    def test_the_window_grid_differs_per_task(self, tmp_path):
+        """The measured consequence, and the reason this had to be per task: a
+        30s window is 12 samples of the movie and 15 of the rest, so the rest
+        edges are LESS noisy at the same nominal aperture."""
+        c = self.over(tmp_path)
+        assert c.window_tr(30, "Movie") == 12
+        assert c.window_tr(30, "Rest") == 15
+
+    def test_the_rank_floor_differs_per_task(self, tmp_path):
+        """(n_nodes + 0.5) x tr, so harvardoxford needs 275s of movie but only
+        220s of rest. A cohort-wide floor would drop rest windows that are
+        perfectly estimable."""
+        from fmri_decomposition.windows import min_window_s_for_nodes
+
+        c = self.over(tmp_path)
+        assert round(min_window_s_for_nodes(111, c.tr_for("Movie"))) == 275
+        assert round(min_window_s_for_nodes(111, c.tr_for("Rest"))) == 220
+
+    def test_trs_names_every_task_rather_than_a_default(self, tmp_path):
+        """For the validators: a report that says "Movie 2.47" beats one that
+        says "default 2.47" and leaves the reader to work out which tasks the
+        default covers."""
+        assert self.over(tmp_path).trs() == {"Movie": 2.47, "Rest": 1.97}
+
+    def test_a_shard_records_the_tr_of_its_own_run(self, tmp_path):
+        """What makes stages 3+ work unchanged: the TR travels in the file, so
+        nothing downstream has to know a cohort has two."""
+        import pyarrow.parquet as pq
+
+        from fmri_decomposition.activation import process_run
+        from fmri_decomposition.cohort import RunRef
+
+        spec, img, _, _ = toy_atlas_and_img(n_tr=40)
+        bold = tmp_path / "sub-01_task-Rest_bold.nii.gz"
+        nib.save(img, bold)
+        cfg = cfg_for(tmp_path, tr=2.47, tr_by_task={"Rest": 1.97},
+                      discovery={"include_tasks": ["Movie", "Rest"]},
+                      atlases=["toy"])
+        entry = process_run(
+            RunRef(cohort="t", sub="01", task="Rest", bold=bold), spec, cfg)
+        md = pq.ParquetFile(entry.path).schema_arrow.metadata
+        assert float(md[b"tr"].decode()) == 1.97
+
+
 class TestConfig:
     def test_tr_is_mandatory(self, tmp_path):
         with pytest.raises(ConfigError, match="tr must be"):

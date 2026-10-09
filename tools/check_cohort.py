@@ -173,20 +173,29 @@ def check_tr(cfg, refs, limit: int | None) -> bool:
             # nothing -- INCLUDING when the config also says 1.0, which is the
             # ds002837 case exactly. A coincidental match is not evidence.
             unset.append((Path(r.bold).name, hdr_tr))
-        elif abs(hdr_tr - cfg.tr) > 1e-3:
-            bad.append((Path(r.bold).name, hdr_tr))
+        # Against THIS RUN's TR. One cohort can be scanned at two TRs
+        # (Cam-CAN movie 2.47s, rest 1.97s, the same people), and comparing
+        # every file to the cohort default would fail every run of the
+        # non-default task -- turning the one check that catches a real wrong
+        # TR into noise that gets ignored.
+        elif abs(hdr_tr - cfg.tr_for(r.task)) > 1e-3:
+            bad.append((Path(r.bold).name, hdr_tr, r.task, cfg.tr_for(r.task)))
 
-    print(f"  config tr = {cfg.tr}s;  headers read = {checked}")
+    trs = cfg.trs()
+    tr_s = (f"{cfg.tr}s" if list(trs) == [None]
+            else ", ".join(f"{t}={v:g}s" for t, v in trs.items()))
+    print(f"  config tr = {tr_s};  headers read = {checked}")
     if bad:
         print(f"[{BAD}] {len(bad)} file(s) disagree with the config TR:")
-        for name, tr in bad[:5]:
-            print(f"    {name}: header says {tr}s, config says {cfg.tr}s")
+        for name, tr, task, want in bad[:5]:
+            print(f"    {name}: header says {tr}s, config says {want}s "
+                  f"for task {task!r}")
         print("  A wrong TR does not crash -- it rescales every window and every "
               "time column. Resolve before extracting.")
         return False
     if unset:
-        coincidental = " (which equals your config TR -- a coincidence, not a check)" \
-            if abs(cfg.tr - unset[0][1]) < 1e-9 else ""
+        coincidental = " (which equals a configured TR -- a coincidence, not a check)" \
+            if any(abs(v - unset[0][1]) < 1e-9 for v in trs.values()) else ""
         print(f"[{WARN}] {len(unset)}/{checked} file(s) carry an unset/default header "
               f"TR of {unset[0][1]}s{coincidental}:")
         for name, tr in unset[:3]:
@@ -258,7 +267,9 @@ def check_outputs(cfg, atlas_names) -> bool:
         for key in ("atlas", "cohort", "task", "sub", "tr"):
             if key not in meta:
                 print(f"[{WARN}]   shard metadata missing {key!r}")
-        if meta.get("tr") and abs(float(meta["tr"]) - cfg.tr) > 1e-6:
+        if (meta.get("tr")
+                and abs(float(meta["tr"])
+                        - cfg.tr_for(meta.get("task"))) > 1e-6):
             print(f"[{BAD}]   shard was written with tr={meta['tr']}, config now says "
                   f"{cfg.tr} -- outputs are stale")
             ok = False
@@ -358,7 +369,10 @@ def main(argv=None) -> int:
                 else {"paths", "tr"})
 
     cfg = _load(args.config)
-    print(f"cohort={cfg.cohort}  tr={cfg.tr}  atlases={cfg.atlases}")
+    _trs = cfg.trs()
+    print(f"cohort={cfg.cohort}  "
+          f"tr={cfg.tr if list(_trs) == [None] else _trs}  "
+          f"atlases={cfg.atlases}")
     print(f"derivatives_root={cfg.derivatives_root}")
     print(f"output_root={cfg.output_root}")
     if not Path(cfg.derivatives_root).exists():

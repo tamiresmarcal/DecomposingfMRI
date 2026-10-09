@@ -91,7 +91,8 @@ class WindowResult:
 
 def dfc_for_run(df: pd.DataFrame, atlas: AtlasSpec, cfg: CohortConfig,
                 window_s: float, stimulus_duration_s: float,
-                n_overlaps: int | None = None) -> list[WindowResult]:
+                n_overlaps: int | None = None, *,
+                task: str | None = None) -> list[WindowResult]:
     """All windows for one run at one window size.
 
     Emission policy is permissive: a window is emitted whenever at least
@@ -122,7 +123,11 @@ def dfc_for_run(df: pd.DataFrame, atlas: AtlasSpec, cfg: CohortConfig,
     t_index = df["t"].to_numpy() if "t" in df else np.arange(len(df))
     time_s = df["time_s"].to_numpy(dtype=np.float64) if "time_s" in df else stim
 
-    n_nominal = window_tr_from_seconds(window_s, cfg.tr)
+    # Per TASK, because one cohort can hold two TRs: a 30s window is 12 TRs
+    # at Cam-CAN's 2.47s movie and 15 at its 1.97s rest. This number is what
+    # the rank check and the min-samples floor are judged against, so the
+    # cohort default would call a perfectly sampled rest window short.
+    n_nominal = window_tr_from_seconds(window_s, cfg.tr_for(task))
     if n_overlaps is None:
         n_overlaps = cfg.windows.overlaps_for(window_s)
     grid = make_stimulus_grid(stimulus_duration_s, window_s,
@@ -203,7 +208,7 @@ def build_dfc_table(results: list[WindowResult], atlas: AtlasSpec, cfg: CohortCo
         b"edge_storage": mode.encode(),
         b"window_s": str(window_s).encode(),
         b"n_overlaps": str(n_overlaps).encode(),
-        b"tr": str(cfg.tr).encode(),
+        b"tr": str(cfg.tr_for(entities.get("task"))).encode(),
         b"estimator": b"pearson_pairwise_deletion",
         b"fisher_z_applied": b"false",
         b"config_hash": cfg.hash().encode(),
@@ -245,10 +250,12 @@ def process_activation_file(path: str | Path, atlas: AtlasSpec, cfg: CohortConfi
                                  ent["sub"], str(out), "skipped", window_s=window_s)
 
         if stimulus_duration_s is None:
-            observed = float(df["stimulus_time_s"].max()) + cfg.tr
+            observed = (float(df["stimulus_time_s"].max())
+                        + cfg.tr_for(ent["task"]))
             stimulus_duration_s = cfg.stimulus_duration_s(ent["task"], fallback=observed)
 
-        results = dfc_for_run(df, atlas, cfg, window_s, stimulus_duration_s, n_overlaps)
+        results = dfc_for_run(df, atlas, cfg, window_s, stimulus_duration_s,
+                              n_overlaps, task=ent["task"])
         if not results:
             return ManifestEntry(
                 "dfc", ent["cohort"], atlas.name, ent["task"], ent["sub"], str(out),

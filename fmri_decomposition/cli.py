@@ -145,7 +145,10 @@ def _path_collisions(cfg, refs) -> list[str]:
 def cmd_validate(args) -> int:
     cfg = _load(args.config)
     refs, problems = _refs(cfg, strict=False)
-    print(f"cohort={cfg.cohort} tr={cfg.tr} runs_discovered={len(refs)}")
+    trs = cfg.trs()
+    tr_s = (f"{cfg.tr}" if list(trs) == [None]
+            else " ".join(f"{t}={v:g}" for t, v in trs.items()))
+    print(f"cohort={cfg.cohort} tr={tr_s} runs_discovered={len(refs)}")
     print(f"atlases={cfg.atlases} config_hash={cfg.hash()}")
     if refs and cfg.atlases:
         problems = list(problems) + _path_collisions(cfg, refs)
@@ -226,13 +229,34 @@ def _dfc_plan(cfg, atlases, sizes):
         for w in sizes:
             if atlas.name not in cfg.windows.atlases_for(w, [a.name for a in atlases]):
                 continue
-            if (cfg.windows.rank_policy == "skip"
-                    and is_rank_deficient(window_tr_from_seconds(w, cfg.tr), atlas.n_nodes)):
+            # Rank deficiency is per TR, not per cohort: the floor is
+            # (n_nodes + 0.5) x tr, so harvardoxford needs 275s at Cam-CAN's
+            # 2.47s movie and 220s at its 1.97s rest. A cohort scanned at both
+            # is therefore skipped only when the window is deficient at EVERY
+            # one of its TRs -- dropping the pair because the slower task
+            # cannot support it would throw away rest windows that are
+            # perfectly estimable. Where it is deficient at some TRs and not
+            # others, the pair RUNS and this says which, because dfc flags
+            # `rank_deficient` per window anyway (dfc.py:158) and a silent
+            # mixture is the thing worth naming.
+            trs = cfg.trs()
+            deficient = {t: tr for t, tr in trs.items()
+                         if is_rank_deficient(window_tr_from_seconds(w, tr),
+                                              atlas.n_nodes)}
+            if cfg.windows.rank_policy == "skip" and len(deficient) == len(trs):
+                at = "  ".join(
+                    f"{min_window_s_for_nodes(atlas.n_nodes, tr):g}s at TR={tr:g}"
+                    + ("" if t is None else f" ({t})")
+                    for t, tr in sorted(trs.items(), key=lambda kv: str(kv[0])))
                 print(f"  skipping atlas={atlas.name} window_s={w:g}: "
-                      f"{atlas.n_nodes} nodes need >= "
-                      f"{min_window_s_for_nodes(atlas.n_nodes, cfg.tr):g}s at TR="
-                      f"{cfg.tr:g}  (windows.rank_policy: skip)")
+                      f"{atlas.n_nodes} nodes need >= {at}"
+                      f"  (windows.rank_policy: skip)")
                 continue
+            if deficient:
+                print(f"  NOTE atlas={atlas.name} window_s={w:g}: rank-deficient "
+                      f"for task(s) {sorted(str(t) for t in deficient)} only, so "
+                      f"the pair still runs -- those windows carry "
+                      f"rank_deficient=True and the others do not.")
             plan.append((atlas, w, cfg.windows.overlaps_for(w), files))
     return plan
 
@@ -248,6 +272,7 @@ def _preview_plan(cfg, plan) -> None:
     """
     import pyarrow.parquet as pq
 
+    from .io import parse_hive_keys
     from .windows import (is_rank_deficient, min_window_s_for_nodes, n_windows,
                           stride_seconds, window_tr_from_seconds)
 
@@ -262,24 +287,34 @@ def _preview_plan(cfg, plan) -> None:
                 n_tr = pq.ParquetFile(f).metadata.num_rows
             except Exception:                                    # noqa: BLE001
                 continue
-            rows += n_windows(n_tr * cfg.tr, w, n_ov, cfg.windows.drop_incomplete)
+            # This shard's TR, from the task in its path. n_tr x tr is a
+            # DURATION, and a cohort with two TRs would have every rest shard's
+            # length overstated by 25% at the movie's TR.
+            tr = cfg.tr_for(parse_hive_keys(f).get("task"))
+            rows += n_windows(n_tr * tr, w, n_ov, cfg.windows.drop_incomplete)
         n_cols = atlas.n_edges + _DFC_FIXED_COLUMNS
         approx = rows * n_cols * 4          # float32 before compression
         total_rows += rows
         total_bytes += approx
-        n_tr_nominal = window_tr_from_seconds(w, cfg.tr)
         print(f"  atlas={atlas.name:<16} window_s={w:<6g} n_overlaps={n_ov} "
               f"stride={stride_seconds(w, n_ov):g}s")
         print(f"    {len(files):>4} shard(s)  ~{rows:,} row(s) x {atlas.n_edges:,} edge(s) "
               f"  ~{_human_bytes(approx)} uncompressed")
-        if is_rank_deficient(n_tr_nominal, atlas.n_nodes):
-            floor_s = min_window_s_for_nodes(atlas.n_nodes, cfg.tr)
-            print(f"    WARNING: {n_tr_nominal} sample(s) for {atlas.n_nodes} node(s) -- "
+        # Once per TR: the same window size holds a different number of samples
+        # at each, so it can be singular for one task and estimable for another.
+        for task, tr in sorted(cfg.trs().items(), key=lambda kv: str(kv[0])):
+            n_tr_nominal = window_tr_from_seconds(w, tr)
+            if not is_rank_deficient(n_tr_nominal, atlas.n_nodes):
+                continue
+            floor_s = min_window_s_for_nodes(atlas.n_nodes, tr)
+            where = "" if task is None else f" for task {task}"
+            print(f"    WARNING{where}: {n_tr_nominal} sample(s) for "
+                  f"{atlas.n_nodes} node(s) -- "
                   f"every window flagged rank_deficient.")
             print(f"             Edges are still finite (each is a 2-variable r over "
                   f"{n_tr_nominal} samples, SE ~ {1 / max(n_tr_nominal - 3, 1) ** 0.5:.2f}); "
                   f"the MATRIX is singular.")
-            print(f"             This atlas needs >= {floor_s:g}s at TR={cfg.tr:g}. "
+            print(f"             This atlas needs >= {floor_s:g}s at TR={tr:g}. "
                   f"To not run the pair, either:")
             print(f"               windows.by_size: {{{w:g}: {{atlases: [...]}}}}   "
                   f"# this size only")

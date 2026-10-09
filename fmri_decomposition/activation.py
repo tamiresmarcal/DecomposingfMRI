@@ -151,7 +151,9 @@ def build_activation_table(ref: RunRef, atlas: AtlasSpec, cfg: CohortConfig,
         b"task": ref.task.encode(),
         b"sub": str(ref.sub).encode(),
         b"n_nodes": str(atlas.n_nodes).encode(),
-        b"tr": str(cfg.tr).encode(),
+        # The TR this RUN was acquired at, which is what every later stage
+        # reads (frames.read_tr) instead of opening a cohort config.
+        b"tr": str(cfg.tr_for(ref.task)).encode(),
         b"timing_source": axis.source.encode(),
         b"config_hash": cfg.hash().encode(),
         b"stage": b"activation",
@@ -184,9 +186,14 @@ def process_run(ref: RunRef, atlas: AtlasSpec, cfg: CohortConfig,
         confounds = None
         if ref.confounds is not None and cfg.confounds.strategy != "none":
             confounds = load_confounds(ref.confounds, cfg, n_tr_file)
-        ts = clean_timeseries(ts, cfg.tr, cfg, confounds)
+        # cfg.tr_for(ref.task), not cfg.tr: one cohort can be scanned at
+        # two TRs (Cam-CAN movie 2.47s, rest 1.97s, same people). The
+        # band-pass and the time axis are both in SECONDS, so the wrong TR
+        # here silently filters the wrong band and dates every frame wrong.
+        tr = cfg.tr_for(ref.task)
+        ts = clean_timeseries(ts, tr, cfg, confounds)
 
-        axis = build_time_axis(n_tr_file, cfg.tr, ref.segments or None, ref.timing_source)
+        axis = build_time_axis(n_tr_file, tr, ref.segments or None, ref.timing_source)
         good = _good_frames(ref, cfg, n_tr_file)
 
         keep = _trim_mask(ref, cfg, axis, n_tr_file)
@@ -248,7 +255,7 @@ def _trim_mask(ref: RunRef, cfg: CohortConfig, axis: TimeAxis, n_tr: int):
 
     `ref.trim_end_s` is ALWAYS seconds by the time it arrives here: the unit
     conversion happens once, in cohort.attach_participants, which multiplies by
-    cfg.tr when trim.unit is 'tr'. This used to convert a second time, so
+    cfg.tr_for(task) when trim.unit is 'tr'. This used to convert a second time, so
     `unit: tr` asked for n_tr * tr volumes -- 702 instead of 471 on cneuromod.
     It raised rather than truncating silently (the n_needed > n_tr guard below
     is what caught it), but the option was unusable. One conversion, at the
@@ -257,10 +264,11 @@ def _trim_mask(ref: RunRef, cfg: CohortConfig, axis: TimeAxis, n_tr: int):
     if ref.trim_end_s is None or cfg.trim.column is None:
         return None
     end_s = float(ref.trim_end_s)
-    n_needed = int(round(end_s / cfg.tr))
+    tr = cfg.tr_for(ref.task)
+    n_needed = int(round(end_s / tr))
     if n_needed > n_tr:
         raise ValueError(
-            f"{ref.run_key}: trim asks for {n_needed} volumes ({end_s}s at TR={cfg.tr}) "
+            f"{ref.run_key}: trim asks for {n_needed} volumes ({end_s}s at TR={tr}) "
             f"but the file has {n_tr}. Check trim.unit -- it is declared as "
             f"{cfg.trim.unit!r}."
         )

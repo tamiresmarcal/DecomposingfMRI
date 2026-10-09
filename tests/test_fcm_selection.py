@@ -226,12 +226,31 @@ class TestOneSample:
 
 
 class TestSeveralTasks:
+    """The guard itself now lives in bstm_selection and is shared by both
+    stages; fcm re-exports it and supplies its own remedy. See
+    test_bstm_selection.TestOneRowPerSubject for the shared behaviour."""
+
     def test_several_rows_for_one_subject_is_refused_not_averaged(self):
         d = pd.DataFrame({"sub": ["A", "A"], "task": ["m1", "m2"]})
         with pytest.raises(SystemExit) as e:
             F.one_row_per_subject(d, "static_fc")
-        assert "--tasks" in str(e.value)
+        assert "--keep-tasks" in str(e.value)
+        assert "same subject" in str(e.value)
+
+    def test_this_stage_offers_pool_subject_as_its_own_remedy(self, one_cell,
+                                                              tmp_path):
+        """`--pool subject` is advice only static-fc can act on, so it comes
+        from this stage's call rather than from the shared message. Checked
+        through run(), so the remedy reaching the user is what is pinned."""
+        root, pheno, subs = one_cell
+        cell(root, "cA", "mini", subs, task="second", seed=7)
+        ph = tmp_path / "pheno.csv"
+        pd.DataFrame({"CCID": subs, "Age": pheno["Age"], "Sex": pheno["Sex"],
+                      "hads": ["Normal"] * len(subs)}).to_csv(ph, index=False)
+        with pytest.raises(SystemExit) as e:
+            F.run(args(root, cohorts=["cA"], pheno=[f"{ph}:,"]))
         assert "--pool subject" in str(e.value)
+        assert "--keep-tasks" in str(e.value)
 
     def test_a_task_filter_narrows_before_the_check(self):
         d = pd.DataFrame({"sub": ["A", "A", "B"], "task": ["m1", "m2", "m1"]})

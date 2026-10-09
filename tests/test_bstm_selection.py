@@ -269,6 +269,82 @@ class TestTheRunAndTargetColumns:
         assert list(d.columns) == ["model", "mean"]
 
 
+class TestOneRowPerSubject:
+    """The silent-leakage guard, shared with select-fcm.
+
+    A subject scanned at two tasks has one row per (task, sub). This stage
+    scores ONE row per subject and merges on `sub` alone, so without the guard
+    the same person lands in the train and the test fold of the same split:
+    leakage, `n` doubled, and a ranking of whichever task sorted first. Nothing
+    downstream could see it. fcm has had this check; bstm had not.
+    """
+
+    def frame(self):
+        return pd.DataFrame({"sub": ["A", "A", "B"],
+                             "task": ["Movie", "Rest", "Movie"]})
+
+    def test_two_tasks_for_one_subject_is_refused(self):
+        with pytest.raises(SystemExit) as e:
+            B.one_row_per_subject(self.frame(), "t")
+        msg = str(e.value)
+        assert "same subject" in msg
+        assert "Movie" in msg and "Rest" in msg
+        assert "--keep-tasks" in msg
+
+    def test_one_task_per_subject_passes_through_untouched(self):
+        d = pd.DataFrame({"sub": ["A", "B"], "task": ["Movie", "Movie"]})
+        assert len(B.one_row_per_subject(d, "t")) == 2
+
+    def test_a_task_filter_resolves_it(self):
+        got = B.one_row_per_subject(self.frame(), "t", ["Movie"])
+        assert got["sub"].tolist() == ["A", "B"]
+
+    def test_a_filter_matching_nothing_is_refused_with_what_exists(self):
+        with pytest.raises(SystemExit) as e:
+            B.one_row_per_subject(self.frame(), "t", ["Nope"])
+        assert "Nope" in str(e.value) and "Movie" in str(e.value)
+
+    def test_the_caller_supplies_its_own_remedy(self):
+        """One guard, two stages: the shared part of the message is here and
+        the stage-specific advice comes from the caller, so neither has to
+        mention the other's flags."""
+        with pytest.raises(SystemExit) as e:
+            B.one_row_per_subject(self.frame(), "t",
+                                  remedy=("re-run `static-fc --pool subject`",))
+        assert "--pool subject" in str(e.value)
+        with pytest.raises(SystemExit) as e:
+            B.one_row_per_subject(self.frame(), "t")
+        assert "--pool subject" not in str(e.value)
+
+    def test_both_stages_spell_the_flag_the_same_way(self):
+        """The symmetry: --task names the output partition in both, and
+        --keep-tasks filters rows in both, with the same dest."""
+        import argparse
+
+        from fmri_decomposition import fcm_selection as F
+
+        dests = []
+        for mod in (B, F):
+            p = argparse.ArgumentParser()
+            mod.add_arguments(p)
+            dests.append({a.option_strings[0]: a.dest
+                          for a in p._actions if a.option_strings})
+        for got in dests:
+            assert got["--task"] == "task"
+            assert got["--keep-tasks"] == "tasks"
+
+    def test_keep_tasks_defaults_to_no_filter(self):
+        """So a single-condition cohort needs no new flag -- the guard only
+        fires when there is genuinely something to disambiguate."""
+        import argparse
+
+        p = argparse.ArgumentParser()
+        B.add_arguments(p)
+        a = p.parse_args(["--target", "t", "--cohort", "c",
+                          "--pheno", "p.csv:,", "--task", "movie"])
+        assert a.tasks is None
+
+
 class TestConstantPredictionWarning:
     """A model that predicted a constant scores every arm identically.
 
