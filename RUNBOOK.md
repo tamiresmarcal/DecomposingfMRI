@@ -588,7 +588,7 @@ D=$(for A in $ATLASES; do
 C=$(for A in $ATLASES; do
       sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$D \
         --time=24:00:00 slurm/clustering.sbatch $A -1 \
-        -- $TRAIN | cut -d';' -f1
+        -- $TRAIN $PROJ | cut -d';' -f1
     done | paste -sd:)
 
 T=$(sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$C \
