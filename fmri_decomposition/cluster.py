@@ -1073,8 +1073,13 @@ def run_one(root: Path, atlas: str, window_s, args):
     # exactly as `decompose` says it -- two stages with the same train/project
     # semantics should use the same vocabulary, and a stage that silently acts
     # on whatever is in the directory cannot be asked for less.
+    # `None` (flag absent) and `[]` (flag given with no values) are different
+    # answers and must not share a branch: absent means "every cohort here",
+    # empty means "none beyond --train". Testing truthiness collapsed them, so
+    # `--project` with no values labelled EVERYTHING -- the exact opposite of
+    # what it reads as.
     project = getattr(args, "project", None)
-    if project:
+    if project is not None:
         unknown = [c for c in project if c not in paths]
         if unknown:
             raise SystemExit(
@@ -1635,7 +1640,9 @@ def add_arguments(p) -> None:
                         "`threshold` requires.")
     p.add_argument("--project", nargs="*", default=None,
                    help="cohorts to LABEL, beside --train which is always "
-                        "labelled. Default: every cohort in the cell, which is "
+                        "labelled. `--project` with NO values means none of "
+                        "them: label only --train. Omitted entirely means "
+                        "every cohort in the cell, which is "
                         "what you want for a full run. Name them to label a "
                         "subset -- adding one cohort months later is "
                         "`--project <it>`, and the rest keep the columns they "

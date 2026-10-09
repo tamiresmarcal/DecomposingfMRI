@@ -1037,7 +1037,13 @@ def add_arguments(p) -> None:
                         "scale -- see frames.py.")
     p.set_defaults(zscore_runs=True)
     p.add_argument("--train", nargs="+", default=["ds002837", "cneuromod"])
-    p.add_argument("--project", nargs="+", default=["camcan"])
+    p.add_argument("--project", nargs="*", default=["camcan"],
+                   help="cohorts the fit is APPLIED to. `--project` with no "
+                        "values means none of them: fit on --train and write "
+                        "only those, which `nargs=+` made impossible to say -- "
+                        "the nearest expressible thing was projecting a "
+                        "training cohort onto itself, which works by accident "
+                        "and reads as nonsense.")
     p.add_argument("--n-latents", nargs="+", type=int, default=[2, 3, 5],
                    help="must include 3: every stage 4b clusterer works on a "
                         "3-D embedding")

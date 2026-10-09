@@ -615,3 +615,60 @@ class TestClusterProject:
         run_cluster(cell, project=["camcan_rest"])
         out = capsys.readouterr().out
         assert "not asked for" in out and "camcan" in out
+
+
+# --------------------------------------------------------------------------
+# "Train only" -- fit on --train and write/label nothing else. Exposed by
+# Tamires asking for the three scenarios side by side: it was not expressible
+# in decompose (nargs=+ rejected an empty list) and was silently INVERTED in
+# cluster (an empty list is falsy, so it labelled everything).
+# --------------------------------------------------------------------------
+class TestTrainOnly:
+    def test_decompose_accepts_an_empty_project_list(self):
+        import argparse
+
+        p = argparse.ArgumentParser()
+        D.add_arguments(p)
+        base = ["--atlas", "yeo7", "--window-s", "-1",
+                "--censor-policy", "none"]
+        assert p.parse_args(base + ["--project"]).project == []
+        assert p.parse_args(base).project == ["camcan"]
+
+    def test_decompose_train_only_writes_only_the_training_cohorts(self,
+                                                                   tmp_path):
+        cohort_tree(tmp_path, ["trainA", "trainB", "camcan"])
+        run(tmp_path, [])
+        for c in ("trainA", "trainB"):
+            assert latents(tmp_path, c).exists(), c
+        assert not latents(tmp_path, "camcan").exists()
+
+    def test_cluster_distinguishes_absent_from_empty(self):
+        import argparse
+
+        from fmri_decomposition import cluster as C
+
+        p = argparse.ArgumentParser()
+        C.add_arguments(p)
+        base = ["--atlas", "yeo7", "--window-s", "-1"]
+        assert p.parse_args(base).project is None          # every cohort
+        assert p.parse_args(base + ["--project"]).project == []   # train only
+
+    def test_cluster_train_only_labels_only_the_training_cohorts(self, cell):
+        """An empty list used to be falsy and fall through to "label
+        everything" -- the exact opposite of what it reads as."""
+        entries, _ = run_cluster(cell, project=[])
+        touched = set(entries[0]["states_used"]) | set(
+            entries[0]["cohorts_kept"])
+        assert touched == {"trainA", "trainB"}
+        assert "camcan" not in touched
+
+    def test_cluster_absent_project_still_labels_everything(self, cell):
+        entries, _ = run_cluster(cell, project=None)
+        assert set(entries[0]["states_used"]) == {"trainA", "trainB", "camcan"}
+
+    def test_a_projected_cohort_is_untouched_by_a_train_only_run(self, cell):
+        col = run_cluster(cell)[0][0]["column"]
+        before = latents(cell, "camcan").stat().st_mtime_ns
+        run_cluster(cell, project=[])
+        assert latents(cell, "camcan").stat().st_mtime_ns == before
+        assert col in pd.read_parquet(latents(cell, "camcan")).columns
