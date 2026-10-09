@@ -103,7 +103,7 @@ confounds:
   dilate_tr: 1
   # DELIBERATELY IDENTICAL TO THE MOVIE CONFIG, and that is the whole point.
   #
-  # Reading resting_bstm_selection beside bstm_selection is only meaningful if
+  # Reading bstm_selection/task=rest beside task=movie is only meaningful if
   # the two conditions were censored by the same rule. A different fd_threshold here
   # would remove a different amount of data from the same subjects, and since
   # fewer frames mean noisier edges and noisier state sequences, the contrast
@@ -271,7 +271,7 @@ windows:
 # agreement does not permit redistributing. The generated file carries ids and
 # exclusion flags only -- keep it that way.
 #
-# Nothing needs them here anyway: `select` and `fcm-select` read covariates
+# Nothing needs them here anyway: `select-bstm` and `select-fcm` read covariates
 # from --pheno, which points at the release tables on the cluster. camcan_movie.yaml
 # still suggests merging them in; that suggestion predates the constraint and
 # should go.
@@ -321,8 +321,8 @@ windows:
 #      fmri-decomp static-fc --atlas harvardoxford yeo7 networks \
 #          --cohorts camcan camcan_rest
 #
-# 4. the two new rankings:
-#      fmri-decomp select --target additional_HADS_anx_category \
-#          --cohort camcan_rest --output-name resting_bstm_selection
-#      fmri-decomp fcm-select --target additional_HADS_anx_category \
-#          --cohorts camcan camcan_rest
+# 4. the two new rankings, each under its own --task partition:
+#      fmri-decomp select-bstm --target additional_HADS_anx_category \
+#          --cohort camcan_rest --task rest --pheno <table>:,
+#      fmri-decomp select-fcm  --target additional_HADS_anx_category \
+#          --cohorts camcan_rest --task rest --pheno <table>:,

@@ -5,16 +5,25 @@
 #   sbatch slurm/model_selection.sbatch additional_HADS_dep_category -- --models ridge hgb lgbm
 #
 # THE RESTING-STATE RUN IS THIS SCRIPT. Same grid, same covariates, same CV --
-# another cohort and another folder, so the two rankings sit in separate trees
-# of identical structure instead of overwriting one another:
+# another cohort and another --task label, so both rankings sit in ONE tree
+# partitioned by condition:
 #
 #   sbatch slurm/model_selection.sbatch $Y -- \
-#       --cohort camcan_rest --output-name resting_bstm_selection
+#       --cohort camcan      --task movie --pheno "$PHENO"
+#   sbatch slurm/model_selection.sbatch $Y -- \
+#       --cohort camcan_rest --task rest  --pheno "$PHENO"
 #
-# The third tree, static connectivity, is slurm/fcm_selection.sbatch. All three
-# are separate RUNS on whoever each has, so if a gap between their summary.csv
-# files is going to be read as a result, pass the SAME --restrict-subjects file
-# to all three and check `n` matches.
+#   -> outputs/bstm_selection/task=movie/target=$Y/summary.csv
+#      outputs/bstm_selection/task=rest/ target=$Y/summary.csv
+#
+# Static connectivity is slurm/fcm_selection.sbatch, under the same split. All
+# four are separate RUNS on whoever each has, so if a gap between their
+# summary.csv files is going to be read as a result, pass the SAME
+# --restrict-subjects file to all of them and check `n` matches.
+#
+# --cohort, --task and --pheno are all REQUIRED and none of them has a default:
+# a job script that names a cohort, or a path into one person's scratch space,
+# only works for one project.
 #
 # --models defaults to `ridge hgb`, both of which are sklearn. `lgbm` needs
 # lightgbm, which containers/stage45.def pins but an older build of the image may
@@ -157,7 +166,7 @@ else
   RUN=(python3)
 fi
 
-"${RUN[@]}" -m fmri_decomposition.cli select-model \
+"${RUN[@]}" -m fmri_decomposition.cli select-bstm \
     --target "${TARGET}" \
     --n-jobs "${SLURM_CPUS_PER_TASK:-1}" \
     ${EXTRA[@]+"${EXTRA[@]}"}

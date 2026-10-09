@@ -1,32 +1,34 @@
 #!/usr/bin/env python3
-"""The subjects every selection tree has, so all three score the same sample.
+"""The subjects every selection run has, so they all score the same sample.
 
     python tools/shared_subjects.py --cohorts camcan camcan_rest \\
         -o shared_subjects.txt
 
-    fmri-decomp select     ... --restrict-subjects shared_subjects.txt
-    fmri-decomp select-fcm ... --restrict-subjects shared_subjects.txt
+    fmri-decomp select-bstm ... --restrict-subjects shared_subjects.txt
+    fmri-decomp select-fcm  ... --restrict-subjects shared_subjects.txt
 
 WHY THIS EXISTS
 ---------------
-`bstm_selection`, `resting_bstm_selection` and `fcm_selection` are separate
-RUNS, each on whoever it has. That is the right structure -- they answer
-different questions and one of them can be re-run without the others -- but it
-means two of their tables can differ in SAMPLE as well as in score, and a gap
-read as "rest does worse" could be "rest was measured on the 480 subjects with
-a usable rest scan while movie had 610".
+`select-bstm` and `select-fcm`, each under `--task movie` and `--task rest`,
+are four separate RUNS, each on whoever it has. That is the right structure --
+they answer different questions and one of them can be re-run without the
+others -- but it means two of their tables can differ in SAMPLE as well as in
+score, and a gap read as "rest does worse" could be "rest was measured on the
+480 subjects with a usable rest scan while movie had 610".
 
 `n` is in every summary.csv so that is visible. This is the fix: one id list,
-passed to every tree, which each applies to the phenotype before any fit.
+passed to every run, which each applies to the phenotype before any fit.
 
 WHAT IT INTERSECTS
 ------------------
-One table per (tree, cohort), because within a cohort every atlas and every
+One table per (stage, cohort), because within a cohort every atlas and every
 state set holds the same subjects -- they come from the same extraction. So the
-first match of each glob is enough, and the intersection is over trees and
-cohorts rather than over the whole grid. The paths are printed with their
-counts, so a tree that silently contributed nothing is visible rather than
-inferred.
+first match of each glob is enough, and the intersection is over stages and
+cohorts rather than over the whole grid. What it reads is the INPUT to each
+selection run -- transitions/ for bstm, static_fc/ for fcm -- not the
+summary.csv they write, so the list can be built before any of them has run.
+The paths are printed with their counts, so a source that silently contributed
+nothing is visible rather than inferred.
 
 Ids are upper-cased and stripped, the same normalisation every join in the
 pipeline applies, so a list written by this tool matches regardless of how the
@@ -43,7 +45,7 @@ from pathlib import Path
 
 
 def sources(root: Path, cohorts: list[str], window_s: str) -> list[tuple[str, str]]:
-    """(label, glob) per tree per cohort, in the order they are reported."""
+    """(label, glob) per stage per cohort, in the order they are reported."""
     out = []
     for c in cohorts:
         out.append((f"transitions/{c}",
@@ -62,10 +64,10 @@ def subjects_in(pattern: str) -> tuple[set[str], str]:
     if not files:
         raise SystemExit(
             f"nothing matched {pattern}\n"
-            f"  That tree has not been built yet. Build it, or drop its cohort "
-            f"from --cohorts -- a list that silently skips a tree is worse "
-            f"than no list, because every tree would then still be scored on "
-            f"its own sample.")
+            f"  That stage has not been built for that cohort yet. Build it, "
+            f"or drop its cohort from --cohorts -- a list that silently skips "
+            f"a source is worse than no list, because every run would then "
+            f"still be scored on its own sample.")
     s = set(pd.read_parquet(files[0], columns=["sub"])["sub"]
             .astype(str).str.strip().str.upper())
     return s, files[0]
@@ -75,7 +77,12 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--cohorts", nargs="+", default=["camcan", "camcan_rest"])
+    # No default: a cohort name baked into this file only works for one
+    # project, and the cohorts to intersect are exactly the ones the selection
+    # runs being compared were given.
+    p.add_argument("--cohorts", nargs="+", required=True,
+                   help="the cohorts whose subjects must all be present, e.g. "
+                        "the --cohort of each run being compared")
     p.add_argument("--window-s", default="-1",
                    help="the transitions aperture to read (default -1)")
     p.add_argument("--output-root", default=None,

@@ -1,23 +1,31 @@
 #!/bin/bash
-# Stage 5b' -- rank STATIC connectivity models. The third selection tree.
+# Stage 5b' -- rank STATIC connectivity models. The other selection tree.
 #
-#   sbatch slurm/fcm_selection.sbatch additional_HADS_anx_category
-#   sbatch slurm/fcm_selection.sbatch additional_HADS_anx_category \
-#       -- --cohorts camcan camcan_rest --models ridge hgb
+#   sbatch slurm/fcm_selection.sbatch $Y -- \
+#       --cohorts camcan      --task movie --pheno "${PHENO[@]}"
+#   sbatch slurm/fcm_selection.sbatch $Y -- \
+#       --cohorts camcan_rest --task rest  --pheno "${PHENO[@]}"
 #
-# THREE TREES, ONE SHAPE, read side by side:
+# TWO TREES, FOUR TABLES, ONE SHAPE, read side by side -- each tree partitioned
+# by condition, not duplicated under a second name:
 #
-#   outputs/bstm_selection/          sbatch slurm/model_selection.sbatch $Y
-#   outputs/resting_bstm_selection/  sbatch slurm/model_selection.sbatch $Y \
-#                                      -- --cohort camcan_rest \
-#                                         --output-name resting_bstm_selection
-#   outputs/fcm_selection/           this
+#   outputs/bstm_selection/task=movie/   slurm/model_selection.sbatch
+#   outputs/bstm_selection/task=rest/      -- --cohort camcan_rest --task rest
+#   outputs/fcm_selection/ task=movie/   this, --cohorts camcan      --task movie
+#   outputs/fcm_selection/ task=rest/    this, --cohorts camcan_rest --task rest
+#
+# --cohorts, --task and --pheno are all REQUIRED and none of them has a default:
+# a job script that names a cohort, or a path into one person's scratch space,
+# only works for one project. --task is a LABEL for the output partition; the
+# ROW filter, for a cohort where a subject has several runs, is --keep-tasks.
 #
 # They are separate RUNS, so each uses whoever it has. If a gap between their
 # summary.csv files is going to be read as a result, pass the SAME
-# --restrict-subjects file to all three and check `n` matches.
+# --restrict-subjects file to all four and check `n` matches.
 #
-# WHAT HAS TO EXIST FIRST: stage 3b, for every cohort named.
+# WHAT HAS TO EXIST FIRST: stage 3b, for every cohort named. That one IS a
+# single run over both -- it writes cohort= partitions and nothing about it is
+# per-condition:
 #   sbatch slurm/static_fc.sbatch camcan camcan_rest
 # The static-FC table is also where frac_good_frames and n_tr_used come from,
 # which are covariates here and have no equivalent in the state trees.

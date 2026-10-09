@@ -157,15 +157,31 @@ def transitions(root: Path, deep: bool = True) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+SELECTION_TREES = ("bstm_selection", "fcm_selection")
+
+
 def selection(root: Path) -> pd.DataFrame:
+    """One row per selection RUN: (tree, task, target).
+
+    Both trees, because `select-fcm` is the control `select-bstm` has to beat
+    and a report that shows only one of them cannot say whether the comparison
+    is even runnable yet. And `task=` under each, because that partition is how
+    the movie and rest rankings sit side by side -- globbing `target=*` directly
+    under the tree, as this did when there was no task level, found nothing at
+    all and printed `(nothing)` for a tree that was fully built.
+    """
     rows = []
-    for d in sorted((root / "bstm_selection").glob("target=*")):
-        sc = d / "scores.parquet"
-        rows.append({"target": _key(d, "target"),
-                     "scores": sc.exists(),
-                     "n_rows": _footer(sc)[0] if sc.exists() else 0,
-                     "design": (d / "DESIGN.md").exists(),
-                     "figures": sum(1 for _ in (d / "figures").glob("*.png"))})
+    for tree in SELECTION_TREES:
+        for d in sorted((root / tree).glob("task=*/target=*")):
+            sc = d / "scores.parquet"
+            rows.append({"tree": tree.replace("_selection", ""),
+                         "task": _key(d, "task"),
+                         "target": _key(d, "target"),
+                         "scores": sc.exists(),
+                         "n_rows": _footer(sc)[0] if sc.exists() else 0,
+                         "design": (d / "DESIGN.md").exists(),
+                         "figures": sum(1 for _
+                                        in (d / "figures").glob("*.png"))})
     return pd.DataFrame(rows)
 
 
@@ -363,7 +379,7 @@ def run(args) -> int:
 
     _show("5  TRANSITIONS  tables written  (rows = task x sub; subs = people)",
           tr)
-    _show("6  SELECTION    targets", sel)
+    _show("6  SELECTION    runs (tree x task x target)", sel)
 
     probs = (problems(lat, args) + stale(lat, tr)
              + behind(lat, tr, args.min_k, args.max_k)

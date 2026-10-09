@@ -1,31 +1,43 @@
 #!/usr/bin/env python3
 """Stage 5b -- which state set predicts a phenotype column best.
 
-    fmri-decomp select-model --target additional_HADS_anx_category
-    fmri-decomp select-model --target additional_HADS_anx_category \\
+    fmri-decomp select-bstm --target additional_HADS_anx_category \\
+        --cohort camcan --task movie --pheno <table>:,
+    fmri-decomp select-bstm --target additional_HADS_anx_category \\
+        --cohort camcan --task movie --pheno <table>:, \\
         --models ridge hgb lgbm --n-jobs 16
 
-    # the resting-state ranking -- same code, same grid, another cohort and
-    # another folder
-    fmri-decomp select-model --target additional_HADS_anx_category \\
-        --cohort camcan_rest --output-name resting_bstm_selection
+    # the resting-state ranking -- same code, same grid, another cohort under
+    # another --task label
+    fmri-decomp select-bstm --target additional_HADS_anx_category \\
+        --cohort camcan_rest --task rest --pheno <table>:,
 
-writes, per target, under `--output-name` (default `bstm_selection`),
+writes, per (task, target), under `--output-name` (default `bstm_selection`),
 
-    outputs/<name>/target=<t>/DESIGN.md       what was compared and fixed
-    outputs/<name>/target=<t>/scores.parquet  every (state set, arm, model, seed)
-    outputs/<name>/target=<t>/summary.csv     the ranking, readable
-    outputs/<name>/target=<t>/figures/*.png   the comparison plots
-    outputs/<name>/target=<t>/models/*.joblib refit artifacts for the top N
-    outputs/meta/<name>/target=<t>.json       manifest
+    outputs/<name>/task=<k>/target=<t>/DESIGN.md       what was compared
+    outputs/<name>/task=<k>/target=<t>/scores.parquet  (state set, arm, model, seed)
+    outputs/<name>/task=<k>/target=<t>/summary.csv     the ranking, readable
+    outputs/<name>/task=<k>/target=<t>/figures/*.png   the comparison plots
+    outputs/<name>/task=<k>/target=<t>/models/*.joblib refits for the top N
+    outputs/meta/<name>/task=<k>/target=<t>.json       manifest
 
-THREE TREES, ONE SHAPE
-----------------------
-`bstm_selection` (movie states), `resting_bstm_selection` (rest states) and
-`fcm_selection` (static connectivity) are read side by side, so they share a
-`summary.csv` shape -- `n` included, without which two scores are not
-comparable. The first two are THIS script under two `--output-name` values;
-only the third is separate code, because its features come from another stage.
+TWO TREES, PARTITIONED BY CONDITION
+-----------------------------------
+`bstm_selection` (state sets) and `fcm_selection` (static connectivity), each
+split by `task=`:
+
+    outputs/bstm_selection/task=movie/target=<t>/summary.csv
+    outputs/bstm_selection/task=rest/ target=<t>/summary.csv
+    outputs/fcm_selection/ task=movie/target=<t>/summary.csv
+    outputs/fcm_selection/ task=rest/ target=<t>/summary.csv
+
+Four tables, one shape, read against each other. `task=` is a hive partition
+like every other key under outputs/ -- atlas=, window_s=, cohort=, states=,
+target= -- rather than a second tree with a different NAME for the same
+ranking on different data, which is what `resting_bstm_selection` was.
+
+This script produces both bstm rows; only `select-fcm` is separate code,
+because its features come from another stage.
 
 They are separate RUNS, so each uses whichever subjects it has.
 `--restrict-subjects`, passed the same file everywhere, is what puts them on
@@ -681,20 +693,23 @@ def run(args) -> int:
                                    " [" + scores_df["p_norm"] + "]"))
     scores_df = _label_axes(scores_df)
 
-    # The FOLDER is a flag, so the same code serves movie and rest without a
-    # second copy of it. `select-model --cohort camcan_rest --output-name
-    # resting_bstm_selection` is the whole of the resting-state arm: the grid,
-    # the covariates, the CV and the figures are identical, and only the cohort
-    # whose transition tables are read differs.
-    out = root / args.output_name / f"target={args.target}"
-    _wipe(out, parent=args.output_name)
+    # The CONDITION is a flag, so the same code serves movie and rest without a
+    # second copy of it. `select-bstm --cohort camcan_rest --task rest` is the
+    # whole of the resting-state arm: the grid, the covariates, the CV and the
+    # figures are identical, and only the cohort whose transition tables are
+    # read differs. `--output-name` stays a flag too, but it names the TREE --
+    # the model family being ranked -- and switching conditions must not move
+    # between trees, or the four tables stop being one comparison.
+    out = (root / args.output_name / f"task={args.task}"
+           / f"target={args.target}")
+    _wipe(out, parent=f"task={args.task}")
     (out / "figures").mkdir(parents=True, exist_ok=True)
     (out / "models").mkdir(parents=True, exist_ok=True)
     scores_df.to_parquet(out / "scores.parquet", index=False)
 
     # `n` and `n_features` are GROUPING keys rather than dropped columns: a
     # row's score is not comparable with another's without them, and these
-    # tables are now read beside resting_bstm_selection's and fcm_selection's.
+    # tables are now read beside the other task's and fcm_selection's.
     # Both are constant within a group, so grouping on them changes no number.
     summary = (scores_df.groupby(["model", "arm", "atlas", "window_s", "K",
                                   "states", "n", "n_features"],
@@ -717,10 +732,12 @@ def run(args) -> int:
     saved = _save_models(scores_df, data, out / "models", args.save_top,
                          args.covariates)
 
-    mf = meta_dir(root) / args.output_name / f"target={args.target}.json"
+    mf = (meta_dir(root) / args.output_name / f"task={args.task}"
+          / f"target={args.target}.json")
     mf.parent.mkdir(parents=True, exist_ok=True)
     mf.write_text(json.dumps(
-        {"target": args.target, "cohort": args.cohort, "models": args.models,
+        {"target": args.target, "task": args.task,
+         "cohort": args.cohort, "models": args.models,
          "restrict_subjects": getattr(args, "restrict_subjects", None),
          "seeds": args.seeds, "features": args.features,
          "p_norm": args.p_norm, "covariates": args.covariates,
@@ -786,17 +803,18 @@ def describe_blocks(sample_table: Path, args) -> list[str]:
     return out
 
 
-def _wipe(out: Path, parent: str = "bstm_selection") -> None:
+def _wipe(out: Path, parent: str) -> None:
     """Empty the target folder before writing a new run into it.
 
     Everything here is regenerated, so a leftover is never a leftover you can
     trust: a run with a shorter `--features` would otherwise leave figures and
     joblib artifacts describing arms it never scored, with nothing saying so.
 
-    `out` is always <root>/<parent>/target=<target>, and the target comes from
-    the command line, so the name is checked before anything is removed -- a
-    `/` or `..` in it would make this delete something else entirely. `parent`
-    is named by the caller rather than inferred, so a stage that gets the path
+    `out` is always <root>/<tree>/task=<task>/target=<target>, and both the
+    task and the target come from the command line, so the names are checked
+    before anything is removed -- a `/` or `..` in either would make this
+    delete something else entirely. `parent` is named by the caller (it is the
+    `task=` component) rather than inferred, so a stage that gets the path
     wrong is refused instead of clearing a tree it does not own.
     """
     import shutil
@@ -1118,15 +1136,25 @@ def add_arguments(p) -> None:
     p.add_argument("--cohort", required=True,
                    help="whose transition tables to rank. Required: this stage "
                         "spans cohorts, so it must not name one by default. "
-                        "The resting-state run is this flag plus "
-                        "--output-name.")
+                        "The resting-state run is this flag plus --task.")
+    p.add_argument("--task", required=True, metavar="LABEL",
+                   help="which experimental CONDITION this ranking is about, "
+                        "as a hive partition: "
+                        "outputs/<tree>/task=<this>/target=<t>/. It is a LABEL "
+                        "for the output path, not a row filter -- "
+                        "`--cohort camcan --task movie` and "
+                        "`--cohort camcan_rest --task rest` put two rankings "
+                        "of the same shape side by side under one tree, which "
+                        "is what makes them readable against each other. "
+                        "Required, so the path always says which condition "
+                        "produced it.")
     p.add_argument("--output-name", default="bstm_selection",
                    metavar="FOLDER",
-                   help="the folder under outputs/ to write into (default "
-                        "bstm_selection). Use resting_bstm_selection with "
-                        "--cohort camcan_rest, so the two rankings sit in "
-                        "separate trees of identical structure instead of "
-                        "overwriting one another.")
+                   help="the TREE under outputs/ to write into. The task "
+                        "split is --task, not this -- one tree partitioned by "
+                        "condition, rather than a second tree with a different "
+                        "name. Change it only for a run that is not one of "
+                        "these conditions at all.")
     p.add_argument("--restrict-subjects", default=None, metavar="FILE",
                    help="one subject id per line, or a CSV with a `sub` "
                         "column. Pass the SAME file to every tree so a gap "

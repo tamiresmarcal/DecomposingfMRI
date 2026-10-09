@@ -2,22 +2,22 @@
 """Stage 5b' -- how well does a STATIC connectivity matrix predict a phenotype?
 
     fmri-decomp select-fcm --target additional_HADS_anx_category \\
-        --cohorts camcan camcan_rest
+        --cohorts camcan --task movie --pheno <table>:,
 
-writes, per target,
+writes, per (task, target),
 
-    outputs/fcm_selection/target=<t>/DESIGN.md       what was compared and fixed
-    outputs/fcm_selection/target=<t>/scores.parquet  every (cell, arm, model, seed)
-    outputs/fcm_selection/target=<t>/summary.csv     the ranking, readable
-    outputs/fcm_selection/target=<t>/figures/*.png
-    outputs/meta/fcm_selection/target=<t>.json       manifest
+    outputs/fcm_selection/task=<k>/target=<t>/DESIGN.md      what was compared
+    outputs/fcm_selection/task=<k>/target=<t>/scores.parquet (cell, arm, model, seed)
+    outputs/fcm_selection/task=<k>/target=<t>/summary.csv    the ranking, readable
+    outputs/fcm_selection/task=<k>/target=<t>/figures/*.png
+    outputs/meta/fcm_selection/task=<k>/target=<t>.json      manifest
 
-THE THIRD TREE
+THE OTHER TREE
 --------------
-`bstm_selection` ranks movie state sets, `resting_bstm_selection` ranks rest
-state sets -- the same script under two `--output-name` values -- and this
-ranks the thing both of them have to beat. Same `summary.csv` shape, so the
-three are read side by side.
+`bstm_selection/task=movie/` and `bstm_selection/task=rest/` rank state sets
+-- the same script under two `--task` labels -- and this ranks the thing both
+of them have to beat, under the same split. Four tables, one `summary.csv`
+shape, read against each other.
 
 Static FC is the default in this literature: flatten one correlation matrix
 per subject, hand the vector to a regressor. If it predicts HADS as well as a
@@ -59,12 +59,12 @@ Every arm is prepended with them, so each is measured against the same
 covariates-only baseline -- one per (cohort, model, seed), since the quality
 columns differ by cohort while Age and Sex do not.
 
-READING IT BESIDE THE OTHER TWO
--------------------------------
-`n` is in `summary.csv` for exactly this reason: these trees are separate runs
-on whoever each one has, so two tables can differ in sample as well as in
+READING IT BESIDE THE OTHER THREE
+--------------------------------
+`n` is in `summary.csv` for exactly this reason: the four rankings are separate
+runs on whoever each one has, so two tables can differ in sample as well as in
 score. Check `n` before reading a gap as a result, and if it differs, pass
-`--restrict-subjects` the same subject list to all three.
+`--restrict-subjects` the same subject list to all four.
 
 No table here subtracts one row from another. The arms share their folds, so a
 difference between two scores is dependent and has no standard error the usual
@@ -280,10 +280,11 @@ def design_note(args, meta: pd.DataFrame, n_jobs: int) -> str:
                      f"{r.n_covariates} | {r.n} |")
     lines += [
         "", "## Reading this", "",
-        "* Read `n` before reading a gap. This tree, `bstm_selection` and "
-        "`resting_bstm_selection` are separate runs on whoever each one has, "
-        "so two tables can differ in sample as well as in score. "
-        "`--restrict-subjects` pins all three to one list.",
+        "* Read `n` before reading a gap. The four rankings -- this tree and "
+        "`bstm_selection`, each under `task=movie` and `task=rest` -- are "
+        "separate runs on whoever each one has, so two tables can differ in "
+        "sample as well as in score. `--restrict-subjects` pins all four to "
+        "one list.",
         "* `global` is the control: a subject's mean and SD over every edge, "
         "with no topology in them. If it matches `edges`, the pattern is not "
         "what is being measured -- the amount is.",
@@ -329,8 +330,9 @@ def run(args) -> int:
     scores_df = pd.DataFrame(rows).merge(meta, on=["cohort", "arm", "atlas"],
                                          how="left")
 
-    out = root / args.output_name / f"target={args.target}"
-    _wipe(out, parent=args.output_name)
+    out = (root / args.output_name / f"task={args.task}"
+           / f"target={args.target}")
+    _wipe(out, parent=f"task={args.task}")
     (out / "figures").mkdir(parents=True, exist_ok=True)
     scores_df.to_parquet(out / "scores.parquet", index=False)
 
@@ -351,12 +353,14 @@ def run(args) -> int:
     print(note)
     _figures(scores_df, summary, out / "figures", args.target)
 
-    mf = meta_dir(root) / args.output_name / f"target={args.target}.json"
+    mf = (meta_dir(root) / args.output_name / f"task={args.task}"
+          / f"target={args.target}.json")
     mf.parent.mkdir(parents=True, exist_ok=True)
     mf.write_text(json.dumps(
         {"target": args.target, "cohorts": args.cohorts, "arms": args.arms,
          "models": args.models, "seeds": args.seeds,
-         "covariates": args.covariates, "tasks": args.tasks,
+         "covariates": args.covariates, "task": args.task,
+         "keep_tasks": args.tasks,
          "fc_transform": args.fc_transform,
          "fc_max_missing": args.fc_max_missing,
          "restrict_subjects": args.restrict_subjects,
@@ -367,7 +371,7 @@ def run(args) -> int:
          "output": str(out.relative_to(root)),
          "note": "out-of-fold scores; the ORDER is the result, the numbers are "
                  "not effect sizes. Read `n` before reading a gap against "
-                 "bstm_selection or resting_bstm_selection.",
+                 "the bstm_selection tree.",
          "written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
         indent=2, default=str))
     log(f"-> {out.relative_to(root)}")
@@ -450,10 +454,14 @@ def add_arguments(p) -> None:
     p.add_argument("--target", required=True,
                    help="phenotype column, e.g. additional_HADS_anx_category")
     p.add_argument("--cohorts", nargs="+", required=True,
-                   help="movie and rest go in ONE table, as a `cohort` column: "
-                        "--cohorts camcan camcan_rest. Required, for the same "
-                        "reason `select-model --cohort` is: a stage that spans "
-                        "cohorts must not name one by default.")
+                   help="whose FC tables to rank, as one or more cohorts "
+                        "making up ONE condition -- they go in one table, with "
+                        "`cohort` as a column. The movie/rest split is --task, "
+                        "so a run is `--cohorts camcan --task movie` or "
+                        "`--cohorts camcan_rest --task rest`, not both pooled "
+                        "under one label. Required, for the same reason "
+                        "`select-bstm --cohort` is: a stage that spans cohorts "
+                        "must not name one by default.")
     p.add_argument("--arms", nargs="+", default=ARMS, choices=ARMS,
                    help="edges = every pairwise correlation (the hypothesis); "
                         "global = a subject's mean and SD over those edges, "
@@ -470,15 +478,29 @@ def add_arguments(p) -> None:
     p.add_argument("--fc-max-missing", type=float, default=0.05,
                    help="drop an edge NaN in more than this fraction of "
                         "subjects; mean-impute what is left")
-    p.add_argument("--tasks", nargs="*", default=None,
-                   help="keep only these task labels, where a subject has "
-                        "several runs of a cohort")
+    p.add_argument("--task", required=True, metavar="LABEL",
+                   help="which experimental CONDITION this ranking is about, "
+                        "as a hive partition: "
+                        "outputs/<tree>/task=<this>/target=<t>/. It is a LABEL "
+                        "for the output path, not a row filter (that is "
+                        "--keep-tasks) -- `--cohorts camcan --task movie` and "
+                        "`--cohorts camcan_rest --task rest` put two rankings "
+                        "of the same shape side by side under one tree, which "
+                        "is what makes them readable against each other. "
+                        "Required, so the path always says which condition "
+                        "produced it.")
+    p.add_argument("--keep-tasks", nargs="*", default=None, dest="tasks",
+                   help="a ROW filter: keep only rows whose `task` column is "
+                        "one of these, for a cohort where a subject has "
+                        "several runs. Distinct from --task, which names the "
+                        "output partition -- these take the BIDS task labels "
+                        "as the data spells them (Movie, 500daysofsummer), "
+                        "while --task is yours to choose.")
     p.add_argument("--restrict-subjects", default=None, metavar="FILE",
                    help="one subject id per line, or a CSV with a `sub` "
-                        "column. Pass the SAME file here and to `select-model` to "
-                        "put all three trees on one sample, so a gap between "
-                        "their tables cannot be a difference in who was "
-                        "scored.")
+                        "column. Pass the SAME file to every selection run -- "
+                        "both tasks of both trees -- so a gap between their "
+                        "tables cannot be a difference in who was scored.")
     p.add_argument("--pheno", nargs="+", required=True, metavar="PATH:SEP",
                    help="phenotype table(s) as path:separator, merged on "
                         "--id-col. Required: the path is a fact about your "

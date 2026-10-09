@@ -226,7 +226,7 @@ class TestOrdinalLevelCoding:
         p = argparse.ArgumentParser()
         B.add_arguments(p)
         got = p.parse_args(["--target", "x", "--cohort", "camcan",
-                            "--pheno", "p.csv:,"])
+                            "--pheno", "p.csv:,", "--task", "movie"])
         assert got.ordinal_levels == B.ORDINAL_LEVELS
 
     def test_an_empty_covariate_is_named_rather_than_blamed_on_the_join(
@@ -238,41 +238,6 @@ class TestOrdinalLevelCoding:
         msg = str(e.value)
         assert "entirely empty" in msg and "Age" in msg
         assert "join matched nothing" not in msg
-
-
-# --------------------------------------------------------------------------
-# Three trees, one shape. `bstm_selection` and `resting_bstm_selection` are
-# THIS script under two --output-name values, so the thing to pin is that the
-# folder is genuinely a parameter and that the tables carry what a reader needs
-# to check two of them were scored on the same sample.
-# --------------------------------------------------------------------------
-class TestThreeTreesOneShape:
-    def test_the_output_folder_is_a_parameter(self):
-        import argparse
-
-        p = argparse.ArgumentParser()
-        B.add_arguments(p)
-        req = ["--target", "t", "--cohort", "camcan",
-               "--pheno", "p.csv:,"]
-        a = p.parse_args(req)
-        assert a.output_name == "bstm_selection"
-        b = p.parse_args(["--target", "t", "--pheno", "p.csv:,",
-                          "--cohort", "camcan_rest",
-                          "--output-name", "resting_bstm_selection"])
-        assert b.output_name == "resting_bstm_selection"
-        assert b.cohort == "camcan_rest"
-
-    def test_wipe_will_not_clear_a_tree_it_was_not_told_to_own(self, tmp_path):
-        """`--output-name` reaches `_wipe`, which empties the folder before
-        writing. A typo there must refuse, not delete someone else's tree."""
-        out = tmp_path / "resting_bstm_selection" / "target=t"
-        out.mkdir(parents=True)
-        (out / "keep.csv").write_text("x")
-        with pytest.raises(SystemExit):
-            B._wipe(out, parent="bstm_selection")
-        assert (out / "keep.csv").exists()
-        B._wipe(out, parent="resting_bstm_selection")
-        assert not out.exists()
 
 
 class TestRestrictSubjects:
@@ -347,7 +312,7 @@ class TestNoDatasetSpecificDefaults:
         with pytest.raises(SystemExit):           # --cohorts and --pheno
             p.parse_args(["--target", "t"])
         a = p.parse_args(["--target", "t", "--cohorts", "camcan",
-                          "--pheno", "p.csv:,"])
+                          "--pheno", "p.csv:,", "--task", "movie"])
         assert a.cohorts == ["camcan"]
         assert "/project/" not in Path(F.__file__).read_text()
 
@@ -361,3 +326,83 @@ class TestNoDatasetSpecificDefaults:
             joined = " ".join(run)
             assert "--cohorts camcan" not in joined, name
             assert "--atlas harvardoxford" not in joined, name
+
+
+class TestTaskIsAPartitionNotASecondTree:
+    """One tree per model family, partitioned by condition.
+
+    It used to be `--output-name resting_bstm_selection`: a second tree with a
+    different NAME for the same ranking on different data. `task=` is a hive
+    partition like every other key in outputs/ -- atlas=, window_s=, cohort=,
+    states=, target= -- so the four summary.csv files (bstm/fcm x movie/rest)
+    share one shape and one layout.
+    """
+
+    def test_the_path_is_tree_then_task_then_target(self, tmp_path):
+        import argparse
+
+        p = argparse.ArgumentParser()
+        B.add_arguments(p)
+        a = p.parse_args(["--target", "hads", "--cohort", "camcan",
+                          "--pheno", "p.csv:,", "--task", "movie"])
+        out = (tmp_path / a.output_name / f"task={a.task}"
+               / f"target={a.target}")
+        assert out.relative_to(tmp_path).as_posix() == (
+            "bstm_selection/task=movie/target=hads")
+
+    def test_a_task_must_be_given(self):
+        import argparse
+
+        p = argparse.ArgumentParser()
+        B.add_arguments(p)
+        with pytest.raises(SystemExit):
+            p.parse_args(["--target", "t", "--cohort", "c",
+                          "--pheno", "p.csv:,"])
+
+    def test_wipe_owns_the_task_partition_not_the_tree(self, tmp_path):
+        """The folder cleared before a run is one task's, so a rest run can
+        never empty the movie ranking beside it."""
+        movie = tmp_path / "bstm_selection" / "task=movie" / "target=hads"
+        rest = tmp_path / "bstm_selection" / "task=rest" / "target=hads"
+        for d in (movie, rest):
+            d.mkdir(parents=True)
+            (d / "summary.csv").write_text("x")
+        B._wipe(rest, parent="task=rest")
+        assert not rest.exists()
+        assert (movie / "summary.csv").exists()
+
+    def test_wipe_refuses_a_task_it_was_not_told_to_own(self, tmp_path):
+        out = tmp_path / "bstm_selection" / "task=movie" / "target=hads"
+        out.mkdir(parents=True)
+        (out / "summary.csv").write_text("x")
+        with pytest.raises(SystemExit):
+            B._wipe(out, parent="task=rest")
+        assert (out / "summary.csv").exists()
+
+    def test_the_fcm_tree_takes_the_same_label(self):
+        import argparse
+
+        from fmri_decomposition import fcm_selection as F
+
+        p = argparse.ArgumentParser()
+        F.add_arguments(p)
+        a = p.parse_args(["--target", "t", "--cohorts", "camcan_rest",
+                          "--pheno", "p.csv:,", "--task", "rest"])
+        assert a.task == "rest"
+        assert a.output_name == "fcm_selection"
+
+    def test_the_row_filter_is_a_different_flag_from_the_label(self):
+        """`--task` names the output partition and is yours to choose;
+        `--keep-tasks` filters rows and takes the BIDS labels as the data
+        spells them. `--task` beside `--tasks` was a collision nobody should
+        have to notice."""
+        import argparse
+
+        from fmri_decomposition import fcm_selection as F
+
+        p = argparse.ArgumentParser()
+        F.add_arguments(p)
+        a = p.parse_args(["--target", "t", "--cohorts", "c",
+                          "--pheno", "p.csv:,", "--task", "movie",
+                          "--keep-tasks", "Movie"])
+        assert a.task == "movie" and a.tasks == ["Movie"]

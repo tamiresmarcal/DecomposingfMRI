@@ -1,11 +1,11 @@
 """Stage 5b' -- the static-connectivity tree.
 
-Three trees are read side by side: `bstm_selection` (movie states),
-`resting_bstm_selection` (rest states, the same script under another
-`--output-name`) and this one. They are separate RUNS, so the thing that can
-silently invalidate a comparison between them is the sample, not the code --
-which is why `n` is in every summary and why `--restrict-subjects` is shared
-rather than reimplemented here.
+Four tables are read side by side: `bstm_selection` under `task=movie` and
+`task=rest` (the same script twice, one tree partitioned by condition), and
+this tree under the same two labels. They are separate RUNS, so the thing that
+can silently invalidate a comparison between them is the sample, not the code
+-- which is why `n` is in every summary and why `--restrict-subjects` is
+shared rather than reimplemented here.
 """
 import argparse
 
@@ -39,7 +39,7 @@ def args(root, **kw):
              fc_max_missing=0.05, tasks=None, restrict_subjects=None,
              covariates=["Age", "Sex"] + F.QUALITY_COVARIATES,
              categorical=["Sex"], atlas=None,
-             output_name="fcm_selection", n_jobs=1, show=20,
+             output_name="fcm_selection", task="movie", n_jobs=1, show=20,
              output_root=str(root), pheno=None, id_col="CCID",
              ordinal_levels=["Normal", "Mild", "Moderate", "Severe"])
     d.update(kw)
@@ -255,7 +255,7 @@ class TestTheTable:
                                for v in pheno["y"]]}).to_csv(ph, index=False)
         a = args(root, cohorts=["cA", "cB"], pheno=[f"{ph}:,"], **kw)
         assert F.run(a) == 0
-        out = root / "fcm_selection" / "target=hads"
+        out = root / "fcm_selection" / "task=movie" / "target=hads"
         return pd.read_csv(out / "summary.csv"), out
 
     def test_movie_and_rest_sit_in_one_table_as_a_cohort_column(
@@ -292,9 +292,18 @@ class TestTheTable:
     def test_it_writes_its_own_tree_not_bstm_selections(self, one_cell,
                                                         tmp_path):
         _, out = self.run_it(one_cell, tmp_path)
-        root = out.parent.parent
+        root = out.parent.parent.parent
         assert out.exists()
         assert not (root / "bstm_selection").exists()
+
+    def test_the_task_is_a_hive_partition_not_a_second_tree(self, one_cell,
+                                                            tmp_path):
+        """One tree partitioned by condition, so the four summary.csv files
+        -- bstm/fcm x movie/rest -- have one shape and one layout."""
+        _, out = self.run_it(one_cell, tmp_path)
+        assert out.parent.name == "task=movie"
+        assert out.parent.parent.name == "fcm_selection"
+        assert out.name == "target=hads"
 
     def test_design_and_manifest_travel_with_the_table(self, one_cell,
                                                        tmp_path):

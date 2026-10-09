@@ -80,6 +80,55 @@ class TestInventory:
         assert d["window_gate"].iloc[0] == "subjects only"
 
 
+class TestSelectionInventory:
+    """One row per RUN, which is (tree, task, target) and not just target.
+
+    This globbed `bstm_selection/target=*` from before `task=` existed. Once
+    the rankings moved under a task partition that matched nothing, so a fully
+    built tree reported `(nothing)` -- the failure mode an inventory command
+    exists to prevent.
+    """
+
+    @staticmethod
+    def _run(root, tree, task, target, figures=2, scores=True):
+        d = root / tree / f"task={task}" / f"target={target}"
+        (d / "figures").mkdir(parents=True)
+        (d / "DESIGN.md").write_text("x")
+        for i in range(figures):
+            (d / "figures" / f"f{i}.png").write_bytes(b"")
+        if scores:
+            pq.write_table(pa.Table.from_pandas(
+                pd.DataFrame({"score": [0.1, 0.2, 0.3]}),
+                preserve_index=False), d / "scores.parquet")
+
+    def test_both_trees_and_both_tasks_are_listed(self, tmp_path):
+        for tree in ("bstm_selection", "fcm_selection"):
+            for task in ("movie", "rest"):
+                self._run(tmp_path, tree, task, "hads")
+        d = S.selection(tmp_path)
+        assert set(zip(d["tree"], d["task"])) == {
+            ("bstm", "movie"), ("bstm", "rest"),
+            ("fcm", "movie"), ("fcm", "rest")}
+        assert d["target"].unique().tolist() == ["hads"]
+        assert d["n_rows"].tolist() == [3, 3, 3, 3]
+        assert d["figures"].tolist() == [2, 2, 2, 2]
+        assert d["design"].all()
+
+    def test_a_target_directly_under_the_tree_is_not_a_run(self, tmp_path):
+        """The pre-`task=` layout. It is not migrated silently: a path with no
+        condition in it cannot say which ranking it is, so the inventory must
+        not claim it as one."""
+        d = tmp_path / "bstm_selection" / "target=hads"
+        (d / "figures").mkdir(parents=True)
+        assert S.selection(tmp_path).empty
+
+    def test_a_run_with_no_scores_yet_is_listed_as_incomplete(self, tmp_path):
+        self._run(tmp_path, "bstm_selection", "rest", "hads", scores=False)
+        d = S.selection(tmp_path)
+        assert len(d) == 1
+        assert not d["scores"].iloc[0] and d["n_rows"].iloc[0] == 0
+
+
 class TestProblems:
     def test_cohorts_from_different_fits(self, tmp_path):
         # The one that silently destroys everything downstream: state 5 is only

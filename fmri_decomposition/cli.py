@@ -523,7 +523,7 @@ def cmd_cluster(args) -> int:
     return cluster.run(args)
 
 
-def cmd_select(args) -> int:
+def cmd_select_bstm(args) -> int:
     """Stage 5b: rank state sets by how well their transitions predict a
     phenotype column. Parallel over (state set x model x fold seed)."""
     from . import bstm_selection
@@ -545,13 +545,15 @@ def cmd_static_fc(args) -> int:
 
 
 def cmd_fcm_select(args) -> int:
-    """Stage 5b': rank static connectivity models the way `select` ranks state
-    sets, into a third tree of the same shape.
+    """Stage 5b': rank static connectivity models the way `select-bstm` ranks
+    state sets, into the other tree of the same shape.
 
-    Three trees, one shape, read side by side:
-      bstm_selection          `select --cohort camcan`
-      resting_bstm_selection  `select --cohort camcan_rest --output-name ...`
-      fcm_selection           this
+    Two trees, each partitioned by condition -- four tables, one shape, read
+    side by side:
+      bstm_selection/task=movie/  select-bstm --cohort camcan      --task movie
+      bstm_selection/task=rest/   select-bstm --cohort camcan_rest --task rest
+      fcm_selection/ task=movie/  this,       --cohorts camcan      --task movie
+      fcm_selection/ task=rest/   this,       --cohorts camcan_rest --task rest
     Only this one is separate code; its features come from stage 3b rather
     than stage 5a.
     """
@@ -722,14 +724,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     from . import bstm_selection as _bstm_selection
 
-    # `select-model` and `select-fcm`, a matched pair. `select` alone did not
-    # say select WHAT, and `fcm-select` put the noun first while `select` put
-    # the verb first -- two spellings of one idea sitting next to each other.
+    # `select-bstm` and `select-fcm`, a matched pair naming the two models
+    # being ranked. `select` alone did not say select WHAT, and `select-model`
+    # said it no better, since BOTH of these select a model. The output trees
+    # are `bstm_selection` and `fcm_selection`, so the commands now spell the
+    # folders they write.
     sel = sub.add_parser(
-        "select-model",
+        "select-bstm",
         help="stage 5b: which state set predicts a phenotype column best")
     _bstm_selection.add_arguments(sel)
-    sel.set_defaults(func=cmd_select)
+    sel.set_defaults(func=cmd_select_bstm)
 
     from . import transitions as _transitions
 
@@ -753,7 +757,7 @@ def build_parser() -> argparse.ArgumentParser:
     fs = sub.add_parser(
         "select-fcm",
         help="stage 5b': how well STATIC connectivity predicts a phenotype "
-             "-- the third tree beside bstm_selection")
+             "-- the other tree beside bstm_selection, same --task split")
     _fcm_selection.add_arguments(fs)
     fs.set_defaults(func=cmd_fcm_select)
 

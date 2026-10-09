@@ -103,6 +103,27 @@ RUN="apptainer exec --cleanenv --bind /project,/scratch,/home ${FMRIDECOMP_SIF45
 The sbatch scripts source `env.sh` themselves, so only your interactive commands
 need this.
 
+**The phenotype tables, once.** Every selection run takes `--pheno` and none of
+them has a default — the path is a fact about your filesystem, not about this
+pipeline, and a cohort's own release table is not in `outputs/`. Cam-CAN splits
+what is needed across two files, so it is a list:
+
+```bash
+CAMCAN=/project/6008063/tamires/cohorts/camcan/dataman/useraccess/opendata/paule_toussaint_camcan01870
+PHENO=("$CAMCAN/approved_data.tsv:"$'\t' "$CAMCAN/standard_data.csv:,")
+```
+
+An **array**, and every use below is `--pheno "${PHENO[@]}"`. Two reasons it
+cannot be a plain string: the entries are two separate arguments, and the first
+one's separator is a real tab, which `$'\t'` produces and `"...\t..."` does not.
+Both survive `sbatch ... -- --pheno "${PHENO[@]}"` — the `--` forwarding keeps
+each element whole.
+
+Each entry is `path:separator`. They are merged on `--id-col` (default `CCID`).
+Nothing in this repository reads them except the two selection stages, and
+nothing writes a copy of them into `outputs/` — the covariates go into the fit
+and the per-subject values do not come back out.
+
 ---
 
 ## 2. Check what you have, at any time
@@ -308,16 +329,24 @@ Then, once that finishes:
 
 ```bash
 for Y in additional_HADS_anx_category additional_HADS_dep_category; do
-  sbatch --time=06:00:00 slurm/model_selection.sbatch $Y
+  sbatch --time=06:00:00 slurm/model_selection.sbatch $Y -- \
+    --cohort camcan --task movie --pheno "${PHENO[@]}"
 done
 ```
 
-The phenotype table defaults to Cam-CAN's release. Everything after `--` goes
-straight to `select-model`, so another cohort's table needs no edit to the script:
+`--cohort`, `--task` and `--pheno` are all required and none has a default: a
+stage that spans cohorts must not name one, and a path into one person's
+scratch space only works for one project. `--task` is the hive partition the
+result lands under, so this writes
+`outputs/bstm_selection/task=movie/target=$Y/`.
+
+Everything after `--` goes straight to `select-bstm`, so another cohort needs no
+edit to the script:
 
 ```bash
 sbatch slurm/model_selection.sbatch severity -- \
-  --pheno /path/to/table.tsv:$'\t' --id-col SubjectID --cohort hcp
+  --pheno /path/to/table.tsv:$'\t' --id-col SubjectID \
+  --cohort hcp --task movie
 ```
 
 The `--target` column may be numeric, or labelled. Labels are matched against
@@ -329,17 +358,20 @@ order is the claim:
   --target severity --ordinal-levels low mid high
 ```
 
-Get that wrong and `select-model` stops and says so, naming the values it found; it
+Get that wrong and `select-bstm` stops and says so, naming the values it found; it
 does not quietly code them to NaN.
 
-`model_selection` **wipes its target directory before writing** — back up a
-result you care about first.
+`select-bstm` **wipes its own `task=`/`target=` directory before writing** — and
+only that one, so a `--task rest` run cannot empty the movie ranking beside it.
+Back up a result you care about first.
 
 ### Finally
 
 ```bash
 $RUN python3 -m fmri_decomposition.cli status | sed -n '/^======/,$p'
-column -s, -t outputs/bstm_selection/target=additional_HADS_anx_category/summary.csv | head -12
+column -s, -t \
+  outputs/bstm_selection/task=movie/target=additional_HADS_anx_category/summary.csv \
+  | head -12
 ```
 
 ### Looking at a state rather than ranking it
@@ -364,21 +396,25 @@ This is the table van der Meer et al.'s Fig. 1 plots.
 ### PHASE 4 — THE OTHER TWO TREES (is any of it better than the alternatives?)
 
 Phase 3 answers *which movie state set* predicts best. It cannot answer whether
-the whole idea beats what it is supposed to improve on. Two more rankings do,
-each in its own tree with the same `summary.csv` shape:
+the whole idea beats what it is supposed to improve on. Three more rankings do.
+They are not three new trees: there are **two trees, each partitioned by
+`task=`**, and phase 3 filled one of their four cells.
 
-| tree | what it is | what it costs |
+| run | what it is | what it costs |
 |---|---|---|
-| `fcm_selection` | one correlation matrix per subject, flattened | one pass over stage 2 |
-| `resting_bstm_selection` | the same pipeline on the rest scan | fMRIPrep + stage 2 |
+| `fcm_selection/task=movie` | one correlation matrix per subject, flattened | one pass over stage 2 |
+| `bstm_selection/task=rest` | the same pipeline on the rest scan | fMRIPrep + stage 2 |
+| `fcm_selection/task=rest` | the same matrix, from the rest scan | falls out of the two above |
 
-`fcm_selection` on the movie alone needs nothing new preprocessed:
+The FC arm on the movie alone needs nothing new preprocessed:
 
 ```bash
 git pull
 sbatch slurm/static_fc.sbatch camcan \
     -- --atlas harvardoxford yeo7 networks
-sbatch slurm/fcm_selection.sbatch additional_HADS_anx_category -- --cohorts camcan
+# once that finishes
+sbatch slurm/fcm_selection.sbatch additional_HADS_anx_category -- \
+    --cohorts camcan --task movie --pheno "${PHENO[@]}"
 ```
 
 Everything below is the rest arm, which starts at fMRIPrep.
@@ -559,13 +595,22 @@ Independent of everything in 4.6, and the cheaper half:
 ```bash
 sbatch slurm/static_fc.sbatch camcan camcan_rest \
     -- --atlas harvardoxford yeo7 networks
-# then, once it finishes
+# then, once it finishes -- one run per condition, because `task=` is the
+# partition the ranking lands under and a run writes exactly one of them
 for Y in additional_HADS_anx_category additional_HADS_dep_category; do
   sbatch slurm/fcm_selection.sbatch $Y -- \
-    --cohorts camcan camcan_rest --atlas harvardoxford yeo7 networks \
-    --pheno "$PHENO"
+    --cohorts camcan      --task movie \
+    --atlas harvardoxford yeo7 networks --pheno "${PHENO[@]}"
+  sbatch slurm/fcm_selection.sbatch $Y -- \
+    --cohorts camcan_rest --task rest \
+    --atlas harvardoxford yeo7 networks --pheno "${PHENO[@]}"
 done
 ```
+
+`static-fc` is one run over both cohorts — it writes `cohort=` partitions and
+nothing about it is per-condition. `select-fcm` is two, one per `task=`. That
+asymmetry is the point: a measurement spans cohorts, a ranking is about one
+condition.
 
 `static_fc.sbatch` asks for 4 CPUs / 32G / 3 h; `fcm_selection.sbatch` for
 16 CPUs / 32G / 3 h. Both are single jobs, not arrays — each (atlas, cohort)
@@ -601,7 +646,7 @@ T=$(sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$C \
 for Y in additional_HADS_anx_category additional_HADS_dep_category; do
   sbatch --kill-on-invalid-dep=yes --dependency=afterok:$T \
     slurm/model_selection.sbatch $Y -- \
-      --cohort camcan_rest --output-name resting_bstm_selection
+      --cohort camcan_rest --task rest --pheno "${PHENO[@]}"
 done
 
 squeue -u $USER -o "%.12i %.32j %.9T %.11M %R"
@@ -669,12 +714,17 @@ caches are written by the run that fits. A cell clustered *before* this change
 has no cached clusterer, so the first run after it still fits once. That is the
 re-run rest pays for; everything after it is cheap.
 
-#### 4.7 — read the three tables
+#### 4.7 — read the four tables
+
+Two trees, two `task=` partitions each, one shape:
 
 ```bash
-for T in bstm_selection resting_bstm_selection fcm_selection; do
-  echo "== $T"
-  column -s, -t outputs/$T/target=additional_HADS_anx_category/summary.csv | head -6
+Y=additional_HADS_anx_category
+for T in bstm_selection fcm_selection; do
+  for K in movie rest; do
+    echo "== $T / task=$K"
+    column -s, -t outputs/$T/task=$K/target=$Y/summary.csv | head -6
+  done
 done
 ```
 
@@ -685,37 +735,48 @@ best-first. What to read:
   floor, and age and sex predict HADS on their own.
 * `std` next to every `mean`. A gap smaller than either arm's spread across
   fold seeds is not a result.
-* **`n` first, always.** These are three separate runs on whoever each one has,
+* **`n` first, always.** These are four separate runs on whoever each one has,
   so two tables can differ in sample as well as in score. If they differ and
-  the gap matters, build one id list and pass it to all three:
+  the gap matters, build one id list and pass it to all four:
 
   ```bash
   $RUN tools/shared_subjects.py --cohorts camcan camcan_rest \
       -o shared_subjects.txt
   ```
 
-  It prints a count per (tree, cohort) so a tree that contributed nothing is
-  visible, and refuses rather than silently skipping one. Then:
+  It intersects the **inputs** — `transitions/` and `static_fc/` — so the list
+  can be built before any ranking has run, and it prints a count per
+  (stage, cohort) so a source that contributed nothing is visible rather than
+  inferred. It refuses rather than silently skipping one. Then re-run all four
+  with it:
 
   ```bash
-  sbatch slurm/model_selection.sbatch $Y -- \
-      --restrict-subjects shared_subjects.txt
-  sbatch slurm/model_selection.sbatch $Y -- --cohort camcan_rest \
-      --output-name resting_bstm_selection \
-      --restrict-subjects shared_subjects.txt
-  sbatch slurm/fcm_selection.sbatch $Y -- \
-      --restrict-subjects shared_subjects.txt
+  for Y in additional_HADS_anx_category additional_HADS_dep_category; do
+    sbatch slurm/model_selection.sbatch $Y -- \
+        --cohort camcan      --task movie --pheno "${PHENO[@]}" \
+        --restrict-subjects shared_subjects.txt
+    sbatch slurm/model_selection.sbatch $Y -- \
+        --cohort camcan_rest --task rest  --pheno "${PHENO[@]}" \
+        --restrict-subjects shared_subjects.txt
+    sbatch slurm/fcm_selection.sbatch $Y -- \
+        --cohorts camcan      --task movie --pheno "${PHENO[@]}" \
+        --restrict-subjects shared_subjects.txt
+    sbatch slurm/fcm_selection.sbatch $Y -- \
+        --cohorts camcan_rest --task rest  --pheno "${PHENO[@]}" \
+        --restrict-subjects shared_subjects.txt
+  done
   ```
 * In `fcm_selection`, `edges` against `global`. `global` is a subject's mean and
   SD over every edge — two numbers with no topology in them. If it matches
   `edges`, the pattern is not what is being measured; the amount is.
 
-None of the three subtracts one row from another, on purpose. The arms share
+None of the four subtracts one row from another, on purpose. The arms share
 their folds, so a difference between two scores is dependent and has no
 standard error the usual tests supply. A real test belongs in the write-up.
 
-Each tree **wipes its target directory before writing** — back up a result you
-care about first.
+Each run **wipes its own `task=`/`target=` directory before writing** — and only
+that one, so a rest run cannot empty the movie ranking beside it. Back up a
+result you care about first.
 
 ### PHASES 2-3 as one chained submission
 
@@ -751,7 +812,8 @@ T=$(sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$C \
 
 for Y in additional_HADS_anx_category additional_HADS_dep_category; do
   sbatch --kill-on-invalid-dep=yes --dependency=afterok:$T --time=06:00:00 \
-    slurm/model_selection.sbatch $Y
+    slurm/model_selection.sbatch $Y -- \
+      --cohort camcan --task movie --pheno "${PHENO[@]}"
 done
 
 squeue -u $USER -o "%.12i %.32j %.9T %.11M %R"

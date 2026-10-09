@@ -54,8 +54,9 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      discovered per (atlas, aperture).
 5b   model_selection.sbatch                rank state sets by how well their
                                      transitions predict a phenotype column,
-                                     against non-transition controls
-                                     -> outputs/bstm_selection/target=<t>/
+                                     against non-transition controls. One run
+                                     per condition, named by --task
+                                     -> outputs/bstm_selection/task=<k>/target=<t>/
 
 3b   static_fc.sbatch                parcel timeseries -> ONE correlation
                                      matrix per subject. Reads stage 2 through
@@ -63,9 +64,9 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      arm reads, so the two differ only in the
                                      MODEL. -> outputs/static_fc/
 5b'  fcm_selection.sbatch            rank STATIC connectivity models the way
-                                     5b ranks state sets, every cohort in one
-                                     `cohort` column
-                                     -> outputs/fcm_selection/target=<t>/
+                                     5b ranks state sets, a condition's cohorts
+                                     in one `cohort` column
+                                     -> outputs/fcm_selection/task=<k>/target=<t>/
 
 any  fmri-decomp status              read-only: what every stage holds, and the
                                      disagreements that span two of them
@@ -135,18 +136,17 @@ outputs/
 │       n_tr_used / frac_good_frames: the reliability of the row AND the
 │       data-quantity covariate stage 5c controls on.
 │
-├── bstm_selection/                               STAGE 5b — the movie ranking
-│   └── target=additional_HADS_anx_category/
+├── bstm_selection/                               STAGE 5b — the state ranking
+│   ├── task=movie/target=additional_HADS_anx_category/
+│   └── task=rest/ target=additional_HADS_anx_category/
 │       ├── summary.csv  scores.parquet  DESIGN.md  figures/  models/
-│
-├── resting_bstm_selection/                       STAGE 5b — the rest ranking
-│   └── target=additional_HADS_anx_category/       `select --cohort camcan_rest
-│       ├── summary.csv  scores.parquet  DESIGN.md figures/  models/
-│                                                   --output-name <this>`
-│                                                  Same script, same shape.
+│       `task=` is a hive partition like every other key here, so one tree
+│       holds both conditions and the two summary.csv files share a layout.
+│       Each run wipes only its own task=/target= folder.
 │
 ├── fcm_selection/                                STAGE 5b' — static FC
-│   └── target=additional_HADS_anx_category/
+│   ├── task=movie/target=additional_HADS_anx_category/
+│   └── task=rest/ target=additional_HADS_anx_category/
 │       ├── summary.csv  same columns, with `cohort` in place of `window_s`
 │       │                and `K`. No delta column anywhere: the arms share
 │       │                folds, so a difference between rows is not a test.
