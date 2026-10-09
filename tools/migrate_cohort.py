@@ -35,11 +35,17 @@ Two things are NOT moved, because moving them would be wrong rather than slow:
 
 WHAT IT REFUSES
 ---------------
-A destination that already exists. Two cohorts merging into one is only safe
-when their `task=` directories are disjoint -- which is the case this exists
-for, Cam-CAN's Movie and Rest -- and a collision means two files claim the same
-(cohort, task, sub) leaf. Overwriting one with the other would silently keep
-whichever moved last.
+A DATA destination that already exists. Two cohorts merging into one is only
+safe when their `task=` directories are disjoint -- which is the case this
+exists for, Cam-CAN's Movie and Rest -- and a collision means two files claim
+the same (cohort, task, sub) leaf. Overwriting one with the other would
+silently keep whichever moved last.
+
+A clashing shard MANIFEST name is not that case and is renamed, not refused:
+those are named by array-task index, so two runs of one stage both write
+`shard-0000-of-0008`, while the files describe different runs and
+`merge-manifests` reads every file matching the glob. The suffix goes before
+`.json` so the renamed file stays inside that glob.
 """
 from __future__ import annotations
 
@@ -82,16 +88,26 @@ def plan(root: Path, src: str, dst: str):
     meta_src = root / "meta" / "cohorts" / f"cohort={src}"
     for name in META_MOVABLE:
         d = meta_src / name
-        if d.exists():
-            to = root / "meta" / "cohorts" / f"cohort={dst}" / name
-            if to.exists():
-                # Shard manifests are named per array task, so two cohorts'
-                # shards/ can be merged file by file.
-                for f in sorted(d.iterdir()):
-                    t = to / f.name
-                    (collisions if t.exists() else moves).append((f, t))
-            else:
-                moves.append((d, to))
+        if not d.exists():
+            continue
+        to = root / "meta" / "cohorts" / f"cohort={dst}" / name
+        if not to.exists():
+            moves.append((d, to))
+            continue
+        # Shard manifests are named by ARRAY TASK INDEX, not by task label, so
+        # two runs of the same stage both produce shard-0000-of-0008. That is a
+        # name clash and NOT the dangerous case: the two files describe
+        # different runs and `merge-manifests` concatenates the entries of
+        # every file matching `manifest_<stage>_shard-*.json`. So the name is
+        # disambiguated instead of refused -- with the suffix before `.json`,
+        # which keeps the file inside that glob and therefore inside the merge.
+        # Refusing here would block the migration on provenance files while the
+        # data itself was perfectly disjoint.
+        for f in sorted(d.iterdir()):
+            t = to / f.name
+            if t.exists():
+                t = to / f"{f.stem}-from-{src}{f.suffix}"
+            (collisions if t.exists() else moves).append((f, t))
     return moves, collisions
 
 

@@ -34,7 +34,15 @@ def tree(root: Path, cohort: str, task: str, subs=("01", "02"),
                 p.write_bytes(b"d")
     meta = root / "meta" / "cohorts" / f"cohort={cohort}"
     (meta / "shards").mkdir(parents=True, exist_ok=True)
-    (meta / "shards" / f"manifest_activation_{task}.json").write_text("{}")
+    # Named by ARRAY TASK INDEX, exactly as cli.py:69 writes them -- which is
+    # why two runs of one stage collide on the name while describing different
+    # runs.
+    for i in range(2):
+        (meta / "shards"
+         / f"manifest_dfc_shard-{i:04d}-of-0002.json").write_text(
+            '{"entries": [{"stage": "dfc", "cohort": "%s", "atlas": "yeo7", '
+            '"task": "%s", "sub": "0%d", "path": "p", "status": "ok"}]}'
+            % (cohort, task, i))
     (meta / "manifest_activation.json").write_text('{"cohort": "%s"}' % cohort)
     (meta / "participants_qc.csv").write_text(f"sub,task\n01,{task}\n")
     cen = root / "censor" / "policy=motion" / f"cohort={cohort}"
@@ -126,16 +134,41 @@ class TestWhatItDeliberatelyLeaves:
         assert (tmp_path / "censor" / "policy=motion" / "cohort=camcan_rest"
                 / "subjects.parquet").exists()
 
-    def test_the_per_run_shard_manifests_DO_move(self, tmp_path):
-        """These are per array task, not per cohort, so finalize needs them
-        under the destination to rebuild the merged manifest."""
+    def test_a_clashing_shard_manifest_is_renamed_not_refused(self, tmp_path):
+        """The case this hit in practice. Shard manifests are named by array
+        task INDEX, so two runs of one stage both write shard-0000-of-0002.
+        That is a name clash, not two files claiming one data leaf -- refusing
+        would block the migration on provenance while the data was disjoint."""
+        tree(tmp_path, "camcan", "Movie")
+        tree(tmp_path, "camcan_rest", "Rest")
+        assert M.main(["--from", "camcan_rest", "--to", "camcan",
+                       "--output-root", str(tmp_path), "--apply"]) == 0
+        shards = tmp_path / "meta" / "cohorts" / "cohort=camcan" / "shards"
+        assert {p.name for p in shards.iterdir()} == {
+            "manifest_dfc_shard-0000-of-0002.json",
+            "manifest_dfc_shard-0001-of-0002.json",
+            "manifest_dfc_shard-0000-of-0002-from-camcan_rest.json",
+            "manifest_dfc_shard-0001-of-0002-from-camcan_rest.json"}
+
+    def test_the_renamed_manifest_is_still_inside_the_merge_glob(self,
+                                                                 tmp_path):
+        """The suffix goes before `.json` for this reason: `merge-manifests`
+        globs `manifest_<stage>_shard-*.json` and concatenates the entries of
+        every match, so a renamed file is still merged and the consolidated
+        manifest covers BOTH runs. A suffix after `.json` would silently drop
+        one task's provenance."""
+        import json
+
         tree(tmp_path, "camcan", "Movie")
         tree(tmp_path, "camcan_rest", "Rest")
         M.main(["--from", "camcan_rest", "--to", "camcan",
                 "--output-root", str(tmp_path), "--apply"])
         shards = tmp_path / "meta" / "cohorts" / "cohort=camcan" / "shards"
-        assert {p.name for p in shards.iterdir()} == {
-            "manifest_activation_Movie.json", "manifest_activation_Rest.json"}
+        files = sorted(shards.glob("manifest_dfc_shard-*.json"))
+        assert len(files) == 4
+        tasks = {e["task"] for f in files
+                 for e in json.loads(f.read_text())["entries"]}
+        assert tasks == {"Movie", "Rest"}
 
     def test_it_says_what_to_re_run(self, tmp_path, capsys):
         tree(tmp_path, "camcan_rest", "Rest")
