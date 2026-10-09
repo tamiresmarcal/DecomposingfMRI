@@ -205,14 +205,15 @@ A cohort carrying the phenotype you want to predict should be **projected**,
 never trained on.
 
 ```bash
-TRAIN="--train ds002837 cneuromod --project camcan"
+TRAIN="--train ds002837 cneuromod"
+PROJ="--project camcan"
 POL="--censor-policy motion"
 
 # dimensionality reduction: PCA + UMAP coordinates
 #   windowed apertures -- one array task per window size
 for A in harvardoxford yeo7 networks; do
   sbatch --array=0-3 slurm/dimensionality_reduction.sbatch $A 30 60 120 300 \
-    -- $TRAIN $POL
+    -- $TRAIN $PROJ $POL
 done
 #   the frame aperture -- one task, a frame has no window to vary.
 #   yeo7 and networks also get --passthrough-features, which writes the NAMED
@@ -722,13 +723,14 @@ dimensionality reduction rewrites the very file clustering appends to.
 ```bash
 source slurm/env.sh
 ATLASES="harvardoxford yeo7 networks"
-TRAIN="--train ds002837 cneuromod --project camcan"
+TRAIN="--train ds002837 cneuromod"
+PROJ="--project camcan"
 POL="--censor-policy motion"
 APERTURES="30 60 120 300 -1"
 
 D=$(for A in $ATLASES; do
       sbatch --parsable --array=0-3 slurm/dimensionality_reduction.sbatch \
-        $A 30 60 120 300 -- $TRAIN $POL | cut -d';' -f1
+        $A 30 60 120 300 -- $TRAIN $PROJ $POL | cut -d';' -f1
       sbatch --parsable --array=0-0 slurm/dimensionality_reduction.sbatch \
         $A -1 -- --source activation $TRAIN $POL | cut -d';' -f1
     done | paste -sd:)

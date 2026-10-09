@@ -114,7 +114,7 @@ class TestNoStatesHere:
         # come at the fit, not later when `cluster` finds no pca3 columns.
         import numpy as np
 
-        a = parse("--atlas", "yeo7", "--window-s", "30", "--n-latents", "2",
+        a = parse("--atlas", "yeo7", "--window-s", "30", "--pca-latents", "2",
                   "--no-umap")
         X = np.random.default_rng(0).normal(size=(60, 6)).astype(np.float32)
         feats = [f"A__{i}" for i in range(6)]
@@ -125,7 +125,7 @@ class TestNoStatesHere:
         import numpy as np
         import pandas as pd
 
-        a = parse("--atlas", "yeo7", "--window-s", "30", "--n-latents", "3",
+        a = parse("--atlas", "yeo7", "--window-s", "30", "--pca-latents", "3",
                   "--no-umap")
         X = np.random.default_rng(0).normal(size=(60, 6)).astype(np.float32)
         feats = [f"A__{i}" for i in range(6)]
@@ -268,7 +268,7 @@ class TestPassthroughFeatures:
         import numpy as np
 
         a = parse("--atlas", "networks", "--source", "activation",
-                  "--n-latents", *n_latents, "--no-umap", *extra)
+                  "--pca-latents", *n_latents, "--no-umap", *extra)
         X = np.random.default_rng(0).normal(size=(80, n_feat)).astype("float32")
         feats = [f"net{i}" for i in range(n_feat)]
         pristine = X.copy()
@@ -356,7 +356,7 @@ class TestNewFlagsDoNotMoveExistingHashes:
 
     def test_umap_latents_matching_n_latents_is_absent_from_the_payload(self):
         a = parse("--atlas", "yeo7", "--window-s", "30",
-                  "--n-latents", "2", "3", "--umap-latents", "2", "3")
+                  "--pca-latents", "2", "3", "--umap-latents", "2", "3")
         assert "umap_latents" not in D.fit_meta(a, "30", EDGES)
 
     def test_but_each_one_changes_the_hash_when_it_differs(self):
@@ -364,7 +364,7 @@ class TestNewFlagsDoNotMoveExistingHashes:
         pt = parse("--atlas", "yeo7", "--window-s", "30",
                    "--passthrough-features")
         ul = parse("--atlas", "yeo7", "--window-s", "30",
-                   "--n-latents", "2", "3", "--umap-latents", "3")
+                   "--pca-latents", "2", "3", "--umap-latents", "3")
         h = D.model_hash(D.fit_meta(base, "30", EDGES), EDGES)
         assert D.model_hash(D.fit_meta(pt, "30", EDGES), EDGES) != h
         assert D.model_hash(D.fit_meta(ul, "30", EDGES), EDGES) != h
@@ -373,8 +373,8 @@ class TestNewFlagsDoNotMoveExistingHashes:
         import numpy as np
 
         a = parse("--atlas", "yeo7", "--window-s", "30",
-                  "--n-latents", "3", "5", "--umap-latents", "3")
+                  "--pca-latents", "3", "5", "--umap-latents", "3")
         assert D._umap_latents(a) == [3]
-        b = parse("--atlas", "yeo7", "--window-s", "30", "--n-latents", "3", "5")
+        b = parse("--atlas", "yeo7", "--window-s", "30", "--pca-latents", "3", "5")
         assert D._umap_latents(b) == [3, 5]
         assert isinstance(np.float32(1), np.floating)   # imports used above

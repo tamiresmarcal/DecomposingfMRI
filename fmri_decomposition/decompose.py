@@ -1037,19 +1037,21 @@ def add_arguments(p) -> None:
                         "scale -- see frames.py.")
     p.set_defaults(zscore_runs=True)
     p.add_argument("--train", nargs="+", default=["ds002837", "cneuromod"])
-    p.add_argument("--project", nargs="*", default=["camcan"],
-                   help="cohorts the fit is APPLIED to. `--project` with no "
-                        "values means none of them: fit on --train and write "
-                        "only those, which `nargs=+` made impossible to say -- "
-                        "the nearest expressible thing was projecting a "
-                        "training cohort onto itself, which works by accident "
-                        "and reads as nonsense.")
-    # `--pca-latents`, to read as the pair of `--umap-latents` it has always
-    # been. `dest` stays `n_latents`, which is deliberate: that string is a KEY
-    # in the model_hash payload, so renaming it would move every hash on disk
-    # for a cosmetic change. The old spelling keeps working -- scripts and
-    # sbatch lines in the wild carry it -- but it is not advertised.
-    p.add_argument("--pca-latents", "--n-latents", dest="n_latents",
+    # DEFAULT: nothing. Train-only is then just `--train A B`, with no flag
+    # saying "no" -- which is how it should read.
+    #
+    # It used to default to `["camcan"]`, and that was wrong on this stage's own
+    # terms: the module docstring says no cohort YAML owns stage 4 because a
+    # decomposition spans cohorts, and then the default named one cohort. A
+    # target cohort belongs in the command, not in a default.
+    p.add_argument("--project", nargs="*", default=[],
+                   help="cohorts the fit is APPLIED to. Omit it and only "
+                        "--train is written.")
+    # `dest` stays `n_latents` while the FLAG is `--pca-latents`: that string
+    # is a KEY in the model_hash payload, so renaming it would move every hash
+    # on disk for a cosmetic change. The flag is the interface; the key is
+    # provenance, and they are allowed to differ.
+    p.add_argument("--pca-latents", dest="n_latents",
                    nargs="+", type=int, default=[2, 3, 5],
                    help="PCA component counts to fit. Must include 3: every "
                         "stage 4b clusterer works on a 3-D embedding. Pair it "

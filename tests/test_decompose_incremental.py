@@ -223,7 +223,7 @@ def cluster_args(**kw):
              train=["trainA", "trainB"], balance_train=False, refit=False,
              meanshift_quantile=0.2, meanshift_fit_rows=50_000, hmm_iter=5,
              hmm2_iter=5, hmm2_restarts=2, hmm2_jobs=1,
-             min_k=2, max_k=30, project=None)
+             min_k=2, max_k=30, project=["all"])
     d.update(kw)
     return argparse.Namespace(**d)
 
@@ -571,8 +571,8 @@ class TestTheDiffIsReadable:
 # labelled silently.
 # --------------------------------------------------------------------------
 class TestClusterProject:
-    def test_the_default_still_labels_everything(self, cell):
-        entries, _ = run_cluster(cell)
+    def test_all_labels_every_cohort_in_the_cell(self, cell):
+        entries, _ = run_cluster(cell, project=["all"])
         assert set(entries[0]["states_used"]) == {"trainA", "trainB", "camcan"}
 
     def test_a_subset_can_be_asked_for(self, cell):
@@ -624,15 +624,21 @@ class TestClusterProject:
 # cluster (an empty list is falsy, so it labelled everything).
 # --------------------------------------------------------------------------
 class TestTrainOnly:
-    def test_decompose_accepts_an_empty_project_list(self):
+    def test_decompose_projects_nothing_by_default(self):
+        """Train-only is just `--train A B`, with no flag saying "no".
+
+        It used to default to ["camcan"], which was wrong on this stage's own
+        terms: the module docstring says no cohort YAML owns stage 4 because a
+        decomposition spans cohorts -- and then the default named one cohort.
+        """
         import argparse
 
         p = argparse.ArgumentParser()
         D.add_arguments(p)
         base = ["--atlas", "yeo7", "--window-s", "-1",
                 "--censor-policy", "none"]
-        assert p.parse_args(base + ["--project"]).project == []
-        assert p.parse_args(base).project == ["camcan"]
+        assert p.parse_args(base).project == []
+        assert p.parse_args(base + ["--project", "camcan"]).project == ["camcan"]
 
     def test_decompose_train_only_writes_only_the_training_cohorts(self,
                                                                    tmp_path):
@@ -642,7 +648,10 @@ class TestTrainOnly:
             assert latents(tmp_path, c).exists(), c
         assert not latents(tmp_path, "camcan").exists()
 
-    def test_cluster_distinguishes_absent_from_empty(self):
+    def test_cluster_projects_nothing_by_default_too(self):
+        """Symmetric with decompose, which is the point: one mental model for
+        both stages. `--project all` is the old implicit behaviour, now asked
+        for rather than assumed."""
         import argparse
 
         from fmri_decomposition import cluster as C
@@ -650,8 +659,8 @@ class TestTrainOnly:
         p = argparse.ArgumentParser()
         C.add_arguments(p)
         base = ["--atlas", "yeo7", "--window-s", "-1"]
-        assert p.parse_args(base).project is None          # every cohort
-        assert p.parse_args(base + ["--project"]).project == []   # train only
+        assert p.parse_args(base).project == []
+        assert p.parse_args(base + ["--project", "all"]).project == ["all"]
 
     def test_cluster_train_only_labels_only_the_training_cohorts(self, cell):
         """An empty list used to be falsy and fall through to "label
@@ -662,8 +671,14 @@ class TestTrainOnly:
         assert touched == {"trainA", "trainB"}
         assert "camcan" not in touched
 
-    def test_cluster_absent_project_still_labels_everything(self, cell):
-        entries, _ = run_cluster(cell, project=None)
+    def test_cluster_labels_only_train_by_default(self, cell):
+        entries, _ = run_cluster(cell, project=[])
+        assert set(entries[0]["states_used"]) == {"trainA", "trainB"}
+
+    def test_project_all_is_how_you_ask_for_every_cohort(self, cell):
+        """The old implicit default. Convenient, and the wrong DEFAULT: a
+        cohort that appeared in the cell got labelled without being named."""
+        entries, _ = run_cluster(cell, project=["all"])
         assert set(entries[0]["states_used"]) == {"trainA", "trainB", "camcan"}
 
     def test_a_projected_cohort_is_untouched_by_a_train_only_run(self, cell):

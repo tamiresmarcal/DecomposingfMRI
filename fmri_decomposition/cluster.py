@@ -1078,19 +1078,21 @@ def run_one(root: Path, atlas: str, window_s, args):
     # empty means "none beyond --train". Testing truthiness collapsed them, so
     # `--project` with no values labelled EVERYTHING -- the exact opposite of
     # what it reads as.
-    project = getattr(args, "project", None)
-    if project is not None:
-        unknown = [c for c in project if c not in paths]
-        if unknown:
-            raise SystemExit(
-                f"--project names cohort(s) with no latents at atlas={atlas} "
-                f"window_s={window_s}: {unknown}\n"
-                f"  this cell has {sorted(paths)}\n"
-                f"  run `decompose --project {' '.join(unknown)}` first, or "
-                f"fix the spelling.")
-        label = [c for c in paths if c in set(train) | set(project)]
-    else:
-        label = list(paths)
+    project = list(getattr(args, "project", None) or [])
+    if project == ["all"]:
+        # The old implicit default, now something you ask for. "Label whatever
+        # is in the directory" is convenient and was the wrong DEFAULT: a
+        # cohort that appeared in the cell got labelled without being named.
+        project = [c for c in paths if c not in set(train)]
+    unknown = [c for c in project if c not in paths]
+    if unknown:
+        raise SystemExit(
+            f"--project names cohort(s) with no latents at atlas={atlas} "
+            f"window_s={window_s}: {unknown}\n"
+            f"  this cell has {sorted(paths)}\n"
+            f"  run `decompose --project {' '.join(unknown)}` first, or fix "
+            f"the spelling.")
+    label = [c for c in paths if c in set(train) | set(project)]
     if len(label) < len(paths):
         log(f"  labelling {label}; not asked for: "
             f"{[c for c in paths if c not in label]}")
@@ -1638,17 +1640,15 @@ def add_arguments(p) -> None:
                         "Meer et al. 2020 selected, so hmm1 and hmm2 can be "
                         "compared at it; 8 and 27 are perfect cubes, which "
                         "`threshold` requires.")
-    p.add_argument("--project", nargs="*", default=None,
+    p.add_argument("--project", nargs="*", default=[],
                    help="cohorts to LABEL, beside --train which is always "
-                        "labelled. `--project` with NO values means none of "
-                        "them: label only --train. Omitted entirely means "
-                        "every cohort in the cell, which is "
-                        "what you want for a full run. Name them to label a "
-                        "subset -- adding one cohort months later is "
-                        "`--project <it>`, and the rest keep the columns they "
-                        "have. Same vocabulary as `decompose`, deliberately. A "
-                        "name with no latents in the cell is refused rather "
-                        "than ignored.")
+                        "labelled. Omit it and only --train is labelled -- the "
+                        "same meaning it has in `decompose`, so one mental "
+                        "model covers both stages. Adding one cohort months "
+                        "later is `--project <it>`, and the rest keep the "
+                        "columns they have. A name with no latents in the cell "
+                        "is refused rather than ignored, and `--project all` "
+                        "labels every cohort the cell holds.")
     p.add_argument("--refit", action="store_true",
                    help="ignore the saved fits under outputs/meta/clusterers/ "
                         "and fit again, relabelling every cohort. The cache is "
