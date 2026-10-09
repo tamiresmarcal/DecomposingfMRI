@@ -80,6 +80,51 @@ class TestInventory:
         assert d["window_gate"].iloc[0] == "subjects only"
 
 
+class TestStaticFcInventory:
+    """Stage 3b was the one stage this command did not report, which made it
+    unable to answer "where am I on the four selection tables" -- two of them
+    are fcm_selection runs and this is their only input."""
+
+    @staticmethod
+    def _cell(root, atlas, cohort, subs, tasks, n_edges=3):
+        rows = [(sub, t) for t in tasks for sub in subs]
+        d = pd.DataFrame({"sub": [r[0] for r in rows],
+                          "task": [r[1] for r in rows]})
+        for i in range(n_edges):
+            d[f"P{i}__P{i + 1}"] = 0.5
+        p = (root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
+             / "subjects.parquet")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.Table.from_pandas(d, preserve_index=False), p)
+
+    def test_it_reports_one_row_per_atlas_and_cohort(self, tmp_path):
+        self._cell(tmp_path, "yeo7", "camcan", ["A", "B", "C"], ["Movie"])
+        self._cell(tmp_path, "networks", "camcan", ["A", "B"], ["Movie"])
+        d = S.static_fc(tmp_path).set_index(["atlas", "cohort"])
+        assert d.loc[("yeo7", "camcan"), "subs"] == 3
+        assert d.loc[("networks", "camcan"), "subs"] == 2
+        assert (d["edges"] == 3).all()
+
+    def test_more_rows_than_subjects_is_the_two_condition_state(self,
+                                                               tmp_path):
+        """What a reader needs to see: a cohort holding both conditions has one
+        row per (task, sub), and select-fcm scores ONE row per subject -- so it
+        will refuse until given --keep-tasks. The counts say so side by side."""
+        self._cell(tmp_path, "yeo7", "camcan", ["A", "B"], ["Movie", "Rest"])
+        row = S.static_fc(tmp_path).iloc[0]
+        assert row["rows"] == 4 and row["subs"] == 2
+        assert row["tasks"] == "Movie,Rest"
+
+    def test_one_condition_has_rows_equal_to_subjects(self, tmp_path):
+        self._cell(tmp_path, "yeo7", "camcan", ["A", "B"], ["Movie"])
+        row = S.static_fc(tmp_path).iloc[0]
+        assert row["rows"] == row["subs"] == 2
+        assert row["tasks"] == "Movie"
+
+    def test_an_unbuilt_stage_is_empty_not_an_error(self, tmp_path):
+        assert S.static_fc(tmp_path).empty
+
+
 class TestSelectionInventory:
     """One row per RUN, which is (tree, task, target) and not just target.
 

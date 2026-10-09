@@ -113,6 +113,43 @@ def dfc(root: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def static_fc(root: Path) -> pd.DataFrame:
+    """Stage 3b: one FC matrix per subject, per (atlas, cohort).
+
+    The one stage this command did not report, which made it unable to answer
+    "where am I on the four selection tables" -- two of the four are the
+    `fcm_selection` runs and this is their only input. Subjects AND tasks,
+    because one cohort can hold both conditions and `select-fcm` scores one row
+    per subject: a cohort showing more rows than subjects is the state where
+    that stage will refuse until it is given --keep-tasks.
+    """
+    rows = []
+    for sp in sorted((root / "static_fc").glob("atlas=*/cohort=*/subjects.parquet")):
+        n = subs = -1
+        tasks = ""
+        try:
+            import pyarrow.parquet as pq
+
+            f = pq.ParquetFile(sp)
+            n = f.metadata.num_rows
+            want = [c for c in ("sub", "task") if c in f.schema_arrow.names]
+            if want:
+                t = f.read(columns=want).to_pandas()
+                subs = int(t["sub"].nunique()) if "sub" in t else -1
+                tasks = ",".join(sorted(t["task"].astype(str).unique())) \
+                    if "task" in t else ""
+            # Edge columns are the payload; counting them says which atlas this
+            # really is without trusting the path.
+            edges = sum(1 for c in f.schema_arrow.names if "__" in c)
+        except Exception as exc:                                 # noqa: BLE001
+            edges = -1
+            print(f"  (could not read {sp}: {type(exc).__name__})")
+        rows.append({"atlas": _key(sp, "atlas"), "cohort": _key(sp, "cohort"),
+                     "rows": n, "subs": subs, "tasks": tasks or "-",
+                     "edges": edges})
+    return pd.DataFrame(rows)
+
+
 def censor(root: Path) -> pd.DataFrame:
     rows = []
     for d in sorted((root / "censor").glob("policy=*")):
@@ -384,6 +421,12 @@ def run(args) -> int:
     _show("3  LATENTS      embeddings per aperture", lat,
           ["atlas", "window_s", "cohort", "rows", "emb", "source", "censor",
            "role", "model_hash", "n_states"])
+    # After 3 so the numbering reads in order, though it is a BRANCH off
+    # stage 2 rather than a step after stage 3: static-fc reads the same
+    # frames the window_s=-1 state arm does, and needs neither latents nor
+    # clusters. That is why the fcm tables are reachable without stage 4.
+    _show("3b STATIC FC    one matrix per subject  (input to fcm_selection)",
+          narrow(static_fc(root)))
 
     print("\n4  STATE SETS   per aperture (K in the name)")
     if lat.empty:
