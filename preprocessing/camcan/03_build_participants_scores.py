@@ -222,8 +222,8 @@ def main(argv=None) -> int:
     p.add_argument("--scored-root", required=True,
                    help="the cc700-scored directory (one subdirectory per test)")
     p.add_argument("--output-root",
-                   help="pipeline output_root; default: read from "
-                        "config/camcan_movie.yaml")
+                   help="pipeline output_root; default: read from the "
+                        "cohort configs in config/")
     p.add_argument("--cohort", default="camcan",
                    help="cohort key the table is written under (default: camcan)")
     p.add_argument("--tests", default="",
@@ -246,9 +246,8 @@ def main(argv=None) -> int:
     if args.output_root:
         output_root = Path(args.output_root)
     else:
-        import yaml
-        cfg = yaml.safe_load((REPO / "config" / "camcan_movie.yaml").read_text())
-        output_root = Path(cfg["output_root"])
+        from fmri_decomposition.io import default_output_root
+        output_root = default_output_root()
 
     from fmri_decomposition.io import cohort_meta_dir
 

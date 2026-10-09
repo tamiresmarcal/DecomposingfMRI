@@ -219,7 +219,7 @@ def main(argv=None) -> int:
     p.add_argument("--data", help="approved_data.tsv, to match columns and report "
                                   "coverage. Without it the code book is flattened "
                                   "but nothing is matched.")
-    p.add_argument("--output-root", help="default: output_root from config/camcan_movie.yaml")
+    p.add_argument("--output-root", help="default: output_root from the cohort configs in config/")
     p.add_argument("--cohort", default="camcan")
     p.add_argument("--out-dir", help="write here instead of the cohort meta directory")
     args = p.parse_args(argv)
@@ -328,9 +328,8 @@ def main(argv=None) -> int:
         if args.output_root:
             output_root = Path(args.output_root)
         else:
-            import yaml
-            cfg = yaml.safe_load((REPO / "config" / "camcan_movie.yaml").read_text())
-            output_root = Path(cfg["output_root"])
+            from fmri_decomposition.io import default_output_root
+            output_root = default_output_root()
         from fmri_decomposition.io import cohort_meta_dir
         out_dir = cohort_meta_dir(output_root, args.cohort)
 

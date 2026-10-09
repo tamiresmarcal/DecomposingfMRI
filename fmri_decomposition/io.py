@@ -269,6 +269,58 @@ def read_shard(path: str | Path):
     return df
 
 
+def default_output_root() -> Path:
+    """Where outputs live when no --output-root was given.
+
+    `$FMRIDECOMP_OUTPUTS` wins. Otherwise it is read from the cohort configs in
+    `config/`, which all name the SAME tree on purpose -- `cohort=` separates
+    them inside it, which is what makes "one atlas, one window size, every
+    cohort" a single readable path.
+
+    This used to be three lines repeated in eight modules, each naming
+    `config/camcan_movie.yaml`. That put one project's cohort filename into the
+    library eight times: renaming the config broke every stage, and a new user
+    with no Cam-CAN got a FileNotFoundError naming a dataset they do not have.
+    Reading whatever configs exist is both shorter and less of a claim.
+
+    Disagreement is REFUSED rather than resolved by picking one. A stage that
+    silently wrote to a different root than the previous stage read from is the
+    worst outcome available here: every file is present, and the tree is two
+    half-built trees.
+    """
+    import os
+
+    if os.environ.get("FMRIDECOMP_OUTPUTS"):
+        return Path(os.environ["FMRIDECOMP_OUTPUTS"])
+
+    import yaml
+
+    cfg_dir = Path(__file__).resolve().parent.parent / "config"
+    roots: dict[str, list[str]] = {}
+    for f in sorted(cfg_dir.glob("*.yaml")):
+        try:
+            raw = yaml.safe_load(f.read_text()) or {}
+        except Exception:                                        # noqa: BLE001
+            continue
+        got = raw.get("output_root") if isinstance(raw, dict) else None
+        if got:
+            roots.setdefault(str(got), []).append(f.name)
+    if not roots:
+        raise SystemExit(
+            f"no output_root found. Either set FMRIDECOMP_OUTPUTS, pass "
+            f"--output-root, or give a cohort config in {cfg_dir} an "
+            f"`output_root:`.")
+    if len(roots) > 1:
+        detail = "\n".join(f"    {r}  <- {', '.join(f)}"
+                            for r, f in sorted(roots.items()))
+        raise SystemExit(
+            f"cohort configs disagree about output_root:\n{detail}\n"
+            f"  They are meant to name ONE tree, with `cohort=` separating "
+            f"them inside it. Fix the configs, or pass --output-root / set "
+            f"FMRIDECOMP_OUTPUTS to say which one this run means.")
+    return Path(next(iter(roots)))
+
+
 def meta_dir(output_root: str | Path) -> Path:
     """Atlas- and model-level metadata: valid for every cohort."""
     return Path(output_root) / "meta"

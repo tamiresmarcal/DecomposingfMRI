@@ -1089,7 +1089,8 @@ def add_arguments(p) -> None:
                         "one aperture got built that way while the others were "
                         "censored -- a warning in a 30-line log is not a guard.")
     p.add_argument("--output-root",
-                   help="default: output_root from config/camcan_movie.yaml")
+                   help="default: $FMRIDECOMP_OUTPUTS, else output_root "
+                        "from the cohort configs in config/")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--dry-run", action="store_true",
@@ -1097,15 +1098,9 @@ def add_arguments(p) -> None:
 
 
 def run(args) -> int:
-    if args.output_root:
-        root = Path(args.output_root)
-    elif os.environ.get("FMRIDECOMP_OUTPUTS"):
-        root = Path(os.environ["FMRIDECOMP_OUTPUTS"])
-    else:
-        import yaml
-        repo = Path(__file__).resolve().parent.parent
-        root = Path(yaml.safe_load(
-            (repo / "config" / "camcan_movie.yaml").read_text())["output_root"])
+    from .io import default_output_root
+
+    root = Path(args.output_root) if args.output_root else default_output_root()
     if not root.is_dir():
         raise SystemExit(f"output_root does not exist: {root}")
     # Write the resolved root back, so anything downstream of here (censor

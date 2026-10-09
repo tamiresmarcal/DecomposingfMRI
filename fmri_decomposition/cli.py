@@ -465,20 +465,37 @@ def cmd_diagnose(args) -> int:
         return 0
     print("ISC alignment ->", write_diagnostic(
         isc, cfg.output_root, "isc_alignment.csv", cohort=cfg.cohort))
-    if cfg.stimulus.isc_gate_tr is None:
-        # Measured and written, deliberately NOT gated -- see
-        # StimulusConfig.isc_gate_tr. A cohort with no shared stimulus has no
-        # alignment for ISC to check, so a FAIL here would cancel stage 3 for
-        # a fact about the design rather than about the data.
-        ok, msg = isc_gate(isc, float("inf"))
-        print(f"ISC gate NOT APPLIED (stimulus.isc_gate_tr is null -- this "
-              f"cohort has no shared stimulus): {msg}")
-        print("  rest ISC should be near zero; a strongly correlated resting "
-              "cohort is a finding, not a pass.")
-        return 0
-    ok, msg = isc_gate(isc, cfg.stimulus.isc_gate_tr)
-    print(("PASS " if ok else "FAIL ") + msg)
-    return 0 if ok else 2
+    # PER TASK. One cohort can hold a task with a shared stimulus and one
+    # without -- Cam-CAN's movie and its rest are the same people -- and the
+    # gate is only meaningful for the former. Gating the whole cohort on one
+    # threshold would either FAIL on the rest runs (cancelling stage 3 and the
+    # censor step through --dependency=afterok, for a fact about the design) or
+    # drop the check for the movie runs, where it is the only thing that
+    # catches a misaligned film.
+    #
+    # The ISC frame's task column is `movie`, which is what isc_qc keys on.
+    tasks = (sorted(isc["movie"].astype(str).unique())
+             if "movie" in isc.columns else [None])
+    failed = []
+    for task in tasks:
+        sub = isc if task is None else isc[isc["movie"].astype(str) == task]
+        where = "" if task is None else f"task {task}: "
+        gate = cfg.stimulus.isc_gate_for(task)
+        if gate is None:
+            # Measured and written, deliberately NOT gated -- see
+            # StimulusConfig.isc_gate_tr. Nothing is shared for ISC to check.
+            _, msg = isc_gate(sub, float("inf"))
+            print(f"  {where}ISC gate NOT APPLIED (no shared stimulus): {msg}")
+            print(f"  {where}ISC should be near zero; a strongly correlated "
+                  f"resting cohort is a finding, not a pass.")
+            continue
+        ok, msg = isc_gate(sub, gate)
+        print(f"  {where}" + ("PASS " if ok else "FAIL ") + msg)
+        if not ok:
+            failed.append(task)
+    if failed:
+        print(f"FAIL ISC gate for task(s) {[str(t) for t in failed]}")
+    return 2 if failed else 0
 
 
 # (column, worse direction, what it is about). One line per failure mode.

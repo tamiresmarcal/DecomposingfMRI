@@ -123,6 +123,22 @@ class StimulusConfig:
     # correlates strongly across subjects is a finding (a task mislabelled as
     # rest, or a shared artifact), not a pass.
 
+    #: Per-task overrides, keyed exactly like `tr_by_task`. One cohort can hold
+    #: a task WITH a shared stimulus and one without -- Cam-CAN's movie and its
+    #: rest are the same people -- and the gate is only meaningful for the
+    #: former. `{Rest: null}` measures rest ISC and does not gate on it while
+    #: the movie stays gated at `isc_gate_tr`. A key present with a null value
+    #: is what turns the gate off; an ABSENT key falls back to `isc_gate_tr`,
+    #: so the two are deliberately different things.
+    isc_gate_tr_by_task: dict[str, float | None] = field(default_factory=dict)
+
+    def isc_gate_for(self, task: str | None) -> float | None:
+        """This task's gate, or the cohort default. `None` means do not gate."""
+        if task is not None and task in self.isc_gate_tr_by_task:
+            v = self.isc_gate_tr_by_task[task]
+            return None if v is None else float(v)
+        return self.isc_gate_tr
+
 
 @dataclass
 class WindowSizeSpec:

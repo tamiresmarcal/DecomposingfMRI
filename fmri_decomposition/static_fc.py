@@ -334,15 +334,11 @@ def run(args) -> int:
 
 
 def _default_root() -> Path:
-    import os
+    """Delegates to io.default_output_root -- see it for why this is not
+    eight copies of a cohort filename any more."""
+    from .io import default_output_root
 
-    if os.environ.get("FMRIDECOMP_OUTPUTS"):
-        return Path(os.environ["FMRIDECOMP_OUTPUTS"])
-    import yaml
-
-    repo = Path(__file__).resolve().parent.parent
-    return Path(yaml.safe_load(
-        (repo / "config" / "camcan_movie.yaml").read_text())["output_root"])
+    return default_output_root()
 
 
 def add_arguments(p) -> None:

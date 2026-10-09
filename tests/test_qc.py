@@ -357,28 +357,35 @@ class TestIscGateNotApplicable:
     the DESIGN rather than about the data.
     """
 
-    def test_a_null_gate_loads_as_none(self, tmp_path):
-        import yaml
-
+    def test_the_shipped_camcan_config_gates_movie_and_not_rest(self):
+        """One cohort, two conditions, one gate decision each -- read off the
+        config this project actually runs, not a fixture. Movie keeps the real
+        1.0 TR gate because a misaligned film is exactly what ISC catches;
+        rest is measured and not gated because nothing is shared to align to.
+        """
         from fmri_decomposition.config import load_config
 
-        base = yaml.safe_load(
-            (Path(__file__).resolve().parent.parent / "config"
-             / "camcan_rest.yaml").read_text())
-        assert base["stimulus"]["isc_gate_tr"] is None
-        p = tmp_path / "c.yaml"
-        p.write_text(yaml.safe_dump(base))
-        assert load_config(p).stimulus.isc_gate_tr is None
+        cfg = load_config(Path(__file__).resolve().parent.parent
+                          / "config" / "camcan.yaml")
+        assert cfg.stimulus.isc_gate_for("Movie") == 1.0
+        assert cfg.stimulus.isc_gate_for("Rest") is None
 
-    def test_the_movie_cohort_still_has_a_real_gate(self):
-        import yaml
+    def test_a_null_override_disables_the_gate_and_an_absent_key_does_not(
+            self, tmp_path):
+        """The two are deliberately different: a key present with a null value
+        turns the gate off, an absent key falls back to isc_gate_tr. Without
+        that distinction there would be no way to say "gate everything except
+        this one task"."""
+        from fmri_decomposition.config import config_from_dict
 
-        cfg = yaml.safe_load(
-            (Path(__file__).resolve().parent.parent / "config"
-             / "camcan_movie.yaml").read_text())
-        # Unset there, so it keeps the 1.0 default rather than being disabled
-        # by this change.
-        assert cfg.get("stimulus", {}).get("isc_gate_tr", 1.0) == 1.0
+        c = config_from_dict({
+            "cohort": "c", "tr": 2.0, "derivatives_root": str(tmp_path),
+            "output_root": str(tmp_path),
+            "stimulus": {"isc_gate_tr": 1.0,
+                         "isc_gate_tr_by_task": {"Rest": None}}})
+        assert c.stimulus.isc_gate_for("Rest") is None
+        assert c.stimulus.isc_gate_for("Movie") == 1.0
+        assert c.stimulus.isc_gate_for(None) == 1.0
 
     def test_rest_like_lags_would_fail_a_default_gate(self):
         """Why the null is needed and not just a larger threshold: with nothing

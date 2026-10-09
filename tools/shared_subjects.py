@@ -86,25 +86,18 @@ def main(argv=None) -> int:
     p.add_argument("--window-s", default="-1",
                    help="the transitions aperture to read (default -1)")
     p.add_argument("--output-root", default=None,
-                   help="default: output_root from config/camcan_movie.yaml, "
-                        "or $FMRIDECOMP_OUTPUTS")
+                   help="default: $FMRIDECOMP_OUTPUTS, else output_root from "
+                        "the cohort configs in config/")
     p.add_argument("-o", "--out", default="shared_subjects.txt")
     a = p.parse_args(argv)
 
     if a.output_root:
         root = Path(a.output_root)
     else:
-        import os
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from fmri_decomposition.io import default_output_root
 
-        if os.environ.get("FMRIDECOMP_OUTPUTS"):
-            root = Path(os.environ["FMRIDECOMP_OUTPUTS"])
-        else:
-            import yaml
-
-            repo = Path(__file__).resolve().parent.parent
-            root = Path(yaml.safe_load(
-                (repo / "config" / "camcan_movie.yaml").read_text())
-                ["output_root"])
+        root = default_output_root()
 
     sets = []
     for label, pattern in sources(root, a.cohorts, a.window_s):

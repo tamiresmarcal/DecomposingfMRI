@@ -1,0 +1,312 @@
+# Cam-CAN CC700 -- ONE COHORT, TWO CONDITIONS: movie watching and rest.
+# https://camcan-archive.mrc-cbu.cam.ac.uk/dataaccess/
+#
+# WHY THESE ARE ONE COHORT AND NOT TWO
+# ------------------------------------
+# They are THE SAME PEOPLE. `cohort` in this pipeline means one acquisition
+# programme sharing one config, not one group of subjects -- and two cohort
+# values for one group made the output tree claim something false: that
+# `camcan` and `camcan_rest` were different samples, so an `n` that differed
+# between the two selection tables could be read as a difference in who was
+# scanned rather than in who completed which scan.
+#
+# What used to prevent the merge was one `tr:` per config, and Cam-CAN's TR
+# differs by task (movie 2.47 s, rest 1.97 s, sensorimotor 1.97 s). That is now
+# `tr_by_task` below. Nothing from `decompose` on ever needed it: TR travels in
+# each shard's own metadata (frames.read_tr), because "these frames were
+# acquired at that TR" is a property of the file rather than of a YAML.
+#
+# One real benefit beyond tidiness. `confounds.fd_threshold` is shared by
+# construction now. It used to be duplicated in two files with a comment in
+# each asking a human to keep them in sync, and the reason that mattered is
+# that a different QC rule per condition removes a different amount of data
+# from the same people -- fewer frames mean noisier edges and noisier state
+# sequences, so the movie-vs-rest contrast would partly measure the threshold.
+#
+# THE DIFFERENCE FROM THE OTHER TWO COHORTS
+# -----------------------------------------
+# ds002837 and cneuromod both arrive preprocessed. Cam-CAN does not. What the
+# archive distributes is RAW BIDS -- no echo combination, no realignment, no
+# normalisation, no motion parameters. Verified on disk (2026-08): every file
+# under release004/BIDSsep matches *_T1w, *_T2w, *_task-Rest_bold or
+# *_task-Movie_echo-0N_bold, and a search for *preproc*, *space-*, rp_* and
+# *confound* across camcan/, cc700/ and ccfrail/ returns nothing.
+#
+# So `derivatives_root` below points at output WE produced, with
+# preprocessing/camcan/. That directory is stage 1, deliberately outside
+# fmri_decomposition and not covered by run_tests.sh -- see its README.
+#
+# derivatives_root IS A MERGED VIEW. fMRIPrep ran twice, once per task, into
+# two trees (camcan_fmriprep and camcan_rest_fmriprep). One cohort reads one
+# root, so camcan_all_fmriprep holds symlinks to both -- the same trick
+# preprocessing/camcan/01_build_bids.py uses on the input side. No code change
+# was needed for it: `bold_glob` and `confounds_glob` are already
+# task-wildcarded, so one directory per subject carrying both tasks' files
+# satisfies them. RUNBOOK section 4.1 builds it.
+#
+# FACTS CONFIRMED FROM THE FILES, NOT FROM PAPERS
+# -----------------------------------------------
+# MOVIE (Hitchcock, "Bang! You're Dead", 8 min edit)
+#   TR 2.47 s          `RepetitionTime: 2.47` in the raw sidecar, and 2.47 in
+#                      the header of the preprocessed image. Unlike ds002837
+#                      (whose real TR of 1.0 is also nibabel's unset default,
+#                      so its check can only warn), 2.47 is a value nibabel
+#                      would never invent. check_cohort.py genuinely CONFIRMS.
+#   193 volumes        = 476.71 s. Short: see `windows` below.
+#   5 echoes           TE 9.4 / 21.2 / 33.1 / 44.9 / 56.7 ms, combined by
+#                      fMRIPrep. A T2starmap is written alongside the BOLD.
+#   649 subjects       have the complete echo set; 648 completed fMRIPrep
+#                      (2026-08, job 20947592). CC221648 failed the first
+#                      array and was resubmitted individually. All 648 verified
+#                      openable by nibabel with shape EXACTLY
+#                      (97, 115, 97, 193) -- no corruption, no shape variance.
+#                      That is the real confirmation behind durations_s.
+#
+# REST (eyes closed; Taylor et al., NeuroImage 2017, 144:262-269)
+#   TR 1.97 s          CONFIRMED (2026-10) from the sidecar on nibi:
+#                      RepetitionTime -> 1.97 in func_rest/sub-CC110033/func/
+#                      sub-CC110033_task-Rest_bold.json
+#   func subdir        CONFIRMED (2026-10) `func_rest`, lower case -- unlike
+#                      ccfrail/release002, which capitalises (func_Movie).
+#   single echo        CONFIRMED (2026-10) the filename is
+#                      sub-X_task-Rest_bold.nii.gz with NO echo- entity at
+#                      all -- a different filename SHAPE from the movie's five
+#                      numbered echoes, not just a different count. So
+#                      --n-echoes 0 when building the BIDS view.
+#   652 usable         CONFIRMED (2026-10) by 01_build_bids.py over the whole
+#                      BIDSsep tree: 652 have a T1w AND a rest run, 1 skipped
+#                      ("did not do the task"), 0 incomplete. MORE than the
+#                      movie's 649, so rest is not the binding constraint on
+#                      the shared sample -- the movie is, at 648.
+#   651 discovered     after fMRIPrep (2026-10). One of the 652 produced no
+#                      preproc_bold; discovery is a glob, so it is silently
+#                      absent rather than an error. Rest is PROJECTED, never
+#                      trained on, so it changes no fit -- only the `n` in the
+#                      rest ranking.
+#   261 volumes        STILL UNCONFIRMED. It sets stimulus.durations_s and
+#                      therefore the windowed grid; it does NOT affect the
+#                      activation-only (window_s=-1) route. See `stimulus`.
+#
+# WHAT THE REST CONDITION IS FOR
+# ------------------------------
+# The naturalistic-viewing claim needs a control that is not another movie. If
+# brain-state transitions predict HADS as well at rest as under the film, the
+# stimulus is not load-bearing -- and a 10-minute rest scan is an instrument
+# every clinical site already has. That is a better result for the project than
+# it first sounds, and it is only a result if rest is measured the same way.
+#
+# output_root is deliberately the SAME as every other cohort's: the `cohort=`
+# key separates them inside one tree, which is what makes "one atlas, one
+# window size, every cohort" a single directory to read. Within this cohort,
+# `task=` separates the two conditions the same way.
+
+cohort: camcan
+tr: 2.47                   # the DEFAULT -- applies to any task not overridden
+tr_by_task:
+  # Rest is 1.97 s. Read through cfg.tr_for(task), never cfg.tr, in anything
+  # that has a task in hand. The consequences, both measured:
+  #   * a 30 s window is 12 samples of movie and 15 of rest, so at the same
+  #     nominal aperture the REST edges are less noisy;
+  #   * the rank floor (n_nodes + 0.5) * tr is 275.4 s of movie but 219.7 s of
+  #     rest for harvardoxford, so a window can be singular for one condition
+  #     and estimable for the other. The window plan reports that per task and
+  #     only skips a pair when it is deficient at EVERY TR.
+  Rest: 1.97
+derivatives_root: /project/6008063/tamires/cohorts/camcan_all_fmriprep
+output_root: /project/6008063/tamires/DecomposingfMRI/outputs
+space: MNI152NLin2009cAsym
+participants: /project/6008063/tamires/DecomposingfMRI/config/camcan_participants.csv
+
+atlases: [harvardoxford, yeo7, networks]
+
+discovery:
+  backend: glob
+  # `res-2` IS part of the filename here and is NOT in the cneuromod config,
+  # because we asked fMRIPrep for `MNI152NLin2009cAsym:res-2` explicitly.
+  # Dropping it from the glob would also match nothing else today, but it would
+  # silently start matching a second resolution the day anyone adds one.
+  bold_glob: "sub-*/func/sub-*_task-*_space-MNI152NLin2009cAsym_res-2_desc-preproc_bold.nii.gz"
+  mask_glob: "sub-{sub}_task-{task}_space-MNI152NLin2009cAsym_res-2_desc-brain_mask.nii.gz"
+  # BOTH conditions, and the list is still a correctness requirement: Cam-CAN
+  # also ships a sensorimotor task at 1.97 s, which this project does not use.
+  # A task discovered without a tr_by_task entry would silently take 2.47.
+  include_tasks: [Movie, Rest]
+
+confounds:
+  format: fmriprep_tsv
+  strategy: 24hmp          # 6 motion params + derivatives + squares
+  confounds_glob: "sub-*_task-*_desc-confounds_timeseries.tsv"
+  fd_column: framewise_displacement
+  fd_threshold: 0.5
+  dilate_tr: 1
+  # SHARED BY BOTH CONDITIONS BY CONSTRUCTION, which is the point of the merge.
+  # A different threshold per condition removes a different amount of data from
+  # the same people, and fewer frames mean noisier edges and noisier state
+  # sequences -- so the movie-vs-rest contrast would partly measure the QC rule
+  # rather than the brain. This used to be two copies with a comment in each
+  # asking a human to keep them in step.
+  #
+  # Expect rest to lose MORE frames than the movie regardless. Eyes-closed rest
+  # produces more motion and more drowsiness than watching a film, which is a
+  # real difference between the conditions and not something to correct away --
+  # `frac_good_frames` is written per subject and fcm_selection controls on it.
+  #
+  # THE ds002837 TRAP DOES NOT APPLY HERE -- checked, not assumed.
+  # NNDb's censor files and its images sit on different timelines, which is why
+  # censoring is disabled for that cohort. The equivalent check for Cam-CAN:
+  # the confounds table has 194 lines (193 + header) against a BOLD of exactly
+  # 193 volumes, for sub-CC110033. One row per volume, same clock. fMRIPrep
+  # writes the table from the images it just produced, so this is expected --
+  # but ds002837 is the reason it is verified rather than assumed.
+  #
+  # ON THE 0.5 mm THRESHOLD -- treat this as provisional.
+  # 0.5 mm is the common convention and is what cneuromod uses, so the two
+  # fMRIPrep cohorts match. But head motion increases with age, and this is an
+  # 18-88 lifespan cohort. A fixed threshold therefore removes MORE data from
+  # older subjects, which manufactures an age effect out of a QC rule: less
+  # data -> noisier correlations -> apparently more variable connectivity.
+  #
+  # Decide this from the FD distribution across subjects and against age, not
+  # from convention. Whatever you choose, `n_tr_effective` in the output
+  # records what actually survived, per window.
+
+filtering:
+  already_applied: false   # fMRIPrep does NOT filter -- same as cneuromod
+  bandpass: [0.01, 0.1]
+  detrend: true
+  standardize: false       # correlation is invariant to it
+  # MATCHES cneuromod exactly, and deliberately DIFFERS from ds002837.
+  #
+  # ds002837 declares `bandpass: [0.01, 1.0]` with `already_applied: true`, so
+  # no filter is applied by this pipeline at all (activation.py:108). Its TR of
+  # 1.0 puts Nyquist at 0.5 Hz, so that 1.0 upper bound never did anything:
+  # ds002837 effectively retains 0.01-0.5 Hz, five times the band these two
+  # cohorts keep, including cardiac and respiratory aliasing they remove.
+  #
+  # Correlations computed over different frequency content are not comparable.
+  # This is a larger cross-cohort confound than most preprocessing differences.
+  # It is also FIXABLE, and only in one direction: a filter cannot be undone,
+  # but a more restrictive one can always be added on top. Setting ds002837 to
+  # already_applied:false / bandpass:[0.01,0.1] / detrend:false would bring all
+  # three into the same band, config-only, no code change.
+  #
+  # Not done here -- that touches a validated cohort and is a research
+  # decision, not a Cam-CAN one.
+  #
+  # ACROSS THE TWO CONDITIONS the band is identical by construction, and
+  # `static-fc` / the `-1` state arm additionally harmonise it at read time
+  # (frames.py's --match-bandpass). Both reach the model with the same
+  # frequency content despite the different TRs.
+
+runs:
+  mode: concat             # one file per subject per task; nothing to concatenate
+
+trim:
+  column: null
+
+stimulus:
+  # PER TASK ALREADY, which is why this key needed no change for the merge.
+  #
+  # MOVIE: SET, on real evidence -- CONFIRMED across the full cohort, not the
+  # pilot. ds002837 and cneuromod leave this empty because run lengths
+  # genuinely vary per subject. Cam-CAN's movie is a FIXED 8-minute clip with a
+  # fixed 193-volume acquisition: 193 * 2.47 = 476.71 s. Checked directly
+  # (2026-08): every one of 648 completed subjects loads with nibabel to
+  # EXACTLY (97, 115, 97, 193) -- one line of shape output, not several, and
+  # zero files failed to open. That is the same check that would have caught a
+  # cancelled or truncated write, so it also stands as the corruption check for
+  # the full run. If CC221648 or any later top-up comes back with a different
+  # volume count, this assumption breaks silently rather than loudly -- re-run
+  # the shape check after any re-run before trusting the value again.
+  #
+  # REST: ABSENT ON PURPOSE, and it costs nothing on the route rest is for.
+  # Rest has no stimulus. `timing_source: identity` makes stimulus time equal
+  # acquisition time from scan onset, so a "stimulus grid" here is a grid of
+  # time bins -- meaningful for rest, and what every sliding-window rest dFC
+  # study uses. Only `dfc` reads a duration, and it falls back to the OBSERVED
+  # run length when absent, with a validation warning `--no-strict` passes.
+  # `extract`, the window_s=-1 state arm and `static-fc` never read it.
+  #
+  # Set {Rest: <n_volumes * 1.97>} once the volume count is confirmed
+  # (261 * 1.97 = 514.17 s if the protocol numbers hold). If it VARIES by
+  # subject, leave it out -- an assumed fixed duration where runs actually
+  # differ is worse than none, because the grid would claim windows some
+  # subjects never acquired.
+  durations_s: {Movie: 476.71}
+  timing_source: identity
+  unit_of_analysis: run
+
+  # THE ALIGNMENT GATE IS PER TASK, and this is the pair of lines without which
+  # phase 1 cannot run for rest at all.
+  #
+  # `diagnose` computes inter-subject correlation and FAILS (exit 2) when the
+  # median |best_lag| exceeds this many TRs, and `activation_and_dfc.sh` chains
+  # stage 3 and the censor step behind it with --dependency=afterok. For the
+  # MOVIE that is exactly right: a misaligned run makes every `window_id` mean
+  # a different moment per subject, and ISC is what detects it.
+  #
+  # At REST there is nothing shared to correlate, so the best lag is noise and
+  # its median lands somewhere in the middle of the +-30 TR search. Gated at
+  # 1.0, every rest run FAILS a check that was never meaningful, and the
+  # failure cancels the rest of the chain.
+  #
+  # A key present with a null value turns the gate off; an ABSENT key falls
+  # back to isc_gate_tr. ISC is still COMPUTED and written for rest, because
+  # it is cheap and informative in the other direction: rest ISC should be near
+  # ZERO, and a resting cohort whose subjects correlate strongly is a finding
+  # -- a task mislabelled as rest, or a shared artifact -- not a pass.
+  isc_gate_tr: 1.0
+  isc_gate_tr_by_task:
+    Rest: null
+
+windows:
+  # ONE GRID FOR BOTH CONDITIONS, so that if a windowed state set is ever the
+  # one to compare, the aperture is not another difference between them. The
+  # SAMPLES per window still differ, because the TRs do -- that is physics, not
+  # a config choice, and `n_tr_effective` records it per window.
+  #
+  # These sizes are only used by `dfc`. The recommended route for the
+  # movie-vs-rest comparison is activation-only (window_s = -1) and reads none
+  # of them.
+  sizes_s: [15, 30, 60, 120, 300]
+  n_overlaps: 5
+  drop_incomplete: true
+  by_size:
+    15:
+      atlases: [yeo7, networks]     # never harvardoxford -- see below
+  # 15 s IS SIX SAMPLES OF MOVIE AND EIGHT OF REST. Added on request; read this
+  # before using it.
+  #
+  # round(15 / 2.47) = 6 TR; round(15 / 1.97) = 8. The rank floor is
+  # (n_nodes + 0.5) * tr, so:
+  #
+  #     atlas          nodes   floor at 2.47   floor at 1.97   6 / 8 samples is
+  #     yeo7               7        18.5 s          14.8 s     below / ABOVE
+  #     networks          14        35.8 s          28.6 s     below / below
+  #     harvardoxford    111       275.4 s         219.7 s     far below both
+  #
+  # So at 15 s every movie window is `rank_deficient = True`, including yeo7,
+  # while yeo7 at rest is NOT. The window plan prints that split per task
+  # rather than averaging it away, and `rank_policy: warn` computes the edges
+  # and flags the rows either way, because the two questions are different: a
+  # rank-deficient window has a SINGULAR correlation MATRIX, while each edge in
+  # it is still an ordinary two-variable correlation. Edge-wise analysis: noisy,
+  # usable, flagged. Anything that inverts or decomposes the matrix
+  # (precision, graphical lasso, PCA on the matrix): void, and the flag is what
+  # tells you so.
+  #
+  # How noisy: Fisher-z sampling SD is 1/sqrt(n-3), so 1/sqrt(3) = 0.577 at 6
+  # samples and 1/sqrt(5) = 0.447 at 8, against 0.316 for ccfrail at the same
+  # 15 s and 0.289 for ds002837. Censoring lowers n further --
+  # `n_tr_effective`, not the nominal count, is the n that applies to a given
+  # window, and at fd_threshold 0.5 some will land at 4 or 5.
+  #
+  # Cost: stride is 15/5 = 3 s, so ~153 movie windows per subject against 75 at
+  # 30 s. Across 648 subjects that is ~99,000 rows per atlas, and rest adds its
+  # own ~651.
+  #
+  # PROVENANCE: adding a size changes `windows.sizes_s`, which is part of
+  # `cfg.hash()`, so every shard written from now on carries a different
+  # `config_hash` from the shards already on disk. Nothing refuses on that --
+  # it is provenance, not a gate -- but it is why a shard's own metadata, not
+  # this file, is what any later stage reads a value from.

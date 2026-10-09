@@ -216,17 +216,9 @@ def add_arguments(p) -> None:
 
 
 def run(args) -> int:
-    import os
+    from .io import default_output_root
 
-    if args.output_root:
-        root = Path(args.output_root)
-    elif os.environ.get("FMRIDECOMP_OUTPUTS"):
-        root = Path(os.environ["FMRIDECOMP_OUTPUTS"])
-    else:
-        import yaml
-        repo = Path(__file__).resolve().parent.parent
-        root = Path(yaml.safe_load(
-            (repo / "config" / "camcan_movie.yaml").read_text())["output_root"])
+    root = Path(args.output_root) if args.output_root else default_output_root()
 
     out = means_in_feature_units(root, args.atlas, args.window_s, args.states,
                                  args.cohorts)
