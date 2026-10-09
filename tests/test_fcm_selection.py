@@ -258,14 +258,14 @@ class TestTheTable:
         out = root / "fcm_selection" / "task=movie" / "target=hads"
         return pd.read_csv(out / "summary.csv"), out
 
-    def test_movie_and_rest_sit_in_one_table_as_a_cohort_column(
+    def test_a_conditions_cohorts_sit_in_one_table_as_a_cohort_column(
             self, one_cell, tmp_path):
         d, _ = self.run_it(one_cell, tmp_path)
         assert set(d["cohort"]) == {"cA", "cB"}
 
     def test_it_carries_the_same_columns_bstm_selection_does(self, one_cell,
                                                              tmp_path):
-        """The three trees are read side by side; a column missing from one of
+        """The four tables are read side by side; a column missing from one of
         them is a comparison that has to be done by hand."""
         d, _ = self.run_it(one_cell, tmp_path)
         for c in ("model", "arm", "atlas", "n", "n_features", "mean", "std",
@@ -305,11 +305,45 @@ class TestTheTable:
         assert out.parent.parent.name == "fcm_selection"
         assert out.name == "target=hads"
 
+    def test_only_task_and_target_are_directories(self, one_cell, tmp_path):
+        """The two keys in the PATH are the two that identify the ranking.
+        Everything else that varies -- cohort, atlas, arm, model -- is a
+        COLUMN, because the point of the file is to read those against each
+        other in one table. A `cohort=`/`atlas=` directory here would split the
+        comparison across files and make it a join.
+        """
+        d, out = self.run_it(one_cell, tmp_path)
+        tree = out.parent.parent                      # <root>/fcm_selection
+        keys = {part.split("=", 1)[0]
+                for p in tree.rglob("*") if p.is_dir()
+                for part in p.relative_to(tree).parts if "=" in part}
+        assert keys == {"task", "target"}
+        # and in that nesting order, so one task= folder holds every target
+        assert out.parent.name.startswith("task=")
+        assert out.name.startswith("target=")
+        for col in ("cohort", "atlas", "arm", "model"):
+            assert col in d.columns, col
+
+    def test_the_scores_table_is_a_csv_anyone_can_open(self, one_cell,
+                                                       tmp_path):
+        """It was parquet. At the full grid it is a couple of thousand rows and
+        a few hundred KB either way, nothing reads it programmatically, and
+        parquet cost the ability to open it in a spreadsheet or with
+        `column -s, -t`.
+        """
+        _, out = self.run_it(one_cell, tmp_path)
+        sc = out / "scores.csv"
+        long = pd.read_csv(sc)
+        assert {"model", "arm", "cohort", "atlas", "seed", "score"} <= set(
+            long.columns)
+        assert len(long) > 0
+        assert not list(out.rglob("*.parquet"))
+
     def test_design_and_manifest_travel_with_the_table(self, one_cell,
                                                        tmp_path):
         _, out = self.run_it(one_cell, tmp_path)
         note = (out / "DESIGN.md").read_text()
         assert "Read `n` before reading a gap" in note
         assert "NOT a test" in note
-        assert (out / "scores.parquet").exists()
+        assert (out / "scores.csv").exists()
         assert (out / "figures" / "arms_by_cohort.png").exists()

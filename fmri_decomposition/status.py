@@ -65,6 +65,29 @@ def _footer(path: Path):
     return f.metadata.num_rows, list(f.schema_arrow.names)
 
 
+def _csv_rows(path: Path) -> int:
+    """Data rows in a CSV, without parsing it.
+
+    `_footer` reads a row count out of parquet metadata for free; a CSV has no
+    footer, so this counts newlines and subtracts the header. It is the one
+    thing lost by writing `scores.csv` instead of `scores.parquet`, and on a
+    file of a few hundred KB it costs nothing.
+
+    Newlines, not a CSV parse, so a value containing one would be counted
+    twice. Nothing written here can: the columns are model, arm, atlas,
+    window_s, K, states, n, n_features, seed, fold and score. This is a
+    progress indicator, not a number any result depends on.
+    """
+    n, last = 0, b"\n"
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            n += chunk.count(b"\n")
+            last = chunk[-1:]
+    if last not in (b"\n", b""):
+        n += 1          # a final line with no newline after it is still a row
+    return max(n - 1, 0)
+
+
 def _key(p: Path, name: str):
     for part in p.parts:
         if part.startswith(f"{name}="):
@@ -173,12 +196,12 @@ def selection(root: Path) -> pd.DataFrame:
     rows = []
     for tree in SELECTION_TREES:
         for d in sorted((root / tree).glob("task=*/target=*")):
-            sc = d / "scores.parquet"
+            sc = d / "scores.csv"
             rows.append({"tree": tree.replace("_selection", ""),
                          "task": _key(d, "task"),
                          "target": _key(d, "target"),
                          "scores": sc.exists(),
-                         "n_rows": _footer(sc)[0] if sc.exists() else 0,
+                         "n_rows": _csv_rows(sc) if sc.exists() else 0,
                          "design": (d / "DESIGN.md").exists(),
                          "figures": sum(1 for _
                                         in (d / "figures").glob("*.png"))})

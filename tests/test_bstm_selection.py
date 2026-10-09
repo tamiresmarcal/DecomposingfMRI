@@ -332,10 +332,13 @@ class TestTaskIsAPartitionNotASecondTree:
     """One tree per model family, partitioned by condition.
 
     It used to be `--output-name resting_bstm_selection`: a second tree with a
-    different NAME for the same ranking on different data. `task=` is a hive
-    partition like every other key in outputs/ -- atlas=, window_s=, cohort=,
-    states=, target= -- so the four summary.csv files (bstm/fcm x movie/rest)
+    different NAME for the same ranking on different data. `task=` is a
+    partition instead, so the four summary.csv files (bstm/fcm x movie/rest)
     share one shape and one layout.
+
+    `task=` and `target=` are the ONLY directory keys in these trees. atlas,
+    window_s, K, states and cohort are columns of the one csv, because the
+    comparison is rows you can sort rather than a join across folders.
     """
 
     def test_the_path_is_tree_then_task_then_target(self, tmp_path):

@@ -139,10 +139,12 @@ outputs/
 ├── bstm_selection/                               STAGE 5b — the state ranking
 │   ├── task=movie/target=additional_HADS_anx_category/
 │   └── task=rest/ target=additional_HADS_anx_category/
-│       ├── summary.csv  scores.parquet  DESIGN.md  figures/  models/
-│       `task=` is a hive partition like every other key here, so one tree
-│       holds both conditions and the two summary.csv files share a layout.
-│       Each run wipes only its own task=/target= folder.
+│       ├── summary.csv  scores.csv  DESIGN.md  figures/  models/
+│       task= and target= are the ONLY directory keys in the two selection
+│       trees. atlas, window_s, K, states and cohort are COLUMNS of
+│       summary.csv -- the comparison is rows you can sort, not a join
+│       across folders -- and the two keys that are directories are the two
+│       that say which ranking this is. Each run wipes only its own folder.
 │
 ├── fcm_selection/                                STAGE 5b' — static FC
 │   ├── task=movie/target=additional_HADS_anx_category/
@@ -150,7 +152,7 @@ outputs/
 │       ├── summary.csv  same columns, with `cohort` in place of `window_s`
 │       │                and `K`. No delta column anywhere: the arms share
 │       │                folds, so a difference between rows is not a test.
-│       └── scores.parquet  DESIGN.md  figures/
+│       └── scores.csv  DESIGN.md  figures/
 │
 └── meta/
     ├── atlas-harvardoxford_labels.csv            atlas-level: cohort-independent

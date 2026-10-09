@@ -7,7 +7,7 @@
 writes, per (task, target),
 
     outputs/fcm_selection/task=<k>/target=<t>/DESIGN.md      what was compared
-    outputs/fcm_selection/task=<k>/target=<t>/scores.parquet (cell, arm, model, seed)
+    outputs/fcm_selection/task=<k>/target=<t>/scores.csv     (cell, arm, model, seed)
     outputs/fcm_selection/task=<k>/target=<t>/summary.csv    the ranking, readable
     outputs/fcm_selection/task=<k>/target=<t>/figures/*.png
     outputs/meta/fcm_selection/task=<k>/target=<t>.json      manifest
@@ -334,7 +334,10 @@ def run(args) -> int:
            / f"target={args.target}")
     _wipe(out, parent=f"task={args.task}")
     (out / "figures").mkdir(parents=True, exist_ok=True)
-    scores_df.to_parquet(out / "scores.parquet", index=False)
+    # CSV for the same reason as select-bstm's: this grid is smaller still
+    # (cohorts x atlases x arms x models x seeds x folds), it is read by eye,
+    # and nothing reads it programmatically.
+    scores_df.to_csv(out / "scores.csv", index=False)
 
     summary = (scores_df.groupby(["model", "cohort", "arm", "atlas", "n",
                                   "n_features"], dropna=False)["score"]

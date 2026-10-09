@@ -97,9 +97,8 @@ class TestSelectionInventory:
         for i in range(figures):
             (d / "figures" / f"f{i}.png").write_bytes(b"")
         if scores:
-            pq.write_table(pa.Table.from_pandas(
-                pd.DataFrame({"score": [0.1, 0.2, 0.3]}),
-                preserve_index=False), d / "scores.parquet")
+            pd.DataFrame({"score": [0.1, 0.2, 0.3]}).to_csv(
+                d / "scores.csv", index=False)
 
     def test_both_trees_and_both_tasks_are_listed(self, tmp_path):
         for tree in ("bstm_selection", "fcm_selection"):

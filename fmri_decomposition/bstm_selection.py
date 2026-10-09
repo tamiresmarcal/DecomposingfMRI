@@ -15,7 +15,7 @@
 writes, per (task, target), under `--output-name` (default `bstm_selection`),
 
     outputs/<name>/task=<k>/target=<t>/DESIGN.md       what was compared
-    outputs/<name>/task=<k>/target=<t>/scores.parquet  (state set, arm, model, seed)
+    outputs/<name>/task=<k>/target=<t>/scores.csv      (state set, arm, model, seed)
     outputs/<name>/task=<k>/target=<t>/summary.csv     the ranking, readable
     outputs/<name>/task=<k>/target=<t>/figures/*.png   the comparison plots
     outputs/<name>/task=<k>/target=<t>/models/*.joblib refits for the top N
@@ -31,10 +31,18 @@ split by `task=`:
     outputs/fcm_selection/ task=movie/target=<t>/summary.csv
     outputs/fcm_selection/ task=rest/ target=<t>/summary.csv
 
-Four tables, one shape, read against each other. `task=` is a hive partition
-like every other key under outputs/ -- atlas=, window_s=, cohort=, states=,
-target= -- rather than a second tree with a different NAME for the same
-ranking on different data, which is what `resting_bstm_selection` was.
+Four tables, one shape, read against each other. `task=` is a partition rather
+than a second tree with a different NAME for the same ranking on different
+data, which is what `resting_bstm_selection` was.
+
+TASK= AND TARGET= ARE THE ONLY DIRECTORIES HERE. Unlike the stage 2-5a trees,
+which nest atlas=/window_s=/cohort=/states= because each level changes the
+SCHEMA of the parquet under it, this tree holds one table per ranking and
+everything that varies inside a ranking -- atlas, window_s, K, states, cohort,
+arm, model -- is a COLUMN. That is the whole point: the comparison is rows of
+one csv you can sort, not a join across directories. The two keys that ARE
+directories are the two that identify which ranking it is, and the two a run
+is given on the command line.
 
 This script produces both bstm rows; only `select-fcm` is separate code,
 because its features come from another stage.
@@ -705,7 +713,13 @@ def run(args) -> int:
     _wipe(out, parent=f"task={args.task}")
     (out / "figures").mkdir(parents=True, exist_ok=True)
     (out / "models").mkdir(parents=True, exist_ok=True)
-    scores_df.to_parquet(out / "scores.parquet", index=False)
+    # CSV, not parquet. The whole point of this file is that a person can look
+    # at it -- `column -s, -t`, a spreadsheet, pandas without pyarrow -- and at
+    # 2,400 rows for the full grid (state sets x arms x models x seeds x folds)
+    # it is ~200 KB either way. parquet bought 180 KB and cost the ability to
+    # open it. Nothing reads it programmatically; `summary.csv` beside it is
+    # the aggregate, and this is the per-fold long form behind it.
+    scores_df.to_csv(out / "scores.csv", index=False)
 
     # `n` and `n_features` are GROUPING keys rather than dropped columns: a
     # row's score is not comparable with another's without them, and these
