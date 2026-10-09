@@ -1044,9 +1044,19 @@ def add_arguments(p) -> None:
                         "the nearest expressible thing was projecting a "
                         "training cohort onto itself, which works by accident "
                         "and reads as nonsense.")
-    p.add_argument("--n-latents", nargs="+", type=int, default=[2, 3, 5],
-                   help="must include 3: every stage 4b clusterer works on a "
-                        "3-D embedding")
+    # `--pca-latents`, to read as the pair of `--umap-latents` it has always
+    # been. `dest` stays `n_latents`, which is deliberate: that string is a KEY
+    # in the model_hash payload, so renaming it would move every hash on disk
+    # for a cosmetic change. The old spelling keeps working -- scripts and
+    # sbatch lines in the wild carry it -- but it is not advertised.
+    p.add_argument("--pca-latents", "--n-latents", dest="n_latents",
+                   nargs="+", type=int, default=[2, 3, 5],
+                   help="PCA component counts to fit. Must include 3: every "
+                        "stage 4b clusterer works on a 3-D embedding. Pair it "
+                        "with the atlas's own width for a lossless rotation, "
+                        "which is what `--passthrough-features` needs -- "
+                        "`--pca-latents 3 14 --umap-latents 3` on a "
+                        "14-network atlas.")
     p.add_argument("--umap-fit-rows", type=int, default=30_000,
                    help="0 fits UMAP on every training row")
     p.add_argument("--umap-latents", nargs="+", type=int, default=None,

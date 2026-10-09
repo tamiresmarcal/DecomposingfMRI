@@ -217,16 +217,16 @@ done
 #   the frame aperture -- one task, a frame has no window to vary.
 #   yeo7 and networks also get --passthrough-features, which writes the NAMED
 #   parcels beside the PCs so stage 4b can fit on them directly; and the extra
-#   --n-latents is the atlas's own width, which makes that PCA a lossless
+#   --pca-latents is the atlas's own width, which makes that PCA a lossless
 #   rotation. --umap-latents keeps UMAP at 3, where it belongs.
 sbatch --array=0-0 slurm/dimensionality_reduction.sbatch harvardoxford -1 \
   -- --source activation $TRAIN $POL
 sbatch --array=0-0 slurm/dimensionality_reduction.sbatch yeo7 -1 \
   -- --source activation $TRAIN $POL \
-     --n-latents 3 7 --umap-latents 3 --passthrough-features
+     --pca-latents 3 7 --umap-latents 3 --passthrough-features
 sbatch --array=0-0 slurm/dimensionality_reduction.sbatch networks -1 \
   -- --source activation $TRAIN $POL \
-     --n-latents 3 14 --umap-latents 3 --passthrough-features
+     --pca-latents 3 14 --umap-latents 3 --passthrough-features
 ```
 
 Wait for those, then look before spending hours on the HMM:

@@ -37,7 +37,7 @@
 #
 # UMAP is the slow part, not PCA: it fits a neighbour graph on
 # --umap-fit-rows (30,000 by default) rows of full edge dimensionality, once
-# per entry in --n-latents. Pass --no-umap for a PCA-only run, which finishes
+# per entry in --pca-latents. Pass --no-umap for a PCA-only run, which finishes
 # in minutes.
 
 #SBATCH --job-name=fmridecomp_decompose
@@ -62,6 +62,20 @@ for a in "$@"; do
   elif [[ "$a" == "--" ]]; then seen_sep=1
   else WINDOWS+=("$a"); fi
 done
+# A WINDOW NEVER STARTS WITH `--`. Forgetting the bare `--` separator does not
+# fail loudly: the forwarded flags land in WINDOWS, argparse's nargs="+" stops
+# at the first one anyway, and the run proceeds with a WINDOWS array that is
+# wrong -- which makes the array-range check and the task log wrong with it.
+# `-1` is a real window and does not start with `--`, so this is exact.
+for w in ${WINDOWS[@]+"${WINDOWS[@]}"}; do
+  if [[ "$w" == --* ]]; then
+    echo "ERROR: '$w' is not a window size." >&2
+    echo "       Extra arguments go after a bare --, e.g." >&2
+    echo "         sbatch $(basename "$0") <atlas> <window>... -- $w ..." >&2
+    exit 1
+  fi
+done
+
 if [[ ${#WINDOWS[@]} -eq 0 ]]; then
   echo "give at least one window size" >&2
   exit 1
