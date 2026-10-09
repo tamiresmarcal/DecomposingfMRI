@@ -94,7 +94,13 @@ outputs/
 │   └── atlas=harvardoxford/
 │       ├── cohort=ds002837/task=500daysofsummer/sub=1/data.parquet
 │       ├── cohort=cneuromod/task=s01e01a/sub=01/data.parquet
-│       └── cohort=hcp7t/task=MOVIE2/sub=100610/data.parquet
+│       ├── cohort=camcan/task=Movie/sub=CC110033/data.parquet
+│       └── cohort=camcan/task=Rest/ sub=CC110033/data.parquet
+│       One cohort can hold several CONDITIONS, because `cohort` means one
+│       acquisition programme and not one group of people. Cam-CAN's movie and
+│       rest are the same subjects, so two cohort values would make the tree
+│       claim they were two samples. Their TRs differ (2.47s, 1.97s) and that
+│       is fine: TR travels in each shard's own metadata.
 │
 ├── dfc/                                          STAGE 3 — window_s between atlas and cohort
 │   └── atlas=harvardoxford/
@@ -185,6 +191,11 @@ where a cohort has one stimulus. It costs CNeuroMod roughly 300 thin directories
 per atlas per window size; the alternative would make the path shape
 cohort-dependent, which is the same class of problem as a per-cohort `run=`
 level.
+
+It is also what lets one cohort hold two CONDITIONS. Everything downstream
+keeps `task` as a column, so a stage that scores one row per subject —
+`select-bstm`, `select-fcm` — needs `--keep-tasks` to say which condition it
+means, and **refuses** rather than silently averaging or picking one.
 
 **Directory depth is constant, and so is the leaf name.** Every leaf is
 `data.parquet`, in every cohort — a reader never has to know which cohort it is

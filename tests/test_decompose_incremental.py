@@ -24,7 +24,7 @@ from fmri_decomposition import decompose as D
 PARCELS = [f"P{i:02d}" for i in range(8)]
 
 
-def write_activation(root, cohort, sub, n_tr=80, tr=2.0, seed=0):
+def write_activation(root, cohort, sub, n_tr=80, tr=2.0, seed=0, task="m"):
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -39,8 +39,12 @@ def write_activation(root, cohort, sub, n_tr=80, tr=2.0, seed=0):
     d["good_frame"] = True
     d["run_idx"] = np.int16(0)
     d["run_key"] = "r0"
+    # NOT a column: `task` is a partition key in an activation shard
+    # (activation.py: "cohort / atlas / task / sub are partition keys, carried
+    # by the path"), and frames.read_cohort assigns it from the path. Writing
+    # it as a column here made it the 9th "parcel".
     p = (root / "activation" / "atlas=mini" / f"cohort={cohort}"
-         / "task=m" / f"sub={sub}" / "data.parquet")
+         / f"task={task}" / f"sub={sub}" / "data.parquet")
     p.parent.mkdir(parents=True, exist_ok=True)
     tbl = pa.Table.from_pandas(d, preserve_index=False)
     pq.write_table(tbl.replace_schema_metadata({b"tr": str(tr).encode()}), p)
@@ -687,3 +691,85 @@ class TestTrainOnly:
         run_cluster(cell, project=[])
         assert latents(cell, "camcan").stat().st_mtime_ns == before
         assert col in pd.read_parquet(latents(cell, "camcan")).columns
+
+
+class TestACohortThatGainedATask:
+    """One cohort, two conditions -- and the skip must notice the second.
+
+    The per-cohort skip asks one question: does this cohort's latents carry the
+    current model_hash? "Yes, leave it alone" is right when its shards have not
+    changed, and WRONG the moment the cohort gains a condition. Cam-CAN's rest
+    arrived as shards under `cohort=camcan/task=Rest` beside a latents file
+    already at the right hash for `task=Movie` alone. Skipped, the whole rest
+    condition would never be projected: every file present, the hash correct,
+    and half the data missing.
+    """
+
+    @pytest.fixture
+    def movie_only(self, tmp_path):
+        """camcan decomposed from Movie shards alone, Rest not yet extracted."""
+        for i, c in enumerate(["trainA", "trainB"]):
+            for j in range(3):
+                write_activation(tmp_path, c, f"S{j}", seed=i * 10 + j,
+                                 task="Movie")
+        for j in range(3):
+            write_activation(tmp_path, "camcan", f"S{j}", seed=99 + j,
+                             task="Movie")
+        run(tmp_path, ["camcan"])
+        return tmp_path
+
+    def test_the_tasks_it_covers_are_recorded(self, movie_only):
+        assert D.latents_tasks(latents(movie_only, "camcan")) == {"Movie"}
+
+    def test_the_source_tasks_come_from_the_partitions(self, movie_only):
+        for j in range(3):
+            write_activation(movie_only, "camcan", f"S{j}", seed=7 + j,
+                             task="Rest")
+        assert D.source_tasks(movie_only, "mini", "-1", "camcan",
+                              "activation") == {"Movie", "Rest"}
+
+    def test_a_cohort_missing_a_task_is_not_skipped(self, movie_only):
+        """THE POINT. Same model_hash, so the plain skip would leave it alone."""
+        for j in range(3):
+            write_activation(movie_only, "camcan", f"S{j}", seed=7 + j,
+                             task="Rest")
+        out_dir = latents(movie_only, "camcan").parent.parent
+        assert D.cohorts_missing_a_task(
+            movie_only, out_dir, "mini", "-1", "activation",
+            ["camcan", "trainA"], log=lambda *a: None) == ["camcan"]
+
+    def test_it_is_rewritten_and_then_covers_both(self, movie_only):
+        for j in range(3):
+            write_activation(movie_only, "camcan", f"S{j}", seed=7 + j,
+                             task="Rest")
+        run(movie_only, ["camcan"], overwrite=True)
+        lat = pd.read_parquet(latents(movie_only, "camcan"))
+        assert set(lat["task"]) == {"Movie", "Rest"}
+        assert D.latents_tasks(latents(movie_only, "camcan")) == {"Movie",
+                                                                 "Rest"}
+
+    def test_a_cohort_whose_tasks_are_unchanged_is_still_skipped(self,
+                                                                movie_only):
+        """The guard must not cost the incremental behaviour it sits beside."""
+        before = {c: latents(movie_only, c).stat().st_mtime_ns
+                  for c in ("trainA", "trainB", "camcan")}
+        run(movie_only, ["camcan"])
+        for c, t in before.items():
+            assert latents(movie_only, c).stat().st_mtime_ns == t, c
+
+    def test_the_rewrite_is_refused_while_state_columns_exist(self,
+                                                              movie_only):
+        """Not silently rewritten: dropping the state columns costs the HMM2
+        fits, so the refusal names the cost and --overwrite is deliberate."""
+        from fmri_decomposition.cluster import append_columns
+
+        n = len(pd.read_parquet(latents(movie_only, "camcan")))
+        append_columns(latents(movie_only, "camcan"),
+                       {"HMM2_pca3_8": np.zeros(n, dtype=np.int16)},
+                       {"HMM2_pca3_8": {"method": "HMM2", "k": 8}})
+        for j in range(3):
+            write_activation(movie_only, "camcan", f"S{j}", seed=7 + j,
+                             task="Rest")
+        with pytest.raises(SystemExit) as e:
+            run(movie_only, ["camcan"])
+        assert "refusing to rewrite" in str(e.value)

@@ -566,6 +566,15 @@ def write_latents(lat: pd.DataFrame, path: Path, models: dict, cohort: str) -> N
             for k, v in {**models["fit_meta"], **axis, "cohort": cohort,
                          "role": models["role_of"][cohort],
                          "model_hash": models["model_hash"],
+                         # Which CONDITIONS this file covers. One cohort can
+                         # hold several -- Cam-CAN's Movie and Rest are the
+                         # same people -- and without this the per-cohort skip
+                         # below cannot tell "already at this model_hash" from
+                         # "already at this model_hash, for only half the
+                         # tasks". Recorded, so the check costs a footer read.
+                         "tasks": sorted(
+                             lat["task"].astype(str).unique().tolist())
+                         if "task" in lat.columns else [],
                          # What actually happened, beside what was asked for.
                          "umap_fitted": bool(models.get("umap_fitted")),
                          "n_umap_components": sorted(models["umap"]),
@@ -670,6 +679,84 @@ def _fit_differences(stored: dict, meta: dict) -> list[str]:
     if stored.get("package_version") not in (None, __version__):
         out.append(f"      package_version: "
                    f"{stored['package_version']!r} -> {__version__!r}")
+    return out
+
+
+def latents_tasks(path: Path) -> set[str] | None:
+    """The tasks a latents file covers, or None if it has none recorded.
+
+    From the schema metadata when it is there -- a footer read -- and from the
+    `task` column when it is not, because files written before `tasks` was
+    stamped are still on disk and a silent `set()` would read as "covers
+    nothing" and force a rewrite of every one of them.
+    """
+    if not path.exists():
+        return None
+    import pyarrow.parquet as pq
+
+    f = pq.ParquetFile(path)
+    md = f.schema_arrow.metadata or {}
+    raw = md.get(b"tasks")
+    if raw is not None:
+        try:
+            got = json.loads(raw.decode())
+        except ValueError:
+            got = None
+        if isinstance(got, list) and got:
+            return {str(t) for t in got}
+    if "task" not in f.schema_arrow.names:
+        return None
+    return {str(t) for t in
+            f.read(columns=["task"]).column("task").to_pylist()}
+
+
+def source_tasks(root: Path, atlas: str, window_s, cohort: str,
+                 source: str) -> set[str]:
+    """The tasks this cohort has shards for, from the partition directories.
+
+    A directory listing, so it costs nothing. `task=` sits directly under
+    `cohort=` in both stage 1 and stage 2 layouts.
+    """
+    from .io import activation_root, dfc_root
+
+    base = (activation_root(root, atlas, cohort) if source == "activation"
+            else dfc_root(root, atlas, window_s, cohort))
+    if not base.is_dir():
+        return set()
+    return {d.name.split("=", 1)[1] for d in base.iterdir()
+            if d.is_dir() and d.name.startswith("task=")}
+
+
+def cohorts_missing_a_task(root: Path, out_dir: Path, atlas: str, window_s,
+                           source: str, at_hash: list[str],
+                           log=print) -> list[str]:
+    """Of the cohorts already at this model_hash, those missing a task.
+
+    THE SILENT-LOSS CASE THE PER-COHORT SKIP OPENS. The skip asks one question
+    -- does this cohort's latents carry the current model_hash -- and answers
+    "yes, leave it alone". That is right when the cohort's shards have not
+    changed. It is wrong the moment a cohort GAINS a condition: Cam-CAN's rest
+    arrived as shards under `cohort=camcan/task=Rest` beside a latents file
+    already at the right hash for `task=Movie` alone, so the cohort was skipped
+    and the entire rest condition was never projected. Every file present, the
+    hash correct, and half the data missing.
+
+    Reported rather than silently rewritten, because a rewrite drops the state
+    columns stage 4b wrote -- which is what `refuse_to_destroy_states` then
+    says, with the cost named.
+    """
+    out = []
+    for c in at_hash:
+        have = latents_tasks(out_dir / f"cohort={c}" / "data.parquet")
+        if have is None:
+            continue
+        want = source_tasks(root, atlas, window_s, c, source)
+        missing = sorted(want - have)
+        if missing:
+            log(f"  cohort={c} is at this model_hash but covers only "
+                f"{sorted(have)} -- shards exist for {missing}, so it needs "
+                f"rewriting to include them")
+            out.append(c)
     return out
 
 
@@ -822,6 +909,12 @@ def run_one(root: Path, window_s, args) -> None:
     on_disk = {c: latents_model_hash(out_dir / f"cohort={c}" / "data.parquet")
                for c in cohorts}
     todo = [c for c in cohorts if args.overwrite or on_disk[c] != mhash]
+    # A cohort at the right hash is normally left alone -- but not if it has
+    # since gained a task. See cohorts_missing_a_task.
+    todo += cohorts_missing_a_task(
+        root, out_dir, atlas, window_s, source,
+        [c for c in cohorts if c not in todo], log=log)
+    todo = [c for c in cohorts if c in set(todo)]
     keep = [c for c in cohorts if c not in todo]
     # A cohort with NO file is new and free to write. One with a DIFFERENT hash
     # is the dangerous case: it exists, it may carry state columns, and a
