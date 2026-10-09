@@ -157,7 +157,7 @@ else
   RUN=(python3)
 fi
 
-"${RUN[@]}" -m fmri_decomposition.cli select \
+"${RUN[@]}" -m fmri_decomposition.cli select-model \
     --target "${TARGET}" \
     --n-jobs "${SLURM_CPUS_PER_TASK:-1}" \
     ${EXTRA[@]+"${EXTRA[@]}"}

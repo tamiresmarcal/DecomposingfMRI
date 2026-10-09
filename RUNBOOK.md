@@ -212,7 +212,7 @@ POL="--censor-policy motion"
 # dimensionality reduction: PCA + UMAP coordinates
 #   windowed apertures -- one array task per window size
 for A in harvardoxford yeo7 networks; do
-  sbatch --array=0-3 slurm/dimensionality_reduction.sbatch $A 30 60 120 300 \
+  sbatch --array=0-3 slurm/decomposition.sbatch $A 30 60 120 300 \
     -- $TRAIN $PROJ $POL
 done
 #   the frame aperture -- one task, a frame has no window to vary.
@@ -220,12 +220,12 @@ done
 #   parcels beside the PCs so stage 4b can fit on them directly; and the extra
 #   --pca-latents is the atlas's own width, which makes that PCA a lossless
 #   rotation. --umap-latents keeps UMAP at 3, where it belongs.
-sbatch --array=0-0 slurm/dimensionality_reduction.sbatch harvardoxford -1 \
+sbatch --array=0-0 slurm/decomposition.sbatch harvardoxford -1 \
   -- --source activation $TRAIN $POL
-sbatch --array=0-0 slurm/dimensionality_reduction.sbatch yeo7 -1 \
+sbatch --array=0-0 slurm/decomposition.sbatch yeo7 -1 \
   -- --source activation $TRAIN $POL \
      --pca-latents 3 7 --umap-latents 3 --passthrough-features
-sbatch --array=0-0 slurm/dimensionality_reduction.sbatch networks -1 \
+sbatch --array=0-0 slurm/decomposition.sbatch networks -1 \
   -- --source activation $TRAIN $POL \
      --pca-latents 3 14 --umap-latents 3 --passthrough-features
 ```
@@ -313,7 +313,7 @@ done
 ```
 
 The phenotype table defaults to Cam-CAN's release. Everything after `--` goes
-straight to `select`, so another cohort's table needs no edit to the script:
+straight to `select-model`, so another cohort's table needs no edit to the script:
 
 ```bash
 sbatch slurm/model_selection.sbatch severity -- \
@@ -329,7 +329,7 @@ order is the claim:
   --target severity --ordinal-levels low mid high
 ```
 
-Get that wrong and `select` stops and says so, naming the values it found; it
+Get that wrong and `select-model` stops and says so, naming the values it found; it
 does not quietly code them to NaN.
 
 `model_selection` **wipes its target directory before writing** — back up a
@@ -376,7 +376,8 @@ each in its own tree with the same `summary.csv` shape:
 
 ```bash
 git pull
-sbatch slurm/static_fc.sbatch camcan
+sbatch slurm/static_fc.sbatch camcan \
+    -- --atlas harvardoxford yeo7 networks
 sbatch slurm/fcm_selection.sbatch additional_HADS_anx_category -- --cohorts camcan
 ```
 
@@ -556,10 +557,13 @@ sbatch --dependency=afterok:$F slurm/censor.sbatch \
 Independent of everything in 4.6, and the cheaper half:
 
 ```bash
-sbatch slurm/static_fc.sbatch camcan camcan_rest
+sbatch slurm/static_fc.sbatch camcan camcan_rest \
+    -- --atlas harvardoxford yeo7 networks
 # then, once it finishes
 for Y in additional_HADS_anx_category additional_HADS_dep_category; do
-  sbatch slurm/fcm_selection.sbatch $Y
+  sbatch slurm/fcm_selection.sbatch $Y -- \
+    --cohorts camcan camcan_rest --atlas harvardoxford yeo7 networks \
+    --pheno "$PHENO"
 done
 ```
 
@@ -581,7 +585,7 @@ PROJ="--project camcan camcan_rest"
 POL="--censor-policy motion"
 
 D=$(for A in $ATLASES; do
-      sbatch --parsable --array=0-0 slurm/dimensionality_reduction.sbatch $A -1 \
+      sbatch --parsable --array=0-0 slurm/decomposition.sbatch $A -1 \
         -- --source activation $TRAIN $PROJ $POL | cut -d';' -f1
     done | paste -sd:)
 
@@ -648,7 +652,7 @@ So the sequence is just:
 squeue -u $USER -n fmridecomp_cluster      # wait for any clustering to drain
 
 for A in harvardoxford yeo7 networks; do
-  sbatch --array=0-0 slurm/dimensionality_reduction.sbatch $A -1 \
+  sbatch --array=0-0 slurm/decomposition.sbatch $A -1 \
     -- --source activation --train ds002837 cneuromod \
        --project camcan camcan_rest --censor-policy motion
 done
@@ -729,9 +733,9 @@ POL="--censor-policy motion"
 APERTURES="30 60 120 300 -1"
 
 D=$(for A in $ATLASES; do
-      sbatch --parsable --array=0-3 slurm/dimensionality_reduction.sbatch \
+      sbatch --parsable --array=0-3 slurm/decomposition.sbatch \
         $A 30 60 120 300 -- $TRAIN $PROJ $POL | cut -d';' -f1
-      sbatch --parsable --array=0-0 slurm/dimensionality_reduction.sbatch \
+      sbatch --parsable --array=0-0 slurm/decomposition.sbatch \
         $A -1 -- --source activation $TRAIN $POL | cut -d';' -f1
     done | paste -sd:)
 [[ -n "$D" ]] || { echo "nothing submitted"; exit 1; }

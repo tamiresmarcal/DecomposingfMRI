@@ -6,6 +6,7 @@ tests pin the derivation, including the case that caused the rewrite: an axis
 that became varied while the document still called it fixed.
 """
 import argparse
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -224,7 +225,8 @@ class TestOrdinalLevelCoding:
         import argparse
         p = argparse.ArgumentParser()
         B.add_arguments(p)
-        got = p.parse_args(["--target", "x"])
+        got = p.parse_args(["--target", "x", "--cohort", "camcan",
+                            "--pheno", "p.csv:,"])
         assert got.ordinal_levels == B.ORDINAL_LEVELS
 
     def test_an_empty_covariate_is_named_rather_than_blamed_on_the_join(
@@ -250,9 +252,12 @@ class TestThreeTreesOneShape:
 
         p = argparse.ArgumentParser()
         B.add_arguments(p)
-        a = p.parse_args(["--target", "t"])
+        req = ["--target", "t", "--cohort", "camcan",
+               "--pheno", "p.csv:,"]
+        a = p.parse_args(req)
         assert a.output_name == "bstm_selection"
-        b = p.parse_args(["--target", "t", "--cohort", "camcan_rest",
+        b = p.parse_args(["--target", "t", "--pheno", "p.csv:,",
+                          "--cohort", "camcan_rest",
                           "--output-name", "resting_bstm_selection"])
         assert b.output_name == "resting_bstm_selection"
         assert b.cohort == "camcan_rest"
@@ -302,3 +307,57 @@ class TestRestrictSubjects:
         with pytest.raises(SystemExit) as e:
             B.read_subject_list(str(p))
         assert "no ids" in str(e.value)
+
+
+class TestNoDatasetSpecificDefaults:
+    """The source must not carry a fact about one dataset on one filesystem.
+
+    `--pheno` used to default to two absolute paths into one person's scratch
+    space, and `--cohort` to "camcan". That is how `select` appeared to need
+    neither -- the same thing `decompose --project camcan` was doing.
+    """
+
+    def parser(self):
+        import argparse
+
+        p = argparse.ArgumentParser()
+        B.add_arguments(p)
+        return p
+
+    def test_a_phenotype_path_must_be_given(self):
+        with pytest.raises(SystemExit):
+            self.parser().parse_args(["--target", "t", "--cohort", "c"])
+
+    def test_a_cohort_must_be_given(self):
+        with pytest.raises(SystemExit):
+            self.parser().parse_args(["--target", "t", "--pheno", "p.csv:,"])
+
+    def test_no_absolute_path_survives_in_the_source(self):
+        src = Path(B.__file__).read_text()
+        assert "/project/" not in src
+        assert "DEFAULT_PHENO" not in src
+
+    def test_the_fcm_tree_has_no_dataset_defaults_either(self):
+        import argparse
+
+        from fmri_decomposition import fcm_selection as F
+
+        p = argparse.ArgumentParser()
+        F.add_arguments(p)
+        with pytest.raises(SystemExit):           # --cohorts and --pheno
+            p.parse_args(["--target", "t"])
+        a = p.parse_args(["--target", "t", "--cohorts", "camcan",
+                          "--pheno", "p.csv:,"])
+        assert a.cohorts == ["camcan"]
+        assert "/project/" not in Path(F.__file__).read_text()
+
+    def test_no_job_script_names_a_cohort_or_an_atlas(self):
+        """A job script that names a cohort only works for one project."""
+        for name in ("static_fc.sbatch", "fcm_selection.sbatch",
+                     "model_selection.sbatch"):
+            src = (Path(B.__file__).parent.parent / "slurm" / name).read_text()
+            run = [ln for ln in src.splitlines()
+                   if "fmri_decomposition.cli" in ln or ln.startswith("    --")]
+            joined = " ".join(run)
+            assert "--cohorts camcan" not in joined, name
+            assert "--atlas harvardoxford" not in joined, name

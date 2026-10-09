@@ -1,12 +1,13 @@
 #!/bin/bash
 # Stage 3b -- one connectivity matrix per subject. What fcm_selection ranks.
 #
-#   sbatch slurm/static_fc.sbatch camcan camcan_rest
+#   sbatch slurm/static_fc.sbatch camcan camcan_rest \
+#       -- --atlas harvardoxford yeo7 networks
 #   sbatch slurm/static_fc.sbatch camcan -- --atlas yeo7 --pool subject
 #
 # Cohorts are positional; anything after a bare `--` is forwarded verbatim.
-# --atlas defaults to all three below, which is what fcm_selection wants: it
-# compares atlases, and one missing at rest silently drops that row.
+# --atlas is REQUIRED and is yours to give: this script names no atlas, no
+# cohort and no path of its own.
 #
 # WHAT IT COSTS. One pass over the stage-2 parquet per (atlas, cohort), then a
 # correlation per subject. The correlation is nothing -- 160 x 111 is
@@ -95,11 +96,12 @@ else
   RUN=(python3)
 fi
 
-# --atlas goes in FIRST so a caller's own --atlas after `--` overrides it:
-# argparse keeps the last value for a repeated option. Same ordering trick as
-# clustering.sbatch's --hmm2-jobs.
+# NO INJECTED --atlas. It used to default to all three here, which made this
+# script carry a fact about one project's atlas set -- the same thing
+# `--project camcan` and the hardcoded phenotype path were doing. Pass it after
+# the `--`; `--check`-style discovery belongs in the Python layer, not in a
+# default buried in a job script.
 "${RUN[@]}" -m fmri_decomposition.cli static-fc \
-    --atlas harvardoxford yeo7 networks \
     --cohorts "${COHORTS[@]}" \
     ${EXTRA[@]+"${EXTRA[@]}"}
 

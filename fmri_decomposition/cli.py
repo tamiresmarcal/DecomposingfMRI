@@ -722,8 +722,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     from . import bstm_selection as _bstm_selection
 
+    # `select-model` and `select-fcm`, a matched pair. `select` alone did not
+    # say select WHAT, and `fcm-select` put the noun first while `select` put
+    # the verb first -- two spellings of one idea sitting next to each other.
     sel = sub.add_parser(
-        "select",
+        "select-model",
         help="stage 5b: which state set predicts a phenotype column best")
     _bstm_selection.add_arguments(sel)
     sel.set_defaults(func=cmd_select)
@@ -741,14 +744,14 @@ def build_parser() -> argparse.ArgumentParser:
     sf = sub.add_parser(
         "static-fc",
         help="stage 3b: one connectivity matrix per subject -- what "
-             "fcm-select ranks")
+             "select-fcm ranks")
     _static_fc.add_arguments(sf)
     sf.set_defaults(func=cmd_static_fc)
 
     from . import fcm_selection as _fcm_selection
 
     fs = sub.add_parser(
-        "fcm-select",
+        "select-fcm",
         help="stage 5b': how well STATIC connectivity predicts a phenotype "
              "-- the third tree beside bstm_selection")
     _fcm_selection.add_arguments(fs)

@@ -5,7 +5,7 @@
         -o shared_subjects.txt
 
     fmri-decomp select     ... --restrict-subjects shared_subjects.txt
-    fmri-decomp fcm-select ... --restrict-subjects shared_subjects.txt
+    fmri-decomp select-fcm ... --restrict-subjects shared_subjects.txt
 
 WHY THIS EXISTS
 ---------------

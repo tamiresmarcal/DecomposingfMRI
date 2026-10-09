@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Stage 5b -- which state set predicts a phenotype column best.
 
-    fmri-decomp select --target additional_HADS_anx_category
-    fmri-decomp select --target additional_HADS_anx_category \\
+    fmri-decomp select-model --target additional_HADS_anx_category
+    fmri-decomp select-model --target additional_HADS_anx_category \\
         --models ridge hgb lgbm --n-jobs 16
 
     # the resting-state ranking -- same code, same grid, another cohort and
     # another folder
-    fmri-decomp select --target additional_HADS_anx_category \\
+    fmri-decomp select-model --target additional_HADS_anx_category \\
         --cohort camcan_rest --output-name resting_bstm_selection
 
 writes, per target, under `--output-name` (default `bstm_selection`),
@@ -164,10 +164,14 @@ CELL_BEARING = ("cells", "all")                 # the sets p_norm applies to
 # would run the identical arm twice.
 P_NORMS = ["joint", "cond"]
 
-CAMCAN = Path("/project/6008063/tamires/cohorts/camcan/dataman/useraccess/"
-              "opendata/paule_toussaint_camcan01870")
-DEFAULT_PHENO = [f"{CAMCAN / 'approved_data.tsv'}:\t",
-                 f"{CAMCAN / 'standard_data.csv'}:,"]
+# NO DEFAULT PHENOTYPE PATH, and no default cohort. There used to be both: two
+# absolute paths into one person's scratch space on one cluster, and
+# `--cohort camcan`. That is how `select` appeared to need neither -- it was
+# carrying a fact about one dataset in its source.
+#
+# The same reasoning that took `camcan` out of `decompose --project`: a stage
+# that spans cohorts must not name one. Both are required arguments now, so the
+# command says which data it ran on and the source says nothing about it.
 # Cam-CAN's HADS category labels, in order. A cohort that codes the same
 # severity differently -- low/mid/high, 0-3, absent/borderline/case -- passes
 # its own with --ordinal-levels; the ORDER is what is being declared, since the
@@ -678,7 +682,7 @@ def run(args) -> int:
     scores_df = _label_axes(scores_df)
 
     # The FOLDER is a flag, so the same code serves movie and rest without a
-    # second copy of it. `select --cohort camcan_rest --output-name
+    # second copy of it. `select-model --cohort camcan_rest --output-name
     # resting_bstm_selection` is the whole of the resting-state arm: the grid,
     # the covariates, the CV and the figures are identical, and only the cohort
     # whose transition tables are read differs.
@@ -1094,9 +1098,12 @@ def add_arguments(p) -> None:
                         "occupancy and dynamics are the controls: if either "
                         "predicts as well as cells, the signal is not in the "
                         "transition structure")
-    p.add_argument("--pheno", nargs="+", default=DEFAULT_PHENO,
-                   metavar="PATH:SEP",
-                   help="phenotype tables as path:separator, merged on --id-col")
+    p.add_argument("--pheno", nargs="+", required=True, metavar="PATH:SEP",
+                   help="phenotype table(s) as path:separator, merged on "
+                        "--id-col. Required: the path is a fact about your "
+                        "filesystem, not about this pipeline. Cam-CAN splits "
+                        "what is needed across two files, hence the list -- "
+                        "e.g. approved_data.tsv:$'\\t' standard_data.csv:,")
     p.add_argument("--id-col", default="CCID")
     p.add_argument("--ordinal-levels", nargs="+", default=list(ORDINAL_LEVELS),
                    metavar="LEVEL",
@@ -1108,9 +1115,11 @@ def add_arguments(p) -> None:
     p.add_argument("--covariates", nargs="+",
                    default=["Age", "Sex", "n_transitions"])
     p.add_argument("--categorical", nargs="+", default=["Sex"])
-    p.add_argument("--cohort", default="camcan",
-                   help="whose transition tables to rank. The resting-state "
-                        "run is this flag plus --output-name.")
+    p.add_argument("--cohort", required=True,
+                   help="whose transition tables to rank. Required: this stage "
+                        "spans cohorts, so it must not name one by default. "
+                        "The resting-state run is this flag plus "
+                        "--output-name.")
     p.add_argument("--output-name", default="bstm_selection",
                    metavar="FOLDER",
                    help="the folder under outputs/ to write into (default "

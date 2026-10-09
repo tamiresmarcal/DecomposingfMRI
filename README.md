@@ -30,7 +30,7 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
 3.5  censor.sbatch                  participants_qc.csv + window flags
                                      -> keep/drop, under a named policy.
                                      Last link of the per-cohort chain.
-4    dimensionality_reduction.sbatch             -> latents: PCA + UMAP coordinates, fit on
+4    decomposition.sbatch             -> latents: PCA + UMAP coordinates, fit on
                                      the train cohorts, projected onto the rest.
                                      PER COHORT: one whose file already carries
                                      this model_hash is left untouched, and the

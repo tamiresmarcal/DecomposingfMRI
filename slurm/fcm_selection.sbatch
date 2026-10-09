@@ -170,10 +170,10 @@ else
   RUN=(python3)
 fi
 
-# --cohorts goes in FIRST so a caller's own --cohorts after `--` overrides it:
-# argparse keeps the last value for a repeated option.
-"${RUN[@]}" -m fmri_decomposition.cli fcm-select \
-    --cohorts camcan camcan_rest \
+# NO INJECTED --cohorts and NO default phenotype path. Both are required and
+# both go after the `--`. A job script that names a cohort is a job script that
+# only works for one project.
+"${RUN[@]}" -m fmri_decomposition.cli select-fcm \
     --target "${TARGET}" \
     --n-jobs "${SLURM_CPUS_PER_TASK:-1}" \
     ${EXTRA[@]+"${EXTRA[@]}"}

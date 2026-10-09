@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 5b' -- how well does a STATIC connectivity matrix predict a phenotype?
 
-    fmri-decomp fcm-select --target additional_HADS_anx_category \\
+    fmri-decomp select-fcm --target additional_HADS_anx_category \\
         --cohorts camcan camcan_rest
 
 writes, per target,
@@ -300,12 +300,7 @@ def design_note(args, meta: pd.DataFrame, n_jobs: int) -> str:
 def run(args) -> int:
     from joblib import Parallel, delayed
 
-    from .bstm_selection import DEFAULT_PHENO
-
     root = Path(args.output_root) if args.output_root else _sfc._default_root()
-    if not args.pheno:
-        args.pheno = list(DEFAULT_PHENO)
-
     cells = discover(root, args.cohorts, args.atlas)
     log(f"phenotype for target={args.target!r}")
     pheno = read_phenotype(
@@ -454,9 +449,11 @@ def _figures(scores: pd.DataFrame, summary: pd.DataFrame, fig_dir: Path,
 def add_arguments(p) -> None:
     p.add_argument("--target", required=True,
                    help="phenotype column, e.g. additional_HADS_anx_category")
-    p.add_argument("--cohorts", nargs="+", default=["camcan"],
+    p.add_argument("--cohorts", nargs="+", required=True,
                    help="movie and rest go in ONE table, as a `cohort` column: "
-                        "--cohorts camcan camcan_rest")
+                        "--cohorts camcan camcan_rest. Required, for the same "
+                        "reason `select-model --cohort` is: a stage that spans "
+                        "cohorts must not name one by default.")
     p.add_argument("--arms", nargs="+", default=ARMS, choices=ARMS,
                    help="edges = every pairwise correlation (the hypothesis); "
                         "global = a subject's mean and SD over those edges, "
@@ -478,13 +475,14 @@ def add_arguments(p) -> None:
                         "several runs of a cohort")
     p.add_argument("--restrict-subjects", default=None, metavar="FILE",
                    help="one subject id per line, or a CSV with a `sub` "
-                        "column. Pass the SAME file here and to `select` to "
+                        "column. Pass the SAME file here and to `select-model` to "
                         "put all three trees on one sample, so a gap between "
                         "their tables cannot be a difference in who was "
                         "scored.")
-    p.add_argument("--pheno", nargs="+", default=None, metavar="PATH:SEP",
-                   help="phenotype tables as path:separator (default: the "
-                        "same ones `select` uses)")
+    p.add_argument("--pheno", nargs="+", required=True, metavar="PATH:SEP",
+                   help="phenotype table(s) as path:separator, merged on "
+                        "--id-col. Required: the path is a fact about your "
+                        "filesystem, not about this pipeline.")
     p.add_argument("--id-col", default="CCID")
     p.add_argument("--ordinal-levels", nargs="+", default=list(ORDINAL_LEVELS),
                    metavar="LEVEL",

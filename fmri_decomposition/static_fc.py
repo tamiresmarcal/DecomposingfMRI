@@ -54,7 +54,7 @@ WHAT IS STORED, AND WHAT IS NOT
 -------------------------------
 Raw r, not Fisher z, exactly as stage 3 stores it: arctanh is invertible and
 costs nothing at load time, so the file keeps the measurement and the model
-step chooses the transform. `fcm-select` applies Fisher z by default.
+step chooses the transform. `select-fcm` applies Fisher z by default.
 
 An edge is NaN when either parcel is empty under that subject's brain mask, or
 constant. NaN is kept, not filled: which subject lost which parcel is a
