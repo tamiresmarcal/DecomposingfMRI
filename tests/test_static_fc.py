@@ -202,7 +202,7 @@ class TestStorageModes:
         d = pd.DataFrame({"task": ["m"], "sub": ["S1"], "n_tr_used": [100],
                           "edges": [np.arange(len(names), dtype=np.float32)],
                           "edge_names": [json.dumps(names)]})
-        p = (tmp_path / "static_fc" / "atlas=big" / "cohort=c")
+        p = (tmp_path / "static_fc" / "atlas=big" / "cohort=c" / "task=m")
         p.mkdir(parents=True)
         d.to_parquet(p / "subjects.parquet", index=False)
         out = S.read_cohort_table(tmp_path, "big", "c")
@@ -216,7 +216,7 @@ class TestWrittenTable:
         d, stats = S.fc_for_cohort(cohort, "mini", "c", band=None)
         path = S.write_cohort(cohort, "mini", "c", d,
                               {"atlas": "mini", "cohort": "c", "pool": "task",
-                               "estimator": "pearson_over_good_frames"})
+                               "estimator": "pearson_over_good_frames"}, "m")
         back = pd.read_parquet(path)
         assert back["estimator"].iloc[0] == "pearson_over_good_frames"
         assert (back["pool"] == "task").all()
@@ -225,7 +225,7 @@ class TestWrittenTable:
 class TestProjection:
     def test_asking_for_keys_does_not_read_the_edges(self, cohort):
         d, _ = S.fc_for_cohort(cohort, "mini", "c", band=None)
-        S.write_cohort(cohort, "mini", "c", d, {"pool": "task"})
+        S.write_cohort(cohort, "mini", "c", d, {"pool": "task"}, "m")
         keys = S.read_cohort_table(cohort, "mini", "c",
                                    columns=["task", "sub", "n_tr_used"])
         assert keys.columns.to_list() == ["task", "sub", "n_tr_used"]
@@ -237,12 +237,12 @@ class TestProjection:
         columns the writing version carried, so a projection names what it
         wants and takes what is there."""
         d, _ = S.fc_for_cohort(cohort, "mini", "c", band=None)
-        S.write_cohort(cohort, "mini", "c", d, {"pool": "task"})
+        S.write_cohort(cohort, "mini", "c", d, {"pool": "task"}, "m")
         out = S.read_cohort_table(cohort, "mini", "c",
                                   columns=["sub", "not_a_column"])
         assert out.columns.to_list() == ["sub"]
 
     def test_without_a_projection_the_edges_still_come_back(self, cohort):
         d, _ = S.fc_for_cohort(cohort, "mini", "c", band=None)
-        S.write_cohort(cohort, "mini", "c", d, {"pool": "task"})
+        S.write_cohort(cohort, "mini", "c", d, {"pool": "task"}, "m")
         assert len(S.fc_columns(S.read_cohort_table(cohort, "mini", "c"))) == 15

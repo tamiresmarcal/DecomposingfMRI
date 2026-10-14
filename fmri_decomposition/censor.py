@@ -6,8 +6,8 @@
 
 writes
 
-    outputs/censor/policy=<name>/cohort=<c>/subjects.parquet
-    outputs/censor/policy=<name>/atlas=<a>/window_s=<w>/cohort=<c>/windows.parquet
+    outputs/censor/policy=<name>/cohort=<c>/task=<t>/subjects.parquet
+    outputs/censor/policy=<name>/atlas=<a>/window_s=<w>/cohort=<c>/task=<t>/windows.parquet
     outputs/meta/censor/policy=<name>.json
 
 WHY THIS IS ITS OWN STAGE
@@ -188,7 +188,14 @@ def run(args) -> int:
             continue
         qc = pd.read_csv(qc_path, dtype={"sub": str})
         gated = gate_subjects(qc, policy)
-        _write(gated, base / f"cohort={cohort}" / "subjects.parquet", policy, phash)
+        # ONE FILE PER TASK. The table is already one row per (sub, task), so
+        # this is a partition of it rather than a change to what it says -- and
+        # it means a cohort's two conditions can be re-gated independently, and
+        # that every tree in outputs/ keys on task= at the same depth.
+        for task, g in gated.groupby("task", sort=True):
+            _write(g.reset_index(drop=True),
+                   base / f"cohort={cohort}" / f"task={task}"
+                   / "subjects.parquet", policy, phash)
 
         kept, total = int(gated["keep"].sum()), len(gated)
         dropped = {k: int(v) for k, v in
@@ -238,8 +245,12 @@ def run(args) -> int:
         win.loc[by_sub.to_numpy(), "keep"] = False
 
         window_key = shard_root.parent.name.split("=", 1)[1]
-        _write(win, base / f"atlas={args.atlas}" / f"window_s={window_key}"
-                    / f"cohort={cohort}" / "windows.parquet", policy, phash)
+        for task, g in win.groupby("task", sort=True):
+            out = g.reset_index(drop=True)
+            out.attrs = win.attrs
+            _write(out, base / f"atlas={args.atlas}"
+                        / f"window_s={window_key}" / f"cohort={cohort}"
+                        / f"task={task}" / "windows.parquet", policy, phash)
         wk, wt = int(win["keep"].sum()), len(win)
         print(f"{'':<16} windows  {wk:,}/{wt:,} kept  "
               f"({100 * wk / wt:.1f}%)  {win.attrs['applied']}")

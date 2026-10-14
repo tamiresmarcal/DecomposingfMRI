@@ -24,12 +24,12 @@ def cell(root, cohort, atlas, subs, task="m", seed=0, nan_edges=0):
     for i, sub in enumerate(subs):
         write_activation(root, cohort, task, sub, seed=seed + i)
     d, _ = S.fc_for_cohort(root, "mini", cohort, band=None, min_tr=10,
-                           log=lambda *a: None)
+                           log=lambda *a: None, task=task)
     cols = S.fc_columns(d)
     for c in cols[:nan_edges]:
         d[c] = np.nan
     S.write_cohort(root, atlas, cohort, d,
-                   {"atlas": atlas, "cohort": cohort, "pool": "task"})
+                   {"atlas": atlas, "cohort": cohort, "pool": "task"}, task)
     return d
 
 

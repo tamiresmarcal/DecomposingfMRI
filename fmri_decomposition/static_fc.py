@@ -74,7 +74,7 @@ import numpy as np
 import pandas as pd
 
 from .dfc import pearson_upper
-from .io import edge_storage_mode, meta_dir
+from .io import edge_storage_mode, hive_key, meta_dir, static_fc_root
 
 POOL_CHOICES = ("task", "subject")
 
@@ -124,9 +124,24 @@ def frame_coverage(paths: list[Path]) -> dict[tuple[str, str], tuple[int, int]]:
     return out
 
 
+#: The `task=` key for a `--pool subject` table, whose rows span every task a
+#: subject has. The COLUMN keeps `(pooled)` -- the parentheses are there so a
+#: pooled row can never be mistaken for one that measured a single condition --
+#: while the path uses the bare word, because `task=(pooled)` needs quoting in
+#: every shell glob anyone writes against the tree.
+POOLED_TASK_KEY = "pooled"
+POOLED_TASK_LABEL = "(pooled)"
+
+
+def task_key(pool: str, task: str) -> str:
+    """The `task=` path key for a row's task label."""
+    return POOLED_TASK_KEY if pool != "task" else task
+
+
 def fc_for_cohort(root: Path, atlas: str, cohort: str, pool: str = "task",
                   censor: dict | None = None, band=None, zscore: bool = True,
-                  min_tr: int = 30, log=log) -> tuple[pd.DataFrame, dict]:
+                  min_tr: int = 30, log=log,
+                  task: str | None = None) -> tuple[pd.DataFrame, dict]:
     """One cohort -> (table, stats). Edges as columns, QC beside them.
 
     `band` is passed through to `frames.read_cohort` untouched, including None,
@@ -135,16 +150,22 @@ def fc_for_cohort(root: Path, atlas: str, cohort: str, pool: str = "task",
     """
     from . import frames
 
-    paths = frames.shard_paths(root, atlas, cohort)
+    paths = frames.shard_paths(root, atlas, cohort, task)
     if not paths:
         raise SystemExit(
-            f"no activation shards for cohort={cohort} at atlas={atlas}.\n"
+            f"no activation shards for cohort={cohort}"
+            + (f" task={task}" if task else "")
+            + f" at atlas={atlas}.\n"
             f"  `static-fc` reads stage 2, so run `fmri-decomp extract "
             f"config/<cohort>.yaml` first.")
     features = frames.feature_columns(paths[0])
+    # `task=None` is only reachable under --pool subject, and frames.cohort_tr
+    # REFUSES it when the cohort holds two TRs -- which is right: a correlation
+    # that concatenated a 2.47s movie run with a 1.97s rest run is not a
+    # measurement of anything.
     ident, X, tr = frames.read_cohort(root, atlas, cohort, features,
                                       censor=censor, band=band, zscore=zscore,
-                                      log=log)
+                                      log=log, task=task)
 
     # The group key IS the pooling policy. `(task, sub)` matches stage 5a's
     # granularity so the two arms line up row for row; `sub` is the pooled
@@ -158,7 +179,7 @@ def fc_for_cohort(root: Path, atlas: str, cohort: str, pool: str = "task",
     for key, g in ident.groupby(keys, sort=True):
         key = key if isinstance(key, tuple) else (key,)
         sub = key[-1]
-        task = key[0] if pool == "task" else "(pooled)"
+        task = key[0] if pool == "task" else POOLED_TASK_LABEL
         sel = g.index.to_numpy()
         if len(sel) < min_tr:
             stats["skipped_thin"].append((task, sub, len(sel)))
@@ -212,8 +233,8 @@ def fc_for_cohort(root: Path, atlas: str, cohort: str, pool: str = "task",
 
 
 def write_cohort(root: Path, atlas: str, cohort: str, table: pd.DataFrame,
-                 prov: dict) -> Path:
-    out_dir = root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
+                 prov: dict, task: str) -> Path:
+    out_dir = static_fc_root(root, atlas, cohort, task)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "subjects.parquet"
     for k, v in prov.items():
@@ -225,7 +246,8 @@ def write_cohort(root: Path, atlas: str, cohort: str, table: pd.DataFrame,
 
 
 def read_cohort_table(root: Path, atlas: str, cohort: str,
-                      columns: list[str] | None = None) -> pd.DataFrame:
+                      columns: list[str] | None = None,
+                      task: str | None = None) -> pd.DataFrame:
     """One stored table, with `edges` unpacked back into named columns.
 
     The two storage modes are an on-disk detail; a reader asking for edges
@@ -236,11 +258,29 @@ def read_cohort_table(root: Path, atlas: str, cohort: str,
     columns. Parquet is columnar, so this physically reads fewer bytes. The
     edges are unpacked only when they were asked for.
     """
-    path = (root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
-            / "subjects.parquet")
+    if task is None:
+        # Every task of this cohort, concatenated -- which is what the
+        # selection stage wants, since it filters rows with --keep-tasks.
+        found = sorted(static_fc_root(root, atlas, cohort)
+                       .glob("task=*/subjects.parquet"))
+        if not found:
+            raise SystemExit(
+                f"no static FC for atlas={atlas} cohort={cohort}.\n"
+                f"  expected {static_fc_root(root, atlas, cohort)}"
+                f"/task=*/subjects.parquet\n"
+                f"  run: fmri-decomp static-fc --atlas {atlas} "
+                f"--cohorts {cohort}")
+        if len(found) > 1:
+            return pd.concat(
+                [read_cohort_table(root, atlas, cohort, columns,
+                                   hive_key(f, "task")) for f in found],
+                ignore_index=True)
+        path = found[0]
+    else:
+        path = static_fc_root(root, atlas, cohort, task) / "subjects.parquet"
     if not path.exists():
         raise SystemExit(
-            f"no static FC for atlas={atlas} cohort={cohort}.\n"
+            f"no static FC for atlas={atlas} cohort={cohort} task={task}.\n"
             f"  expected {path}\n"
             f"  run: fmri-decomp static-fc --atlas {atlas} --cohorts {cohort}")
     if columns is not None:
@@ -273,52 +313,82 @@ def run(args) -> int:
     written = []
     for atlas in args.atlas:
         for cohort in args.cohorts:
-            log(f"atlas={atlas} cohort={cohort} pool={args.pool}")
             censor = None
             if args.censor_policy:
                 from .decompose import load_censor
                 censor = load_censor(root, args.censor_policy, atlas, -1,
                                      cohort)
-            table, stats = fc_for_cohort(
-                root, atlas, cohort, pool=args.pool, censor=censor, band=band,
-                zscore=args.zscore_runs, min_tr=args.min_tr, log=log)
-            prov = {"atlas": atlas, "cohort": cohort, "pool": args.pool,
-                    "estimator": "pearson_over_good_frames",
-                    "frame_source": "frames.read_cohort",
-                    "match_bandpass": json.dumps(list(band) if band else None),
-                    "zscore_runs": bool(args.zscore_runs),
-                    "censor_policy": args.censor_policy or "",
-                    "min_tr": int(args.min_tr),
-                    "tr": stats["tr"], "n_nodes": stats["n_nodes"],
-                    "n_edges": stats["n_edges"]}
-            # The name list is carried ONLY when the edges are packed into one
-            # list column, because that is the only case where the names are
-            # not already the column names. Writing it in the wide case would
-            # repeat a 6,105-name JSON string on every row to say what the
-            # schema already says.
-            if stats["edge_storage"] == "list":
-                prov["edge_names"] = json.dumps(stats["edge_names"])
-            path = write_cohort(root, atlas, cohort, table, prov)
-            log(f"  {stats['n_subjects']} subject(s), {stats['n_edges']} edge(s)"
-                f" [{stats['edge_storage']}], frames used "
-                f"median {stats['median_tr_used']:.0f} / min "
-                f"{stats['min_tr_used']}, "
-                f"{stats['frac_edges_nan'] * 100:.3f}% of edges NaN")
-            if stats["skipped_thin"]:
-                log(f"  WARNING: {len(stats['skipped_thin'])} subject-task(s) "
-                    f"below --min-tr {args.min_tr}, not written: "
-                    f"{stats['skipped_thin'][:4]}")
-            if stats["all_nan"]:
-                log(f"  WARNING: {len(stats['all_nan'])} subject-task(s) had no "
-                    f"computable edge at all: {stats['all_nan'][:4]}")
-            written.append({"atlas": atlas, "cohort": cohort,
-                            "path": str(path.relative_to(root)),
-                            **{k: v for k, v in stats.items()
-                               if k not in ("skipped_thin", "all_nan",
-                                            "edge_names")},
-                            "n_skipped_thin": len(stats["skipped_thin"]),
-                            "n_all_nan": len(stats["all_nan"])})
+            # ONE FILE PER TASK under --pool task, which is both what the path
+            # now says and what the TR requires: a cohort holding two TRs is
+            # read one condition at a time (see frames.cohort_tr). --pool
+            # subject is deliberately ONE read of the whole cohort, because
+            # that is what pooling means -- and the same guard refuses it when
+            # the TRs differ, since concatenating a 2.47s run with a 1.97s one
+            # is not a measurement.
+            from . import frames
+            tasks = (frames.shard_tasks(root, atlas, cohort)
+                     if args.pool == "task" else [None])
+            if not tasks:
+                raise SystemExit(
+                    f"no activation shards for cohort={cohort} at "
+                    f"atlas={atlas} -- `static-fc` reads stage 2, so run "
+                    f"`fmri-decomp extract config/<cohort>.yaml` first.")
+            for task in tasks:
+                log(f"atlas={atlas} cohort={cohort}"
+                    + (f" task={task}" if task else "")
+                    + f" pool={args.pool}")
+                written.append(_one(root, atlas, cohort, task, args, band,
+                                    censor, log=log))
+    return _finish(root, args, written)
 
+
+def _one(root: Path, atlas: str, cohort: str, task, args, band, censor,
+         log=log) -> dict:
+    """One (atlas, cohort, task) -> one stored table, and its manifest row."""
+    table, stats = fc_for_cohort(
+        root, atlas, cohort, pool=args.pool, censor=censor, band=band,
+        zscore=args.zscore_runs, min_tr=args.min_tr, log=log, task=task)
+    prov = {"atlas": atlas, "cohort": cohort,
+            "task_key": task_key(args.pool, task or ""),
+            "pool": args.pool,
+            "estimator": "pearson_over_good_frames",
+            "frame_source": "frames.read_cohort",
+            "match_bandpass": json.dumps(list(band) if band else None),
+            "zscore_runs": bool(args.zscore_runs),
+            "censor_policy": args.censor_policy or "",
+            "min_tr": int(args.min_tr),
+            "tr": stats["tr"], "n_nodes": stats["n_nodes"],
+            "n_edges": stats["n_edges"]}
+    # The name list is carried ONLY when the edges are packed into one list
+    # column, because that is the only case where the names are not already the
+    # column names. Writing it in the wide case would repeat a 6,105-name JSON
+    # string on every row to say what the schema already says.
+    if stats["edge_storage"] == "list":
+        prov["edge_names"] = json.dumps(stats["edge_names"])
+    path = write_cohort(root, atlas, cohort, table, prov,
+                        task_key(args.pool, task or ""))
+    log(f"  {stats['n_subjects']} subject(s), {stats['n_edges']} edge(s)"
+        f" [{stats['edge_storage']}], frames used "
+        f"median {stats['median_tr_used']:.0f} / min {stats['min_tr_used']}, "
+        f"{stats['frac_edges_nan'] * 100:.3f}% of edges NaN")
+    if stats["skipped_thin"]:
+        log(f"  WARNING: {len(stats['skipped_thin'])} subject-task(s) "
+            f"below --min-tr {args.min_tr}, not written: "
+            f"{stats['skipped_thin'][:4]}")
+    if stats["all_nan"]:
+        log(f"  WARNING: {len(stats['all_nan'])} subject-task(s) had no "
+            f"computable edge at all: {stats['all_nan'][:4]}")
+    return {"atlas": atlas, "cohort": cohort,
+            "task": task_key(args.pool, task or ""),
+            "path": str(path.relative_to(root)),
+            **{k: v for k, v in stats.items()
+               if k not in ("skipped_thin", "all_nan", "edge_names")},
+            "n_skipped_thin": len(stats["skipped_thin"]),
+            "n_all_nan": len(stats["all_nan"])}
+
+
+def _finish(root: Path, args, written: list[dict]) -> int:
+    band = tuple(args.match_bandpass) if args.match_bandpass else None
     mf = meta_dir(root) / "static_fc.json"
     mf.parent.mkdir(parents=True, exist_ok=True)
     mf.write_text(json.dumps(
@@ -331,7 +401,6 @@ def run(args) -> int:
         indent=2, default=str))
     log(f"-> {mf.relative_to(root)}")
     return 0
-
 
 def _default_root() -> Path:
     """Delegates to io.default_output_root -- see it for why this is not

@@ -198,22 +198,32 @@ def load_censor(root: Path, policy: str | None, atlas: str, window_s, cohort: st
         return None
 
     base = root / "censor" / f"policy={policy}"
-    subj_path = base / f"cohort={cohort}" / "subjects.parquet"
-    if not subj_path.exists():
+    # EVERY task of the cohort, unioned. The decision is per (sub, task) and
+    # the set below is keyed by that pair, so reading the parts and unioning
+    # them is the same answer as one file was -- and a cohort whose conditions
+    # were gated in separate runs is handled without either overwriting the
+    # other.
+    subj_paths = sorted((base / f"cohort={cohort}")
+                        .glob("task=*/subjects.parquet"))
+    if not subj_paths:
         raise SystemExit(
-            f"--censor-policy {policy!r} but {subj_path} does not exist.\n"
+            f"--censor-policy {policy!r} but no "
+            f"{base / f'cohort={cohort}'}/task=*/subjects.parquet exists.\n"
             f"Run:  fmri-decomp censor --policy config/censor/{policy}.yaml "
             f"--cohorts {cohort}")
 
-    subj = pd.read_parquet(subj_path, columns=["sub", "task", "keep"])
+    subj = pd.concat([pd.read_parquet(p, columns=["sub", "task", "keep"])
+                      for p in subj_paths], ignore_index=True)
     keep_subs = set(zip(subj.loc[subj["keep"], "task"].astype(str),
                         subj.loc[subj["keep"], "sub"].astype(str)))
 
-    win_path = (base / f"atlas={atlas}" / f"window_s={window_s}"
-                / f"cohort={cohort}" / "windows.parquet")
+    win_paths = sorted((base / f"atlas={atlas}" / f"window_s={window_s}"
+                        / f"cohort={cohort}").glob("task=*/windows.parquet"))
     keep_windows = None
-    if win_path.exists():
-        win = pd.read_parquet(win_path, columns=["sub", "task", "window_id", "keep"])
+    if win_paths:
+        win = pd.concat(
+            [pd.read_parquet(p, columns=["sub", "task", "window_id", "keep"])
+             for p in win_paths], ignore_index=True)
         win = win.loc[win["keep"]]
         keep_windows = set(zip(win["task"].astype(str), win["sub"].astype(str),
                                win["window_id"].astype("int64")))

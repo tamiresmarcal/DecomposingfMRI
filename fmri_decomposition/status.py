@@ -122,7 +122,8 @@ def static_fc(root: Path) -> pd.DataFrame:
     that stage will refuse until it is given --keep-tasks.
     """
     rows = []
-    for sp in sorted((root / "static_fc").glob("atlas=*/cohort=*/subjects.parquet")):
+    for sp in sorted((root / "static_fc")
+                     .glob("atlas=*/cohort=*/task=*/subjects.parquet")):
         n = subs = -1
         tasks = ""
         try:
@@ -130,12 +131,13 @@ def static_fc(root: Path) -> pd.DataFrame:
 
             f = pq.ParquetFile(sp)
             n = f.metadata.num_rows
-            want = [c for c in ("sub", "task") if c in f.schema_arrow.names]
-            if want:
-                t = f.read(columns=want).to_pandas()
-                subs = int(t["sub"].nunique()) if "sub" in t else -1
-                tasks = ",".join(sorted(t["task"].astype(str).unique())) \
-                    if "task" in t else ""
+            if "sub" in f.schema_arrow.names:
+                t = f.read(columns=["sub"]).to_pandas()
+                subs = int(t["sub"].nunique())
+                # One file is one task now, so rows > subs here means a SUBJECT
+                # appears twice within one condition -- several ses/run of it --
+                # which is still the state that makes select-fcm refuse.
+                tasks = _key(sp, "task") or ""
             # Edge columns are the payload; counting them says which atlas this
             # really is without trusting the path.
             edges = sum(1 for c in f.schema_arrow.names if "__" in c)
@@ -143,7 +145,7 @@ def static_fc(root: Path) -> pd.DataFrame:
             edges = -1
             print(f"  (could not read {sp}: {type(exc).__name__})")
         rows.append({"atlas": _key(sp, "atlas"), "cohort": _key(sp, "cohort"),
-                     "rows": n, "subs": subs, "tasks": tasks or "-",
+                     "task": _key(sp, "task"), "rows": n, "subs": subs,
                      "edges": edges})
     return pd.DataFrame(rows)
 
@@ -155,9 +157,9 @@ def censor(root: Path) -> pd.DataFrame:
         # given --stage dfc for. Subjects-only is the normal first-pass state, so
         # this reports which it is rather than treating absence as a fault.
         gates = sorted({f"{_key(q, 'atlas')}/{_key(q, 'window_s')}s"
-                        for q in d.glob(
-                            "atlas=*/window_s=*/cohort=*/windows.parquet")})
-        for sp in sorted(d.glob("cohort=*/subjects.parquet")):
+                        for q in d.glob("atlas=*/window_s=*/cohort=*/task=*/"
+                                        "windows.parquet")})
+        for sp in sorted(d.glob("cohort=*/task=*/subjects.parquet")):
             try:
                 t = pd.read_parquet(sp, columns=["keep"])
                 kept, total = int(t["keep"].sum()), len(t)
@@ -166,6 +168,7 @@ def censor(root: Path) -> pd.DataFrame:
                 print(f"  (could not read {sp}: {type(exc).__name__})")
             rows.append({"policy": _key(d, "policy"),
                          "cohort": _key(sp, "cohort"),
+                         "task": _key(sp, "task"),
                          "subjects_kept": kept, "of": total,
                          "window_gate": ",".join(gates) or "subjects only"})
     return pd.DataFrame(rows)
@@ -173,12 +176,14 @@ def censor(root: Path) -> pd.DataFrame:
 
 def latents(root: Path) -> pd.DataFrame:
     rows = []
-    for p in sorted((root / "latents").glob("atlas=*/window_s=*/cohort=*/data.parquet")):
+    for p in sorted((root / "latents")
+                    .glob("atlas=*/window_s=*/cohort=*/task=*/data.parquet")):
         n, cols = _footer(p)
         states = sorted(c for c in cols if STATE_RE.match(c))
         rows.append({
             "atlas": _key(p, "atlas"), "window_s": _key(p, "window_s"),
-            "cohort": _key(p, "cohort"), "rows": n,
+            "cohort": _key(p, "cohort"), "task": _key(p, "task"),
+            "rows": n, "stride_s": _meta(p, "stride_s"),
             "emb": ",".join(_embeddings_present(cols)) or "-",
             "censor": str(_meta(p, "censor_policy")),
             "source": str(_meta(p, "source") or "dfc"),
@@ -210,7 +215,7 @@ def transitions(root: Path, deep: bool = True) -> pd.DataFrame:
                 subs = None
         rows.append({"atlas": _key(p, "atlas"), "window_s": _key(p, "window_s"),
                      "states": _key(p, "states"), "cohort": _key(p, "cohort"),
-                     "rows": n, "subs": subs,
+                     "task": _key(p, "task"), "rows": n, "subs": subs,
                      "cells": sum(1 for c in cols if "->" in c)})
     return pd.DataFrame(rows)
 
@@ -417,8 +422,8 @@ def run(args) -> int:
           if not dfcs.empty else dfcs)
     _show("2.5 CENSOR      subjects kept per policy", cen)
     _show("3  LATENTS      embeddings per aperture", lat,
-          ["atlas", "window_s", "cohort", "rows", "emb", "source", "censor",
-           "role", "model_hash", "n_states"])
+          ["atlas", "window_s", "cohort", "task", "rows", "stride_s", "emb",
+           "source", "censor", "role", "model_hash", "n_states"])
     # After 3 so the numbering reads in order, though it is a BRANCH off
     # stage 2 rather than a step after stage 3: static-fc reads the same
     # frames the window_s=-1 state arm does, and needs neither latents nor
