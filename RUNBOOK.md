@@ -672,19 +672,23 @@ existing one alone. **`--overwrite` is no longer needed to project rest**, the
 movie's state columns survive, and the re-cluster that would have cost is not
 spent.
 
-Dry-run by default. It **refuses** if any destination exists: two cohorts
-merging is only safe when their `task=` directories are disjoint, and a
-collision means two files claim one `(cohort, task, sub)` leaf, where whichever
-moved last would silently win.
+Both halves dry-run by default and both **refuse** if a destination data file
+exists: a collision means two files claim one leaf, and whichever moved last
+would silently win. One exception, in the rename half only — the per-array-task
+`shards/manifest_<stage>_shard-NNNN-of-NNNN.json` files are named by array
+index, so two runs of the same stage always write the same names. That is a
+name clash and not a data collision, so those are **renamed** on arrival
+(`-from-<src>` before the `.json`) rather than refused.
 
-What it moves: `activation/`, `dfc/`, and the per-array-task
-`meta/cohorts/cohort=*/shards/` manifests. What it deliberately does **not**
-move, and why: the derived per-cohort tables — `manifest_*.json`,
+Back to the rename half, what it moves: `activation/`, `dfc/`, and the
+per-array-task `meta/cohorts/cohort=*/shards/` manifests. What it deliberately
+does **not** move, and why: the derived per-cohort tables — `manifest_*.json`,
 `participants_qc.csv`, `coverage.parquet`, `isc_alignment.csv` — and everything
-under `censor/` are keyed by cohort and hold one row per `(sub, task)`. Each
-cohort has a *complete* copy covering its own tasks, so moving one over the
-other would overwrite one task's table with the other's. They are cheap, and
-`finalize` rewrites them from scratch:
+under `censor/` hold one row per `(sub, task)` for a whole cohort. Each cohort
+has a *complete* copy covering its own tasks, so moving one over the other
+would overwrite one task's table with the other's. They are cheap, and
+`finalize` and `censor` rewrite them from scratch — which is also why the split
+half has nothing to carry over for them:
 
 ```bash
 F=$(sbatch --parsable slurm/finalize.sbatch config/camcan.yaml activation)
