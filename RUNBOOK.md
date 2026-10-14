@@ -758,13 +758,19 @@ camcan` covers both in one pass — the cohort list does not change at all:
 
 ```bash
 source slurm/env.sh
+R=<the censor job id>           # the tail of the rebuild, or drop the
+                                # --dependency=afterok:$R below if the
+                                # derived tables are already current
 ATLASES="harvardoxford yeo7 networks"
 TRAIN="--train ds002837 cneuromod"
 PROJ="--project camcan"
 POL="--censor-policy motion"
+TARGETS="additional_HADS_anx_category additional_HADS_dep_category"
 
+# ---- state arm: latents -> clusterers -> transitions ----------------------
 D=$(for A in $ATLASES; do
-      sbatch --parsable --array=0-0 slurm/decomposition.sbatch $A -1 \
+      sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
+        --array=0-0 slurm/decomposition.sbatch $A -1 \
         -- --source activation $TRAIN $PROJ $POL | cut -d';' -f1
     done | paste -sd:)
 
@@ -777,16 +783,50 @@ C=$(for A in $ATLASES; do
 T=$(sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$C \
       slurm/brain_states_transitions.sbatch -- --window-s -1 | cut -d';' -f1)
 
-for Y in additional_HADS_anx_category additional_HADS_dep_category; do
-  sbatch --kill-on-invalid-dep=yes --dependency=afterok:$T \
-    slurm/model_selection.sbatch $Y -- \
-      --cohort camcan --task movie --keep-tasks Movie --pheno "${PHENO[@]}"
-  sbatch --kill-on-invalid-dep=yes --dependency=afterok:$T \
-    slurm/model_selection.sbatch $Y -- \
-      --cohort camcan --task rest  --keep-tasks Rest  --pheno "${PHENO[@]}"
+# ---- FC arm: parallel to it, off the same rebuild, SAME GATE -------------
+S=$(sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
+      slurm/static_fc.sbatch camcan \
+      -- --atlas $ATLASES $POL | cut -d';' -f1)
+
+# ---- the four rankings, two per arm --------------------------------------
+for Y in $TARGETS; do
+  for ARM in "movie Movie" "rest Rest"; do
+    set -- $ARM
+    sbatch --kill-on-invalid-dep=yes --dependency=afterok:$T \
+      --time=12:00:00 --mem=32G slurm/model_selection.sbatch $Y -- \
+        --cohort camcan --task $1 --keep-tasks $2 --pheno "${PHENO[@]}"
+    sbatch --kill-on-invalid-dep=yes --dependency=afterok:$S \
+      slurm/fcm_selection.sbatch $Y -- \
+        --cohorts camcan --task $1 --keep-tasks $2 \
+        --atlas $ATLASES --pheno "${PHENO[@]}"
+  done
 done
 
 squeue -u $USER -o "%.12i %.32j %.9T %.11M %R"
+```
+
+The two arms are independent after the rebuild and run side by side: the FC
+branch is one 3 h job and does not wait for the 24 h clustering. Only the
+rankings wait, each on its own arm.
+
+**`$POL` goes to `static-fc` as well, and that is not optional.** The property
+that makes the comparison fair is that these edges come from the same frames
+the `window_s = -1` state arm is fitted on -- same band-pass, same per-run
+z-score, same `good_frame` gate, **same censor table** (static_fc.py: "THE ONE
+PROPERTY THAT MAKES THE COMPARISON FAIR"). Leave `--censor-policy` off and the
+FC arm silently keeps subjects the state arm dropped, so a difference between
+`fc:edges` and `bstm:cells` is partly a difference in sample rather than a
+difference between the models -- which is the one thing this design exists to
+rule out. The written table carries a `censor_policy` column, so check it
+rather than trusting the command line:
+
+```bash
+$RUN python3 -c "
+from fmri_decomposition.static_fc import read_cohort_table
+from fmri_decomposition.io import default_output_root
+d = read_cohort_table(default_output_root(), 'harvardoxford', 'camcan',
+                      columns=['task', 'sub', 'censor_policy'])
+print(d.groupby(['task', 'censor_policy']).size())"
 ```
 
 **There is deliberately no `--overwrite` on the decompose line. Do not add
