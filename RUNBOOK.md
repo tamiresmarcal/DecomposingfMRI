@@ -250,12 +250,12 @@ done
 #   --pca-latents is the atlas's own width, which makes that PCA a lossless
 #   rotation. --umap-latents keeps UMAP at 3, where it belongs.
 sbatch --array=0-0 slurm/decomposition.sbatch harvardoxford -1 \
-  -- --source activation $TRAIN $POL
+  -- --source activation $TRAIN $PROJ $POL
 sbatch --array=0-0 slurm/decomposition.sbatch yeo7 -1 \
-  -- --source activation $TRAIN $POL \
+  -- --source activation $TRAIN $PROJ $POL \
      --pca-latents 3 7 --umap-latents 3 --passthrough-features
 sbatch --array=0-0 slurm/decomposition.sbatch networks -1 \
-  -- --source activation $TRAIN $POL \
+  -- --source activation $TRAIN $PROJ $POL \
      --pca-latents 3 14 --umap-latents 3 --passthrough-features
 ```
 
@@ -768,11 +768,24 @@ POL="--censor-policy motion"
 TARGETS="additional_HADS_anx_category additional_HADS_dep_category"
 
 # ---- state arm: latents -> clusterers -> transitions ----------------------
-D=$(for A in $ATLASES; do
-      sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
-        --array=0-0 slurm/decomposition.sbatch $A -1 \
-        -- --source activation $TRAIN $PROJ $POL | cut -d';' -f1
-    done | paste -sd:)
+# The -1 fit is PER ATLAS: yeo7 and networks carry --passthrough-features
+# and their own --pca-latents (the atlas's own width, which makes that PCA a
+# lossless rotation). One flag set over all three asks for a DIFFERENT model
+# on two of them, every existing cell reads as stale, and decompose refuses.
+# Keep these three lines separate -- a loop here is how that happens.
+D=$(
+  { sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
+      --array=0-0 slurm/decomposition.sbatch harvardoxford -1 \
+      -- --source activation $TRAIN $PROJ $POL
+    sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
+      --array=0-0 slurm/decomposition.sbatch yeo7 -1 \
+      -- --source activation $TRAIN $PROJ $POL \
+         --pca-latents 3 7 --umap-latents 3 --passthrough-features
+    sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
+      --array=0-0 slurm/decomposition.sbatch networks -1 \
+      -- --source activation $TRAIN $PROJ $POL \
+         --pca-latents 3 14 --umap-latents 3 --passthrough-features
+  } | cut -d';' -f1 | paste -sd:)
 
 C=$(for A in $ATLASES; do
       sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$D \
