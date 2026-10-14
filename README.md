@@ -109,15 +109,23 @@ outputs/
 │       └── window_s=120/cohort=cneuromod/task=s01e01a/sub=01/data.parquet
 │
 ├── censor/                                       STAGE 3.5 — the keep/drop decision
-│   └── policy=motion/cohort=camcan/subjects.parquet
+│   └── policy=motion/cohort=camcan/task=Movie/subjects.parquet
+│       `task=` because a subject can pass the motion threshold watching the
+│       movie and fail it lying still, and one `keep` per subject per cohort
+│       would have to pick one of those answers for both.
 │
 ├── latents/                                      STAGE 4 — coordinates, + STAGE 4b labels
-│   └── atlas=yeo7/window_s=30/cohort=camcan/data.parquet
+│   └── atlas=yeo7/window_s=30/cohort=camcan/task=Movie/data.parquet
 │       window_s=-1 is the per-TR aperture. The state-label columns stage 4b
 │       adds live INSIDE these files, with per-column provenance in the schema.
+│       One file per (cohort, task), not per cohort, because each file carries
+│       ONE `stride_s` -- the TR its rows were sampled at -- and stage 5a reads
+│       that for every dwell-second. Cam-CAN's movie and rest are 2.47s and
+│       1.97s, so a merged file would have to lie about one of them.
 │
 ├── transitions/                                  STAGE 5a — one table per state set
-│   └── atlas=yeo7/window_s=30/states=HMM1_pca3_8/cohort=camcan/subjects.parquet
+│   └── atlas=yeo7/window_s=30/states=HMM1_pca3_8/cohort=camcan/task=Movie/
+│       subjects.parquet
 │
 ├── meta/
 │   ├── models/        STAGE 4 — the fitted scaler/PCA/UMAP per (atlas, aperture),
@@ -137,7 +145,9 @@ outputs/
 │                      between runs.
 │
 ├── static_fc/                                    STAGE 3b — one FC per subject
-│   └── atlas=harvardoxford/cohort=camcan/subjects.parquet
+│   └── atlas=harvardoxford/cohort=camcan/task=Movie/subjects.parquet
+│       `task=pooled` instead under `--pool cohort`, which averages a
+│       subject's conditions into one FC: the key always says which it is.
 │       Edge columns named <parcel_i>__<parcel_j>, stage 3's convention, plus
 │       n_tr_used / frac_good_frames: the reliability of the row AND the
 │       data-quantity covariate stage 5c controls on.
@@ -441,8 +451,8 @@ and consumers select by `--censor-policy <name>`, so re-gating never re-extracts
 anything. It writes:
 
 ```
-outputs/censor/policy=<name>/cohort=<c>/subjects.parquet
-outputs/censor/policy=<name>/atlas=<a>/window_s=<w>/cohort=<c>/windows.parquet
+outputs/censor/policy=<name>/cohort=<c>/task=<k>/subjects.parquet
+outputs/censor/policy=<name>/atlas=<a>/window_s=<w>/cohort=<c>/task=<k>/windows.parquet
 outputs/meta/censor/policy=<name>.json          # counts + what was skipped
 ```
 

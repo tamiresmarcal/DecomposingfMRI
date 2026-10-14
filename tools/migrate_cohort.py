@@ -1,11 +1,32 @@
 #!/usr/bin/env python3
-"""Move one cohort's output under another cohort's key.
+"""Move one cohort's output under another cohort's key, and split it by task.
 
-    # look first -- this is the default
+    # 1. merge two cohorts into one (look first -- that is the default)
     python tools/migrate_cohort.py --from camcan_rest --to camcan
-
-    # then do it
     python tools/migrate_cohort.py --from camcan_rest --to camcan --apply
+
+    # 2. add the task= level to the trees that did not have it
+    python tools/migrate_cohort.py --split-tasks
+    python tools/migrate_cohort.py --split-tasks --apply
+
+TWO HALVES OF ONE MIGRATION, which is why they live together. The first moves
+`cohort=camcan_rest` under `cohort=camcan`, because they are the same people.
+The second gives `latents/`, `transitions/`, `static_fc/` and `censor/` the
+`task=` key that `activation/` and `dfc/` always had -- without which a single
+cohort holding two conditions is not merely untidy but WRONG: a latents file
+records one `stride_s`, which is the TR of its rows, and `transitions` reads it
+for every dwell time in seconds. Run the move first, then the split.
+
+WHY THE SPLIT IS A REWRITE AND NOT A MOVE
+-----------------------------------------
+For `activation/` and `dfc/`, `task=` was always a directory, so moving one is
+a rename. In these four trees it was a COLUMN, so the split reads each file,
+partitions its rows by that column, and writes one file per task. The schema
+metadata copies verbatim to every part, because all of it describes the FIT and
+not the rows: `model_hash`, `censor_policy`, `stride_s`, and the per-column
+`clusterers` block carrying each state set's `fit_hash`, `params` and
+`train_cohorts`. Dropping that would leave the HMM2 label columns in place
+while stripping their provenance, which is worse than losing them.
 
 WHY A MOVE IS ENOUGH, AND WHERE IT IS NOT
 -----------------------------------------
@@ -111,12 +132,131 @@ def plan(root: Path, src: str, dst: str):
     return moves, collisions
 
 
+# --------------------------------------------------- split by task ---------
+#: The leaf file name in each tree that keys on cohort=.
+LEAVES = ("data.parquet", "subjects.parquet", "windows.parquet")
+
+
+def unsplit_leaves(root: Path) -> list[Path]:
+    """Every leaf still written at the pre-`task=` depth.
+
+    The rule is uniform across all five shapes -- latents, transitions,
+    static_fc, and censor's subject AND window tables -- because they all end
+    in `cohort=<c>/<leaf>`: a leaf whose immediate parent is a `cohort=` key
+    has not been split, and one whose parent is a `task=` key has. No per-tree
+    pattern list to keep in step with io.py.
+    """
+    out = []
+    for tree in ("latents", "transitions", "static_fc", "censor"):
+        base = root / tree
+        if not base.is_dir():
+            continue
+        for leaf in LEAVES:
+            out += [p for p in base.rglob(leaf)
+                    if p.parent.name.startswith("cohort=")]
+    return sorted(out)
+
+
+def split_plan(root: Path) -> tuple[list[tuple[Path, dict]], list[str]]:
+    """[(file, {task: destination})], plus warnings worth reading first."""
+    import pyarrow.parquet as pq
+
+    plan, warn = [], []
+    for f in unsplit_leaves(root):
+        try:
+            tasks = sorted({str(t) for t in pq.ParquetFile(f)
+                            .read(columns=["task"]).column("task").to_pylist()})
+        except Exception as exc:                                 # noqa: BLE001
+            warn.append(f"  SKIPPED {f.relative_to(root)}: no readable `task` "
+                        f"column ({type(exc).__name__})")
+            continue
+        if not tasks:
+            warn.append(f"  SKIPPED {f.relative_to(root)}: empty")
+            continue
+        dest = {t: f.parent / f"task={t}" / f.name for t in tasks}
+        clash = [str(d.relative_to(root)) for d in dest.values() if d.exists()]
+        if clash:
+            warn.append(f"  SKIPPED {f.relative_to(root)}: already split "
+                        f"({clash[0]} exists)")
+            continue
+        # A latents file carries ONE stride_s, and every part inherits it. That
+        # is right exactly when the file held one TR -- which it did if it holds
+        # one task, or if the cohort has a single TR across them. It is the
+        # reason the task level exists, so a file about to be split into
+        # SEVERAL tasks gets said out loud rather than assumed.
+        if len(tasks) > 1 and f.name == "data.parquet":
+            warn.append(
+                f"  NOTE {f.relative_to(root)} holds {len(tasks)} tasks "
+                f"{tasks}; each part inherits the one stride_s this file "
+                f"records, which is correct only if those tasks share a TR. "
+                f"If they do not, re-run `decompose` for this cell instead of "
+                f"trusting the split.")
+        plan.append((f, dest))
+    return plan, warn
+
+
+def split_file(f: Path, dest: dict) -> None:
+    """One file -> one per task, carrying the schema metadata verbatim.
+
+    The metadata is what makes a latents file self-identifying: `model_hash`,
+    `censor_policy`, `stride_s`, and the per-column `clusterers` block holding
+    each state set's `fit_hash`, `params` and `train_cohorts`. All of it
+    describes the FIT, not the rows, so it copies unchanged to every part --
+    and dropping it would strip the HMM2 labels of their provenance while
+    leaving the columns in place, which is the worst of both.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(f)
+    md = table.schema.metadata
+    col = table.column("task").to_pylist()
+    for task, to in dest.items():
+        mask = pa.array([str(v) == task for v in col])
+        part = table.filter(mask).replace_schema_metadata(md)
+        to.parent.mkdir(parents=True, exist_ok=True)
+        tmp = to.with_name(f"{to.name}.tmp")
+        pq.write_table(part, tmp, compression="zstd")
+        tmp.replace(to)
+
+
+def do_split(root: Path, apply: bool) -> int:
+    plan, warn = split_plan(root)
+    for w in warn:
+        print(w)
+    if not plan:
+        print(f"\nnothing to split under {root} -- every leaf is already "
+              f"under a task= key")
+        return 0
+    for f, dest in plan:
+        print(f"  {f.relative_to(root)}")
+        for t, to in dest.items():
+            print(f"    -> {to.relative_to(root)}")
+    print(f"\n{len(plan)} file(s) to split into "
+          f"{sum(len(d) for _, d in plan)} part(s)"
+          + ("" if apply else "  (--apply to do it)"))
+    if not apply:
+        return 0
+    for f, dest in plan:
+        split_file(f, dest)
+        f.unlink()
+    print("split.")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--from", dest="src", required=True, metavar="COHORT")
-    p.add_argument("--to", dest="dst", required=True, metavar="COHORT")
+    p.add_argument("--from", dest="src", metavar="COHORT")
+    p.add_argument("--to", dest="dst", metavar="COHORT")
+    p.add_argument("--split-tasks", action="store_true",
+                   help="the OTHER half of this migration: split each leaf "
+                        "still written at cohort=<c>/<leaf> into "
+                        "cohort=<c>/task=<t>/<leaf>, by its own `task` column. "
+                        "Carries the schema metadata, including the per-column "
+                        "clusterers block, so state labels keep their "
+                        "provenance. Dry-run unless --apply.")
     p.add_argument("--output-root", default=None,
                    help="default: $FMRIDECOMP_OUTPUTS, else output_root from "
                         "the cohort configs in config/")
@@ -124,7 +264,9 @@ def main(argv=None) -> int:
                    help="actually move. Without it this only reports.")
     a = p.parse_args(argv)
 
-    if a.src == a.dst:
+    if not a.split_tasks and not (a.src and a.dst):
+        raise SystemExit("either --from COHORT --to COHORT, or --split-tasks")
+    if a.src and a.src == a.dst:
         raise SystemExit("--from and --to are the same cohort")
 
     if a.output_root:
@@ -136,6 +278,9 @@ def main(argv=None) -> int:
     if not root.is_dir():
         raise SystemExit(f"output_root does not exist: {root}")
     print(f"output_root {root}")
+
+    if a.split_tasks:
+        return do_split(root, a.apply)
 
     moves, collisions = plan(root, a.src, a.dst)
     if collisions:

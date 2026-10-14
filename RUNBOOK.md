@@ -639,6 +639,39 @@ $RUN python3 tools/migrate_cohort.py --from camcan_rest --to camcan   # look
 $RUN python3 tools/migrate_cohort.py --from camcan_rest --to camcan --apply
 ```
 
+**Then the second half, which is not optional.** `latents/`, `transitions/`,
+`static_fc/` and `censor/` key on `cohort=` with `task` as a *column*;
+`activation/` and `dfc/` have always had `task=` as a directory. One cohort
+holding two conditions makes that difference a correctness problem rather than
+an untidiness: a latents file records ONE `stride_s` — the TR of its rows — and
+`transitions` reads it for every dwell time in seconds, so a file holding a
+2.47 s movie and a 1.97 s rest can only be right about one of them.
+
+```bash
+$RUN python3 tools/migrate_cohort.py --split-tasks            # look
+$RUN python3 tools/migrate_cohort.py --split-tasks --apply
+```
+
+A rewrite rather than a rename: each file is partitioned by its own `task`
+column into `cohort=<c>/task=<t>/<leaf>`. The schema metadata copies verbatim
+to every part — `model_hash`, `censor_policy`, `stride_s`, and the per-column
+`clusterers` block holding each state set's `fit_hash`, `params` and
+`train_cohorts` — because all of it describes the fit and not the rows. Without
+that carry the HMM2 label columns would survive with their provenance stripped,
+which looks usable and is not.
+
+Read the dry run's NOTE lines. A file holding **several** tasks is reported,
+because every part inherits the one `stride_s` it records and that is only
+correct if those tasks share a TR. For your tree they do — `cohort=camcan`'s
+latents are Movie-only, and `cneuromod` and `ds002837` have one TR each — so
+there should be no such note.
+
+What this buys beyond correctness: the skip in `decompose` becomes per
+`(cohort, task)`, so adding a condition writes a **new** file and leaves the
+existing one alone. **`--overwrite` is no longer needed to project rest**, the
+movie's state columns survive, and the re-cluster that would have cost is not
+spent.
+
 Dry-run by default. It **refuses** if any destination exists: two cohorts
 merging is only safe when their `task=` directories are disjoint, and a
 collision means two files claim one `(cohort, task, sub)` leaf, where whichever

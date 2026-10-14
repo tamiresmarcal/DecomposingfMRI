@@ -10,6 +10,7 @@ silently keep whichever moved last.
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -178,3 +179,148 @@ class TestWhatItDeliberatelyLeaves:
         assert "finalize.sbatch config/camcan.yaml activation" in out
         assert "censor.sbatch" in out
         assert "participants_qc.csv" in out
+
+
+class TestSplitByTask:
+    """The other half: give the four trees the `task=` key they lacked.
+
+    A rewrite, not a move -- `task` was a COLUMN here, so each file is
+    partitioned by its own rows. The part that needs testing is the schema
+    metadata: all of it describes the FIT rather than the rows, so every part
+    must carry it verbatim, and the per-column `clusterers` block is what
+    gives the HMM2 label columns their provenance.
+    """
+
+    @staticmethod
+    def _latents(root, cohort, tasks, states=("HMM2_pca3_8",)):
+        import json
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        rows = [(t, f"S{i}") for t in tasks for i in range(2)]
+        d = pd.DataFrame({"cohort": cohort,
+                          "task": [r[0] for r in rows],
+                          "sub": [r[1] for r in rows],
+                          "window_id": range(len(rows)),
+                          "pca0/3": 0.5})
+        for st in states:
+            d[st] = 1
+        t = pa.Table.from_pandas(d, preserve_index=False)
+        md = {
+            b"model_hash": json.dumps("abc123").encode(),
+            b"censor_policy": json.dumps("motion").encode(),
+            b"stride_s": json.dumps(2.47).encode(),
+            b"clusterers": json.dumps(
+                {st: {"fit_hash": f"fit-{st}", "k": 8,
+                      "train_cohorts": ["ds002837", "cneuromod"],
+                      "params": {"n_iter": 100}} for st in states}).encode(),
+        }
+        p = (root / "latents" / "atlas=yeo7" / "window_s=-1"
+             / f"cohort={cohort}" / "data.parquet")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(t.replace_schema_metadata({**(t.schema.metadata or {}),
+                                                  **md}), p)
+        return p
+
+    def test_the_default_is_a_dry_run(self, tmp_path):
+        src = self._latents(tmp_path, "camcan", ["Movie", "Rest"])
+        assert M.main(["--split-tasks", "--output-root", str(tmp_path)]) == 0
+        assert src.exists()
+        assert not (src.parent / "task=Movie").exists()
+
+    def test_it_writes_one_file_per_task_and_removes_the_original(self,
+                                                                  tmp_path):
+        src = self._latents(tmp_path, "camcan", ["Movie", "Rest"])
+        M.main(["--split-tasks", "--output-root", str(tmp_path), "--apply"])
+        assert not src.exists()
+        for t in ("Movie", "Rest"):
+            assert (src.parent / f"task={t}" / "data.parquet").exists()
+
+    def test_each_part_holds_only_its_own_rows(self, tmp_path):
+        src = self._latents(tmp_path, "camcan", ["Movie", "Rest"])
+        M.main(["--split-tasks", "--output-root", str(tmp_path), "--apply"])
+        total = 0
+        for t in ("Movie", "Rest"):
+            d = pd.read_parquet(src.parent / f"task={t}" / "data.parquet")
+            assert set(d["task"]) == {t}
+            assert sorted(d["sub"]) == ["S0", "S1"]
+            total += len(d)
+        assert total == 4            # nothing lost, nothing duplicated
+
+    def test_the_clusterers_provenance_survives_in_every_part(self, tmp_path):
+        """THE POINT. Dropping this would leave the HMM2 columns in place while
+        stripping the fit that produced them -- worse than losing them, because
+        the labels would look usable."""
+        import json
+
+        import pyarrow.parquet as pq
+
+        src = self._latents(tmp_path, "camcan", ["Movie", "Rest"])
+        M.main(["--split-tasks", "--output-root", str(tmp_path), "--apply"])
+        for t in ("Movie", "Rest"):
+            md = pq.ParquetFile(src.parent / f"task={t}"
+                                / "data.parquet").schema_arrow.metadata
+            blk = json.loads(md[b"clusterers"].decode())
+            assert blk["HMM2_pca3_8"]["fit_hash"] == "fit-HMM2_pca3_8"
+            assert blk["HMM2_pca3_8"]["train_cohorts"] == ["ds002837",
+                                                           "cneuromod"]
+            assert json.loads(md[b"model_hash"].decode()) == "abc123"
+            assert json.loads(md[b"censor_policy"].decode()) == "motion"
+            assert json.loads(md[b"stride_s"].decode()) == 2.47
+
+    def test_a_multi_task_latents_file_says_stride_s_is_inherited(self,
+                                                                  tmp_path,
+                                                                  capsys):
+        """The one thing a split cannot fix: the file records ONE stride_s and
+        every part inherits it, which is right only if those tasks share a TR.
+        Said out loud rather than assumed, since it is the reason the level
+        exists."""
+        self._latents(tmp_path, "camcan", ["Movie", "Rest"])
+        M.main(["--split-tasks", "--output-root", str(tmp_path)])
+        out = capsys.readouterr().out
+        assert "inherits the one stride_s" in out
+        assert "Movie" in out and "Rest" in out
+
+    def test_a_single_task_file_gets_no_such_note(self, tmp_path, capsys):
+        self._latents(tmp_path, "camcan", ["Movie"])
+        M.main(["--split-tasks", "--output-root", str(tmp_path)])
+        assert "inherits the one stride_s" not in capsys.readouterr().out
+
+    def test_an_already_split_tree_is_a_no_op(self, tmp_path, capsys):
+        self._latents(tmp_path, "camcan", ["Movie", "Rest"])
+        M.main(["--split-tasks", "--output-root", str(tmp_path), "--apply"])
+        assert M.main(["--split-tasks", "--output-root", str(tmp_path),
+                       "--apply"]) == 0
+        assert "nothing to split" in capsys.readouterr().out
+
+    def test_it_finds_every_tree_by_one_rule(self, tmp_path):
+        """latents, transitions, static_fc and BOTH censor tables -- a leaf
+        whose parent is a cohort= key has not been split. One rule, so there is
+        no per-tree pattern list to keep in step with io.py."""
+        for rel, leaf in (
+                ("latents/atlas=yeo7/window_s=-1/cohort=c", "data.parquet"),
+                ("transitions/atlas=yeo7/window_s=-1/states=S/cohort=c",
+                 "subjects.parquet"),
+                ("static_fc/atlas=yeo7/cohort=c", "subjects.parquet"),
+                ("censor/policy=motion/cohort=c", "subjects.parquet"),
+                ("censor/policy=motion/atlas=yeo7/window_s=30/cohort=c",
+                 "windows.parquet")):
+            d = tmp_path / rel
+            d.mkdir(parents=True)
+            pd.DataFrame({"task": ["m"], "sub": ["S0"]}).to_parquet(
+                d / leaf, index=False)
+        assert len(M.unsplit_leaves(tmp_path)) == 5
+        M.main(["--split-tasks", "--output-root", str(tmp_path), "--apply"])
+        assert M.unsplit_leaves(tmp_path) == []
+
+    def test_a_leaf_already_under_a_task_key_is_not_a_candidate(self, tmp_path):
+        d = tmp_path / "latents/atlas=yeo7/window_s=-1/cohort=c/task=Movie"
+        d.mkdir(parents=True)
+        pd.DataFrame({"task": ["Movie"], "sub": ["S0"]}).to_parquet(
+            d / "data.parquet", index=False)
+        assert M.unsplit_leaves(tmp_path) == []
+
+    def test_either_a_move_or_a_split_is_required(self, tmp_path):
+        with pytest.raises(SystemExit, match="--split-tasks"):
+            M.main(["--output-root", str(tmp_path)])
