@@ -87,7 +87,7 @@ from .bstm_selection import (CONSTANT_COLUMNS, ORDINAL_LEVELS, _wipe,
                              one_row_per_subject, read_phenotype,
                              read_subject_list, score_once,
                              warn_if_a_model_never_split)
-from .io import meta_dir
+from .io import hive_key, meta_dir, static_fc_root
 
 ARMS = ["edges", "global"]
 
@@ -102,9 +102,12 @@ def discover(root: Path, cohorts: list[str], atlases: list[str] | None
     """(cohort, atlas) pairs that have a stored static-FC table."""
     cells = []
     for cohort in cohorts:
-        found = sorted(p.parts[-3].split("=")[1] for p in
-                       (root / "static_fc").glob(
-                           f"atlas=*/cohort={cohort}/subjects.parquet"))
+        # By key NAME: `p.parts[-3]` was the atlas until `task=` appeared
+        # below `cohort=`, after which it was the cohort -- silently, with no
+        # error anywhere.
+        found = sorted({hive_key(p, "atlas") for p in
+                        static_fc_root(root).rglob("subjects.parquet")
+                        if hive_key(p, "cohort") == cohort})
         if atlases is not None:
             found = [a for a in found if a in atlases]
         if not found:

@@ -140,7 +140,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .io import meta_dir, read_file
+from .io import hive_key, meta_dir, read_file, transitions_root
 
 # The per-subject features that are NOT transition cells. `occ_*` is added to
 # this per state set, since its width is K.
@@ -497,11 +497,17 @@ def _held_fixed_rows(sets: pd.DataFrame, args) -> list[str]:
 
 
 def discover(root: Path) -> pd.DataFrame:
-    rows = [{"atlas": p.parts[-5].split("=")[1],
-             "window_s": p.parts[-4].split("=")[1],
-             "states": p.parts[-3].split("=")[1],
-             "cohort": p.parts[-2].split("=")[1], "path": p}
-            for p in (root / "transitions").rglob("subjects.parquet")]
+    # BY KEY NAME, not by position. This was `p.parts[-5]`, `[-4]`, `[-3]`,
+    # `[-2]`, and `rglob` is depth-agnostic -- so the day `task=` was inserted
+    # below `cohort=` every index shifted by one, each `.split("=")[1]` still
+    # succeeded, and the atlas silently became the window while the cohort
+    # became the task. It died three lines down on `parts[2].astype(int)`,
+    # complaining about state-set names. `hive_key` searches the parts for the
+    # prefix, so it is immune to this level and to the next one anybody adds.
+    rows = [{"atlas": hive_key(p, "atlas"), "window_s": hive_key(p, "window_s"),
+             "states": hive_key(p, "states"), "cohort": hive_key(p, "cohort"),
+             "task": hive_key(p, "task"), "path": p}
+            for p in transitions_root(root).rglob("subjects.parquet")]
     if not rows:
         raise SystemExit(f"no transition tables under {root / 'transitions'} -- "
                          f"run `fmri-decomp transitions` first")

@@ -88,11 +88,9 @@ def _csv_rows(path: Path) -> int:
     return max(n - 1, 0)
 
 
-def _key(p: Path, name: str):
-    for part in p.parts:
-        if part.startswith(f"{name}="):
-            return part.split("=", 1)[1]
-    return None
+#: One implementation of "read a partition key by name", in io. This module had
+#: its own copy; two copies of a path convention is how the convention drifts.
+from .io import hive_key as _key          # noqa: E402  (re-export, used below)
 
 
 # ------------------------------------------------------------------ stages ---
