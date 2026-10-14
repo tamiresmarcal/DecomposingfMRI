@@ -766,6 +766,9 @@ TRAIN="--train ds002837 cneuromod"
 PROJ="--project camcan"
 POL="--censor-policy motion"
 TARGETS="additional_HADS_anx_category additional_HADS_dep_category"
+# Only for a tree whose latents were written before 2026-10-08 -- see
+# "THE HASH BRIDGE" below. Empty on a tree written since.
+BRIDGE="--legacy-project-hash"
 
 # ---- state arm: latents -> clusterers -> transitions ----------------------
 # The -1 fit is PER ATLAS: yeo7 and networks carry --passthrough-features
@@ -776,14 +779,14 @@ TARGETS="additional_HADS_anx_category additional_HADS_dep_category"
 D=$(
   { sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
       --array=0-0 slurm/decomposition.sbatch harvardoxford -1 \
-      -- --source activation $TRAIN $PROJ $POL
+      -- --source activation $TRAIN $PROJ $POL $BRIDGE
     sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
       --array=0-0 slurm/decomposition.sbatch yeo7 -1 \
-      -- --source activation $TRAIN $PROJ $POL \
+      -- --source activation $TRAIN $PROJ $POL $BRIDGE \
          --pca-latents 3 7 --umap-latents 3 --passthrough-features
     sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
       --array=0-0 slurm/decomposition.sbatch networks -1 \
-      -- --source activation $TRAIN $PROJ $POL \
+      -- --source activation $TRAIN $PROJ $POL $BRIDGE \
          --pca-latents 3 14 --umap-latents 3 --passthrough-features
   } | cut -d';' -f1 | paste -sd:)
 
@@ -861,6 +864,55 @@ one and there is nothing to acknowledge.
 Leaving `--overwrite` off also keeps the guard. `refuse_to_destroy_states` stops
 a cell that exists at a DIFFERENT hash from being rewritten silently, so if
 something really does need replacing you are told rather than charged for it.
+
+#### THE HASH BRIDGE -- `--legacy-project-hash`
+
+Only for latents written before 2026-10-08. `project_cohorts` was part of
+`model_hash` until then, and `9e1a9ac` removed it: a per-invocation quantity
+does not describe a fit, and while it was hashed no cohort could ever be
+skipped, so every addition rewrote and re-clustered the whole cell. That commit
+says the removal "DOES move every hash already on disk. It is accepted once."
+
+This is what paying that once looks like. A tree written earlier carries hashes
+computed WITH the key, so the current code reads every cell as a different fit
+and refuses to rewrite the ones holding state columns:
+
+```
+window_s=-1: refusing to rewrite 59 (cohort, task) cell(s) that carry
+brain-state columns.
+  ...
+  They are stale because this run describes a DIFFERENT fit:
+      project_cohorts: ['camcan'] -> '(absent)'
+```
+
+No flag of that run is missing -- which is why the refusal now says so and
+names this one. `--legacy-project-hash` puts the key back for the run, so the
+hash matches what is on disk. Then:
+
+* the existing cells are skipped, state columns and all -- nothing is rewritten;
+* `reuse_models` matches the saved manifest, so the fit is REUSED, not
+  re-derived. This matters more than the time: a refit gives the new cell its
+  own UMAP, and a dwell time measured in one embedding is not comparable to one
+  measured in another;
+* the cached clusterers accept the new cell, so rest is labelled by a forward
+  pass instead of a fresh HMM2.
+
+Pass the same `--project` the original run used, or the hash will not match
+either. Check it in the first minute of the job, before the six hours:
+
+```
+  already at this model_hash, left untouched: camcan/Movie, cneuromod/..., ...
+  to write: camcan/Rest
+```
+
+That is the run doing the right thing. If it refuses instead, the feature list
+moved too (the one part of the payload the refusal cannot see, since `n_edges`
+and `edges_digest` are not in the stored description) and nothing has been
+written yet -- the chain dies on `afterok` with nothing lost.
+
+The end state is still the tree on the current convention, reached by
+re-stamping the stored hashes rather than by rewriting the rows. Until then the
+bridge keeps the tree internally consistent, which is what comparability needs.
 
 `--keep-tasks` is what splits the ranking: `--task` names the output partition
 and is yours to choose, `--keep-tasks` filters rows and takes the BIDS labels

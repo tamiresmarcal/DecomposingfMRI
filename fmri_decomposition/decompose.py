@@ -405,6 +405,16 @@ def fit_meta(args, window_s, features: list[str]) -> dict:
                                if args.match_bandpass else None),
             "zscore_runs": bool(args.zscore_runs),
         })
+    # The bridge for a tree written before `project_cohorts` left this payload.
+    # Those files' model_hash was computed WITH it, so the current code reads
+    # every one of them as a different fit -- which is the break the removal
+    # accepted up front. Adding the key back reproduces the old payload exactly
+    # (`model_hash` sorts the keys, so position is irrelevant), and nothing else
+    # about the fit is touched. Opt-in, and never the default: the removal is
+    # the right end state, and this only lets an existing tree be extended
+    # without re-clustering it to get there.
+    if getattr(args, "legacy_project_hash", False):
+        meta["project_cohorts"] = list(args.project)
     return meta
 
 
@@ -803,6 +813,23 @@ def refuse_to_destroy_states(out_dir: Path, stale, meta: dict,
         "",
         "  If a flag above is missing from this command, add it back: the fit "
         "is defined by the flags, so omitting one is a different model.",
+    ]
+    # The one difference no flag of this run can account for: these files were
+    # written while `project_cohorts` was part of the payload. Say so, because
+    # otherwise the advice above sends someone hunting for a flag they did not
+    # forget, and the only other suggestion costs them the re-cluster.
+    if any(line.lstrip().startswith("project_cohorts:") for line in diff):
+        lines += [
+            "  `project_cohorts` is NOT one of those flags. It LEFT this "
+            "payload deliberately, so a tree written before that reads as a "
+            "different fit however the command is spelled.",
+            "  To extend such a tree without rewriting it, pass "
+            "--legacy-project-hash (with the same --project as the run that "
+            "wrote it). The hash then matches what is on disk, the saved fit "
+            "is reused rather than re-fitted, and the cached clusterers still "
+            "accept the new cell.",
+        ]
+    lines += [
         "  If the change is intended, pass --overwrite to accept losing the "
         "state columns and re-cluster afterwards.",
     ]
@@ -1166,6 +1193,16 @@ def add_arguments(p) -> None:
     p.add_argument("--project", nargs="*", default=[],
                    help="cohorts the fit is APPLIED to. Omit it and only "
                         "--train is written.")
+    p.add_argument("--legacy-project-hash", action="store_true",
+                   help="include --project in model_hash, as runs before "
+                        "2026-10-08 did. A BRIDGE, not a setting: latents "
+                        "written then carry a hash computed with the project "
+                        "list in it, so without this every such cell reads as "
+                        "a different fit and cannot be skipped -- and the only "
+                        "other way forward is --overwrite, which drops the "
+                        "brain-state columns and costs the re-cluster. Pass "
+                        "the same --project the original run used, or the hash "
+                        "will not match either.")
     # `dest` stays `n_latents` while the FLAG is `--pca-latents`: that string
     # is a KEY in the model_hash payload, so renaming it would move every hash
     # on disk for a cosmetic change. The flag is the interface; the key is

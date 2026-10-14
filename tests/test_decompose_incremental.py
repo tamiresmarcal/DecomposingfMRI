@@ -65,7 +65,7 @@ def args(root, project, **kw):
              umap_latents=None, censor_policy=None, seed=0, overwrite=False,
              match_bandpass=None, zscore_runs=True,
              passthrough_features=False, output_root=str(root),
-             balance_train=False, min_rows=1)
+             balance_train=False, min_rows=1, legacy_project_hash=False)
     d.update(kw)
     return argparse.Namespace(**d)
 
@@ -782,3 +782,94 @@ class TestACohortThatGainedATask:
         run(movie_only, ["camcan"])
         for c, t in before.items():
             assert latents(movie_only, c, "Movie").stat().st_mtime_ns == t, c
+
+
+class TestTheLegacyProjectHashBridge:
+    """Adding a TASK to a tree whose hashes predate the `project_cohorts` removal.
+
+    The fixtures above describe the tree the current code writes. This class
+    describes the one already on nibi: written while `project_cohorts` was part
+    of `model_hash`, carrying brain-state columns that cost ~24 h per atlas, and
+    needing one new cell (`camcan/Rest`) added to it.
+
+    Without the bridge every cell reads as a different fit, so the refusal fires
+    and the only documented way past it is `--overwrite` -- which drops the
+    state columns and spends the re-cluster. With it the hash matches what is on
+    disk, so the skip works, the saved fit is REUSED rather than re-derived, and
+    the new cell lands in the same coordinate space as the old ones. That last
+    part is the one that matters beyond cost: a refit would give rest its own
+    UMAP, and rest's dwell times would then not be comparable to the movie's.
+    """
+
+    @pytest.fixture
+    def legacy(self, tmp_path):
+        """One movie condition, decomposed the way the pre-removal code did,
+        with a state column stage 4b would have written into it."""
+        from fmri_decomposition.cluster import append_columns
+
+        cohort_tree(tmp_path, ["trainA", "trainB", "camcan"])
+        run(tmp_path, ["camcan"], legacy_project_hash=True)
+        n = len(pd.read_parquet(latents(tmp_path, "camcan")))
+        append_columns(latents(tmp_path, "camcan"),
+                       {"HMM2_pca3_8": np.zeros(n, dtype=np.int32)},
+                       {"HMM2_pca3_8": {"method": "hmm2", "k": 8}})
+        # The condition that has not been projected yet.
+        for j in range(3):
+            write_activation(tmp_path, "camcan", f"S{j}", seed=99 + j, task="r")
+        return tmp_path
+
+    def test_the_stored_hash_is_the_legacy_one(self, legacy):
+        on = args(legacy, ["camcan"], legacy_project_hash=True)
+        off = args(legacy, ["camcan"])
+        feats = PARCELS
+        stored = D.latents_model_hash(latents(legacy, "camcan"))
+        assert stored == D.model_hash(D.fit_meta(on, "-1", feats), feats)
+        assert stored != D.model_hash(D.fit_meta(off, "-1", feats), feats)
+
+    def test_without_the_bridge_it_refuses_and_says_how(self, legacy):
+        with pytest.raises(SystemExit) as e:
+            run(legacy, ["camcan"])
+        msg = str(e.value)
+        assert "refusing to rewrite" in msg
+        assert "camcan/m" in msg
+        assert "project_cohorts" in msg
+        assert "--legacy-project-hash" in msg
+
+    def test_without_the_bridge_the_state_column_is_still_there(self, legacy):
+        """A refusal that had already rewritten something would be no refusal."""
+        with pytest.raises(SystemExit):
+            run(legacy, ["camcan"])
+        assert "HMM2_pca3_8" in pd.read_parquet(latents(legacy, "camcan")).columns
+
+    def test_with_the_bridge_the_new_task_is_written(self, legacy):
+        run(legacy, ["camcan"], legacy_project_hash=True)
+        assert latents(legacy, "camcan", task="r").exists()
+
+    def test_the_existing_cells_are_not_touched(self, legacy):
+        before = {c: latents(legacy, c).stat().st_mtime_ns
+                  for c in ("trainA", "trainB", "camcan")}
+        run(legacy, ["camcan"], legacy_project_hash=True)
+        for c, t in before.items():
+            assert latents(legacy, c).stat().st_mtime_ns == t, c
+
+    def test_the_state_column_survives(self, legacy):
+        run(legacy, ["camcan"], legacy_project_hash=True)
+        back = pd.read_parquet(latents(legacy, "camcan"))
+        assert "HMM2_pca3_8" in back.columns
+
+    def test_the_fit_is_reused_and_not_re_derived(self, legacy, capsys):
+        """Why this matters more than the time saved: a refit gives the new
+        cell its own UMAP, and a dwell time measured in one embedding is not
+        comparable to one measured in another."""
+        capsys.readouterr()
+        run(legacy, ["camcan"], legacy_project_hash=True)
+        out = capsys.readouterr().out
+        assert "reusing the saved fit" in out
+
+    def test_every_cell_ends_on_one_hash(self, legacy):
+        """Including the new one -- `transitions --check` refuses otherwise."""
+        run(legacy, ["camcan"], legacy_project_hash=True)
+        got = {f"{c}/{t}": D.latents_model_hash(latents(legacy, c, task=t))
+               for c, t in [("trainA", "m"), ("trainB", "m"),
+                            ("camcan", "m"), ("camcan", "r")]}
+        assert len(set(got.values())) == 1, got
