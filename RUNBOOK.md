@@ -765,7 +765,7 @@ POL="--censor-policy motion"
 
 D=$(for A in $ATLASES; do
       sbatch --parsable --array=0-0 slurm/decomposition.sbatch $A -1 \
-        -- --source activation $TRAIN $PROJ $POL --overwrite | cut -d';' -f1
+        -- --source activation $TRAIN $PROJ $POL | cut -d';' -f1
     done | paste -sd:)
 
 C=$(for A in $ATLASES; do
@@ -789,23 +789,25 @@ done
 squeue -u $USER -o "%.12i %.32j %.9T %.11M %R"
 ```
 
-**Note the `--overwrite` on the decompose line, and read this before running
-it.** `camcan`'s latents already carry the current `model_hash` from the movie
-alone, so the per-cohort skip would normally leave the cohort untouched and
-rest would never be projected. `decompose` now detects that — it compares the
-tasks the latents cover against the `task=` partitions on disk and prints
+**There is deliberately no `--overwrite` on the decompose line. Do not add
+one.** It used to be required and is now the opposite of what you want.
 
-```
-cohort=camcan is at this model_hash but covers only ['Movie'] -- shards exist
-for ['Rest'], so it needs rewriting to include them
-```
+The skip is per `(cohort, task)` since the task split, and each cell is its own
+file. `cohort=camcan/task=Rest` has no file, so its hash reads as None, it lands
+in `todo`, and it is written. `cohort=camcan/task=Movie` already carries this
+`model_hash`, so it is kept — untouched, with the state columns stage 4b wrote
+still in it.
 
-— and then **refuses** without `--overwrite`, because rewriting drops the state
-columns stage 4b wrote. That refusal is correct: the rewrite costs the HMM2
-fits. In the migration case you are re-clustering anyway (no clusterer cache
-exists yet), so pay it once here; if you ever add a third condition to a cohort
-whose clusterers *are* cached, the fits will be reused and only the labelling
-repeats.
+`--overwrite` rewrites EVERY cell, the movie included, and a rewrite drops those
+state columns. Where the clusterers are not cached that is the ~24 h HMM2 fit
+paid again for nothing. Before the split it was unavoidable: one file per cohort
+meant adding rest rewrote the movie's rows too, and `decompose` refused unless
+`--overwrite` acknowledged the loss. Now the new condition lands beside the old
+one and there is nothing to acknowledge.
+
+Leaving `--overwrite` off also keeps the guard. `refuse_to_destroy_states` stops
+a cell that exists at a DIFFERENT hash from being rewritten silently, so if
+something really does need replacing you are told rather than charged for it.
 
 `--keep-tasks` is what splits the ranking: `--task` names the output partition
 and is yours to choose, `--keep-tasks` filters rows and takes the BIDS labels
