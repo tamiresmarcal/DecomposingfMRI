@@ -70,9 +70,10 @@ def args(root, project, **kw):
     return argparse.Namespace(**d)
 
 
-def latents(root, cohort):
+def latents(root, cohort, task="m"):
+    """One file per (cohort, task) -- see io.latents_root on why."""
     return (root / "latents" / "atlas=mini" / "window_s=-1"
-            / f"cohort={cohort}" / "data.parquet")
+            / f"cohort={cohort}" / f"task={task}" / "data.parquet")
 
 
 def run(root, project, **kw):
@@ -312,9 +313,12 @@ class TestClusterReusesItsFit:
         assert "reusing the cached fit" in out
         assert new[0]["fit_reused"]
         # Only the new cohort was labelled, and it did get states.
-        assert list(new[0]["states_used"]) == ["camcan_rest"]
-        assert new[0]["states_used"]["camcan_rest"] >= 1
-        assert sorted(new[0]["cohorts_kept"]) == ["camcan", "trainA", "trainB"]
+        # Keyed by CELL now -- "cohort/task" -- since cluster labels one
+        # latents file per (cohort, task).
+        assert list(new[0]["states_used"]) == ["camcan_rest/m"]
+        assert new[0]["states_used"]["camcan_rest/m"] >= 1
+        assert sorted(new[0]["cohorts_kept"]) == ["camcan/m", "trainA/m",
+                                                  "trainB/m"]
         assert col in pd.read_parquet(latents(cell, "camcan_rest")).columns
 
     def test_the_labels_are_the_same_model_not_a_new_one(self, clustered):
@@ -577,7 +581,8 @@ class TestTheDiffIsReadable:
 class TestClusterProject:
     def test_all_labels_every_cohort_in_the_cell(self, cell):
         entries, _ = run_cluster(cell, project=["all"])
-        assert set(entries[0]["states_used"]) == {"trainA", "trainB", "camcan"}
+        assert set(entries[0]["states_used"]) == {"trainA/m", "trainB/m",
+                                                  "camcan/m"}
 
     def test_a_subset_can_be_asked_for(self, cell):
         """Her case: come back a month later and label only the new cohort."""
@@ -585,8 +590,8 @@ class TestClusterProject:
         entries, _ = run_cluster(cell, project=["camcan_rest"])
         labelled = set(entries[0]["states_used"]) | set(
             entries[0]["cohorts_kept"])
-        assert "camcan_rest" in set(entries[0]["states_used"])
-        assert "camcan" not in labelled      # not asked for, not touched
+        assert "camcan_rest/m" in set(entries[0]["states_used"])
+        assert "camcan/m" not in labelled    # not asked for, not touched
 
     def test_train_is_labelled_without_being_named(self, cell):
         """`train + project`, exactly as decompose says it -- the training
@@ -594,7 +599,7 @@ class TestClusterProject:
         run(cell, ["camcan", "camcan_rest"])
         entries, _ = run_cluster(cell, project=["camcan_rest"])
         got = set(entries[0]["states_used"]) | set(entries[0]["cohorts_kept"])
-        assert {"trainA", "trainB", "camcan_rest"} <= got
+        assert {"trainA/m", "trainB/m", "camcan_rest/m"} <= got
 
     def test_a_cohort_not_asked_for_keeps_the_columns_it_has(self, cell):
         col = run_cluster(cell)[0][0]["column"]
@@ -672,18 +677,19 @@ class TestTrainOnly:
         entries, _ = run_cluster(cell, project=[])
         touched = set(entries[0]["states_used"]) | set(
             entries[0]["cohorts_kept"])
-        assert touched == {"trainA", "trainB"}
-        assert "camcan" not in touched
+        assert touched == {"trainA/m", "trainB/m"}
+        assert "camcan/m" not in touched
 
     def test_cluster_labels_only_train_by_default(self, cell):
         entries, _ = run_cluster(cell, project=[])
-        assert set(entries[0]["states_used"]) == {"trainA", "trainB"}
+        assert set(entries[0]["states_used"]) == {"trainA/m", "trainB/m"}
 
     def test_project_all_is_how_you_ask_for_every_cohort(self, cell):
         """The old implicit default. Convenient, and the wrong DEFAULT: a
         cohort that appeared in the cell got labelled without being named."""
         entries, _ = run_cluster(cell, project=["all"])
-        assert set(entries[0]["states_used"]) == {"trainA", "trainB", "camcan"}
+        assert set(entries[0]["states_used"]) == {"trainA/m", "trainB/m",
+                                                  "camcan/m"}
 
     def test_a_projected_cohort_is_untouched_by_a_train_only_run(self, cell):
         col = run_cluster(cell)[0][0]["column"]
@@ -694,20 +700,23 @@ class TestTrainOnly:
 
 
 class TestACohortThatGainedATask:
-    """One cohort, two conditions -- and the skip must notice the second.
+    """One cohort, two conditions -- now impossible to get wrong by structure.
 
-    The per-cohort skip asks one question: does this cohort's latents carry the
-    current model_hash? "Yes, leave it alone" is right when its shards have not
-    changed, and WRONG the moment the cohort gains a condition. Cam-CAN's rest
-    arrived as shards under `cohort=camcan/task=Rest` beside a latents file
-    already at the right hash for `task=Movie` alone. Skipped, the whole rest
-    condition would never be projected: every file present, the hash correct,
-    and half the data missing.
+    This used to need a guard. The per-cohort skip asked "is this cohort at the
+    current model_hash" and answered "yes, leave it alone", which was right
+    until a cohort GAINED a condition: rest arriving beside a latents file
+    already at the right hash for Movie alone was skipped, and the whole rest
+    condition was never projected.
+
+    With one file per (cohort, task) the question cannot be asked wrongly. The
+    new condition is a new file, so it is simply absent and therefore written;
+    the existing one is untouched and KEEPS ITS STATE COLUMNS, which is what
+    made `--overwrite` necessary before and does not now.
     """
 
     @pytest.fixture
     def movie_only(self, tmp_path):
-        """camcan decomposed from Movie shards alone, Rest not yet extracted."""
+        """trainA, trainB and camcan decomposed from Movie shards alone."""
         for i, c in enumerate(["trainA", "trainB"]):
             for j in range(3):
                 write_activation(tmp_path, c, f"S{j}", seed=i * 10 + j,
@@ -718,58 +727,58 @@ class TestACohortThatGainedATask:
         run(tmp_path, ["camcan"])
         return tmp_path
 
-    def test_the_tasks_it_covers_are_recorded(self, movie_only):
-        assert D.latents_tasks(latents(movie_only, "camcan")) == {"Movie"}
+    def test_the_movie_cell_is_written_under_its_task(self, movie_only):
+        assert latents(movie_only, "camcan", "Movie").exists()
 
-    def test_the_source_tasks_come_from_the_partitions(self, movie_only):
+    def test_a_new_condition_is_a_NEW_file(self, movie_only):
+        """THE POINT. Rest is simply absent, so it is written, and the Movie
+        file is not rewritten at all."""
+        before = latents(movie_only, "camcan", "Movie").stat().st_mtime_ns
         for j in range(3):
             write_activation(movie_only, "camcan", f"S{j}", seed=7 + j,
                              task="Rest")
-        assert D.source_tasks(movie_only, "mini", "-1", "camcan",
-                              "activation") == {"Movie", "Rest"}
-
-    def test_a_cohort_missing_a_task_is_not_skipped(self, movie_only):
-        """THE POINT. Same model_hash, so the plain skip would leave it alone."""
-        for j in range(3):
-            write_activation(movie_only, "camcan", f"S{j}", seed=7 + j,
-                             task="Rest")
-        out_dir = latents(movie_only, "camcan").parent.parent
-        assert D.cohorts_missing_a_task(
-            movie_only, out_dir, "mini", "-1", "activation",
-            ["camcan", "trainA"], log=lambda *a: None) == ["camcan"]
-
-    def test_it_is_rewritten_and_then_covers_both(self, movie_only):
-        for j in range(3):
-            write_activation(movie_only, "camcan", f"S{j}", seed=7 + j,
-                             task="Rest")
-        run(movie_only, ["camcan"], overwrite=True)
-        lat = pd.read_parquet(latents(movie_only, "camcan"))
-        assert set(lat["task"]) == {"Movie", "Rest"}
-        assert D.latents_tasks(latents(movie_only, "camcan")) == {"Movie",
-                                                                 "Rest"}
-
-    def test_a_cohort_whose_tasks_are_unchanged_is_still_skipped(self,
-                                                                movie_only):
-        """The guard must not cost the incremental behaviour it sits beside."""
-        before = {c: latents(movie_only, c).stat().st_mtime_ns
-                  for c in ("trainA", "trainB", "camcan")}
         run(movie_only, ["camcan"])
-        for c, t in before.items():
-            assert latents(movie_only, c).stat().st_mtime_ns == t, c
+        assert latents(movie_only, "camcan", "Rest").exists()
+        assert latents(movie_only, "camcan",
+                       "Movie").stat().st_mtime_ns == before
 
-    def test_the_rewrite_is_refused_while_state_columns_exist(self,
-                                                              movie_only):
-        """Not silently rewritten: dropping the state columns costs the HMM2
-        fits, so the refusal names the cost and --overwrite is deliberate."""
+    def test_the_existing_conditions_state_columns_survive(self, movie_only):
+        """What `--overwrite` used to cost: stage 4b's labels, and the hours of
+        HMM2 behind them. Adding a condition now leaves them in place."""
         from fmri_decomposition.cluster import append_columns
 
-        n = len(pd.read_parquet(latents(movie_only, "camcan")))
-        append_columns(latents(movie_only, "camcan"),
-                       {"HMM2_pca3_8": np.zeros(n, dtype=np.int16)},
+        path = latents(movie_only, "camcan", "Movie")
+        n = len(pd.read_parquet(path))
+        append_columns(path, {"HMM2_pca3_8": np.zeros(n, dtype=np.int16)},
                        {"HMM2_pca3_8": {"method": "HMM2", "k": 8}})
         for j in range(3):
             write_activation(movie_only, "camcan", f"S{j}", seed=7 + j,
                              task="Rest")
-        with pytest.raises(SystemExit) as e:
-            run(movie_only, ["camcan"])
-        assert "refusing to rewrite" in str(e.value)
+        run(movie_only, ["camcan"])            # no --overwrite needed
+        assert "HMM2_pca3_8" in pd.read_parquet(path).columns
+
+    def test_each_cell_records_its_own_stride_s(self, movie_only):
+        """The reason the level exists: stride_s is the TR of the rows in the
+        file, and one file can hold one value."""
+        import json
+
+        import pyarrow.parquet as pq
+
+        for j in range(3):
+            write_activation(movie_only, "camcan", f"S{j}", seed=7 + j,
+                             task="Rest", tr=1.0)
+        run(movie_only, ["camcan"])
+        got = {}
+        for task in ("Movie", "Rest"):
+            md = pq.ParquetFile(
+                latents(movie_only, "camcan", task)).schema_arrow.metadata
+            got[task] = json.loads(md[b"stride_s"].decode())
+        assert got == {"Movie": 2.0, "Rest": 1.0}
+
+    def test_a_cell_whose_shards_are_unchanged_is_still_skipped(self,
+                                                                movie_only):
+        before = {c: latents(movie_only, c, "Movie").stat().st_mtime_ns
+                  for c in ("trainA", "trainB", "camcan")}
+        run(movie_only, ["camcan"])
+        for c, t in before.items():
+            assert latents(movie_only, c, "Movie").stat().st_mtime_ns == t, c

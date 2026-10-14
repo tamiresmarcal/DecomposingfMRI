@@ -106,9 +106,11 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def shard_paths(root: Path, atlas: str, window_s, cohort: str) -> list[Path]:
+def shard_paths(root: Path, atlas: str, window_s, cohort: str,
+                task: str | None = None) -> list[Path]:
+    t = task if task else "*"
     return sorted(root.glob(f"dfc/atlas={atlas}/window_s={window_s}/"
-                            f"cohort={cohort}/task=*/sub=*/data.parquet"))
+                            f"cohort={cohort}/task={t}/sub=*/data.parquet"))
 
 
 # --------------------------------------------------------- feature sources ---
@@ -121,11 +123,11 @@ ACTIVATION_WINDOW = "-1"
 
 
 def source_shard_paths(root: Path, atlas: str, window_s, cohort: str,
-                       source: str) -> list[Path]:
+                       source: str, task: str | None = None) -> list[Path]:
     if source == "activation":
         from . import frames
-        return frames.shard_paths(root, atlas, cohort)
-    return shard_paths(root, atlas, window_s, cohort)
+        return frames.shard_paths(root, atlas, cohort, task)
+    return shard_paths(root, atlas, window_s, cohort, task)
 
 
 def source_feature_columns(path: Path, source: str) -> list[str]:
@@ -136,7 +138,8 @@ def source_feature_columns(path: Path, source: str) -> list[str]:
 
 
 def source_read_cohort(root: Path, atlas: str, window_s, cohort: str,
-                       features: list[str], args, censor: dict | None):
+                       features: list[str], args, censor: dict | None,
+                       task: str | None = None):
     """-> (identity frame, float32 matrix, stride_s, indep_factor).
 
     `stride_s` and `indep_factor` describe the time axis of the rows and are
@@ -149,11 +152,12 @@ def source_read_cohort(root: Path, atlas: str, window_s, cohort: str,
         from . import frames
         ident, X, tr = frames.read_cohort(
             root, atlas, cohort, features, censor=censor,
-            band=args.match_bandpass, zscore=args.zscore_runs, log=log)
+            band=args.match_bandpass, zscore=args.zscore_runs, log=log,
+            task=task)
         # Frames do not overlap, so one row IS one independent sample.
         return ident, X, float(tr), 1
     ident, X = read_cohort(root, atlas, window_s, cohort, features,
-                           censor=censor)
+                           censor=censor, task=task)
     return ident, X, None, None
 
 
@@ -218,17 +222,19 @@ def load_censor(root: Path, policy: str | None, atlas: str, window_s, cohort: st
 
 
 def read_cohort(root: Path, atlas: str, window_s, cohort: str, edges: list[str],
-                want_edges: bool = True, censor: dict | None = None):
+                want_edges: bool = True, censor: dict | None = None,
+                task: str | None = None):
     """One cohort -> (identity frame, float32 edge matrix or None).
 
     Reads the identity columns and the edge columns in one pass but keeps them
     apart, so the edge block is a contiguous float32 array and never a
     DataFrame with 6,105 columns of object-dtype partition keys beside it.
     """
-    paths = shard_paths(root, atlas, window_s, cohort)
+    paths = shard_paths(root, atlas, window_s, cohort, task)
     if not paths:
-        raise SystemExit(f"no dfc shards for cohort={cohort} at "
-                         f"atlas={atlas} window_s={window_s}")
+        raise SystemExit(f"no dfc shards for cohort={cohort}"
+                         + (f" task={task}" if task else "")
+                         + f" at atlas={atlas} window_s={window_s}")
     ident_cols = [c for c in IDENT if c not in _DERIVED]
     idents, blocks = [], []
     n_dropped_subs = n_dropped_windows = 0
@@ -682,6 +688,16 @@ def _fit_differences(stored: dict, meta: dict) -> list[str]:
     return out
 
 
+def cell_path(out_dir: Path, cohort: str, task: str) -> Path:
+    """The one latents file for (cohort, task), under a cell's out_dir."""
+    return out_dir / f"cohort={cohort}" / f"task={task}" / "data.parquet"
+
+
+def _cells(cells) -> str:
+    """(cohort, task) pairs for a log line."""
+    return ", ".join(f"{c}/{t}" for c, t in cells)
+
+
 def latents_tasks(path: Path) -> set[str] | None:
     """The tasks a latents file covers, or None if it has none recorded.
 
@@ -727,42 +743,13 @@ def source_tasks(root: Path, atlas: str, window_s, cohort: str,
             if d.is_dir() and d.name.startswith("task=")}
 
 
-def cohorts_missing_a_task(root: Path, out_dir: Path, atlas: str, window_s,
-                           source: str, at_hash: list[str],
-                           log=print) -> list[str]:
-    """Of the cohorts already at this model_hash, those missing a task.
-
-    THE SILENT-LOSS CASE THE PER-COHORT SKIP OPENS. The skip asks one question
-    -- does this cohort's latents carry the current model_hash -- and answers
-    "yes, leave it alone". That is right when the cohort's shards have not
-    changed. It is wrong the moment a cohort GAINS a condition: Cam-CAN's rest
-    arrived as shards under `cohort=camcan/task=Rest` beside a latents file
-    already at the right hash for `task=Movie` alone, so the cohort was skipped
-    and the entire rest condition was never projected. Every file present, the
-    hash correct, and half the data missing.
-
-    Reported rather than silently rewritten, because a rewrite drops the state
-    columns stage 4b wrote -- which is what `refuse_to_destroy_states` then
-    says, with the cost named.
-    """
-    out = []
-    for c in at_hash:
-        have = latents_tasks(out_dir / f"cohort={c}" / "data.parquet")
-        if have is None:
-            continue
-        want = source_tasks(root, atlas, window_s, c, source)
-        missing = sorted(want - have)
-        if missing:
-            log(f"  cohort={c} is at this model_hash but covers only "
-                f"{sorted(have)} -- shards exist for {missing}, so it needs "
-                f"rewriting to include them")
-            out.append(c)
-    return out
-
-
-def refuse_to_destroy_states(out_dir: Path, stale: list[str], meta: dict,
+def refuse_to_destroy_states(out_dir: Path, stale, meta: dict,
                              window_s) -> None:
-    """Stop before rewriting a cohort whose state columns would be lost.
+    """Stop before rewriting a cell whose state columns would be lost.
+
+    `stale` is (cohort, task) pairs. Per CELL rather than per cohort since the
+    task level: a cohort gaining a condition no longer puts its existing
+    condition at risk, because the new one is its own file.
 
     A rewrite here is not recoverable by re-running: `cluster` would have to
     refit, and HMM2 at K=27 measured hours per cell. The commonest cause is a
@@ -772,18 +759,18 @@ def refuse_to_destroy_states(out_dir: Path, stale: list[str], meta: dict,
     rather than the hash.
     """
     at_risk = {}
-    for c in stale:
-        stored, cols = latents_fit_description(
-            out_dir / f"cohort={c}" / "data.parquet")
+    for cohort, task in stale:
+        stored, cols = latents_fit_description(cell_path(out_dir, cohort, task))
         if cols:
-            at_risk[c] = (stored, cols)
+            at_risk[f"{cohort}/{task}"] = (stored, cols)
     if not at_risk:
         return
     first = next(iter(at_risk.values()))[0]
     diff = _fit_differences(first, meta)
     lines = [
         f"window_s={window_s}: refusing to rewrite "
-        f"{len(at_risk)} cohort(s) that carry brain-state columns.",
+        f"{len(at_risk)} (cohort, task) cell(s) that carry brain-state "
+        f"columns.",
         "",
         "  Rewriting a latents file REMOVES those columns -- parquet cannot "
         "append, so stage 4b's labels live inside the file -- and getting them "
@@ -791,8 +778,7 @@ def refuse_to_destroy_states(out_dir: Path, stale: list[str], meta: dict,
         "",
     ]
     for c, (_, cols) in at_risk.items():
-        lines.append(f"    cohort={c}: {len(cols)} state set(s), e.g. "
-                     f"{cols[:4]}")
+        lines.append(f"    {c}: {len(cols)} state set(s), e.g. {cols[:4]}")
     lines += ["", "  They are stale because this run describes a DIFFERENT "
                   "fit:"]
     lines += diff or ["      (no readable difference -- the stored fit "
@@ -893,10 +879,33 @@ def run_one(root: Path, window_s, args) -> None:
 
     cohorts = list(dict.fromkeys(args.train + args.project))
     source = source_of(args)
-    first = source_shard_paths(root, atlas, window_s, args.train[0], source)
+
+    # ONE OUTPUT FILE PER (cohort, task), which is what makes the single
+    # `stride_s` each file records a true claim: stride_s is the TR of the rows
+    # in it, and one cohort can hold two TRs (Cam-CAN movie 2.47s, rest 1.97s,
+    # the same people). It also makes the skip below per (cohort, task), so a
+    # cohort that GAINS a condition writes a new file instead of rewriting the
+    # one it has -- the state columns stage 4b wrote into the existing
+    # condition survive, and `--overwrite` is not needed to add a condition.
+    cells = [(c, t) for c in cohorts
+             for t in sorted(source_tasks(root, atlas, window_s, c, source))]
+    if not cells:
+        raise SystemExit(
+            f"window_s={window_s}: no {source} shards for any of "
+            f"{', '.join(cohorts)} at atlas={atlas} -- nothing to decompose.")
+    train_cells = [(c, t) for c, t in cells if c in set(args.train)]
+    if not train_cells:
+        raise SystemExit(
+            f"window_s={window_s}: no {source} shards for any TRAINING cohort "
+            f"({', '.join(args.train)}) at atlas={atlas}. The fit has nothing "
+            f"to be fitted on.")
+
+    first = source_shard_paths(root, atlas, window_s, *train_cells[0][:1],
+                               source, train_cells[0][1])
     if not first:
-        raise SystemExit(f"no {source} shards for the first training cohort "
-                         f"{args.train[0]!r} at atlas={atlas} window_s={window_s}")
+        raise SystemExit(f"no {source} shards for the first training cell "
+                         f"{train_cells[0]!r} at atlas={atlas} "
+                         f"window_s={window_s}")
     features = source_feature_columns(first[0], source)
 
     # The hash is computed from the config and the feature list alone, so WHICH
@@ -906,33 +915,27 @@ def run_one(root: Path, window_s, args) -> None:
     # columns stage 4b put in them.
     meta = fit_meta(args, window_s, features)
     mhash = model_hash(meta, features)
-    on_disk = {c: latents_model_hash(out_dir / f"cohort={c}" / "data.parquet")
-               for c in cohorts}
-    todo = [c for c in cohorts if args.overwrite or on_disk[c] != mhash]
-    # A cohort at the right hash is normally left alone -- but not if it has
-    # since gained a task. See cohorts_missing_a_task.
-    todo += cohorts_missing_a_task(
-        root, out_dir, atlas, window_s, source,
-        [c for c in cohorts if c not in todo], log=log)
-    todo = [c for c in cohorts if c in set(todo)]
-    keep = [c for c in cohorts if c not in todo]
-    # A cohort with NO file is new and free to write. One with a DIFFERENT hash
+    on_disk = {k: latents_model_hash(cell_path(out_dir, *k)) for k in cells}
+    todo = [k for k in cells if args.overwrite or on_disk[k] != mhash]
+    keep = [k for k in cells if k not in todo]
+    # A cell with NO file is new and free to write. One with a DIFFERENT hash
     # is the dangerous case: it exists, it may carry state columns, and a
-    # rewrite deletes them.
+    # rewrite deletes them. A cohort gaining a TASK is no longer one of these
+    # cases at all -- the new condition is its own file.
     if not args.overwrite:
         refuse_to_destroy_states(
-            out_dir, [c for c in todo if on_disk[c] is not None], meta,
+            out_dir, [k for k in todo if on_disk[k] is not None], meta,
             window_s)
 
     unit = "parcels" if source == "activation" else "edges"
     log(f"window_s={window_s}  source={source}  {len(features)} {unit}  "
         f"model_hash {mhash}")
     if keep:
-        log(f"  already at this model_hash, left untouched: {', '.join(keep)}")
+        log(f"  already at this model_hash, left untouched: {_cells(keep)}")
     if not todo:
         log(f"  nothing to write (--overwrite to redo)")
         return
-    log(f"  to write: {', '.join(todo)}")
+    log(f"  to write: {_cells(todo)}")
 
     # Refit only when the saved fit for this cell is not the one wanted. The
     # scaler/PCA/UMAP depend on `--train` and the settings, never on who is
@@ -940,11 +943,12 @@ def run_one(root: Path, window_s, args) -> None:
     # at all -- which is the difference between minutes and an hour at
     # harvardoxford, on top of not disturbing the other cohorts.
     models = None if args.overwrite else reuse_models(stem, mhash, log=log)
-    read_cohorts = list(dict.fromkeys(
-        todo if models is not None else list(args.train) + todo))
+    read_cells = list(dict.fromkeys(
+        todo if models is not None else train_cells + todo))
 
-    counts = {c: len(source_shard_paths(root, atlas, window_s, c, source))
-              for c in read_cohorts}
+    counts = {f"{c}/{t}": len(source_shard_paths(root, atlas, window_s, c,
+                                                 source, t))
+              for c, t in read_cells}
     log(f"  shards: {counts}")
     if source == "activation":
         log(f"  frames: bandpass="
@@ -967,8 +971,11 @@ def run_one(root: Path, window_s, args) -> None:
             f"that writes them:\n" + fix +
             f"or drop {window_s} from --window-s.")
 
+    # Per COHORT, not per cell: one censor decision covers every task of a
+    # cohort, because its table is keyed (sub, task) inside one file. The read
+    # is per cell, but the gate it is filtered through is shared.
     censors = {c: load_censor(root, args.censor_policy, atlas, window_s, c)
-               for c in read_cohorts}
+               for c in dict.fromkeys(c for c, _ in read_cells)}
     if args.censor_policy:
         for c, cen in censors.items():
             gate = "subjects+windows" if cen["windows"] is not None else "subjects only"
@@ -994,12 +1001,13 @@ def run_one(root: Path, window_s, args) -> None:
         log("loading training cohorts")
         idents, blocks = [], []
         stride_s = indep_factor = None
-        for cohort in args.train:
+        for cohort, task in train_cells:
             ident, X, stride_s, indep_factor = source_read_cohort(
-                root, atlas, window_s, cohort, features, args, censors[cohort])
+                root, atlas, window_s, cohort, features, args,
+                censors[cohort], task)
             ident, X = drop_nan_rows(ident, X)
-            log(f"  {cohort}: {len(X):,} rows, {ident['sub'].nunique()} subs, "
-                f"{X.nbytes / 1e9:.2f} GB")
+            log(f"  {cohort}/{task}: {len(X):,} rows, "
+                f"{ident['sub'].nunique()} subs, {X.nbytes / 1e9:.2f} GB")
             idents.append(ident)
             blocks.append(X)
         X_train = np.vstack(blocks) if len(blocks) > 1 else blocks[0]
@@ -1048,19 +1056,21 @@ def run_one(root: Path, window_s, args) -> None:
     # Second pass: one cohort in memory at a time. Only the cohorts that need
     # it -- an untouched cohort keeps its file, and with it every state column
     # stage 4b wrote into it.
-    for cohort in todo:
+    for cohort, task in todo:
         ident, X, stride_s, indep_factor = source_read_cohort(
-            root, atlas, window_s, cohort, features, args, censors[cohort])
+            root, atlas, window_s, cohort, features, args,
+            censors[cohort], task)
         ident, X = drop_nan_rows(ident, X)
-        # Per cohort, because the TR is: see write_latents on why this sits
-        # outside fit_meta and therefore outside model_hash.
+        # Per CELL, because the TR is -- and one file records one stride_s. See
+        # write_latents on why this sits outside fit_meta and therefore outside
+        # model_hash.
         models["stride_s"], models["indep_factor"] = stride_s, indep_factor
         lat = latents_for(ident, X, models, role_of[cohort])
         del ident, X
         gc.collect()
-        path = out_dir / f"cohort={cohort}" / "data.parquet"
+        path = cell_path(out_dir, cohort, task)
         write_latents(lat, path, models, cohort)
-        log(f"  {cohort:<14} {role_of[cohort]:<10} {len(lat):>9,} rows "
+        log(f"  {cohort}/{task:<12} {role_of[cohort]:<10} {len(lat):>9,} rows "
             f"x {lat.shape[1]} cols "
             f"-> {path.relative_to(root)}")
         del lat

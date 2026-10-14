@@ -218,7 +218,7 @@ class TestPerCellStateSets:
                       k_of or {ms: {"k": int(ms.rsplit("_", 1)[1])},
                                "ThresholdCluster_pca3_8": {"k": 8}}).encode()}
             p = (root / "latents" / f"atlas={atlas}" / f"window_s={w}"
-                 / f"cohort={c}" / "data.parquet")
+                 / f"cohort={c}" / "task=m" / "data.parquet")
             p.parent.mkdir(parents=True, exist_ok=True)
             pq.write_table(pa.Table.from_pandas(d, preserve_index=False)
                              .replace_schema_metadata(md), p)
@@ -274,7 +274,10 @@ class TestPerCellStateSets:
         assert "MeanShift_pca3_4" not in usable
         assert "MeanShift_pca3_9" not in usable
         assert usable == ["ThresholdCluster_pca3_8"]
-        assert partial == {"a": ["MeanShift_pca3_4"], "b": ["MeanShift_pca3_9"]}
+        # Keyed by CELL -- (cohort, task) -- since stage 3 writes one latents
+        # file per condition and stage 4b can run unevenly across them.
+        assert partial == {("a", "m"): ["MeanShift_pca3_4"],
+                           ("b", "m"): ["MeanShift_pca3_9"]}
 
     def test_a_degenerate_k_is_excluded_per_cell(self, tmp_path):
         self.cell(tmp_path, "yeo7", "30", "MeanShift_pca3_1",

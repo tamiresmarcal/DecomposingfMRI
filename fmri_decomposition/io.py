@@ -150,6 +150,25 @@ def latents_root(output_root: str | Path, atlas: str, window_s=None,
     return p if task is None else p / f"task={_key(task)}"
 
 
+def latents_cells(output_root: str | Path, atlas: str,
+                  window_s) -> dict[tuple[str, str], Path]:
+    """{(cohort, task): latents file} for one (atlas, aperture) cell.
+
+    The one enumerator for stage 3's output, because stage 4 and stage 5a both
+    walk it and a second copy is how the two drift. Keyed by the PAIR since
+    `decompose` writes one file per (cohort, task).
+    """
+    d = latents_root(output_root, atlas, window_s)
+    if not d.is_dir():
+        return {}
+    out = {}
+    for sub in sorted(d.glob("cohort=*/task=*")):
+        f = sub / "data.parquet"
+        if f.exists():
+            out[(hive_key(sub, "cohort"), hive_key(sub, "task"))] = f
+    return out
+
+
 def transitions_root(output_root: str | Path, atlas: str | None = None,
                      window_s=None, states: str | None = None,
                      cohort: str | None = None,

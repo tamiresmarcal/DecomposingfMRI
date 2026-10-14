@@ -147,7 +147,7 @@ class TestCheckGrid:
             for st in states:
                 d[st] = 0
             p = (root / "latents" / f"atlas={atlas}" / f"window_s={window_s}"
-                 / f"cohort={c}" / "data.parquet")
+                 / f"cohort={c}" / "task=m" / "data.parquet")
             p.parent.mkdir(parents=True, exist_ok=True)
             pq.write_table(pa.Table.from_pandas(d, preserve_index=False), p)
 
@@ -261,7 +261,7 @@ class TestDegenerateKIsRefused:
                 "pca2/3": rng.normal(size=n)}) for s in range(n_subs)],
                 ignore_index=True)
             p = (tmp_path / "latents" / "atlas=toy" / "window_s=30"
-                 / f"cohort={c}" / "data.parquet")
+                 / f"cohort={c}" / "task=m" / "data.parquet")
             p.parent.mkdir(parents=True, exist_ok=True)
             pq.write_table(pa.Table.from_pandas(d, preserve_index=False), p)
 
@@ -278,7 +278,7 @@ class TestDegenerateKIsRefused:
         a = args(methods=["threshold"], k=[8], min_k=20, max_k=64)
         C.run_one(tmp_path, "toy", "30", a)
         p = (tmp_path / "latents" / "atlas=toy" / "window_s=30"
-             / "cohort=a" / "data.parquet")
+             / "cohort=a" / "task=m" / "data.parquet")
         assert C._state_columns(p) == []
 
     def test_a_usable_k_alongside_a_refused_one_still_gets_written(self, tmp_path):
@@ -534,7 +534,7 @@ def write_latents(root, atlas, window_s, cohorts, cols=None, states=()):
         for st in states:
             d[st] = 0
         p = (root / "latents" / f"atlas={atlas}" / f"window_s={window_s}"
-             / f"cohort={c}" / "data.parquet")
+             / f"cohort={c}" / "task=m" / "data.parquet")
         p.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(pa.Table.from_pandas(d, preserve_index=False), p)
 
@@ -546,7 +546,7 @@ ALL_UMAP = C.EMBEDDINGS["umap3"]
 class TestRawEmbeddingResolution:
     def test_it_resolves_when_every_cohort_has_the_same_features(self, tmp_path):
         write_latents(tmp_path, "networks", "-1", ["a", "b"], COLS + RAW14)
-        paths = C.cohort_paths(tmp_path, "networks", "-1")
+        paths = C.cell_paths(tmp_path, "networks", "-1")
         cols = C.embedding_columns("raw14", paths)
         assert cols == sorted(RAW14)
 
@@ -555,30 +555,30 @@ class TestRawEmbeddingResolution:
         would silently relabel the axes."""
         write_latents(tmp_path, "networks", "-1",
                       {"a": COLS + RAW14, "b": COLS + list(reversed(RAW14))})
-        paths = C.cohort_paths(tmp_path, "networks", "-1")
+        paths = C.cell_paths(tmp_path, "networks", "-1")
         assert C.embedding_columns("raw14", paths) == sorted(RAW14)
 
     def test_a_cohort_short_of_features_resolves_to_none(self, tmp_path):
         write_latents(tmp_path, "networks", "-1",
                       {"a": COLS + RAW14, "b": COLS + RAW14[:13]})
-        paths = C.cohort_paths(tmp_path, "networks", "-1")
+        paths = C.cell_paths(tmp_path, "networks", "-1")
         assert C.embedding_columns("raw14", paths) is None
 
     def test_the_wrong_width_resolves_to_none(self, tmp_path):
         write_latents(tmp_path, "networks", "-1", ["a", "b"], COLS + RAW14)
-        paths = C.cohort_paths(tmp_path, "networks", "-1")
+        paths = C.cell_paths(tmp_path, "networks", "-1")
         assert C.embedding_columns("raw7", paths) is None
 
     def test_no_passthrough_at_all_resolves_to_none(self, tmp_path):
         write_latents(tmp_path, "yeo7", "30", ["a", "b"], COLS)
-        paths = C.cohort_paths(tmp_path, "yeo7", "30")
+        paths = C.cell_paths(tmp_path, "yeo7", "30")
         assert C.embedding_columns("raw14", paths) is None
 
     def test_a_missing_fixed_embedding_also_resolves_to_none(self, tmp_path):
         """Not assumed present. Returning the constant unconditionally made
         check_grid call a cell ready when umap3 was absent."""
         write_latents(tmp_path, "yeo7", "30", ["a", "b"], COLS)
-        paths = C.cohort_paths(tmp_path, "yeo7", "30")
+        paths = C.cell_paths(tmp_path, "yeo7", "30")
         assert C.embedding_columns("pca3", paths) == COLS
         assert C.embedding_columns("umap3", paths) is None
 
@@ -636,7 +636,7 @@ class TestExitCodeSeparatesNotApplicableFromRefused:
             for j, col in enumerate(cols):
                 d[col] = block[:, j]
             p = (tmp_path / "latents" / "atlas=networks" / "window_s=-1"
-                 / f"cohort={c}" / "data.parquet")
+                 / f"cohort={c}" / "task=m" / "data.parquet")
             p.parent.mkdir(parents=True, exist_ok=True)
             pq.write_table(pa.Table.from_pandas(d, preserve_index=False), p)
 
@@ -662,7 +662,7 @@ class TestExitCodeSeparatesNotApplicableFromRefused:
                          embeddings=["pca3", "raw14"], k=[8, 10])
         cols = set(pq.ParquetFile(
             tmp_path / "latents" / "atlas=networks" / "window_s=-1"
-            / "cohort=b" / "data.parquet").schema_arrow.names)
+            / "cohort=b" / "task=m" / "data.parquet").schema_arrow.names)
         # threshold: pca3 at K=8 only (10 is not a cube, raw14 is not 3-D)
         assert "ThresholdCluster_pca3_8" in cols
         assert "ThresholdCluster_pca3_10" not in cols
@@ -829,7 +829,7 @@ def _latents_cell(tmp_path, raw_widths, cohorts=("a", "b", "c")):
         for j in range(raw_widths.get(c, 0)):
             d[f"{RAW_PREFIX}F{j}"] = list(np.linspace(0, 1, n) + j)
         path = (tmp_path / "latents" / "atlas=mini" / "window_s=-1"
-                / f"cohort={c}" / "data.parquet")
+                / f"cohort={c}" / "task=m" / "data.parquet")
         path.parent.mkdir(parents=True, exist_ok=True)
         t = pa.Table.from_pandas(pd.DataFrame(d), preserve_index=False)
         pq.write_table(t.replace_schema_metadata(

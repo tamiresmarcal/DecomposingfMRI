@@ -107,7 +107,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .io import (RAW_PREFIX, STATE_COLUMN_RE, STATE_K_BAND,
+from .io import (RAW_PREFIX, STATE_COLUMN_RE, STATE_K_BAND, hive_key,
                  latents_root, meta_dir)
 
 EMBEDDINGS = {
@@ -619,13 +619,27 @@ def column_name(method: str, embedding: str, k: int) -> str:
 
 
 # ----------------------------------------------------------------- data ---
-def cohort_paths(root: Path, atlas: str, window_s) -> dict[str, Path]:
-    d = latents_root(root, atlas, window_s)
-    if not d.is_dir():
-        return {}
-    return {p.name.split("=", 1)[1]: p / "data.parquet"
-            for p in sorted(d.glob("cohort=*"))
-            if (p / "data.parquet").exists()}
+def cell_paths(root: Path, atlas: str,
+               window_s) -> dict[tuple[str, str], Path]:
+    """{(cohort, task): latents file} for one (atlas, aperture) cell.
+
+    Keyed by the PAIR because `decompose` writes one file per (cohort, task) --
+    one file records one `stride_s`, and one cohort can hold two TRs. `--train`
+    and `--project` still name COHORTS: you train on a cohort and all of its
+    conditions come with it, which keeps the vocabulary the same as
+    `decompose`'s. Only the file enumeration is per cell.
+    """
+    from .io import latents_cells
+
+    return latents_cells(root, atlas, window_s)
+
+
+def _cell(k: tuple[str, str]) -> str:
+    return f"{k[0]}/{k[1]}"
+
+
+def _cells(ks) -> str:
+    return ", ".join(_cell(k) for k in sorted(ks))
 
 
 def _seq_lengths(df: pd.DataFrame) -> list[int]:
@@ -1043,15 +1057,20 @@ def _require_embeddings(paths: dict, embeddings: list[str], atlas: str,
 
 def run_one(root: Path, atlas: str, window_s, args):
     """-> (state columns written, state sets refused for a degenerate K)."""
-    paths = cohort_paths(root, atlas, window_s)
+    paths = cell_paths(root, atlas, window_s)
     if not paths:
         log(f"  atlas={atlas} window_s={window_s}: no latents, skipped")
         return [], []
-    train = [c for c in args.train if c in paths]
-    if not train:
+    # Cells to fit on, but the HASHES below keep naming cohorts: a fit is
+    # defined by which cohorts it pooled, and spelling that as cells would move
+    # every fit_hash the day a training cohort gained a condition even though
+    # the rows were unchanged. `n_train_rows` is what records an actual change.
+    train_cells = [k for k in paths if k[0] in set(args.train)]
+    train = sorted({k[0] for k in train_cells})
+    if not train_cells:
         raise SystemExit(f"none of --train {args.train} has latents at "
                          f"atlas={atlas} window_s={window_s}; found "
-                         f"{sorted(paths)}")
+                         f"{_cells(paths)}")
 
     # Every requested embedding is checked BEFORE anything is fitted. Checking
     # inside the loop would still have failed, but only after the earlier
@@ -1067,7 +1086,7 @@ def run_one(root: Path, atlas: str, window_s, args):
     # to have the same row count.
     from .decompose import latents_model_hash
 
-    cell_model_hash = latents_model_hash(paths[train[0]])
+    cell_model_hash = latents_model_hash(paths[train_cells[0]])
 
     # WHICH COHORTS GET LABELLED, said rather than inferred. `train + project`,
     # exactly as `decompose` says it -- two stages with the same train/project
@@ -1083,19 +1102,25 @@ def run_one(root: Path, atlas: str, window_s, args):
         # The old implicit default, now something you ask for. "Label whatever
         # is in the directory" is convenient and was the wrong DEFAULT: a
         # cohort that appeared in the cell got labelled without being named.
-        project = [c for c in paths if c not in set(train)]
-    unknown = [c for c in project if c not in paths]
+        project = sorted({k[0] for k in paths} - set(train))
+    have = {k[0] for k in paths}
+    unknown = [c for c in project if c not in have]
     if unknown:
         raise SystemExit(
             f"--project names cohort(s) with no latents at atlas={atlas} "
             f"window_s={window_s}: {unknown}\n"
-            f"  this cell has {sorted(paths)}\n"
+            f"  this cell has {_cells(paths)}\n"
             f"  run `decompose --project {' '.join(unknown)}` first, or fix "
             f"the spelling.")
-    label = [c for c in paths if c in set(train) | set(project)]
+    # Every CONDITION of a named cohort is labelled. Asking for a cohort and
+    # getting one of its two conditions would be a trap, and the condition
+    # split belongs to the ANALYSIS stages (--keep-tasks), not here: a state
+    # label has to mean the same thing in both before they can be compared.
+    wanted = set(train) | set(project)
+    label = [k for k in paths if k[0] in wanted]
     if len(label) < len(paths):
-        log(f"  labelling {label}; not asked for: "
-            f"{[c for c in paths if c not in label]}")
+        log(f"  labelling {_cells(label)}; not asked for: "
+            f"{_cells(k for k in paths if k not in label)}")
 
     # Families resolved against THIS cell, because `raw`'s width is a property
     # of the atlas and not of the command.
@@ -1131,13 +1156,13 @@ def run_one(root: Path, atlas: str, window_s, args):
             continue
         frames = {c: read_embedding(p, cols) for c, p in paths.items()}
 
-        Xtr, len_tr, share = _training_block(frames, train, cols, args)
+        Xtr, len_tr, share = _training_block(frames, train_cells, cols, args)
         how = "balanced" if args.balance_train else "pooled as-is"
         log(f"  {emb}: {len(cols)}-D, one fit on {len(Xtr):,} row(s) from "
             f"{train} ({how}); "
-            + "  ".join(f"{c} {share[c]:.0%}" for c in train)
+            + "  ".join(f"{_cell(k)} {share[k]:.0%}" for k in train_cells)
             + " of the merged rows, then projected onto "
-            + f"{sorted(set(paths) - set(train))}")
+            + f"{_cells(set(paths) - set(train_cells))}")
 
         methods = _methods_for(emb, args, atlas, window_s, skipped)
         for method in methods:
@@ -1225,21 +1250,21 @@ def run_one(root: Path, atlas: str, window_s, args):
                         f"  Delete {cache} and re-run with --refit.")
 
                 written, kept = {}, []
-                for cohort, f in frames.items():
-                    if cohort not in label:
+                for cell, f in frames.items():
+                    if cell not in label:
                         continue
                     # A cohort already carrying THIS fit is left alone. Not an
                     # optimisation: append_columns rewrites the whole file, so
                     # relabelling a cohort that needs nothing would churn every
                     # file in the cell on every run.
                     if (not args.refit
-                            and column_fit_hash(paths[cohort], col) == h):
-                        kept.append(cohort)
+                            and column_fit_hash(paths[cell], col) == h):
+                        kept.append(_cell(cell))
                         continue
                     X = f[cols].to_numpy(float)
                     lab = (cl.labels(X, lengths=_seq_lengths(f))
                            if method in SEQUENTIAL else cl.labels(X))
-                    append_columns(paths[cohort], {col: lab},
+                    append_columns(paths[cell], {col: lab},
                                    {col: {"method": method, "embedding": emb,
                                           "embedding_columns": cols,
                                           "k": int(cl.k_found), "fit_hash": h,
@@ -1253,7 +1278,7 @@ def run_one(root: Path, atlas: str, window_s, args):
                                           "n_train_rows": int(len(Xtr)),
                                           "written_utc": time.strftime(
                                               "%Y-%m-%dT%H:%M:%SZ", time.gmtime())}})
-                    written[cohort] = int(len(np.unique(lab)))
+                    written[_cell(cell)] = int(len(np.unique(lab)))
                 d = getattr(cl, "diagnostics", {}) or {}
                 extra = ""
                 if "n_valid_restarts" in d:
@@ -1403,14 +1428,14 @@ def check_grid(root: Path, args) -> pd.DataFrame:
     rows = []
     for atlas in args.atlas:
         for w in args.window_s:
-            paths = cohort_paths(root, atlas, w)
+            paths = cell_paths(root, atlas, w)
             if not paths:
                 rows.append({"atlas": atlas, "window_s": w, "ok": False,
                              "reason": "no latents (run stage 4)",
                              "cohorts": "-", "embeddings": "-", "existing": "-",
                              "rows": 0})
                 continue
-            train = [c for c in args.train if c in paths]
+            train = [k for k in paths if k[0] in set(args.train)]
             # Resolved per cell, exactly as run_one does -- otherwise --check
             # reports the FAMILY names as absent and the dry run disagrees with
             # the real one, which is the one thing a dry run must not do.
@@ -1451,7 +1476,7 @@ def check_grid(root: Path, args) -> pd.DataFrame:
                 reason = ""
             rows.append({"atlas": atlas, "window_s": w, "ok": not reason,
                          "reason": reason or "ready",
-                         "cohorts": ",".join(sorted(paths)),
+                         "cohorts": _cells(paths),
                          "embeddings": ",".join(have) or "-",
                          "raw_absent": ",".join(missing_raw) or "-",
                          "censor": pol_s, "existing": len(existing), "rows": n})
