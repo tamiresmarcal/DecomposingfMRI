@@ -208,7 +208,23 @@ def split_file(f: Path, dest: dict) -> None:
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    table = pq.read_table(f)
+    # ParquetFile, not pq.read_table: these leaves carry provenance columns
+    # that REPEAT a key in their own path -- censor's tables have a `policy`
+    # column under `policy=<name>/`, and after this split every one of them has
+    # a `task` column under `task=<t>/`. read_table builds a ParquetDataset
+    # even for a single file, infers those keys from the directory names, and
+    # then cannot merge the inferred dictionary<string> field with the file's
+    # own string column:
+    #
+    #   ArrowTypeError: Unable to merge: Field policy has incompatible types:
+    #   string vs dictionary<values=string, indices=int32, ordered=0>
+    #
+    # It is version-dependent -- pyarrow 18 raises, pyarrow 25 infers nothing
+    # for a file path and does not -- so it passes every local test and fails
+    # on the cluster. See io.read_file, which exists for this and which the
+    # library's own readers use. Kept inline rather than imported so this tool
+    # does not need the package on sys.path.
+    table = pq.ParquetFile(f).read()
     md = table.schema.metadata
     col = table.column("task").to_pylist()
     for task, to in dest.items():

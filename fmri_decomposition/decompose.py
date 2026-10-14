@@ -91,7 +91,8 @@ import pandas as pd
 
 # Identity and QC carried into the latents. Everything else in a dfc file is
 # either an edge (dropped -- it is already in dfc/) or a partition key.
-from .io import PASSTHROUGH_MAX_FEATURES, RAW_PREFIX, latents_root
+from .io import (PASSTHROUGH_MAX_FEATURES, RAW_PREFIX, latents_root,
+                 read_file)
 
 IDENT = ["cohort", "role", "model_hash", "task", "sub", "window_id", "start_s",
          "stimulus_start_s", "n_tr_effective", "frac_good_frames",
@@ -212,7 +213,12 @@ def load_censor(root: Path, policy: str | None, atlas: str, window_s, cohort: st
             f"Run:  fmri-decomp censor --policy config/censor/{policy}.yaml "
             f"--cohorts {cohort}")
 
-    subj = pd.concat([pd.read_parquet(p, columns=["sub", "task", "keep"])
+    # read_file, not pd.read_parquet: a censor table carries a `policy` column
+    # under `policy=<name>/` and a `task` column under `task=<t>/`, so the
+    # dataset layer infers both keys from the path and cannot merge them with
+    # the file's own columns. Raises on pyarrow 18, passes on 25. See
+    # io.read_file.
+    subj = pd.concat([read_file(p, ["sub", "task", "keep"]).to_pandas()
                       for p in subj_paths], ignore_index=True)
     keep_subs = set(zip(subj.loc[subj["keep"], "task"].astype(str),
                         subj.loc[subj["keep"], "sub"].astype(str)))
@@ -222,7 +228,7 @@ def load_censor(root: Path, policy: str | None, atlas: str, window_s, cohort: st
     keep_windows = None
     if win_paths:
         win = pd.concat(
-            [pd.read_parquet(p, columns=["sub", "task", "window_id", "keep"])
+            [read_file(p, ["sub", "task", "window_id", "keep"]).to_pandas()
              for p in win_paths], ignore_index=True)
         win = win.loc[win["keep"]]
         keep_windows = set(zip(win["task"].astype(str), win["sub"].astype(str),

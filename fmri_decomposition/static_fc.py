@@ -74,7 +74,7 @@ import numpy as np
 import pandas as pd
 
 from .dfc import pearson_upper
-from .io import edge_storage_mode, hive_key, meta_dir, static_fc_root
+from .io import edge_storage_mode, hive_key, meta_dir, read_file, static_fc_root
 
 POOL_CHOICES = ("task", "subject")
 
@@ -283,16 +283,18 @@ def read_cohort_table(root: Path, atlas: str, cohort: str,
             f"no static FC for atlas={atlas} cohort={cohort} task={task}.\n"
             f"  expected {path}\n"
             f"  run: fmri-decomp static-fc --atlas {atlas} --cohorts {cohort}")
+    # read_file throughout, never pd.read_parquet: `prov` writes `atlas` and
+    # `cohort` as columns and each row carries `task`, and all three are keys
+    # in this file's own path. The dataset layer infers them from the directory
+    # names and then cannot merge dictionary<string> with the stored string
+    # column -- raises on pyarrow 18, silent on 25. See io.read_file.
+    #
+    # It also applies the projection itself: a column this cell does not have
+    # is dropped rather than raising, because the width of the table depends on
+    # the storage mode and on which QC columns the writing version carried.
     if columns is not None:
-        import pyarrow.parquet as pq
-
-        have = set(pq.ParquetFile(path).schema_arrow.names)
-        # A projection names what it wants; a column this cell does not have
-        # is dropped rather than raising, because the width of the table
-        # depends on the storage mode and on which QC columns the writing
-        # version carried.
-        return pd.read_parquet(path, columns=[c for c in columns if c in have])
-    d = pd.read_parquet(path)
+        return read_file(path, columns).to_pandas()
+    d = read_file(path).to_pandas()
     if "edges" in d.columns:
         names = json.loads(d["edge_names"].iloc[0])
         wide = pd.DataFrame(np.vstack(d["edges"].to_numpy()), columns=names,
