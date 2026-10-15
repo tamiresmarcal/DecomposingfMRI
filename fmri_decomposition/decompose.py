@@ -345,6 +345,36 @@ def model_hash(meta: dict, features: list[str]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+def _reference_for_aperture(path: Path, window_s) -> Path:
+    """The `--legacy-hash-from` cell for THIS aperture.
+
+    `window_s` is in the hash payload, and unlike `--pca-latents` it is not a
+    flag anybody can forget: it is the aperture the task is processing. So a
+    reference from another aperture is not a mistake to report, it is a path to
+    resolve -- and it HAS to be resolved here, because one
+    `sbatch --array=0-3 ... 30 60 120 300` cannot carry four reference paths.
+
+    Only the `window_s=` key is substituted. Everything else about the path is
+    taken as given, and the clash check still runs on whatever comes back, so
+    pointing at the wrong atlas is still refused by name.
+    """
+    want = f"window_s={window_s}"
+    parts = [want if p.startswith("window_s=") else p for p in path.parts]
+    out = Path(*parts)
+    if out == path:
+        return out
+    if not out.exists():
+        raise SystemExit(
+            f"--legacy-hash-from {path} is for another aperture, and this "
+            f"run's one does not exist:\n"
+            f"  looked for {out}\n"
+            f"  `window_s` is part of the fit description, so the reference "
+            f"has to describe the same aperture. Only that key is "
+            f"substituted; point it at a cell whose atlas and cohort are the "
+            f"ones you mean.")
+    return out
+
+
 def _umap_latents(args) -> list[int]:
     """Which component counts UMAP is fitted at. Defaults to --n-latents.
 
@@ -431,6 +461,7 @@ def fit_meta(args, window_s, features: list[str]) -> dict:
     # this run's output with a claim about a model it did not use.
     ref = getattr(args, "legacy_hash_from", None)
     if ref:
+        ref = _reference_for_aperture(Path(ref), window_s)
         stored, _ = latents_fit_description(Path(ref))
         if not stored:
             raise SystemExit(

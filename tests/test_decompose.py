@@ -621,3 +621,69 @@ class TestTheGeneralLegacyHashBridge:
         a = parse("--atlas", "yeo7", "--window-s", "30")
         assert D.model_hash(D.fit_meta(a, "30", EDGES), EDGES) == \
             TestFitMetaIsHashStable.DFC_HASH
+
+
+class TestTheLegacyReferenceResolvesPerAperture:
+    """`window_s` is in the payload but is not a flag.
+
+    An `--array=0-3 ... 30 60 120 300` submission runs one aperture per task
+    and cannot carry four `--legacy-hash-from` paths, so the one it is given is
+    resolved per task. Pointing at window_s=300 for every aperture is what the
+    first attempt did, and it refused three of four with
+    `window_s: '300' (stored) vs '30' (this run)` -- a true clash about a key
+    nobody could have passed differently.
+    """
+
+    def cell(self, root, atlas, window_s, **extra):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        d = (root / "latents" / f"atlas={atlas}" / f"window_s={window_s}"
+             / "cohort=camcan" / "task=Movie")
+        d.mkdir(parents=True, exist_ok=True)
+        a = parse("--atlas", atlas, "--window-s", str(window_s))
+        desc = {**D.fit_meta(a, str(window_s), EDGES), **extra}
+        pq.write_table(
+            pa.table({"sub": ["S1"]}).replace_schema_metadata(
+                {k.encode(): json.dumps(v).encode()
+                 for k, v in desc.items()}), d / "data.parquet")
+        return d / "data.parquet"
+
+    def test_it_swaps_the_aperture_key(self, tmp_path):
+        self.cell(tmp_path, "yeo7", 30, bins=[2, 3, 5, 8])
+        ref300 = self.cell(tmp_path, "yeo7", 300, bins=[2, 3, 5, 8])
+        got = D._reference_for_aperture(ref300, "30")
+        assert "window_s=30/" in str(got).replace("\\\\", "/")
+        assert got.exists()
+
+    def test_the_hash_then_matches_this_apertures_cell(self, tmp_path):
+        ref30 = self.cell(tmp_path, "yeo7", 30, bins=[2, 3, 5, 8])
+        ref300 = self.cell(tmp_path, "yeo7", 300, bins=[2, 3, 5, 8])
+        a = parse("--atlas", "yeo7", "--window-s", "30",
+                  "--legacy-hash-from", str(ref300))
+        stored, _ = D.latents_fit_description(ref30)
+        assert (D.model_hash(D.fit_meta(a, "30", EDGES), EDGES)
+                == D.model_hash(stored, EDGES))
+
+    def test_a_path_without_the_key_is_left_alone(self, tmp_path):
+        f = tmp_path / "data.parquet"
+        assert D._reference_for_aperture(f, "30") == f
+
+    def test_a_missing_aperture_says_what_it_looked_for(self, tmp_path):
+        ref300 = self.cell(tmp_path, "yeo7", 300)
+        with pytest.raises(SystemExit) as e:
+            D._reference_for_aperture(ref300, "60")
+        msg = str(e.value)
+        assert "another aperture" in msg
+        assert "window_s=60" in msg
+
+    def test_the_wrong_atlas_is_still_refused_by_the_clash_check(self,
+                                                                tmp_path):
+        """Only window_s is substituted, so the rest of the path stays the
+        caller's claim and a mismatched atlas is still caught."""
+        ref = self.cell(tmp_path, "networks", 30, bins=[2, 3, 5, 8])
+        a = parse("--atlas", "yeo7", "--window-s", "30",
+                  "--legacy-hash-from", str(ref))
+        with pytest.raises(SystemExit) as e:
+            D.fit_meta(a, "30", EDGES)
+        assert "atlas" in str(e.value) and "DIFFERENT fit" in str(e.value)

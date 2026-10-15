@@ -956,12 +956,19 @@ option per removal does not scale and cannot cover the next one.
 over whatever this version no longer emits, `bins` and `project_cohorts` alike:
 
 ```bash
-REF=outputs/latents/atlas=networks/window_s=300/cohort=camcan/task=Movie/data.parquet
-sbatch --array=0-3 slurm/decomposition.sbatch networks 30 60 120 300 \
-  -- $TRAIN $PROJ $POL --pca-latents 3 --legacy-hash-from $REF
+for A in harvardoxford yeo7 networks; do
+  sbatch --array=0-3 slurm/decomposition.sbatch $A 30 60 120 300 \
+    -- $TRAIN $PROJ $POL --pca-latents 3 \
+       --legacy-hash-from outputs/latents/atlas=$A/window_s=300/cohort=camcan/task=Movie/data.parquet
+done
 ```
 
-Point it at one file the run reports as stale, for that atlas and aperture.
+**One reference per ATLAS covers all four apertures.** `window_s` is in the
+payload, but unlike `--pca-latents` it is not a flag anybody can forget -- it
+is the aperture the array task is processing -- and one `--array=0-3` cannot
+carry four reference paths. So only that key is substituted, per task. Nothing
+else about the path is: point it at the wrong atlas and the clash check still
+refuses by name.
 
 Keys BOTH descriptions carry must AGREE. A flag you actually forgot is still
 refused, and named with both values, because the alternative is to stamp this
