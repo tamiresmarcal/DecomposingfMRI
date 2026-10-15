@@ -553,3 +553,80 @@ class TestTaskIsAPartitionNotASecondTree:
                           "--pheno", "p.csv:,", "--task", "movie",
                           "--keep-tasks", "Movie"])
         assert a.task == "movie" and a.tasks == ["Movie"]
+
+
+class TestKeepTasksSelectsFilesNotJustRows:
+    """The failure a `--keep-tasks Movie` run hit on a split tree.
+
+    `discover` walks `cohort=camcan/task=*/subjects.parquet`, so since the task
+    split it yields one table per condition. A movie run therefore reaches
+    `task=Rest/subjects.parquet`, and filtering THAT row-wise raised
+
+        --keep-tasks ['Movie'] matches no row of .../task=Rest/subjects.parquet;
+        it has ['Rest']
+
+    -- a true statement about a file the run was never meant to read. Before
+    the split one file held both conditions and a row filter was the only
+    filter there could be; now the task is a key in the path, so the right
+    place to apply it is table selection.
+    """
+
+    def tree(self):
+        d = sets([
+            {"atlas": "yeo7", "window_s": "-1", "states": "HMM2_pca3_8",
+             "cohort": "camcan", "task": "Movie", "path": "m1"},
+            {"atlas": "yeo7", "window_s": "-1", "states": "HMM2_pca3_8",
+             "cohort": "camcan", "task": "Rest", "path": "r1"},
+            {"atlas": "networks", "window_s": "30", "states": "HMM1_pca3_10",
+             "cohort": "camcan", "task": "Movie", "path": "m2"},
+            {"atlas": "networks", "window_s": "30", "states": "HMM1_pca3_10",
+             "cohort": "camcan", "task": "Rest", "path": "r2"},
+            {"atlas": "yeo7", "window_s": "-1", "states": "HMM2_pca3_8",
+             "cohort": "ds002837", "task": "pulpfiction", "path": "x1"},
+        ])
+        return d
+
+    def test_a_movie_run_reads_only_the_movie_tables(self):
+        got = B.select_tables(self.tree(), "camcan", tasks=["Movie"])
+        assert sorted(got["path"]) == ["m1", "m2"]
+        assert set(got["task"]) == {"Movie"}
+
+    def test_a_rest_run_reads_only_the_rest_tables(self):
+        got = B.select_tables(self.tree(), "camcan", tasks=["Rest"])
+        assert sorted(got["path"]) == ["r1", "r2"]
+
+    def test_without_keep_tasks_both_are_offered(self):
+        """Unchanged: `one_row_per_subject` is then what refuses, which is the
+        guard that stops a subject landing in two folds of one split."""
+        got = B.select_tables(self.tree(), "camcan")
+        assert sorted(got["path"]) == ["m1", "m2", "r1", "r2"]
+
+    def test_another_cohort_is_never_included(self):
+        got = B.select_tables(self.tree(), "camcan")
+        assert "x1" not in set(got["path"])
+
+    def test_a_misspelled_label_names_what_is_present(self):
+        with pytest.raises(SystemExit) as e:
+            B.select_tables(self.tree(), "camcan", tasks=["movie"])
+        msg = str(e.value)
+        assert "matches no transition table" in msg
+        assert "Movie" in msg and "Rest" in msg
+        assert "case sensitive" in msg
+
+    def test_it_composes_with_the_atlas_and_aperture_filters(self):
+        got = B.select_tables(self.tree(), "camcan", atlas=["yeo7"],
+                              window_s=["-1"], tasks=["Movie"])
+        assert got["path"].tolist() == ["m1"]
+
+    def test_an_empty_intersection_still_refuses(self):
+        with pytest.raises(SystemExit, match="no state set matches"):
+            B.select_tables(self.tree(), "camcan", atlas=["harvardoxford"])
+
+    def test_the_order_is_still_atlas_then_K_then_aperture(self):
+        """Not a global aperture order -- atlas leads, so `networks/30s` comes
+        before `yeo7/frame`. Pinned because the selection reads in this order
+        and DESIGN.md reports the axes in it."""
+        got = B.select_tables(self.tree(), "camcan", tasks=["Movie"])
+        assert list(zip(got["atlas"], got["K"], got["window_s_num"])) == \
+            sorted(zip(got["atlas"], got["K"], got["window_s_num"]))
+        assert got["path"].tolist() == ["m2", "m1"]

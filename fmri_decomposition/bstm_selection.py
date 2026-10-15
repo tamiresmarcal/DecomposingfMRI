@@ -529,6 +529,41 @@ def discover(root: Path) -> pd.DataFrame:
     return d
 
 
+def select_tables(sets: pd.DataFrame, cohort: str, atlas=None,
+                  window_s=None, tasks=None) -> pd.DataFrame:
+    """Which transition tables this run reads, in the order it reads them.
+
+    `tasks` (`--keep-tasks`) selects FILES here, not only rows inside them.
+    Since the task split there is one table per (cohort, task), so a
+    `--keep-tasks Movie` run walks past `task=Rest/subjects.parquet` -- and
+    filtering that one row-wise raised "matches no row ... it has ['Rest']",
+    which is true and is not a problem. Before the split one file held both
+    conditions and the row filter was the only filter there could be.
+
+    The task is a key in the path, so this costs a comparison rather than a
+    read, and `one_row_per_subject` stays as the backstop for a file that
+    really does mix conditions.
+    """
+    sets = sets[sets["cohort"] == cohort]
+    if atlas:
+        sets = sets[sets["atlas"].isin(atlas)]
+    if window_s:
+        sets = sets[sets["window_s"].isin([str(w) for w in window_s])]
+    if tasks:
+        have = sorted(sets["task"].dropna().unique())
+        sets = sets[sets["task"].isin(tasks)]
+        if sets.empty:
+            raise SystemExit(
+                f"--keep-tasks {list(tasks)} matches no transition table for "
+                f"cohort={cohort}.\n"
+                f"  tasks present: {have}\n"
+                f"  These are the BIDS labels as the data spells them, so "
+                f"they are case sensitive -- `Movie`, not `movie`.")
+    if sets.empty:
+        raise SystemExit("no state set matches --atlas / --window-s / --cohort")
+    return sets.sort_values(["atlas", "K", "window_s_num"]).reset_index(drop=True)
+
+
 def design(cov: pd.DataFrame) -> np.ndarray:
     X = pd.get_dummies(cov, drop_first=True, dummy_na=False).astype(float)
     return X.fillna(X.mean()).to_numpy()
@@ -648,15 +683,8 @@ def run(args) -> int:
     from joblib import Parallel, delayed
 
     root = Path(args.output_root) if args.output_root else _default_root()
-    sets = discover(root)
-    sets = sets[sets["cohort"] == args.cohort]
-    if args.atlas:
-        sets = sets[sets["atlas"].isin(args.atlas)]
-    if args.window_s:
-        sets = sets[sets["window_s"].isin([str(w) for w in args.window_s])]
-    if sets.empty:
-        raise SystemExit("no state set matches --atlas / --window-s / --cohort")
-    sets = sets.sort_values(["atlas", "K", "window_s_num"]).reset_index(drop=True)
+    sets = select_tables(discover(root), args.cohort, args.atlas,
+                         args.window_s, args.tasks)
 
     log(f"phenotype for target={args.target!r}")
     pheno = read_phenotype(args.pheno, args.id_col, args.target,
