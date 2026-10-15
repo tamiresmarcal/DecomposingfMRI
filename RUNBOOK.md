@@ -96,10 +96,27 @@ apptainer silently mounts your *current directory* as the container — you then
 get `python3: executable file not found`, which looks like a broken image and is
 not one. The `:?` form fails immediately and says so.
 
+`slurm/env.sh.example` now defines `RUN` and `RUN23` itself, so `source
+slurm/env.sh` is enough. **Your `slurm/env.sh` is gitignored and predates that**,
+so add the block from the example to your copy once -- otherwise `$RUN` stays
+empty and the commands below run the login node's bare `python3`:
+
+```bash
+diff <(grep -c . slurm/env.sh) /dev/null >/dev/null  # your copy exists?
+grep -q 'RUN=' slurm/env.sh || sed -n '/interactive shortcuts/,/^$/p' slurm/env.sh.example
+```
+
+Until then, by hand -- and note the `:?`, which is the whole point:
+
 ```bash
 RUN="apptainer exec --cleanenv --bind /project,/scratch,/home ${FMRIDECOMP_SIF45:?source slurm/env.sh}"
 RUN23="apptainer exec --cleanenv --bind /project,/scratch,/home --pwd $PWD ${FMRIDECOMP_SIF:?source slurm/env.sh}"
 ```
+
+An **empty** `$RUN` is the failure that does not announce itself: `$RUN python3
+-m fmri_decomposition.cli status` becomes plain `python3 ...` and dies on
+`ModuleNotFoundError: No module named 'numpy'`, which reads like a broken
+install rather than a missing variable.
 
 **`$RUN23` is the OTHER image**, and `tools/*.py` need it: a bare `python3` on a
 login node has no pandas, so `tools/make_participants.py` and
@@ -120,6 +137,12 @@ what is needed across two files, so it is a list:
 CAMCAN=/project/6008063/tamires/cohorts/camcan/dataman/useraccess/opendata/paule_toussaint_camcan01870
 PHENO=("$CAMCAN/approved_data.tsv:"$'\t' "$CAMCAN/standard_data.csv:,")
 ```
+
+Better: put those two lines in your gitignored `slurm/env.sh` (there is a
+commented template in `env.sh.example`), so sourcing sets them and no shell is
+ever one line short of a working selection run. `--pheno` is `required=True` in
+both stages, so an empty `PHENO` is an argparse error raised when the JOB
+starts -- behind a dependency chain, a day after you submitted it.
 
 An **array**, and every use below is `--pheno "${PHENO[@]}"`. Two reasons it
 cannot be a plain string: the entries are two separate arguments, and the first
