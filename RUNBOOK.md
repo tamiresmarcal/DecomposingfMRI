@@ -936,6 +936,40 @@ Everything else is carried verbatim: the rows, the embedding columns, every
 other state column, and the schema metadata -- `model_hash`, `stride_s`,
 `censor_policy`, and the remaining `clusterers` entries.
 
+#### A WINDOWED TREE NEEDS THE GENERAL BRIDGE -- `--legacy-hash-from`
+
+The windowed latents are older still than the `-1` ones, and their refusal
+names a second removed key:
+
+```
+  They are stale because this run describes a DIFFERENT fit:
+      bins: [2, 3, 5, 8] -> '(absent)'
+      n_latents: [3] -> [2, 3, 5]
+```
+
+`n_latents` is an ordinary forgotten flag -- those fits used `--pca-latents 3`.
+`bins` is not: it left the payload when quantile thresholding moved out of this
+stage into `cluster`, so there is no `--bins` to set any more. One `--legacy-*`
+option per removal does not scale and cannot cover the next one.
+
+`--legacy-hash-from` reads the description a cell was WRITTEN with and carries
+over whatever this version no longer emits, `bins` and `project_cohorts` alike:
+
+```bash
+REF=outputs/latents/atlas=networks/window_s=300/cohort=camcan/task=Movie/data.parquet
+sbatch --array=0-3 slurm/decomposition.sbatch networks 30 60 120 300 \
+  -- $TRAIN $PROJ $POL --pca-latents 3 --legacy-hash-from $REF
+```
+
+Point it at one file the run reports as stale, for that atlas and aperture.
+
+Keys BOTH descriptions carry must AGREE. A flag you actually forgot is still
+refused, and named with both values, because the alternative is to stamp this
+run's output with a hash claiming a model it did not use -- the one confusion
+`model_hash` exists to prevent. So the sequence is: run it, read the refusal,
+add the flags it names, pass `--legacy-hash-from` for the keys that no longer
+exist.
+
 #### THE HASH BRIDGE -- `--legacy-project-hash`
 
 Only for latents written before 2026-10-08. `project_cohorts` was part of

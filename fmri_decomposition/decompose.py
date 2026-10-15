@@ -94,6 +94,11 @@ import pandas as pd
 from .io import (PASSTHROUGH_MAX_FEATURES, RAW_PREFIX, latents_root,
                  read_file)
 
+#: Stored beside the fit description but describing the FILE, not the fit, so
+#: never carried into a hash by --legacy-hash-from. `tasks` is the conditions
+#: one cell happens to cover, which is per-file by construction.
+_NEVER_CARRIED = frozenset({"tasks"})
+
 IDENT = ["cohort", "role", "model_hash", "task", "sub", "window_id", "start_s",
          "stimulus_start_s", "n_tr_effective", "frac_good_frames",
          "rank_deficient", "crosses_run_boundary"]
@@ -415,6 +420,40 @@ def fit_meta(args, window_s, features: list[str]) -> dict:
     # without re-clustering it to get there.
     if getattr(args, "legacy_project_hash", False):
         meta["project_cohorts"] = list(args.project)
+    # The general form of the same bridge. `project_cohorts` is not the only key
+    # that has left this payload -- `bins` left when quantile thresholding moved
+    # out of this stage into `cluster` -- and a key that left cannot be restored
+    # by any flag, because there is no flag left to set. So instead of one
+    # --legacy-* option per removal, this reads the fit description an existing
+    # cell was WRITTEN with and carries over the keys the current code no longer
+    # emits at all. Keys both descriptions carry must AGREE: a difference there
+    # is a genuinely different fit, and matching its hash anyway would stamp
+    # this run's output with a claim about a model it did not use.
+    ref = getattr(args, "legacy_hash_from", None)
+    if ref:
+        stored, _ = latents_fit_description(Path(ref))
+        if not stored:
+            raise SystemExit(
+                f"--legacy-hash-from {ref}: no fit description in that file.\n"
+                f"  Point it at a latents data.parquet that this run would "
+                f"otherwise read as stale.")
+        clash = {k: (stored[k], meta[k]) for k in sorted(meta)
+                 if k in stored and stored[k] != meta[k]}
+        if clash:
+            lines = [f"--legacy-hash-from {ref} describes a DIFFERENT fit, so "
+                     f"its hash cannot be reproduced by carrying keys:"]
+            lines += [f"      {k}: {was!r} (stored) vs {now!r} (this run)"
+                      for k, (was, now) in clash.items()]
+            lines += [
+                "  Each line is a flag this command is missing or has changed."
+                " Add it back and the rest of the payload will line up.",
+                "  This bridge only restores keys the current code no longer "
+                "writes; it will not paper over a flag you did not pass.",
+            ]
+            raise SystemExit("\n".join(lines))
+        meta.update({k: v for k, v in stored.items()
+                     if k not in _NOT_FIT_KEYS and k not in _NEVER_CARRIED
+                     and k not in meta})
     return meta
 
 
@@ -1193,6 +1232,16 @@ def add_arguments(p) -> None:
     p.add_argument("--project", nargs="*", default=[],
                    help="cohorts the fit is APPLIED to. Omit it and only "
                         "--train is written.")
+    p.add_argument("--legacy-hash-from", metavar="LATENTS", default=None,
+                   help="reproduce the model_hash of an existing cell by "
+                        "carrying over the payload keys this version no longer "
+                        "writes (`bins`, `project_cohorts`). The general form "
+                        "of --legacy-project-hash, and the only way to match a "
+                        "tree written before a key was REMOVED, since no flag "
+                        "sets a key that is gone. Point it at one latents "
+                        "data.parquet the run reports as stale. Keys both "
+                        "descriptions carry must agree, so a flag you actually "
+                        "forgot is still refused and named.")
     p.add_argument("--legacy-project-hash", action="store_true",
                    help="include --project in model_hash, as runs before "
                         "2026-10-08 did. A BRIDGE, not a setting: latents "
