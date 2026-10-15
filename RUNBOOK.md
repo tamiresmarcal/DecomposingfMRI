@@ -905,6 +905,37 @@ Leaving `--overwrite` off also keeps the guard. `refuse_to_destroy_states` stops
 a cell that exists at a DIFFERENT hash from being rewritten silently, so if
 something really does need replacing you are told rather than charged for it.
 
+#### Removing a state set that only some cells carry
+
+A state set present in one condition and absent from another is a permanent
+nuisance rather than a one-off: `transitions --check` reports every cell that
+lacks it ("stage 4b ran unevenly"), and `select-bstm` ranks it for whichever
+condition has it, so one arm's summary.csv carries rows the other cannot.
+
+That is what the legacy `HMM_*` columns are -- the naming from before HMM1 and
+HMM2 became separate definitions, which the current code never writes again.
+
+```bash
+$RUN python3 tools/drop_state_columns.py --states HMM_pca3_8 HMM_pca3_27 \
+                                                  HMM_umap3_8 HMM_umap3_27
+$RUN python3 tools/drop_state_columns.py --states ... --apply
+```
+
+**`rm -rf outputs/transitions/.../states=X` on its own does not hold.**
+`transitions` builds its plan from the state COLUMNS inside the latents, so the
+next run regenerates exactly what was deleted. The columns are the source and
+the transitions tables are derived, so the tool removes the columns first and
+the derived tables second.
+
+It takes EXACT names, never a glob: `HMM_*` would also match `HMM1_*` and
+`HMM2_*` and delete the current definitions along with the legacy ones. A name
+matching nothing is reported, and all names matching nothing is a refusal --
+a typo that silently cleans up zero columns is the failure mode here.
+
+Everything else is carried verbatim: the rows, the embedding columns, every
+other state column, and the schema metadata -- `model_hash`, `stride_s`,
+`censor_policy`, and the remaining `clusterers` entries.
+
 #### THE HASH BRIDGE -- `--legacy-project-hash`
 
 Only for latents written before 2026-10-08. `project_cohorts` was part of
