@@ -758,6 +758,15 @@ camcan` covers both in one pass — the cohort list does not change at all:
 
 ```bash
 source slurm/env.sh
+# PHENO is NOT in env.sh. It is yours to set, once per shell -- the paths are a
+# fact about your filesystem and the tables are not redistributable, which is
+# why nothing in the repo can default them. See "The phenotype tables, once."
+# above and paste those two lines here. Eight selection jobs once died on exit
+# code 2 for want of them, a day into the dependency chain, because a new login
+# shell had `source slurm/env.sh` and no PHENO.
+CAMCAN=/project/6008063/tamires/cohorts/camcan/dataman/useraccess/opendata/paule_toussaint_camcan01870
+PHENO=("$CAMCAN/approved_data.tsv:"$'\t' "$CAMCAN/standard_data.csv:,")
+
 R=<the censor job id>           # the tail of the rebuild, or drop the
                                 # --dependency=afterok:$R below if the
                                 # derived tables are already current
@@ -805,18 +814,26 @@ S=$(sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
       -- --atlas $ATLASES $POL | cut -d';' -f1)
 
 # ---- the four rankings, two per arm --------------------------------------
-for Y in $TARGETS; do
-  for ARM in "movie Movie" "rest Rest"; do
-    set -- $ARM
-    sbatch --kill-on-invalid-dep=yes --dependency=afterok:$T \
-      --time=12:00:00 --mem=32G slurm/model_selection.sbatch $Y -- \
-        --cohort camcan --task $1 --keep-tasks $2 --pheno "${PHENO[@]}"
-    sbatch --kill-on-invalid-dep=yes --dependency=afterok:$S \
-      slurm/fcm_selection.sbatch $Y -- \
-        --cohorts camcan --task $1 --keep-tasks $2 \
-        --atlas $ATLASES --pheno "${PHENO[@]}"
+# Guarded, because `--pheno` is required=True in both selections: an empty
+# PHENO is an argparse error, exit code 2, AFTER the job has waited out the
+# whole chain. Checking it here costs nothing and the queue costs a day.
+if [[ ${#PHENO[@]} -eq 0 ]]; then
+  echo "SKIPPING the selections: PHENO is empty -- set CAMCAN and PHENO (see" \
+       "\"The phenotype tables, once.\") and submit the rankings separately."
+else
+  for Y in $TARGETS; do
+    for ARM in "movie Movie" "rest Rest"; do
+      set -- $ARM
+      sbatch --kill-on-invalid-dep=yes --dependency=afterok:$T \
+        --time=12:00:00 --mem=32G slurm/model_selection.sbatch $Y -- \
+          --cohort camcan --task $1 --keep-tasks $2 --pheno "${PHENO[@]}"
+      sbatch --kill-on-invalid-dep=yes --dependency=afterok:$S \
+        slurm/fcm_selection.sbatch $Y -- \
+          --cohorts camcan --task $1 --keep-tasks $2 \
+          --atlas $ATLASES --pheno "${PHENO[@]}"
+    done
   done
-done
+fi
 
 squeue -u $USER -o "%.12i %.32j %.9T %.11M %R"
 ```
