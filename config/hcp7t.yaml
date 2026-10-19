@@ -1,0 +1,138 @@
+# HCP Young Adult 7T movie-watching -- DRAFT, NOT YET VERIFIED AGAINST DATA.
+#
+# Unlike config/ds002837.yaml, whose header says every fact in it was confirmed
+# against the dataset README, the three marked TODO blocks below are GUESSES and
+# the cohort must not be run until they are settled. `check_cohort.py` catches
+# the structural ones (paths, discovery, TR); it cannot catch the two that
+# matter most, which are about what the files already had done to them.
+#
+# WHAT IS ESTABLISHED
+# -------------------
+#   - Four movie runs per subject, each its OWN task: MOVIE1..MOVIE4. They are
+#     not four runs of one stimulus -- different films, and (see below) two
+#     different scan sessions.
+#   - The volumetric file is the one this pipeline can read. The *.dtseries.nii
+#     are CIFTI grayordinates and stage 1 is `nib.load` + voxel membership.
+#   - The concatenated `tfMRI_MOVIE_7T/` directory is deliberately NOT matched.
+#     Handing the pipeline one 4-run file would make it see a single run, so a
+#     120s or 300s window could straddle the junction between two different
+#     films, two phase-encode directions and two scan days, with
+#     `crosses_run_boundary` never firing because there is no boundary to see.
+#     `MOVIE?_7T_??` requires the digit and the PE suffix, which that directory
+#     has neither of.
+#   - Phase encoding: MOVIE1/MOVIE4 are AP, MOVIE2/MOVIE3 are PA. HCP acquires
+#     opposite-PE pairs so TOPUP can undo the distortion; after the minimal
+#     preprocessing pipeline both are in the same space, so this config does not
+#     branch on it. It is recorded here because PE direction, film identity and
+#     scan session are ALIASED in this design -- MOVIE1+2 in one session,
+#     MOVIE3+4 in another -- so a difference between movies cannot be read as a
+#     stimulus effect.
+#   - `space` is FSL's MNI152 (what HCP's MNINonLinear targets), NOT the
+#     MNI152NLin2009cAsym of the three fMRIPrep cohorts. HarvardOxford and Yeo
+#     are distributed in exactly this space, so the atlas/template match is
+#     BETTER here than for the existing cohorts. The sphere-based `networks`
+#     atlas is the one to check, per the README's template caveat.
+#
+# WHY NOT THE MSMAll CIFTI, WHICH HCP THEMSELVES RECOMMEND
+# -------------------------------------------------------
+# Because `model_hash` hashes the FEATURE NAMES (`edges_digest`), and
+# `decompose` fits one scaler/PCA/UMAP on pooled training rows. A Glasser
+# parcellation gives different columns, so this cohort could not be pooled with
+# or projected onto the existing fit -- every cell would read as a different
+# model. MSMAll is better WITHIN HCP; using it only here would put a
+# cohort-by-atlas confound exactly where the design is trying to isolate a
+# difference between MODELS. Run it, if wanted, as a separate within-HCP
+# sensitivity analysis with its own --train.
+
+cohort: hcp7t
+tr: 1.0                 # TODO VERIFY. 1.0s is the published 7T movie TR, but
+                        # like ds002837 this is from the protocol and not yet
+                        # from the headers. check_cohort.py reports what the
+                        # files actually say.
+
+# TODO SITE PATH. The subject directories sit directly under this root, each
+# holding MNINonLinear/Results/.
+derivatives_root: /project/6008063/tamires/cohorts/hcp7t
+output_root: /project/6008063/tamires/DecomposingfMRI/outputs
+space: MNI152NLin6Asym
+participants: /project/6008063/tamires/DecomposingfMRI/config/hcp7t_participants.csv
+
+atlases: [harvardoxford, yeo7, networks]
+
+discovery:
+  backend: glob
+  # Subject ids are bare 6-digit numbers with no `sub-` prefix, and there is no
+  # BIDS `task-` entity, so both patterns are overridden. `subject_pattern` is
+  # matched against the WHOLE path and `task_pattern` against the FILENAME only
+  # (cohort.py `_discover_glob`), which is why the first anchors on the
+  # directory that follows it and the second does not need to.
+  bold_glob: "*/MNINonLinear/Results/tfMRI_MOVIE?_7T_??/tfMRI_MOVIE?_7T_??_hp2000_clean_rclean_tclean.nii.gz"
+  mask_glob: "brainmask_fs.1.60.nii.gz"
+  subject_pattern: "/([0-9]{6})/MNINonLinear"
+  # Captures MOVIE1..MOVIE4 as the path spells them, so the partitions come out
+  # `task=MOVIE1`. That is the same rule `--keep-tasks` follows everywhere else
+  # ("the BIDS labels as the data spells them"); lowercasing would mean the
+  # config and the filesystem disagree about the name of the same thing.
+  task_pattern: "tfMRI_(MOVIE[0-9])_7T"
+  # The default excludes "rest"; nothing here is named that, and the
+  # concatenated directory is already excluded by the glob above.
+  exclude_tasks: []
+
+# TODO BLOCKED. `_rclean_tclean` is NOT standard HCP naming -- the original HCP
+# outputs in these directories are 9 years old and these files are 4 -- and it
+# is not documented anywhere I could find. Whoever produced them chose a
+# nuisance regression and a temporal filter, and until that is known these two
+# blocks are unanswerable:
+#
+#   - if motion regression is already baked in, this is ds002837's situation:
+#     `already_applied: true`, `strategy: none`.
+#   - if it is not, the 12 columns of Movement_Regressors.txt have to be
+#     regressed here, and `format: afni_1D` reads them (np.loadtxt), though
+#     note activation.py honours `strategy` only for fmriprep_tsv.
+#
+# Find the script that made them before setting these.
+filtering:
+  already_applied: true
+  bandpass: null
+  detrend: false
+  standardize: false
+
+confounds:
+  format: afni_1D
+  strategy: none
+  # SUBJECT-LEVEL QC only, which is all this key is for. One value per frame,
+  # readable by np.loadtxt.
+  motion_glob: "Movement_RelativeRMS.txt"
+  # TODO BLOCKED. HCP ships no censor file, and the fd_column/fd_threshold
+  # route is honoured for fmriprep_tsv only -- so as written this cohort gets
+  # NO frame censoring at all, while the other three are gated under
+  # `motion`. That is the one asymmetry that would undermine the comparison,
+  # for the same reason static_fc.py insists on the same censor table across
+  # arms. Fix by converting Movement_RelativeRMS.txt to a 0/1 censor 1D per
+  # run and pointing censor_glob at it; relative RMS is close to Power FD but
+  # not identical, so the 0.5 threshold needs re-deriving, not copying.
+  censor_glob: null
+  dilate_tr: 1
+
+stimulus:
+  timing_source: identity
+  # NOT `clip`, despite HCP being the cohort that key was written for. `dfc.py`
+  # flags `crosses_clip_boundary` from a `clip_idx` column, and NOTHING in the
+  # repo produces that column -- the branch is dead. Until it is implemented, a
+  # long window will silently span the cut between two unrelated clips and the
+  # rest block between them. Clip timings:
+  # https://wiki.humanconnectome.org/docs/7T%20Movie%20watching%20task%20clip%20info%20timing%20versions%20shown%20per%20individual%20subject.html
+  unit_of_analysis: run
+  # There IS a shared stimulus, so the alignment gate is meaningful -- unlike
+  # Cam-CAN's rest. But that wiki page is titled "versions shown per individual
+  # subject", so confirm every subject saw the same montage before trusting a
+  # FAIL here to mean misalignment rather than design.
+  isc_gate_tr: 1.0
+  # TODO. Left empty so stage 3 falls back to each file's observed length, which
+  # is what the chain script's "--no-strict" prompt is about. Fill from the
+  # headers once extraction has run.
+  durations_s: {}
+
+runs:
+  mode: separate
+  drop_boundary_windows: false
