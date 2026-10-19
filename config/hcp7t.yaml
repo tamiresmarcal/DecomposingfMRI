@@ -84,40 +84,47 @@ discovery:
   # concatenated directory is already excluded by the glob above.
   exclude_tasks: []
 
-# TODO BLOCKED. `_rclean_tclean` is NOT standard HCP naming -- the original HCP
-# outputs in these directories are 9 years old and these files are 4 -- and it
-# is not documented anywhere I could find. Whoever produced them chose a
-# nuisance regression and a temporal filter, and until that is known these two
-# blocks are unanswerable:
+# SETTLED EMPIRICALLY (2026-10), not by finding the script. Two measurements
+# on 100610/MOVIE1, over 22,552 voxels of a mid-brain slab:
 #
-#   - if motion regression is already baked in, this is ds002837's situation:
-#     `already_applied: true`, `strategy: none`.
-#   - if it is not, the 12 columns of Movement_Regressors.txt have to be
-#     regressed here, and `format: afni_1D` reads them (np.loadtxt), though
-#     note activation.py honours `strategy` only for fmriprep_tsv.
+#   median R^2 of the 12 motion regressors = 0.0251
+#       Chance for 12 predictors over ~900 TRs is ~12/900 = 0.013, so this is
+#       about 1.9x chance -- small, but NOT zero. Had those columns been
+#       projected out, the residuals would be orthogonal to them and R^2 would
+#       be exactly 0. So `_rclean_tclean` did NOT regress Movement_Regressors,
+#       which is what ICA-FIX looks like: structured motion components removed,
+#       the regressors themselves never subtracted. Motion is therefore
+#       regressed HERE, as camcan and cneuromod do it.
 #
-# Find the script that made them before setting these.
+#   power below 0.01 Hz = 20.8%, above 0.1 Hz = 31.2%
+#       Full bandwidth survives, so the only highpass is hp2000 (0.0005 Hz).
+#       No band-pass was pre-applied, so this cohort does its own -- again
+#       matching camcan and cneuromod rather than ds002837, whose 0.01-1.0 Hz
+#       is baked in by afni_proc.
+#
+# The result is that all three of the non-ds002837 cohorts now share one
+# recipe: band-pass 0.01-0.1, detrend, 24HMP, FD 0.5.
 filtering:
-  already_applied: true
-  bandpass: null
-  detrend: false
+  already_applied: false
+  bandpass: [0.01, 0.1]
+  detrend: true
   standardize: false
 
+# fMRIPrep's dialect, spoken by tools/hcp_confounds.py. Not `afni_1D`, which
+# would read Movement_Regressors.txt but give 12 columns and no censoring:
+# `strategy` is honoured for fmriprep_tsv ONLY, and `fd_threshold` needs a
+# `framewise_displacement` COLUMN that HCP does not ship. Run
+#     python tools/hcp_confounds.py config/hcp7t.yaml --apply
+# before stage 1; without the sidecars this cohort silently gets neither.
 confounds:
-  format: afni_1D
-  strategy: none
-  # SUBJECT-LEVEL QC only, which is all this key is for. One value per frame,
-  # readable by np.loadtxt.
-  motion_glob: "Movement_RelativeRMS.txt"
-  # TODO BLOCKED. HCP ships no censor file, and the fd_column/fd_threshold
-  # route is honoured for fmriprep_tsv only -- so as written this cohort gets
-  # NO frame censoring at all, while the other three are gated under
-  # `motion`. That is the one asymmetry that would undermine the comparison,
-  # for the same reason static_fc.py insists on the same censor table across
-  # arms. Fix by converting Movement_RelativeRMS.txt to a 0/1 censor 1D per
-  # run and pointing censor_glob at it; relative RMS is close to Power FD but
-  # not identical, so the 0.5 threshold needs re-deriving, not copying.
-  censor_glob: null
+  format: fmriprep_tsv
+  strategy: 24hmp
+  confounds_glob: "*_desc-confounds_timeseries.tsv"
+  # The same threshold as camcan and cneuromod, and it means the same thing
+  # because hcp_confounds.py computes Power FD from the six parameters rather
+  # than reusing Movement_RelativeRMS.txt, which is an RMS displacement and a
+  # different quantity.
+  fd_threshold: 0.5
   dilate_tr: 1
 
 stimulus:
