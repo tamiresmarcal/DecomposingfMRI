@@ -50,9 +50,12 @@ tr: 1.0                 # TODO VERIFY. 1.0s is the published 7T movie TR, but
                         # from the headers. check_cohort.py reports what the
                         # files actually say.
 
-# TODO SITE PATH. The subject directories sit directly under this root, each
-# holding MNINonLinear/Results/.
-derivatives_root: /project/6008063/tamires/cohorts/hcp7t
+# VERIFIED 2026-10: 59 six-digit subject directories sit directly under this
+# root, each holding MNINonLinear/Results/tfMRI_MOVIE<N>_7T_<PE>/. The sibling
+# `test_file_connect` and `unzip_hcp.sh` do not match the glob, and could not
+# be mistaken for subjects anyway since `subject_pattern` demands six digits
+# followed by /MNINonLinear.
+derivatives_root: /project/6008063/tamires/cohorts/hcp
 output_root: /project/6008063/tamires/DecomposingfMRI/outputs
 space: MNI152NLin6Asym
 participants: /project/6008063/tamires/DecomposingfMRI/config/hcp7t_participants.csv
@@ -67,6 +70,9 @@ discovery:
   # (cohort.py `_discover_glob`), which is why the first anchors on the
   # directory that follows it and the second does not need to.
   bold_glob: "*/MNINonLinear/Results/tfMRI_MOVIE?_7T_??/tfMRI_MOVIE?_7T_??_hp2000_clean_rclean_tclean.nii.gz"
+  # Resolved against the BOLD file's own directory -- cohort.py does
+  # `path.parent.glob(mask_glob)` -- so a bare sibling name is right here,
+  # where ds002837 needs `../anat/...`.
   mask_glob: "brainmask_fs.1.60.nii.gz"
   subject_pattern: "/([0-9]{6})/MNINonLinear"
   # Captures MOVIE1..MOVIE4 as the path spells them, so the partitions come out
