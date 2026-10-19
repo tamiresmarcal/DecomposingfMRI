@@ -84,47 +84,64 @@ discovery:
   # concatenated directory is already excluded by the glob above.
   exclude_tasks: []
 
-# SETTLED EMPIRICALLY (2026-10), not by finding the script. Two measurements
-# on 100610/MOVIE1, over 22,552 voxels of a mid-brain slab:
+# THE FILE IS ALREADY FULLY CLEANED -- the suffixes are HCP pipeline stages,
+# not someone's ad-hoc script:
 #
-#   median R^2 of the 12 motion regressors = 0.0251
-#       Chance for 12 predictors over ~900 TRs is ~12/900 = 0.013, so this is
-#       about 1.9x chance -- small, but NOT zero. Had those columns been
-#       projected out, the residuals would be orthogonal to them and R^2 would
-#       be exactly 0. So `_rclean_tclean` did NOT regress Movement_Regressors,
-#       which is what ICA-FIX looks like: structured motion components removed,
-#       the regressors themselves never subtracted. Motion is therefore
-#       regressed HERE, as camcan and cneuromod do it.
+#   hp2000   highpass at 2000s (0.0005 Hz)
+#   clean    sICA + FIX
+#   rclean   ReClean, HCP's automated pipeline for improved sICA artifact
+#            removal on top of FIX
+#   tclean   temporal ICA (tICA) cleanup, which removes global NOISE while
+#            preserving global SIGNAL -- so this data has had the equivalent
+#            of GSR's benefit without GSR's cost
 #
-#   power below 0.01 Hz = 20.8%, above 0.1 Hz = 31.2%
-#       Full bandwidth survives, so the only highpass is hp2000 (0.0005 Hz).
-#       No band-pass was pre-applied, so this cohort does its own -- again
-#       matching camcan and cneuromod rather than ds002837, whose 0.01-1.0 Hz
-#       is baked in by afni_proc.
+# It is the END of HCP's denoising chain, and there is no more-processed file;
+# the only other 4D volumetric candidates in these directories do not exist
+# (the minimally-preprocessed originals are not in this copy).
 #
-# The result is that all three of the non-ds002837 cohorts now share one
-# recipe: band-pass 0.01-0.1, detrend, 24HMP, FD 0.5.
+# SO THIS COHORT GETS NO NUISANCE REGRESSION AND NO SCRUBBING, which is HCP's
+# own recommendation and not an omission. Glasser: spatial and temporal ICA
+# cleanup already remove head-motion effects, and regressing motion beyond that
+# removes neural signal; the current recommended approach excludes scrubbing,
+# GSR and CompCor-style nuisance regression alike.
+#
+# An earlier draft of this config regressed 24 motion parameters and censored
+# at FD 0.5, to match camcan and cneuromod. That was wrong -- it would have
+# undone part of what tICA bought. The measurement that looked like evidence
+# for it (median R^2 = 0.0251 of the 12 motion regressors) says the opposite
+# once read properly: chance for 12 predictors over ~900 TRs is ~0.013, so
+# 0.0251 is twice chance, which is LOW for motion variance in fMRI. It is not
+# exactly zero only because the regressors were never projected out -- ICA
+# removes components, it does not subtract the columns.
 filtering:
+  # `already_applied` is about the BAND, and the band genuinely is not applied:
+  # measured on 100610/MOVIE1, 20.8% of power sits below 0.01 Hz and 31.2%
+  # above 0.1 Hz, so hp2000 is the only highpass and nothing was lowpassed.
+  # Band-passing here is the ANALYSIS band every cohort ends up in, not
+  # re-doing preprocessing -- ds002837 arrives with 0.01-1.0 baked in, camcan
+  # and cneuromod are banded at this stage, and stage 4's --match-bandpass
+  # harmonises the activation source regardless. Stage 3 has no such step, so
+  # a broadband cohort there would be the odd one out.
   already_applied: false
   bandpass: [0.01, 0.1]
   detrend: true
   standardize: false
 
-# fMRIPrep's dialect, spoken by tools/hcp_confounds.py. Not `afni_1D`, which
-# would read Movement_Regressors.txt but give 12 columns and no censoring:
-# `strategy` is honoured for fmriprep_tsv ONLY, and `fd_threshold` needs a
-# `framewise_displacement` COLUMN that HCP does not ship. Run
-#     python tools/hcp_confounds.py config/hcp7t.yaml --apply
-# before stage 1; without the sidecars this cohort silently gets neither.
 confounds:
-  format: fmriprep_tsv
-  strategy: 24hmp
-  confounds_glob: "*_desc-confounds_timeseries.tsv"
-  # The same threshold as camcan and cneuromod, and it means the same thing
-  # because hcp_confounds.py computes Power FD from the six parameters rather
-  # than reusing Movement_RelativeRMS.txt, which is an RMS displacement and a
-  # different quantity.
-  fd_threshold: 0.5
+  # Nothing, deliberately. See above.
+  format: none
+  strategy: none
+  censor_glob: null
+  # NOTE, and accept it knowingly: with no motion source this cohort has no
+  # `mean_fd`, so `config/censor/motion.yaml`'s max_mean_fd and
+  # min_frac_good_frames will both report NOT APPLIED for it and every subject
+  # passes. That is consistent with HCP's no-scrubbing recommendation, but it
+  # does mean hcp7t is gated differently from the other three and the DESIGN
+  # table should say so. Movement_RelativeRMS_mean.txt holds one number per
+  # run if a motion figure is wanted for reporting -- it is an RMS
+  # displacement, not Power FD, so it is not comparable to the other cohorts'
+  # thresholds and must not be fed to one.
+  motion_glob: null
   dilate_tr: 1
 
 stimulus:
