@@ -10,6 +10,7 @@ Exploration of what the pipeline wrote. Nothing here writes to `outputs/`.
 | `04_activation_pca.ipynb` | open activation → filter by a `{cohort: [subs]}` dict → PCA (standalone, no `nbtools`) |
 | `06_visualize.ipynb` | the latent-space figures, three cohorts, plus one coloured by symptom |
 | `07_transitions_phenotype.ipynb` | brain-state transitions vs. phenotype: one subject-level table and a volcano over every state set |
+| `08_transitions_anxiety_depression.ipynb` | HADS anxiety & depression: the four rankings (bstm/fcm x rest/movie) side by side, and a volcano over the top-10 bstm state sets per task |
 | `nbtools.py` | the loaders they use: inventory, pruned reads, the participants join |
 
 **QC lives in one place.** `03_qc.ipynb` owns subject-level quality control —
