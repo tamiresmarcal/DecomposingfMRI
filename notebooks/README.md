@@ -11,6 +11,7 @@ Exploration of what the pipeline wrote. Nothing here writes to `outputs/`.
 | `06_visualize.ipynb` | the latent-space figures, three cohorts, plus one coloured by symptom |
 | `07_transitions_phenotype.ipynb` | brain-state transitions vs. phenotype: one subject-level table and a volcano over every state set |
 | `08.1_transitions_volcano_effect.ipynb` | HADS anxiety & depression: every selection row (bstm/fcm x rest/movie) against an Age + Sex baseline interval, what drives the score (window, atlas, model, state method, arm), and a volcano over the top bstm state sets with an effect size on x |
+| `09_model_contributions.ipynb` | what the saved bstm models use: out-of-fold SHAP shares by variable type and for the covariates/dynamics across every saved model, a SHAP beeswarm for one chosen model, and its state set's Normal vs symptom-group state diagrams |
 | `nbtools.py` | the loaders they use: inventory, pruned reads, the participants join |
 
 **QC lives in one place.** `03_qc.ipynb` owns subject-level quality control —
