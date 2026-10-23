@@ -582,10 +582,10 @@ def stopwatch(ax, x, y, r, colour):
 
 EDGE = 1.55                                                       # the diagram's side, with its % labels
 
-def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0, gap=1.0, pt=.01):
+def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0, gap=1.0, pt=.01, away=None):
     """The panel's dynamics as a column of symbol + value beside the diagram on `side` (-1 left,
-    +1 right). The same distance, d = .16 x gap, separates the diagram from the column and the
-    items from each other. A passing one is coloured, with its change underneath.
+    +1 right). The items are .16 x gap apart; the column is .16 x away from the diagram (away=None:
+    the same as between the items). A passing one is coloured, with its change underneath.
     fs = font scale; pt = one typographic point in data units (the panel's real scale).
     icon = symbol size x the font, or "fit": as large as lets the column span the diagram, from
     the top state's circle to the bottom one's (without the % labels)."""
@@ -606,7 +606,7 @@ def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0, gap=1.0, pt=.01):
     block = icon_h + small + 2 * line                             # the change line is always reserved
     labels = [DYN_SHOW[r.variable][2].format(r.value) for r in dyn.itertuples()]
     half = max(max(map(len, labels)) * .55 * 6.3 * fs * pt, icon_h) / 2   # the column's half width
-    x = (EDGE + d + half) * side
+    x = (EDGE + .16 * (gap if away is None else away) + half) * side
     y = (n * block + (n - 1) * d) / 2                             # centred on the diagram
     for r, lab in zip(dyn.itertuples(), labels):
         sym = DYN_SHOW[r.variable][0]
@@ -623,7 +623,7 @@ def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0, gap=1.0, pt=.01):
                     color=c, gid="scaled")
         y -= block + d
 
-def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None, fs=None, icon=None, gap=None):
+def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None, fs=None, icon=None, gap=None, away=None):
     """Rows = Normal, then each phenotype; columns = tasks. pooled[(task, group)] = (p(j | i), occ, n).
     refs[(task, group)] = the panel it is compared with (its items in marks are highlighted in
     colours[(task, group)]); a panel without a ref is drawn as it is. dyn (Study.dynamics_marks) adds
@@ -632,6 +632,7 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
     fs = cfg.font_scale if fs is None else fs                  # the diagrams' own text, scaled here
     icon = cfg.dyn_icon if icon is None else icon
     gap = cfg.dyn_gap if gap is None else gap
+    away = cfg.dyn_away if away is None else away
     room = cfg.fig_scale
     columns = []                                              # drawn after the layout
     tasks, groups = list(cfg.tasks), ["Normal", *cfg.targets]
@@ -654,7 +655,7 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
             panels[t, g] = (hT, hO, nT, nO, sorted(base | {e for e in off if hT[e]}))
     wmax = max(pooled[k][0][e] for k, p in panels.items() for e in p[4])
     omax = max(pooled[k][1].max() for k in panels)
-    out = EDGE + .16 * gap + .6                              # the panel's outer edge with the dynamics
+    out = EDGE + .16 * away + .6                              # the panel's outer edge with the dynamics
     w = 4.6 + (out - 1.6) * 1.15 if dyn is not None else 4.6
     fig, axes = plt.subplots(len(groups), len(tasks), squeeze=False, figsize=_size(cfg, w * len(tasks), 5.3 * len(groups) + .6))
     for (i, g), (j, t) in ((a, b) for a in enumerate(groups) for b in enumerate(tasks)):
@@ -676,8 +677,7 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
         diagram(axes[i, j], T, occ, edges, wmax, omax, compare=ref[1] != g, hit_T=hT, hit_occ=hO, note_T=nT,
                 note_occ=nO, colour=colours[t, g], fs=fs, room=room)
         vs = ref[0] if ref[1] == g else ref[1]
-        name_of = {RED: "red", BLUE: "blue"}.get(colours[t, g], "highlighted")
-        axes[i, j].set_title(f"{t} · {who} (n={n})\nvs {vs}  ·  {int(hT.sum() + hO.sum())} in {name_of}", fontsize=9.5)
+        axes[i, j].set_title(f"{t} · {who} (n={n}) vs {vs}", fontsize=9.5)
         if dyn is not None:
             axes[i, j].set_xlim(*((-out, 1.6) if j == 0 else (-1.6, out)))
     fig.legend(handles=[
@@ -696,6 +696,6 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
         box = ax.get_position()
         (x0, x1), (y0, y1) = ax.get_xlim(), ax.get_ylim()
         pt = max((x1 - x0) / (box.width * fig.get_figwidth() * 72), (y1 - y0) / (box.height * fig.get_figheight() * 72))
-        dynamics_column(ax, d, side, c, fs, icon, gap, pt)
+        dynamics_column(ax, d, side, c, fs, icon, gap, pt, away)
     save(fig, name, cfg)
     plt.show()

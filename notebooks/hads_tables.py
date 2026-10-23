@@ -105,7 +105,8 @@ class Settings:
     edge_top: int = 12
     font_scale: float = 2.0                            # every text of every figure x this
     fig_scale: float = 1.5                             # every figure's size x this, to make room for it
-    dyn_gap: float = 2.0                               # D3 / E3: the dynamics column's distance from the diagram
+    dyn_gap: float = 2.0                               # D3 / E3: space between the dynamics items (x .16)
+    dyn_away: float = 4.0                              # D3 / E3: space between the diagram and its dynamics (x .16)
     dyn_icon: float | str = 1.0                        # D3 / E3: its symbols' size, x the font; "fit" = span the diagram
     save_dir: Path | None = None
     # running
