@@ -3,6 +3,7 @@
 Every function takes a table and the Settings (`cfg`) and draws one figure; nothing here
 computes a statistic. The state diagram's rules (sizes, label placement) are in `diagram`.
 """
+import dataclasses
 from pathlib import Path
 
 import matplotlib
@@ -41,6 +42,15 @@ def save(fig, name, cfg):
         Path(cfg.save_dir).mkdir(parents=True, exist_ok=True)
         for ext in ("png", "svg"):
             fig.savefig(Path(cfg.save_dir) / f"{name}.{ext}", dpi=200, bbox_inches="tight")
+
+def rule(v, cfg, alpha=None, fc_line=None, xlim=None):
+    """The pass rule at figure time: p_fdr is already BH, so a new alpha or fc_line (0 = off) only
+    re-marks the points, with no recomputing. Returns (v with a new `hit`, cfg with the new values)."""
+    new = {k: x for k, x in dict(alpha=alpha, fc_line=fc_line, xlim=xlim).items() if x is not None}
+    if not new:
+        return v, cfg
+    cfg = dataclasses.replace(cfg, **new)
+    return v.assign(hit=(v["p_fdr"] < cfg.alpha) & (v["x"].abs() >= (cfg.fc_line or 0))), cfg
 
 def _panels(cfg):
     return [(t, lab) for t in cfg.tasks for lab in cfg.targets]
@@ -103,8 +113,10 @@ def volcano_panel(ax, v, cfg):
     ax.set_title(f"{v['task'].iloc[0]} · {v['phenotype'].iloc[0]}   ({int(v['hit'].sum())} / {len(v)} {cfg.pass_text}, {n})",
                  fontsize=10)
 
-def fig_volcanos(v, cfg, title, name, xlabel):
-    """One panel per (task, phenotype) of v: rows = tasks, columns = phenotypes."""
+def fig_volcanos(v, cfg, title, name, xlabel, alpha=None, fc_line=None, xlim=None):
+    """One panel per (task, phenotype) of v: rows = tasks, columns = phenotypes.
+    alpha / fc_line / xlim change the rule or the x range for this figure only."""
+    v, cfg = rule(v, cfg, alpha, fc_line, xlim)
     rows, cols = list(dict.fromkeys(v["task"])), list(dict.fromkeys(v["phenotype"]))
     fig, axes = plt.subplots(len(rows), len(cols), squeeze=False, figsize=(8.5 * len(cols), 5.6 * len(rows) + .6))
     for (i, t), (j, lab) in ((a, b) for a in enumerate(rows) for b in enumerate(cols)):
@@ -124,6 +136,8 @@ def fig_volcanos(v, cfg, title, name, xlabel):
 
 def palette(v, by):
     """{level: colour}: sequential for window and K (they have an order), categorical otherwise."""
+    if by == "block":
+        return {b: c for b, c in BLOCK_COLOUR.items() if b in set(v["block"])}
     if by in ORDERED:
         lev = v.groupby(by)[ORDERED[by]].first().sort_values().index.tolist()
         idx = np.linspace(0, len(RAMP) - 1, len(lev)).round().astype(int)
@@ -147,10 +161,13 @@ def _multiverse_legend(fig, colours, cfg, h, ncol=8):
                        [Line2D([], [], ls="none", label=f"solid = {cfg.pass_text} (FDR over the panel)")],
                loc="upper right", ncol=min(len(colours) + 1, ncol), fontsize=7, bbox_to_anchor=(1, 1 - .3 / h))
 
-def fig_multiverse(multi, cfg, title, name, xlabel):
-    """One figure per colouring (cfg.color_by), one panel per (task, phenotype) in multi."""
+def fig_multiverse(multi, cfg, title, name, xlabel, by="block", alpha=None, fc_line=None, xlim=None):
+    """One panel per (task, phenotype) in multi, coloured by `by`: "block" (cells, occupancy,
+    dynamics), "window", "atlas", "method" or "K"; a list draws one figure per colouring.
+    alpha / fc_line / xlim change the rule or the x range for this figure only."""
+    multi, cfg = rule(multi, cfg, alpha, fc_line, xlim)
     rows, cols = list(dict.fromkeys(multi["task"])), list(dict.fromkeys(multi["phenotype"]))
-    for by in cfg.color_by:
+    for by in [by] if isinstance(by, str) else by:
         colours = palette(multi, by)
         h = 5.2 * len(rows) + .9
         fig, axes = plt.subplots(len(rows), len(cols), squeeze=False, figsize=(9.5 * len(cols), h))
@@ -304,8 +321,9 @@ def fig_factors(rows, cfg):
         plt.show()
 
 def fig_performance(perf, cfg, title):
-    """E1: the chosen model in each panel: one dot per seed, mean ± sd, over its own baseline."""
-    fig, axes = plt.subplots(1, len(cfg.targets), squeeze=False, sharey=True, figsize=(4.2 * len(cfg.targets), 3.8))
+    """E1: the chosen model in each panel: its score at each fold seed (small dots), mean ± sd,
+    next to the best static-FC row of the same model (orange), over that model's baseline."""
+    fig, axes = plt.subplots(1, len(cfg.targets), squeeze=False, sharey=True, figsize=(5 * len(cfg.targets), 4.6))
     rng = np.random.default_rng(0)
     for ax, lab in zip(axes[0], cfg.targets):
         p = perf[perf["phenotype"] == lab]
@@ -320,18 +338,23 @@ def fig_performance(perf, cfg, title):
                 continue
             r = g.iloc[0]
             ax.scatter(i + rng.uniform(-.08, .08, len(g)), g["score"], s=14, color=TASK_COLOURS[i], alpha=.5, lw=0)
-            ax.errorbar(i + .22, r["mean"], yerr=r["std"], fmt=TASK_MARKERS[i], ms=8, lw=1.5, color=TASK_COLOURS[i],
+            ax.errorbar(i + .15, r["mean"], yerr=r["std"], fmt=TASK_MARKERS[i], ms=8, lw=1.5, color=TASK_COLOURS[i],
                         mec=SURFACE, mew=1, zorder=3)
-            ticks.append(f"{task}\n#{r['rank']} of {r['of']}")
+            if pd.notna(r["fc_mean"]):
+                ax.errorbar(i + .35, r["fc_mean"], yerr=r["fc_std"], fmt="s", ms=7, lw=1.5, color=TREE_COLOUR["fcm"],
+                            mec=SURFACE, mew=1, zorder=3)
+            ticks.append(f"{task}\n#{r['rank']} of {r['of']} bstm\nFC: {r['fc_label']}")
         ax.set_xticks(range(len(cfg.tasks)), ticks)
         ax.set_title(lab)
     axes[0, 0].set_ylabel("CV score (Spearman)")
-    fig.legend(handles=[Line2D([], [], ls="none", marker="o", ms=5, color=INK2, alpha=.5, label="one fold seed"),
-                        Line2D([], [], ls="none", marker="o", ms=7, color=INK2, label="mean ± sd over seeds"),
+    fig.legend(handles=[Line2D([], [], ls="none", marker="o", ms=5, color=INK2, alpha=.5, label="the chosen model, one fold seed each"),
+                        Line2D([], [], ls="none", marker="o", ms=7, color=INK2, label="the chosen model, mean ± sd over seeds"),
+                        Line2D([], [], ls="none", marker="s", ms=7, color=TREE_COLOUR["fcm"],
+                               label="best static-FC row of the same model, mean ± sd"),
                         Patch(color=MUTED, alpha=.35, label="the model's Age + Sex baseline ± sd")],
-               loc="lower center", ncol=3, fontsize=7.5)
+               loc="lower center", ncol=2, fontsize=7.5)
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
-    fig.tight_layout(rect=(0, .08, 1, .95))
+    fig.tight_layout(rect=(0, .14, 1, .95))
     save(fig, "E1_performance", cfg)
     plt.show()
 
@@ -496,8 +519,8 @@ def diagram(ax, T, occ, edges, wmax, omax, compare=False, hit_T=None, hit_occ=No
         hit = hit_T[i, j]
         ax.add_patch(FancyArrowPatch(pos[i], pos[j], connectionstyle="arc3,rad=.18", arrowstyle="-|>",
                                      patchA=nodes[i], patchB=nodes[j], shrinkA=2, shrinkB=3,
-                                     mutation_scale=max(6 + 6 * T[i, j] / wmax, 11 if hit else 0),
-                                     lw=max(.3 + 4.5 * T[i, j] / wmax, 1.8 if hit else 0),   # never too thin to see
+                                     mutation_scale=6 + 6 * T[i, j] / wmax,   # colour never changes the width
+                                     lw=.3 + 4.5 * T[i, j] / wmax,
                                      color=colour if hit else base, alpha=1 if hit else .7, zorder=3 if hit else 2))
         if hit and note_T is not None and note_T[i, j]:       # beside the middle of the curve
             # centred just outside the curve's middle (the curve itself bulges .09 out): beside the

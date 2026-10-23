@@ -98,7 +98,6 @@ class Settings:
     factors: dict = field(default_factory=lambda: {"window": "window size", "atlas": "atlas", "model": "model",
                                                    "method": "state method", "arm": "arm"})
     factor_trees: list = field(default_factory=lambda: ["bstm"])
-    color_by: list = field(default_factory=lambda: ["block", "window", "atlas", "method", "K"])
     top_vars: int = 15
     edge_top: int = 12
     save_dir: Path | None = None
@@ -648,12 +647,20 @@ class Study:
             marks.loc[big.index[~big], "note"] = ""
         return marks
 
-    def stat_marks(self, pooled, paired, grp):
+    def stat_marks(self, pooled, paired, grp, task_alpha=None, task_fc=None, task_top=None):
         """D3: what is highlighted on the graph and its change in pp. The second task's Normal panel:
         the paired test vs the first task's Normal. Each phenotype panel: its group test vs the Normal
-        panel of the same task."""
+        panel of the same task. The task difference passes far more easily (hundreds of people, each
+        their own control), so its rule can be stricter: task_alpha (FDR), task_fc (|log2FC|),
+        task_top (only the N largest |log2FC| that pass). None = the usual rule."""
         t0, t1 = self.cfg.tasks
         rows = []
+        if task_alpha is not None or task_fc is not None:
+            paired = paired.assign(hit=(paired["p_fdr"] < (self.cfg.alpha if task_alpha is None else task_alpha))
+                                   & (paired["x"].abs() >= ((self.cfg.fc_line if task_fc is None else task_fc) or 0)))
+        if task_top:
+            keep = paired[paired["hit"] & paired["block"].isin(GRAPH)]["x"].abs().nlargest(task_top).index
+            paired = paired.assign(hit=paired.index.isin(keep))
 
         def add(panel, ref, v):
             for r in v[v["hit"] & v["block"].isin(GRAPH)].itertuples():
@@ -697,7 +704,8 @@ class Study:
 
     def performance_choice(self, space, model, base):
         """E1: the chosen model's score per panel (mean, sd, and each seed when scores.csv has them),
-        its baseline, and its rank among every bstm row of the same model in that panel."""
+        its baseline, its rank among every bstm row of the same model in that panel, and the best
+        static-FC (fcm) row of the same model for comparison."""
         s, out = self.summ, []
         for task in self.cfg.tasks:
             for lab in self.cfg.targets:
@@ -708,9 +716,14 @@ class Study:
                 if me.empty:
                     continue
                 b = base[(base["phenotype"] == lab) & (base["model"] == model["model"])].iloc[0]
+                fc = s[(s["tree"] == "fcm") & (s["task"] == task) & (s["phenotype"] == lab)
+                       & (s["model"] == model["model"]) & (s["arm"] != self.cfg.baseline_arm)]
+                fc = fc.loc[fc["mean"].idxmax()] if len(fc) else None
                 row = dict(task=task, phenotype=lab, mean=me["mean"].iloc[0], std=me["std"].iloc[0],
                            rank=int((panel["mean"] > me["mean"].iloc[0]).sum()) + 1, of=len(panel),
-                           base_mean=b["mean"], base_sd=b["std"], base_n=b["n"])
+                           base_mean=b["mean"], base_sd=b["std"], base_n=b["n"],
+                           fc_mean=np.nan if fc is None else fc["mean"], fc_std=np.nan if fc is None else fc["std"],
+                           fc_label="none" if fc is None else f"{fc['atlas']} · {fc['arm']}")
                 seeds = self._scores(task, lab, space, model)
                 out += [dict(row, seed=r.seed, score=r.score) for r in seeds.itertuples()] or [dict(row, seed=np.nan, score=np.nan)]
         return pd.DataFrame(out)
