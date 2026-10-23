@@ -580,36 +580,48 @@ def stopwatch(ax, x, y, r, colour):
     ax.plot([x - .3 * r, x + .3 * r], [y + 1.4 * r] * 2, color=colour, lw=1.6, solid_capstyle="round", zorder=6)
     ax.plot([x, x + .45 * r], [y, y + .45 * r], color=colour, lw=1.4, solid_capstyle="round", zorder=6)
 
+EDGE = 1.55                                                       # the diagram's side, with its % labels
+
 def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0, gap=1.0, pt=.01):
-    """The panel's dynamics as a column of symbol + value, outside the circle on `side` (-1 left,
-    +1 right), gap x the default distance. A passing one is coloured, with its change underneath.
+    """The panel's dynamics as a column of symbol + value beside the diagram on `side` (-1 left,
+    +1 right). The same distance, d = .16 x gap, separates the diagram from the column and the
+    items from each other. A passing one is coloured, with its change underneath.
     fs = font scale; pt = one typographic point in data units (the panel's real scale).
-    icon = symbol size x the font, or "fit": as large as lets the column (symbols, values and the
-    space between them) span the diagram, from the top state's circle to the bottom one's."""
-    top, bottom = 1.22, -1.22                                     # the circles' extent, without the % labels
+    icon = symbol size x the font, or "fit": as large as lets the column span the diagram, from
+    the top state's circle to the bottom one's (without the % labels)."""
+    top, bottom = 1.22, -1.22                                     # the circles' extent
+    d = .16 * gap
     line = 6.3 * fs * 1.25 * pt                                   # one line of the value text
     small = .3 * line
-    slot = (top - bottom) / len(dyn)
-    if icon == "fit":                                             # each item fills 90% of its slot
-        icon_h = .9 * slot - 2 * line - small
+    n = len(dyn)
+    if icon == "fit":
+        icon_h = (top - bottom - (n - 1) * d) / n - 2 * line - small
+        floor = .75 * 10.5 * fs * .5 * pt                         # never below half the default symbol
+        if icon_h < floor:
+            print(f"dyn_icon='fit': {n} items, their values and {n - 1} gaps of {d:.2f} do not fit the "
+                  f"diagram's height; symbols at half size instead (lower dyn_gap or show fewer dynamics)")
+            icon_h = floor
     else:
         icon_h = .75 * 10.5 * fs * icon * pt                      # a glyph is ~3/4 of its font size
-    block = icon_h + small + 2 * line
-    x = (1.45 + .5 * gap) * side
-    for k, r in enumerate(dyn.itertuples()):
-        sym, _, f = DYN_SHOW[r.variable]
+    block = icon_h + small + 2 * line                             # the change line is always reserved
+    labels = [DYN_SHOW[r.variable][2].format(r.value) for r in dyn.itertuples()]
+    half = max(max(map(len, labels)) * .55 * 6.3 * fs * pt, icon_h) / 2   # the column's half width
+    x = (EDGE + d + half) * side
+    y = (n * block + (n - 1) * d) / 2                             # centred on the diagram
+    for r, lab in zip(dyn.itertuples(), labels):
+        sym = DYN_SHOW[r.variable][0]
         c = colour if r.hit else INK2
-        y = top - k * slot - max(slot - block, 0) / 2             # this item's top
         if sym == "⏱":
             rr = icon_h / 2.4                                     # dial + crown = 2.4 radii
             stopwatch(ax, x, y - 1.4 * rr, rr, c)
         else:
             ax.text(x, y - icon_h / 2, sym, ha="center", va="center", fontsize=icon_h / pt / .75, color=c, gid="scaled")
         yv = y - icon_h - small - line / 2
-        ax.text(x, yv, f.format(r.value), ha="center", va="center", fontsize=6.3 * fs, color=c, gid="scaled")
+        ax.text(x, yv, lab, ha="center", va="center", fontsize=6.3 * fs, color=c, gid="scaled")
         if r.hit:
             ax.text(x, yv - line, f"{100 * r.change:+.0f}%", ha="center", va="center", fontsize=6.3 * fs,
                     color=c, gid="scaled")
+        y -= block + d
 
 def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None, fs=None, icon=None, gap=None):
     """Rows = Normal, then each phenotype; columns = tasks. pooled[(task, group)] = (p(j | i), occ, n).
@@ -642,8 +654,8 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
             panels[t, g] = (hT, hO, nT, nO, sorted(base | {e for e in off if hT[e]}))
     wmax = max(pooled[k][0][e] for k, p in panels.items() for e in p[4])
     omax = max(pooled[k][1].max() for k in panels)
-    out = 1.75 + .5 * gap                                    # the panel's outer edge with the dynamics
-    w = 4.6 + (.9 + .55 * (gap - 1) if dyn is not None else 0)
+    out = EDGE + .16 * gap + .6                              # the panel's outer edge with the dynamics
+    w = 4.6 + (out - 1.6) * 1.15 if dyn is not None else 4.6
     fig, axes = plt.subplots(len(groups), len(tasks), squeeze=False, figsize=_size(cfg, w * len(tasks), 5.3 * len(groups) + .6))
     for (i, g), (j, t) in ((a, b) for a in enumerate(groups) for b in enumerate(tasks)):
         T, occ, n = pooled[t, g]
