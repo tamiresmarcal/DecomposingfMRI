@@ -544,10 +544,31 @@ def diagram(ax, T, occ, edges, wmax, omax, compare=False, hit_T=None, hit_occ=No
     ax.set_aspect("equal")
     ax.axis("off")
 
-def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name):
+# the dynamics beside the diagrams: symbol, name, format
+DYN_SHOW = {"switch_rate": ("⇄", "switch rate", "{:.2f}"), "mean_dwell_s": ("τ", "mean dwell", "{:.0f} s"),
+            "entropy_rate_bits": ("H", "entropy rate", "{:.2f} bits"), "dispersion": ("◌", "dispersion", "{:.2f}"),
+            "n_distinct_transitions": ("#", "distinct transitions", "{:.0f}"),
+            "self_transition_rate": ("↺", "self-transition rate", "{:.2f}"),
+            "switches_per_min": ("⇄/min", "switches per min", "{:.1f}"),
+            "n_states_visited": ("K", "states visited", "{:.1f}")}
+
+def dynamics_column(ax, dyn, side, colour):
+    """The panel's dynamics as a column of symbol + value, outside the circle on `side` (-1 left,
+    +1 right). A passing one is coloured, with its change underneath."""
+    x, ys = 1.95 * side, np.linspace(1.05, -1.05, len(dyn))
+    for y, r in zip(ys, dyn.itertuples()):
+        sym, _, f = DYN_SHOW[r.variable]
+        c = colour if r.hit else INK2
+        ax.text(x, y + .1, sym, ha="center", va="center", fontsize=10.5, color=c)
+        ax.text(x, y - .08, f.format(r.value), ha="center", va="center", fontsize=6.3, color=c)
+        if r.hit:
+            ax.text(x, y - .22, f"{100 * r.change:+.0f}%", ha="center", va="center", fontsize=6.3, color=c)
+
+def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None):
     """Rows = Normal, then each phenotype; columns = tasks. pooled[(task, group)] = (p(j | i), occ, n).
     refs[(task, group)] = the panel it is compared with (its items in marks are highlighted in
-    colours[(task, group)]); a panel without a ref is drawn as it is. Every panel draws the Normal
+    colours[(task, group)]); a panel without a ref is drawn as it is. dyn (Study.dynamics_marks) adds
+    each panel's dynamics as a column of symbols: left of the first task, right of the others. Every panel draws the Normal
     group's edge_top strongest arrows of every task, plus its own highlighted ones, on ONE width scale."""
     tasks, groups = list(cfg.tasks), ["Normal", *cfg.targets]
     K = len(pooled[tasks[0], "Normal"][1])
@@ -569,15 +590,22 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name):
             panels[t, g] = (hT, hO, nT, nO, sorted(base | {e for e in off if hT[e]}))
     wmax = max(pooled[k][0][e] for k, p in panels.items() for e in p[4])
     omax = max(pooled[k][1].max() for k in panels)
-    fig, axes = plt.subplots(len(groups), len(tasks), squeeze=False, figsize=(4.6 * len(tasks), 4.7 * len(groups) + .6))
+    w = 4.6 + (.9 if dyn is not None else 0)
+    fig, axes = plt.subplots(len(groups), len(tasks), squeeze=False, figsize=(w * len(tasks), 4.7 * len(groups) + .6))
     for (i, g), (j, t) in ((a, b) for a in enumerate(groups) for b in enumerate(tasks)):
         T, occ, n = pooled[t, g]
         hT, hO, nT, nO, edges = panels[t, g]
         who = "Normal on both scales" if g == "Normal" else f"{g}, {cfg.case_from}+"
         ref = refs.get((t, g))
+        if dyn is not None:
+            side = -1 if j == 0 else 1
+            dynamics_column(axes[i, j], dyn[(dyn["task"] == t) & (dyn["group"] == g)], side,
+                            colours.get((t, g), INK2) if ref is not None else INK2)
         if ref is None:
             diagram(axes[i, j], T, occ, edges, wmax, omax)
             axes[i, j].set_title(f"{t} · {who} (n={n})", fontsize=9.5)
+            if dyn is not None:
+                axes[i, j].set_xlim(*((-2.25, 1.6) if j == 0 else (-1.6, 2.25)))
             continue
         # against another group, the rest goes grey; against the same group in the other task, it
         # stays dark: the Normal diagram is still itself, only its changes are marked
@@ -586,11 +614,16 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name):
         vs = ref[0] if ref[1] == g else ref[1]
         name_of = {RED: "red", BLUE: "blue"}.get(colours[t, g], "highlighted")
         axes[i, j].set_title(f"{t} · {who} (n={n})\nvs {vs}  ·  {int(hT.sum() + hO.sum())} in {name_of}", fontsize=9.5)
+        if dyn is not None:
+            axes[i, j].set_xlim(*((-2.25, 1.6) if j == 0 else (-1.6, 2.25)))
     fig.legend(handles=[
         Line2D([], [], ls="none", marker="o", ms=10, mfc=NODE, mec=INK2, label="circle area = time in state (%)"),
         Line2D([], [], color=INK2, lw=2.5, label="arrow width = p(j | i): share of moves out of i that go to j"),
         Line2D([], [], ls="none", marker=r"$\circlearrowleft$", ms=12, color=INK2, label="loop = p(stay): thicker = held longer"),
-        *[Line2D([], [], color=c, lw=2.5, label=m) for c, m in meaning]],
+        *[Line2D([], [], color=c, lw=2.5, label=m) for c, m in meaning],
+        *([Line2D([], [], ls="none", label="beside: " + "   ".join(f"{DYN_SHOW[v][0]} {DYN_SHOW[v][1]}"
+                                                               for v in dict.fromkeys(dyn["variable"])))]
+          if dyn is not None else [])],
         loc="lower center", ncol=2, fontsize=7.5, bbox_to_anchor=(.5, 0))
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
     fig.tight_layout(rect=(0, .07, 1, .97))

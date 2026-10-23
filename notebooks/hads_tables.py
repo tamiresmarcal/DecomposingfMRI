@@ -90,6 +90,8 @@ class Settings:
     stable_min: float = 0.8
     min_d: float = 0.2
     label_pp: int | None = None
+    dynamics_show: list = field(default_factory=lambda: ["switch_rate", "mean_dwell_s", "entropy_rate_bits",
+                                                        "dispersion", "n_distinct_transitions"])
     fc_arm: str = "edges"                             # E1: the fcm arm (edges = the hypothesis, global = its control)
     # drawing
     xlim: float | None = 2
@@ -674,6 +676,28 @@ class Study:
                 add((task, lab), (task, "Normal"), grp[(grp["task"] == task) & (grp["phenotype"] == lab)])
         cols = ["task", "group", "block", "variable", "x", "p_fdr", "change", "hit"]
         return self._notes(pd.DataFrame(rows, columns=cols))
+
+    def dynamics_marks(self, space, paired, grp, variables=None):
+        """The dynamics beside D3's diagrams: each panel's mean of every variable in `variables`
+        (cfg.dynamics_show), its change vs the panel it is compared with, and whether it passes the
+        same test as the graph (D1 for the second task's Normal, D2 for the phenotypes)."""
+        c = self.cfg
+        t0, t1 = c.tasks
+        variables = [v for v in (variables or c.dynamics_show)]
+        means = {}
+        for task in c.tasks:
+            d = self.table(space, task)
+            for g, m in self.groups(d).items():
+                means[task, g] = d.loc[m, [v for v in variables if v in d]].mean()
+        rows = []
+        for (task, g), mu in means.items():
+            ref, test = ((t0, "Normal"), paired) if (task, g) == (t1, "Normal") else \
+                        ((task, "Normal"), grp[(grp["task"] == task) & (grp["phenotype"] == g)]) if g != "Normal" else (None, None)
+            for v, val in mu.items():
+                hit = test is not None and bool(test.loc[(test["block"] == "dynamics") & (test["variable"] == v), "hit"].any())
+                change = np.nan if ref is None else val / means[ref][v] - 1 if means[ref][v] else np.nan
+                rows.append(dict(task=task, group=g, variable=v, value=val, change=change, hit=hit))
+        return pd.DataFrame(rows)
 
     # -- E: one model ---------------------------------------------------------------------------
     def model_options(self, space):
