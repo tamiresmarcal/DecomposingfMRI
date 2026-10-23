@@ -468,9 +468,9 @@ def away(direction):
     return ("left" if x > .35 else "right" if x < -.35 else "center",
             "bottom" if y > .35 else "top" if y < -.35 else "center")
 
-def box(xy, text):
-    """A label's box in data units, (x, y, half width, half height), for ~6.5 pt text on a ~4.6 in panel."""
-    return (xy[0], xy[1], .5 * len(text) * .042 + .02, .05)
+def box(xy, text, fs=1.0):
+    """A label's box in data units, (x, y, half width, half height), for ~6.5 pt text (x fs) on a ~4.6 in panel."""
+    return (xy[0], xy[1], (.5 * len(text) * .042 + .02) * fs, .05 * fs)
 
 def clear_of(b, centres, radii, boxes):
     """True if label box b touches no state's circle and no label already placed."""
@@ -481,7 +481,7 @@ def clear_of(b, centres, radii, boxes):
             and all(abs(x - bx) > hw + bw or abs(y - by) > hh + bh for bx, by, bw, bh in boxes))
 
 def diagram(ax, T, occ, edges, wmax, omax, compare=False, hit_T=None, hit_occ=None, note_T=None, note_occ=None,
-            colour=RED):
+            colour=RED, fs=1.0):
     """A state diagram on a circle. Circle area = time in state, loop = p(stay), arrow width =
     p(j | i). With `compare`, everything not highlighted is grey. hit_T / hit_occ are drawn in
     `colour`, with note_T / note_occ (pp) written beside them; an empty note is not written."""
@@ -503,21 +503,21 @@ def diagram(ax, T, occ, edges, wmax, omax, compare=False, hit_T=None, hit_occ=No
         ax.add_patch(Arc(pos[k] + u * (r + .045), .11, .11, theta1=th - 140, theta2=th + 140, zorder=2,
                          lw=.3 + 3 * T[k, k], color=colour if hit_T[k, k] else base))
         occ_note = note_occ[k] if hit_occ[k] and note_occ is not None and note_occ[k] else None
-        ax.text(*pos[k], str(k), ha="center", va="center", fontsize=7.5, color=INK, zorder=6)
+        ax.text(*pos[k], str(k), ha="center", va="center", fontsize=7.5 * fs, color=INK, zorder=6)
         at, lab = pos[k] * (1 + (r + .36) / np.linalg.norm(pos[k])), pct(occ[k]) + (f" ({occ_note})" if occ_note else "")
-        ax.text(*at, lab, ha="center", va="center", fontsize=6.5, color=colour if occ_note else INK2, zorder=6)
-        placed.append(box(at, lab))                           # time in state, beside it
+        ax.text(*at, lab, ha="center", va="center", fontsize=6.5 * fs, color=colour if occ_note else INK2, zorder=6)
+        placed.append(box(at, lab, fs))                           # time in state, beside it
         if hit_T[k, k] and note_T is not None and note_T[k, k]:   # a loop's change: from its outer
             side = np.array([u[1], -u[0]])                    # corner, sideways, a little over it
             d = (u + side) / np.linalg.norm(u + side)
             ha, va = away(d)
             corner = pos[k] + u * (r + .045) + d * .055
             ax.annotate(note_T[k, k], corner, xytext=-1.5 * d, textcoords="offset points", ha=ha, va=va,
-                        fontsize=6.2, color=colour, zorder=7,
+                        fontsize=6.2 * fs, color=colour, zorder=7,
                         bbox=dict(boxstyle="round,pad=.12", fc=SURFACE, ec="none", alpha=.8))
-            _, _, hw, hh = box(corner, note_T[k, k])
+            _, _, hw, hh = box(corner, note_T[k, k], fs)
             placed.append(box(corner + np.array([{"left": hw, "right": -hw}.get(ha, 0),
-                                                 {"bottom": hh, "top": -hh}.get(va, 0)]), note_T[k, k]))
+                                                 {"bottom": hh, "top": -hh}.get(va, 0)]), note_T[k, k], fs))
     for i, j in edges:                                        # transitions
         hit = hit_T[i, j]
         ax.add_patch(FancyArrowPatch(pos[i], pos[j], connectionstyle="arc3,rad=.18", arrowstyle="-|>",
@@ -535,10 +535,10 @@ def diagram(ax, T, occ, edges, wmax, omax, compare=False, hit_T=None, hit_occ=No
             curve, n = (pos[i] + pos[j]) / 2 + .09 * perp, perp / np.linalg.norm(perp)
             candidates = [(pos[i] + pos[j]) / 2 + .17 * perp] + [
                 curve + side * t * n for t in (.08, .12, .16, .2, .25, .3, .36, .42, .5) for side in (1, -1)]
-            mid = next((c for c in candidates if clear_of(box(c, note_T[i, j]), pos, radii, placed)), candidates[0])
-            ax.text(*mid, note_T[i, j], ha="center", va="center", fontsize=6.5, color=colour, zorder=5,
+            mid = next((c for c in candidates if clear_of(box(c, note_T[i, j], fs), pos, radii, placed)), candidates[0])
+            ax.text(*mid, note_T[i, j], ha="center", va="center", fontsize=6.5 * fs, color=colour, zorder=5,
                     bbox=dict(boxstyle="round,pad=.15", fc=SURFACE, ec="none", alpha=.85))
-            placed.append(box(mid, note_T[i, j]))
+            placed.append(box(mid, note_T[i, j], fs))
     ax.set_xlim(-1.6, 1.6)
     ax.set_ylim(-1.75, 1.75)                                  # room for the top / bottom labels
     ax.set_aspect("equal")
@@ -552,19 +552,19 @@ DYN_SHOW = {"switch_rate": ("⇄", "switch rate", "{:.2f}"), "mean_dwell_s": ("�
             "switches_per_min": ("⇄/min", "switches per min", "{:.1f}"),
             "n_states_visited": ("K", "states visited", "{:.1f}")}
 
-def dynamics_column(ax, dyn, side, colour):
+def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0):
     """The panel's dynamics as a column of symbol + value, outside the circle on `side` (-1 left,
     +1 right). A passing one is coloured, with its change underneath."""
-    x, ys = 1.95 * side, np.linspace(1.05, -1.05, len(dyn))
+    x, ys = 1.95 * side, np.linspace(1.35, -1.25, len(dyn))         # the full height of the panel
     for y, r in zip(ys, dyn.itertuples()):
         sym, _, f = DYN_SHOW[r.variable]
         c = colour if r.hit else INK2
-        ax.text(x, y + .1, sym, ha="center", va="center", fontsize=10.5, color=c)
-        ax.text(x, y - .08, f.format(r.value), ha="center", va="center", fontsize=6.3, color=c)
+        ax.text(x, y + .07 * icon * fs, sym, ha="center", va="center", fontsize=10.5 * fs * icon, color=c)
+        ax.text(x, y - .08 * fs - .02 * icon, f.format(r.value), ha="center", va="center", fontsize=6.3 * fs, color=c)
         if r.hit:
-            ax.text(x, y - .22, f"{100 * r.change:+.0f}%", ha="center", va="center", fontsize=6.3, color=c)
+            ax.text(x, y - .2 * fs - .02 * icon, f"{100 * r.change:+.0f}%", ha="center", va="center", fontsize=6.3 * fs, color=c)
 
-def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None):
+def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None, fs=1.0, icon=1.0):
     """Rows = Normal, then each phenotype; columns = tasks. pooled[(task, group)] = (p(j | i), occ, n).
     refs[(task, group)] = the panel it is compared with (its items in marks are highlighted in
     colours[(task, group)]); a panel without a ref is drawn as it is. dyn (Study.dynamics_marks) adds
@@ -600,20 +600,20 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None)
         if dyn is not None:
             side = -1 if j == 0 else 1
             dynamics_column(axes[i, j], dyn[(dyn["task"] == t) & (dyn["group"] == g)], side,
-                            colours.get((t, g), INK2) if ref is not None else INK2)
+                            colours.get((t, g), INK2) if ref is not None else INK2, fs, icon)
         if ref is None:
-            diagram(axes[i, j], T, occ, edges, wmax, omax)
-            axes[i, j].set_title(f"{t} · {who} (n={n})", fontsize=9.5)
+            diagram(axes[i, j], T, occ, edges, wmax, omax, fs=fs)
+            axes[i, j].set_title(f"{t} · {who} (n={n})", fontsize=9.5 * fs)
             if dyn is not None:
                 axes[i, j].set_xlim(*((-2.25, 1.6) if j == 0 else (-1.6, 2.25)))
             continue
         # against another group, the rest goes grey; against the same group in the other task, it
         # stays dark: the Normal diagram is still itself, only its changes are marked
         diagram(axes[i, j], T, occ, edges, wmax, omax, compare=ref[1] != g, hit_T=hT, hit_occ=hO, note_T=nT,
-                note_occ=nO, colour=colours[t, g])
+                note_occ=nO, colour=colours[t, g], fs=fs)
         vs = ref[0] if ref[1] == g else ref[1]
         name_of = {RED: "red", BLUE: "blue"}.get(colours[t, g], "highlighted")
-        axes[i, j].set_title(f"{t} · {who} (n={n})\nvs {vs}  ·  {int(hT.sum() + hO.sum())} in {name_of}", fontsize=9.5)
+        axes[i, j].set_title(f"{t} · {who} (n={n})\nvs {vs}  ·  {int(hT.sum() + hO.sum())} in {name_of}", fontsize=9.5 * fs)
         if dyn is not None:
             axes[i, j].set_xlim(*((-2.25, 1.6) if j == 0 else (-1.6, 2.25)))
     fig.legend(handles=[
@@ -624,8 +624,8 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None)
         *([Line2D([], [], ls="none", label="beside: " + "   ".join(f"{DYN_SHOW[v][0]} {DYN_SHOW[v][1]}"
                                                                for v in dict.fromkeys(dyn["variable"])))]
           if dyn is not None else [])],
-        loc="lower center", ncol=2, fontsize=7.5, bbox_to_anchor=(.5, 0))
-    fig.suptitle(title, x=.01, ha="left", fontsize=10)
+        loc="lower center", ncol=2, fontsize=7.5 * fs, bbox_to_anchor=(.5, 0))
+    fig.suptitle(title, x=.01, ha="left", fontsize=10 * fs)
     fig.tight_layout(rect=(0, .07, 1, .97))
     save(fig, name, cfg)
     plt.show()
