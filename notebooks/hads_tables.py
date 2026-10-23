@@ -90,6 +90,7 @@ class Settings:
     stable_min: float = 0.8
     min_d: float = 0.2
     label_pp: int | None = None
+    fc_arm: str = "edges"                             # E1: the fcm arm (edges = the hypothesis, global = its control)
     # drawing
     xlim: float | None = 2
     label_top: int = 3
@@ -702,31 +703,23 @@ class Study:
         return s[(s["model"] == model["model"]) & (s["arm"] == model["arm"]) & (s["atlas"] == space["atlas"])
                  & np.isclose(s["window_s"], space["window_s"]) & (s["states"] == space["states"])][["seed", "score"]]
 
-    def performance_choice(self, space, model, base):
-        """E1: the chosen model's score per panel (mean, sd, and each seed when scores.csv has them),
-        its baseline, its rank among every bstm row of the same model in that panel, and the best
-        static-FC (fcm) row of the same model for comparison."""
-        s, out = self.summ, []
-        for task in self.cfg.tasks:
-            for lab in self.cfg.targets:
-                panel = s[(s["tree"] == "bstm") & (s["task"] == task) & (s["phenotype"] == lab)
-                          & (s["model"] == model["model"]) & (s["arm"] != self.cfg.baseline_arm)]
-                me = panel[(panel["arm"] == model["arm"]) & (panel["atlas"] == space["atlas"])
-                           & np.isclose(panel["window_s"], space["window_s"]) & (panel["states"] == space["states"])]
-                if me.empty:
-                    continue
-                b = base[(base["phenotype"] == lab) & (base["model"] == model["model"])].iloc[0]
-                fc = s[(s["tree"] == "fcm") & (s["task"] == task) & (s["phenotype"] == lab)
-                       & (s["model"] == model["model"]) & (s["arm"] != self.cfg.baseline_arm)]
-                fc = fc.loc[fc["mean"].idxmax()] if len(fc) else None
-                row = dict(task=task, phenotype=lab, mean=me["mean"].iloc[0], std=me["std"].iloc[0],
-                           rank=int((panel["mean"] > me["mean"].iloc[0]).sum()) + 1, of=len(panel),
-                           base_mean=b["mean"], base_sd=b["std"], base_n=b["n"],
-                           fc_mean=np.nan if fc is None else fc["mean"], fc_std=np.nan if fc is None else fc["std"],
-                           fc_label="none" if fc is None else f"{fc['atlas']} · {fc['arm']}")
-                seeds = self._scores(task, lab, space, model)
-                out += [dict(row, seed=r.seed, score=r.score) for r in seeds.itertuples()] or [dict(row, seed=np.nan, score=np.nan)]
-        return pd.DataFrame(out)
+    def performance_trees(self, space, arm, model, base):
+        """E1: one model (`model`, e.g. "hgb") in each panel: the bstm row of the chosen space and arm,
+        and the fcm row of the same atlas, the same model and `fc_arm` (none when fcm has no such
+        atlas), with that model's Age + Sex baseline. One row per (task, phenotype, tree)."""
+        c, s, out = self.cfg, self.summ, []
+        for task in c.tasks:
+            for lab in c.targets:
+                p = s[(s["task"] == task) & (s["phenotype"] == lab) & (s["model"] == model)]
+                b = base[(base["phenotype"] == lab) & (base["model"] == model)]
+                bstm = p[(p["tree"] == "bstm") & (p["arm"] == arm) & (p["atlas"] == space["atlas"])
+                         & np.isclose(p["window_s"], space["window_s"]) & (p["states"] == space["states"])]
+                fcm = p[(p["tree"] == "fcm") & (p["arm"] == c.fc_arm) & (p["atlas"] == space["atlas"])]
+                for tree, r in (("bstm", bstm), ("fcm", fcm)):
+                    if len(r) and len(b):
+                        out.append(dict(task=task, phenotype=lab, tree=tree, mean=r["mean"].iloc[0], std=r["std"].iloc[0],
+                                        base_mean=b["mean"].iloc[0], base_sd=b["std"].iloc[0]))
+        return pd.DataFrame(out, columns=["task", "phenotype", "tree", "mean", "std", "base_mean", "base_sd"])
 
     def deep(self, space, model):
         """E2 / E3: the chosen model refit in each panel, out-of-fold SHAP at every seed of

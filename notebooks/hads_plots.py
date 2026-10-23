@@ -320,41 +320,44 @@ def fig_factors(rows, cfg):
         save(fig, f"B2_{k}_{col}", cfg)
         plt.show()
 
-def fig_performance(perf, cfg, title):
-    """E1: the chosen model in each panel: its score at each fold seed (small dots), mean ± sd,
-    next to the best static-FC row of the same model (orange), over that model's baseline."""
-    fig, axes = plt.subplots(1, len(cfg.targets), squeeze=False, sharey=True, figsize=(5 * len(cfg.targets), 4.6))
-    rng = np.random.default_rng(0)
+def fig_performance(perf, cfg, title, legend, model):
+    """E1: one model, one panel per phenotype; x = bstm | fcm, colour = task, a line per task
+    from bstm to fcm; mean ± sd over seeds, over that model's Age + Sex baseline.
+    legend = the label of each tree (what was selected)."""
+    tasks, trees = list(cfg.tasks), ["bstm", "fcm"]
+    colour, marker = dict(zip(tasks, TASK_COLOURS)), dict(zip(tasks, TASK_MARKERS))
+    fig, axes = plt.subplots(1, len(cfg.targets), squeeze=False, sharey=True, figsize=(4.5 * len(cfg.targets), 4.9))
     for ax, lab in zip(axes[0], cfg.targets):
         p = perf[perf["phenotype"] == lab]
-        b = p.iloc[0]
-        ax.set_xlim(-.6, len(cfg.tasks) - .4)
-        draw_band(ax, b["base_mean"], b["base_sd"])
-        ticks = []
-        for i, task in enumerate(cfg.tasks):
-            g = p[p["task"] == task]
-            if g.empty:
-                ticks.append(task)
-                continue
-            r = g.iloc[0]
-            ax.scatter(i + rng.uniform(-.08, .08, len(g)), g["score"], s=14, color=TASK_COLOURS[i], alpha=.5, lw=0)
-            ax.errorbar(i + .15, r["mean"], yerr=r["std"], fmt=TASK_MARKERS[i], ms=8, lw=1.5, color=TASK_COLOURS[i],
+        ax.set_xlim(-.4, 1.4)
+        if len(p):
+            draw_band(ax, p["base_mean"].iloc[0], p["base_sd"].iloc[0])
+        ends = []                                              # (y, x, task): the line's name at its end
+        for k, task in enumerate(tasks):
+            h = p[p["task"] == task].set_index("tree").reindex(trees)
+            x = np.arange(len(trees)) + (k - (len(tasks) - 1) / 2) * .06
+            ax.plot(x, h["mean"], color=colour[task], lw=1.4, alpha=.7)
+            ax.errorbar(x, h["mean"], yerr=h["std"], fmt=marker[task], ls="none", ms=8, lw=1.6, color=colour[task],
                         mec=SURFACE, mew=1, zorder=3)
-            if pd.notna(r["fc_mean"]):
-                ax.errorbar(i + .35, r["fc_mean"], yerr=r["fc_std"], fmt="s", ms=7, lw=1.5, color=TREE_COLOUR["fcm"],
-                            mec=SURFACE, mew=1, zorder=3)
-            ticks.append(f"{task}\n#{r['rank']} of {r['of']} bstm\nFC: {r['fc_label']}")
-        ax.set_xticks(range(len(cfg.tasks)), ticks)
+            last = h["mean"].last_valid_index()
+            if last is not None:
+                ends.append([h.loc[last, "mean"], x[trees.index(last)] + .1, task])
+        ax.autoscale_view()
+        gap = .05 * np.diff(ax.get_ylim())[0]                  # names never closer than this
+        ends.sort()
+        for e0, e1 in zip(ends, ends[1:]):
+            e1[0] = max(e1[0], e0[0] + gap)
+        for y, x, task in ends:
+            ax.text(x, y, task, color=colour[task], va="center", fontsize=8)
+        ax.set_xticks(range(len(trees)), ["bstm\n(transitions)", "fcm\n(static FC)"])
         ax.set_title(lab)
-    axes[0, 0].set_ylabel("CV score (Spearman)")
-    fig.legend(handles=[Line2D([], [], ls="none", marker="o", ms=5, color=INK2, alpha=.5, label="the chosen model, one fold seed each"),
-                        Line2D([], [], ls="none", marker="o", ms=7, color=INK2, label="the chosen model, mean ± sd over seeds"),
-                        Line2D([], [], ls="none", marker="s", ms=7, color=TREE_COLOUR["fcm"],
-                               label="best static-FC row of the same model, mean ± sd"),
-                        Patch(color=MUTED, alpha=.35, label="the model's Age + Sex baseline ± sd")],
-               loc="lower center", ncol=2, fontsize=7.5)
+    axes[0, 0].set_ylabel("CV score (Spearman), mean ± sd over seeds")
+    fig.legend(handles=[Line2D([], [], ls="none", marker=marker[t], ms=7, color=colour[t], label=t) for t in tasks] +
+                       [Line2D([], [], ls="none", label=f"{tree} = {legend[tree]}") for tree in trees] +
+                       [Patch(color=MUTED, alpha=.35, label=f"{model} on Age + Sex only (the baseline) ± sd")],
+               loc="lower center", ncol=1, fontsize=7.5)
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
-    fig.tight_layout(rect=(0, .14, 1, .95))
+    fig.tight_layout(rect=(0, .2, 1, .95))
     save(fig, "E1_performance", cfg)
     plt.show()
 
