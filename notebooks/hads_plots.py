@@ -552,10 +552,10 @@ DYN_SHOW = {"switch_rate": ("⇄", "switch rate", "{:.2f}"), "mean_dwell_s": ("�
             "switches_per_min": ("⇄/min", "switches per min", "{:.1f}"),
             "n_states_visited": ("K", "states visited", "{:.1f}")}
 
-def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0):
+def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0, gap=1.0):
     """The panel's dynamics as a column of symbol + value, outside the circle on `side` (-1 left,
     +1 right). A passing one is coloured, with its change underneath."""
-    x, ys = 1.95 * side, np.linspace(1.35, -1.25, len(dyn))         # the full height of the panel
+    x, ys = (1.45 + .5 * gap) * side, np.linspace(1.35, -1.25, len(dyn))   # gap = distance from the diagram, x1         # the full height of the panel
     for y, r in zip(ys, dyn.itertuples()):
         sym, _, f = DYN_SHOW[r.variable]
         c = colour if r.hit else INK2
@@ -564,7 +564,7 @@ def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0):
         if r.hit:
             ax.text(x, y - .2 * fs - .02 * icon, f"{100 * r.change:+.0f}%", ha="center", va="center", fontsize=6.3 * fs, color=c)
 
-def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None, fs=1.0, icon=1.0):
+def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None, fs=1.0, icon=1.0, gap=1.0):
     """Rows = Normal, then each phenotype; columns = tasks. pooled[(task, group)] = (p(j | i), occ, n).
     refs[(task, group)] = the panel it is compared with (its items in marks are highlighted in
     colours[(task, group)]); a panel without a ref is drawn as it is. dyn (Study.dynamics_marks) adds
@@ -590,7 +590,8 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
             panels[t, g] = (hT, hO, nT, nO, sorted(base | {e for e in off if hT[e]}))
     wmax = max(pooled[k][0][e] for k, p in panels.items() for e in p[4])
     omax = max(pooled[k][1].max() for k in panels)
-    w = 4.6 + (.9 if dyn is not None else 0)
+    out = 1.75 + .5 * gap                                    # the panel's outer edge with the dynamics
+    w = 4.6 + (.9 + .55 * (gap - 1) if dyn is not None else 0)
     fig, axes = plt.subplots(len(groups), len(tasks), squeeze=False, figsize=(w * len(tasks), 4.7 * len(groups) + .6))
     for (i, g), (j, t) in ((a, b) for a in enumerate(groups) for b in enumerate(tasks)):
         T, occ, n = pooled[t, g]
@@ -600,12 +601,12 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
         if dyn is not None:
             side = -1 if j == 0 else 1
             dynamics_column(axes[i, j], dyn[(dyn["task"] == t) & (dyn["group"] == g)], side,
-                            colours.get((t, g), INK2) if ref is not None else INK2, fs, icon)
+                            colours.get((t, g), INK2) if ref is not None else INK2, fs, icon, gap)
         if ref is None:
             diagram(axes[i, j], T, occ, edges, wmax, omax, fs=fs)
             axes[i, j].set_title(f"{t} · {who} (n={n})", fontsize=9.5 * fs)
             if dyn is not None:
-                axes[i, j].set_xlim(*((-2.25, 1.6) if j == 0 else (-1.6, 2.25)))
+                axes[i, j].set_xlim(*((-out, 1.6) if j == 0 else (-1.6, out)))
             continue
         # against another group, the rest goes grey; against the same group in the other task, it
         # stays dark: the Normal diagram is still itself, only its changes are marked
@@ -615,7 +616,7 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
         name_of = {RED: "red", BLUE: "blue"}.get(colours[t, g], "highlighted")
         axes[i, j].set_title(f"{t} · {who} (n={n})\nvs {vs}  ·  {int(hT.sum() + hO.sum())} in {name_of}", fontsize=9.5 * fs)
         if dyn is not None:
-            axes[i, j].set_xlim(*((-2.25, 1.6) if j == 0 else (-1.6, 2.25)))
+            axes[i, j].set_xlim(*((-out, 1.6) if j == 0 else (-1.6, out)))
     fig.legend(handles=[
         Line2D([], [], ls="none", marker="o", ms=10, mfc=NODE, mec=INK2, label="circle area = time in state (%)"),
         Line2D([], [], color=INK2, lw=2.5, label="arrow width = p(j | i): share of moves out of i that go to j"),
