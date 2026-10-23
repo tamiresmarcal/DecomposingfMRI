@@ -576,8 +576,10 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name):
             diagram(axes[i, j], T, occ, edges, wmax, omax)
             axes[i, j].set_title(f"{t} · {who} (n={n})", fontsize=9.5)
             continue
-        diagram(axes[i, j], T, occ, edges, wmax, omax, compare=True, hit_T=hT, hit_occ=hO, note_T=nT, note_occ=nO,
-                colour=colours[t, g])
+        # against another group, the rest goes grey; against the same group in the other task, it
+        # stays dark: the Normal diagram is still itself, only its changes are marked
+        diagram(axes[i, j], T, occ, edges, wmax, omax, compare=ref[1] != g, hit_T=hT, hit_occ=hO, note_T=nT,
+                note_occ=nO, colour=colours[t, g])
         vs = ref[0] if ref[1] == g else ref[1]
         name_of = {RED: "red", BLUE: "blue"}.get(colours[t, g], "highlighted")
         axes[i, j].set_title(f"{t} · {who} (n={n})\nvs {vs}  ·  {int(hT.sum() + hO.sum())} in {name_of}", fontsize=9.5)
