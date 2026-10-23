@@ -12,6 +12,8 @@ Exploration of what the pipeline wrote. Nothing here writes to `outputs/`.
 | `07_transitions_phenotype.ipynb` | brain-state transitions vs. phenotype: one subject-level table and a volcano over every state set |
 | `08_transitions_anxiety_depression.ipynb` | HADS anxiety & depression: every selection row against an Age + Sex baseline, what drives the score (window, atlas, model, state method, arm), volcanos over the top state sets and over every set (the multiverse), and one state set's dynamics for Normal / anxiety / depression with what differs drawn in red |
 | `09_model_contributions.ipynb` | what the saved bstm models use: out-of-fold SHAP shares across every saved model, one model in depth (beeswarm, predicted vs observed, stability over fold seeds), and where it looks on its state set's graph |
+| `10_hads_report.ipynb` | 08 and 09 unified, general to particular: movie-vs-rest and HADS multiverses, every model vs its Age + Sex baseline and what drives the score, the `all` arms' SHAP shares, then one chosen state set (volcanos, state graph: blue = movie vs rest, red = vs Normal) and one chosen model in it (score, stability, where it looks) |
+| `hads_tables.py` / `hads_plots.py` | 10's tables (cached in `cache/`; `python hads_tables.py` builds the slow ones on the cluster) and its figures |
 | `nbtools.py` | the loaders they use: inventory, pruned reads, the participants join |
 
 **QC lives in one place.** `03_qc.ipynb` owns subject-level quality control —

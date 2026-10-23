@@ -253,5 +253,5 @@ slurm/env.sh
 # exclusion reasons are facts about files, not about people.
 config/phenotype/*.csv
 
-# notebooks/09 caches its SHAP summaries here (per-variable means, regenerated on demand)
+# notebooks/09 and hads_tables.py (notebook 10) cache their slow tables here (regenerated on demand)
 notebooks/cache/
