@@ -52,6 +52,18 @@ def rule(v, cfg, alpha=None, fc_line=None, xlim=None):
     cfg = dataclasses.replace(cfg, **new)
     return v.assign(hit=(v["p_fdr"] < cfg.alpha) & (v["x"].abs() >= (cfg.fc_line or 0))), cfg
 
+def _size(cfg, w, h):
+    """A figure size, grown by cfg.fig_scale so the larger fonts (cfg.font_scale) still fit."""
+    return (w * cfg.fig_scale, h * cfg.fig_scale)
+
+def layout(fig, cfg, **kw):
+    """Every text of the figure x cfg.font_scale (but those drawn already scaled, gid "scaled"),
+    then tight_layout(**kw), so the layout makes room for the larger text."""
+    for t in fig.findobj(matplotlib.text.Text):
+        if t.get_gid() != "scaled":
+            t.set_fontsize(t.get_fontsize() * cfg.font_scale)
+    fig.tight_layout(**kw)
+
 def _panels(cfg):
     return [(t, lab) for t in cfg.tasks for lab in cfg.targets]
 
@@ -68,7 +80,7 @@ def label_points(ax, v, name, cfg, rows=None):
     lo, hi = ax.get_ylim()
     t["f"] = ((t["y"] - lo) / (hi - lo)).clip(0, 1)             # height as a fraction of the panel
     t = t.sort_values("f", ascending=False)
-    gap = min(.035, .98 / len(t))
+    gap = min(.035 * cfg.font_scale / cfg.fig_scale, .98 / len(t))
     pos, cur = [], 1.0
     for f in t["f"]:                                           # as close to the point as the one above allows
         cur = min(f, cur - gap) if pos else min(f, 1.0)
@@ -118,7 +130,7 @@ def fig_volcanos(v, cfg, title, name, xlabel, alpha=None, fc_line=None, xlim=Non
     alpha / fc_line / xlim change the rule or the x range for this figure only."""
     v, cfg = rule(v, cfg, alpha, fc_line, xlim)
     rows, cols = list(dict.fromkeys(v["task"])), list(dict.fromkeys(v["phenotype"]))
-    fig, axes = plt.subplots(len(rows), len(cols), squeeze=False, figsize=(8.5 * len(cols), 5.6 * len(rows) + .6))
+    fig, axes = plt.subplots(len(rows), len(cols), squeeze=False, figsize=_size(cfg, 8.5 * len(cols), 5.6 * len(rows) + .6))
     for (i, t), (j, lab) in ((a, b) for a in enumerate(rows) for b in enumerate(cols)):
         volcano_panel(axes[i, j], v[(v["task"] == t) & (v["phenotype"] == lab)], cfg)
     for ax in axes[:, 0]:
@@ -130,7 +142,7 @@ def fig_volcanos(v, cfg, title, name, xlabel, alpha=None, fc_line=None, xlim=Non
                        [Line2D([], [], ls="none", marker="o", ms=7, mfc=INK2, mec=INK, label=f"outlined = {cfg.pass_text}")],
                loc="lower center", ncol=4, fontsize=7.5)
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
-    fig.tight_layout(rect=(0, .05, 1, .97), w_pad=8)
+    layout(fig, cfg, rect=(0, .05, 1, .97), w_pad=8)
     save(fig, name, cfg)
     plt.show()
 
@@ -170,7 +182,7 @@ def fig_multiverse(multi, cfg, title, name, xlabel, by="block", alpha=None, fc_l
     for by in [by] if isinstance(by, str) else by:
         colours = palette(multi, by)
         h = 5.2 * len(rows) + .9
-        fig, axes = plt.subplots(len(rows), len(cols), squeeze=False, figsize=(9.5 * len(cols), h))
+        fig, axes = plt.subplots(len(rows), len(cols), squeeze=False, figsize=_size(cfg, 9.5 * len(cols), h))
         for (i, t), (j, lab) in ((a, b) for a in enumerate(rows) for b in enumerate(cols)):
             multiverse_panel(axes[i, j], multi[(multi["task"] == t) & (multi["phenotype"] == lab)], by, colours, cfg)
         for ax in axes[:, 0]:
@@ -179,7 +191,7 @@ def fig_multiverse(multi, cfg, title, name, xlabel, by="block", alpha=None, fc_l
             ax.set_xlabel(xlabel)
         _multiverse_legend(fig, colours, cfg, h)
         fig.suptitle(f"{title} · colour = {by}", x=.01, y=1 - .08 / h, va="top", ha="left", fontsize=10, color=INK)
-        fig.tight_layout(h_pad=2.5, rect=(0, 0, 1, 1 - .75 / h))
+        layout(fig, cfg, h_pad=2.5, rect=(0, 0, 1, 1 - .75 / h))
         save(fig, f"{name}_{by}", cfg)
         plt.show()
 
@@ -245,8 +257,8 @@ def fig_rankings(rows, cfg, above_both):
 
     n_lines = cfg.highlight_max + 2 * len(tasks) + 3
     fig, axes = plt.subplots(2 * len(models), len(cfg.targets), squeeze=False,
-                             figsize=(6.5 * len(cfg.targets), len(models) * (4 + .16 * n_lines)),
-                             gridspec_kw={"height_ratios": [4, .16 * n_lines] * len(models)})
+                             figsize=_size(cfg, 6.5 * len(cfg.targets), len(models) * (4 + .16 * n_lines * cfg.font_scale / cfg.fig_scale)),
+                             gridspec_kw={"height_ratios": [4, .16 * n_lines * cfg.font_scale / cfg.fig_scale] * len(models)})
     for k, model in enumerate(models):
         for j, lab in enumerate(cfg.targets):
             ax, leg = axes[2 * k, j], axes[2 * k + 1, j]
@@ -259,7 +271,7 @@ def fig_rankings(rows, cfg, above_both):
         axes[2 * k, 0].set_ylabel("CV score (Spearman)")
     fig.suptitle("B1  every row · dashed = that model's Age + Sex baseline, band ± sd · coloured = above it at "
                  f"{' and '.join(tasks)}, ± sd over seeds", fontsize=8, color=INK2, y=.995)
-    fig.tight_layout()
+    layout(fig, cfg, )
     save(fig, "B1_rankings", cfg)
     plt.show()
 
@@ -303,7 +315,7 @@ def fig_factors(rows, cfg):
     for k, (col, name) in enumerate(cfg.factors.items(), start=1):
         blocks = [None] if col == "model" else models          # None = every model in one panel
         fig, axes = plt.subplots(len(blocks), len(cfg.targets), squeeze=False, sharey=True,
-                                 figsize=(6.5 * len(cfg.targets), 3.6 * len(blocks) + .4))
+                                 figsize=_size(cfg, 6.5 * len(cfg.targets), 3.6 * len(blocks) + .4))
         lev = levels(pool.dropna(subset=[col]), col)
         for r, model in enumerate(blocks):
             for ax, lab in zip(axes[r], cfg.targets):
@@ -316,7 +328,7 @@ def fig_factors(rows, cfg):
         fig.legend(handles=handles + [Patch(color=MUTED, alpha=.35, label="that model's Age + Sex baseline ± sd")],
                    loc="upper right", ncol=3, fontsize=7, bbox_to_anchor=(1, 1.01))
         fig.suptitle(f"B2.{k}  {name}  ·  {', '.join(cfg.factor_trees)}", x=.01, ha="left", fontsize=10, color=INK, y=1.0)
-        fig.tight_layout()
+        layout(fig, cfg, )
         save(fig, f"B2_{k}_{col}", cfg)
         plt.show()
 
@@ -326,7 +338,7 @@ def fig_performance(perf, cfg, title, legend, model):
     legend = the label of each tree (what was selected)."""
     tasks, trees = list(cfg.tasks), ["bstm", "fcm"]
     colour, marker = dict(zip(tasks, TASK_COLOURS)), dict(zip(tasks, TASK_MARKERS))
-    fig, axes = plt.subplots(1, len(cfg.targets), squeeze=False, sharey=True, figsize=(4.5 * len(cfg.targets), 4.9))
+    fig, axes = plt.subplots(1, len(cfg.targets), squeeze=False, sharey=True, figsize=_size(cfg, 4.5 * len(cfg.targets), 5.8))
     for ax, lab in zip(axes[0], cfg.targets):
         p = perf[perf["phenotype"] == lab]
         ax.set_xlim(-.4, 1.4)
@@ -357,7 +369,7 @@ def fig_performance(perf, cfg, title, legend, model):
                        [Patch(color=MUTED, alpha=.35, label=f"{model} on Age + Sex only (the baseline) ± sd")],
                loc="lower center", ncol=1, fontsize=7.5)
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
-    fig.tight_layout(rect=(0, .2, 1, .95))
+    layout(fig, cfg, rect=(0, .3, 1, .95))
     save(fig, "E1_performance", cfg)
     plt.show()
 
@@ -388,7 +400,7 @@ def fig_shares(contrib, cfg, title):
 
     n = contrib.groupby(["task", "phenotype"])["label"].nunique().max()
     h = len(cfg.tasks) * (.9 + .19 * n)
-    fig, axes = plt.subplots(len(cfg.tasks), len(cfg.targets), squeeze=False, figsize=(7.5 * len(cfg.targets), h))
+    fig, axes = plt.subplots(len(cfg.tasks), len(cfg.targets), squeeze=False, figsize=_size(cfg, 7.5 * len(cfg.targets), h))
     for (i, task), (j, lab) in ((a, b) for a in enumerate(cfg.tasks) for b in enumerate(cfg.targets)):
         plot(axes[i, j], contrib[(contrib["task"] == task) & (contrib["phenotype"] == lab)])
         axes[i, j].set_title(f"{task} · {lab}", fontsize=10)
@@ -397,14 +409,14 @@ def fig_shares(contrib, cfg, title):
     fig.legend(handles=[Patch(color=BLOCK_COLOUR[b], label=b) for b in order], loc="upper right",
                ncol=4, fontsize=8, bbox_to_anchor=(1, 1.0))
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
-    fig.tight_layout(rect=(0, 0, 1, 1 - .3 / h))
+    layout(fig, cfg, rect=(0, 0, 1, 1 - .3 / h))
     save(fig, "C_shares", cfg)
     plt.show()
 
 def fig_predicted(deep, cfg, title):
     """E2.1: observed HADS category vs out-of-fold prediction; bar = middle half, marker = median."""
     fig, axes = plt.subplots(len(cfg.tasks), len(cfg.targets), squeeze=False, sharey=True,
-                             figsize=(5.5 * len(cfg.targets), 3.4 * len(cfg.tasks)))
+                             figsize=_size(cfg, 5.5 * len(cfg.targets), 3.4 * len(cfg.tasks)))
     rng = np.random.default_rng(0)
     for (i, task), (j, lab) in ((a, b) for a in enumerate(cfg.tasks) for b in enumerate(cfg.targets)):
         ax, d = axes[i, j], deep[task, lab]
@@ -422,7 +434,7 @@ def fig_predicted(deep, cfg, title):
     for ax in axes[:, 0]:
         ax.set_ylabel("predicted HADS level")
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
-    fig.tight_layout(rect=(0, 0, 1, .96))
+    layout(fig, cfg, rect=(0, 0, 1, .96))
     save(fig, "E2_1_predicted", cfg)
     plt.show()
 
@@ -431,7 +443,7 @@ def fig_stability(deep, cfg, title):
     Right: the direction (↑ higher values push the prediction up, ↓ down, ↕ the seeds disagree)
     and how many seeds rank it in their own top_vars."""
     fig, axes = plt.subplots(len(cfg.tasks), len(cfg.targets), squeeze=False,
-                             figsize=(6.8 * len(cfg.targets), (1 + .32 * cfg.top_vars) * len(cfg.tasks)))
+                             figsize=_size(cfg, 6.8 * len(cfg.targets), (1 + .32 * cfg.top_vars) * len(cfg.tasks)))
     for (i, task), (j, lab) in ((a, b) for a in enumerate(cfg.tasks) for b in enumerate(cfg.targets)):
         ax, d = axes[i, j], deep[task, lab]
         M, sign = d["by_seed"], np.sign(d["sign_by_seed"])
@@ -452,7 +464,7 @@ def fig_stability(deep, cfg, title):
                                                         f"k/{len(cfg.seeds_stab)} = seeds ranking it top {cfg.top_vars}")],
                loc="upper right", ncol=5, fontsize=7.5, bbox_to_anchor=(1, 1.0))
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
-    fig.tight_layout(rect=(0, 0, 1, .96))
+    layout(fig, cfg, rect=(0, 0, 1, .96))
     save(fig, "E2_2_stability", cfg)
     plt.show()
 
@@ -481,10 +493,11 @@ def clear_of(b, centres, radii, boxes):
             and all(abs(x - bx) > hw + bw or abs(y - by) > hh + bh for bx, by, bw, bh in boxes))
 
 def diagram(ax, T, occ, edges, wmax, omax, compare=False, hit_T=None, hit_occ=None, note_T=None, note_occ=None,
-            colour=RED, fs=1.0):
+            colour=RED, fs=1.0, room=1.0):
     """A state diagram on a circle. Circle area = time in state, loop = p(stay), arrow width =
     p(j | i). With `compare`, everything not highlighted is grey. hit_T / hit_occ are drawn in
-    `colour`, with note_T / note_occ (pp) written beside them; an empty note is not written."""
+    `colour`, with note_T / note_occ (pp) written beside them; an empty note is not written.
+    fs = font scale, room = panel size scale (label boxes are measured in data units: fs / room)."""
     K = len(occ)
     hit_T = np.zeros((K, K), bool) if hit_T is None else hit_T
     hit_occ = np.zeros(K, bool) if hit_occ is None else hit_occ
@@ -503,21 +516,21 @@ def diagram(ax, T, occ, edges, wmax, omax, compare=False, hit_T=None, hit_occ=No
         ax.add_patch(Arc(pos[k] + u * (r + .045), .11, .11, theta1=th - 140, theta2=th + 140, zorder=2,
                          lw=.3 + 3 * T[k, k], color=colour if hit_T[k, k] else base))
         occ_note = note_occ[k] if hit_occ[k] and note_occ is not None and note_occ[k] else None
-        ax.text(*pos[k], str(k), ha="center", va="center", fontsize=7.5 * fs, color=INK, zorder=6)
+        ax.text(*pos[k], str(k), ha="center", va="center", fontsize=7.5 * fs, gid="scaled", color=INK, zorder=6)
         at, lab = pos[k] * (1 + (r + .36) / np.linalg.norm(pos[k])), pct(occ[k]) + (f" ({occ_note})" if occ_note else "")
-        ax.text(*at, lab, ha="center", va="center", fontsize=6.5 * fs, color=colour if occ_note else INK2, zorder=6)
-        placed.append(box(at, lab, fs))                           # time in state, beside it
+        ax.text(*at, lab, ha="center", va="center", fontsize=6.5 * fs, gid="scaled", color=colour if occ_note else INK2, zorder=6)
+        placed.append(box(at, lab, fs / room))                           # time in state, beside it
         if hit_T[k, k] and note_T is not None and note_T[k, k]:   # a loop's change: from its outer
             side = np.array([u[1], -u[0]])                    # corner, sideways, a little over it
             d = (u + side) / np.linalg.norm(u + side)
             ha, va = away(d)
             corner = pos[k] + u * (r + .045) + d * .055
             ax.annotate(note_T[k, k], corner, xytext=-1.5 * d, textcoords="offset points", ha=ha, va=va,
-                        fontsize=6.2 * fs, color=colour, zorder=7,
+                        fontsize=6.2 * fs, gid="scaled", color=colour, zorder=7,
                         bbox=dict(boxstyle="round,pad=.12", fc=SURFACE, ec="none", alpha=.8))
-            _, _, hw, hh = box(corner, note_T[k, k], fs)
+            _, _, hw, hh = box(corner, note_T[k, k], fs / room)
             placed.append(box(corner + np.array([{"left": hw, "right": -hw}.get(ha, 0),
-                                                 {"bottom": hh, "top": -hh}.get(va, 0)]), note_T[k, k], fs))
+                                                 {"bottom": hh, "top": -hh}.get(va, 0)]), note_T[k, k], fs / room))
     for i, j in edges:                                        # transitions
         hit = hit_T[i, j]
         ax.add_patch(FancyArrowPatch(pos[i], pos[j], connectionstyle="arc3,rad=.18", arrowstyle="-|>",
@@ -535,41 +548,67 @@ def diagram(ax, T, occ, edges, wmax, omax, compare=False, hit_T=None, hit_occ=No
             curve, n = (pos[i] + pos[j]) / 2 + .09 * perp, perp / np.linalg.norm(perp)
             candidates = [(pos[i] + pos[j]) / 2 + .17 * perp] + [
                 curve + side * t * n for t in (.08, .12, .16, .2, .25, .3, .36, .42, .5) for side in (1, -1)]
-            mid = next((c for c in candidates if clear_of(box(c, note_T[i, j], fs), pos, radii, placed)), candidates[0])
-            ax.text(*mid, note_T[i, j], ha="center", va="center", fontsize=6.5 * fs, color=colour, zorder=5,
+            mid = next((c for c in candidates if clear_of(box(c, note_T[i, j], fs / room), pos, radii, placed)), candidates[0])
+            ax.text(*mid, note_T[i, j], ha="center", va="center", fontsize=6.5 * fs, gid="scaled", color=colour, zorder=5,
                     bbox=dict(boxstyle="round,pad=.15", fc=SURFACE, ec="none", alpha=.85))
-            placed.append(box(mid, note_T[i, j], fs))
+            placed.append(box(mid, note_T[i, j], fs / room))
     ax.set_xlim(-1.6, 1.6)
     ax.set_ylim(-1.75, 1.75)                                  # room for the top / bottom labels
     ax.set_aspect("equal")
     ax.axis("off")
 
-# the dynamics beside the diagrams: symbol, name, format
-DYN_SHOW = {"switch_rate": ("⇄", "switch rate", "{:.2f}"), "mean_dwell_s": ("τ", "mean dwell", "{:.0f} s"),
-            "entropy_rate_bits": ("H", "entropy rate", "{:.2f} bits"), "dispersion": ("◌", "dispersion", "{:.2f}"),
+# the dynamics beside the diagrams: symbol, name, format. "⏱" is drawn (few fonts have it).
+DYN_SHOW = {"switch_rate": ("⇄", "switch rate", "{:.2f}"), "mean_dwell_s": ("⏱", "mean dwell", "{:.0f} s"),
+            "entropy_rate_bits": ("H", "entropy rate", "{:.2f} bits"), "dispersion": ("✳", "dispersion", "{:.2f}"),
             "n_distinct_transitions": ("#", "distinct transitions", "{:.0f}"),
             "self_transition_rate": ("↺", "self-transition rate", "{:.2f}"),
             "switches_per_min": ("⇄/min", "switches per min", "{:.1f}"),
             "n_states_visited": ("K", "states visited", "{:.1f}")}
 
-def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0, gap=1.0):
+# a stopwatch as a marker path: dial, crown, one hand (few fonts have "⏱")
+STOPWATCH = matplotlib.path.Path.make_compound_path(
+    matplotlib.path.Path.unit_circle(), matplotlib.path.Path([[0, 1], [0, 1.35]]),
+    matplotlib.path.Path([[-.3, 1.4], [.3, 1.4]]), matplotlib.path.Path([[0, 0], [.45, .45]]))
+
+def _marker(sym):
+    return STOPWATCH if sym == "⏱" else f"${sym}$" if sym != "#" else r"$\#$"
+
+def stopwatch(ax, x, y, r, colour):
+    """A stopwatch at (x, y), radius r in data units: dial, crown, one hand."""
+    ax.add_patch(Circle((x, y), r, fc="none", ec=colour, lw=1.4, zorder=6))
+    ax.plot([x, x], [y + r, y + 1.35 * r], color=colour, lw=1.6, solid_capstyle="butt", zorder=6)
+    ax.plot([x - .3 * r, x + .3 * r], [y + 1.4 * r] * 2, color=colour, lw=1.6, solid_capstyle="round", zorder=6)
+    ax.plot([x, x + .45 * r], [y, y + .45 * r], color=colour, lw=1.4, solid_capstyle="round", zorder=6)
+
+def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0, gap=1.0, room=1.0):
     """The panel's dynamics as a column of symbol + value, outside the circle on `side` (-1 left,
-    +1 right). A passing one is coloured, with its change underneath."""
-    x, ys = (1.45 + .5 * gap) * side, np.linspace(1.35, -1.25, len(dyn))   # gap = distance from the diagram, x1         # the full height of the panel
+    +1 right), gap x the default distance. A passing one is coloured, with its change underneath.
+    fs / icon = font / symbol scale; room = panel size scale (offsets are in data units)."""
+    u = fs / room                                                 # one unit of text height, in data units
+    x, ys = (1.45 + .5 * gap) * side, np.linspace(1.35, -1.25, len(dyn))
     for y, r in zip(ys, dyn.itertuples()):
         sym, _, f = DYN_SHOW[r.variable]
         c = colour if r.hit else INK2
-        ax.text(x, y + .07 * icon * fs, sym, ha="center", va="center", fontsize=10.5 * fs * icon, color=c)
-        ax.text(x, y - .08 * fs - .02 * icon, f.format(r.value), ha="center", va="center", fontsize=6.3 * fs, color=c)
+        if sym == "⏱":
+            stopwatch(ax, x, y + .07 * icon * u, .055 * icon * u, c)
+        else:
+            ax.text(x, y + .07 * icon * u, sym, ha="center", va="center", fontsize=10.5 * fs * icon, color=c, gid="scaled")
+        ax.text(x, y - .08 * u - .02 * icon * u, f.format(r.value), ha="center", va="center", fontsize=6.3 * fs,
+                color=c, gid="scaled")
         if r.hit:
-            ax.text(x, y - .2 * fs - .02 * icon, f"{100 * r.change:+.0f}%", ha="center", va="center", fontsize=6.3 * fs, color=c)
+            ax.text(x, y - .2 * u - .02 * icon * u, f"{100 * r.change:+.0f}%", ha="center", va="center",
+                    fontsize=6.3 * fs, color=c, gid="scaled")
 
-def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None, fs=1.0, icon=1.0, gap=1.0):
+def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None, fs=None, icon=None, gap=None):
     """Rows = Normal, then each phenotype; columns = tasks. pooled[(task, group)] = (p(j | i), occ, n).
     refs[(task, group)] = the panel it is compared with (its items in marks are highlighted in
     colours[(task, group)]); a panel without a ref is drawn as it is. dyn (Study.dynamics_marks) adds
     each panel's dynamics as a column of symbols: left of the first task, right of the others. Every panel draws the Normal
     group's edge_top strongest arrows of every task, plus its own highlighted ones, on ONE width scale."""
+    fs = cfg.font_scale if fs is None else fs                  # the diagrams' own text, scaled here
+    icon = cfg.dyn_icon if icon is None else icon
+    gap = cfg.dyn_gap if gap is None else gap
+    room = cfg.fig_scale
     tasks, groups = list(cfg.tasks), ["Normal", *cfg.targets]
     K = len(pooled[tasks[0], "Normal"][1])
     off = [(a, b) for a in range(K) for b in range(K) if a != b]
@@ -592,7 +631,7 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
     omax = max(pooled[k][1].max() for k in panels)
     out = 1.75 + .5 * gap                                    # the panel's outer edge with the dynamics
     w = 4.6 + (.9 + .55 * (gap - 1) if dyn is not None else 0)
-    fig, axes = plt.subplots(len(groups), len(tasks), squeeze=False, figsize=(w * len(tasks), 4.7 * len(groups) + .6))
+    fig, axes = plt.subplots(len(groups), len(tasks), squeeze=False, figsize=_size(cfg, w * len(tasks), 5.3 * len(groups) + .6))
     for (i, g), (j, t) in ((a, b) for a in enumerate(groups) for b in enumerate(tasks)):
         T, occ, n = pooled[t, g]
         hT, hO, nT, nO, edges = panels[t, g]
@@ -601,20 +640,20 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
         if dyn is not None:
             side = -1 if j == 0 else 1
             dynamics_column(axes[i, j], dyn[(dyn["task"] == t) & (dyn["group"] == g)], side,
-                            colours.get((t, g), INK2) if ref is not None else INK2, fs, icon, gap)
+                            colours.get((t, g), INK2) if ref is not None else INK2, fs, icon, gap, room)
         if ref is None:
-            diagram(axes[i, j], T, occ, edges, wmax, omax, fs=fs)
-            axes[i, j].set_title(f"{t} · {who} (n={n})", fontsize=9.5 * fs)
+            diagram(axes[i, j], T, occ, edges, wmax, omax, fs=fs, room=room)
+            axes[i, j].set_title(f"{t} · {who} (n={n})", fontsize=9.5)
             if dyn is not None:
                 axes[i, j].set_xlim(*((-out, 1.6) if j == 0 else (-1.6, out)))
             continue
         # against another group, the rest goes grey; against the same group in the other task, it
         # stays dark: the Normal diagram is still itself, only its changes are marked
         diagram(axes[i, j], T, occ, edges, wmax, omax, compare=ref[1] != g, hit_T=hT, hit_occ=hO, note_T=nT,
-                note_occ=nO, colour=colours[t, g], fs=fs)
+                note_occ=nO, colour=colours[t, g], fs=fs, room=room)
         vs = ref[0] if ref[1] == g else ref[1]
         name_of = {RED: "red", BLUE: "blue"}.get(colours[t, g], "highlighted")
-        axes[i, j].set_title(f"{t} · {who} (n={n})\nvs {vs}  ·  {int(hT.sum() + hO.sum())} in {name_of}", fontsize=9.5 * fs)
+        axes[i, j].set_title(f"{t} · {who} (n={n})\nvs {vs}  ·  {int(hT.sum() + hO.sum())} in {name_of}", fontsize=9.5)
         if dyn is not None:
             axes[i, j].set_xlim(*((-out, 1.6) if j == 0 else (-1.6, out)))
     fig.legend(handles=[
@@ -622,11 +661,11 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
         Line2D([], [], color=INK2, lw=2.5, label="arrow width = p(j | i): share of moves out of i that go to j"),
         Line2D([], [], ls="none", marker=r"$\circlearrowleft$", ms=12, color=INK2, label="loop = p(stay): thicker = held longer"),
         *[Line2D([], [], color=c, lw=2.5, label=m) for c, m in meaning],
-        *([Line2D([], [], ls="none", label="beside: " + "   ".join(f"{DYN_SHOW[v][0]} {DYN_SHOW[v][1]}"
-                                                               for v in dict.fromkeys(dyn["variable"])))]
-          if dyn is not None else [])],
-        loc="lower center", ncol=2, fontsize=7.5 * fs, bbox_to_anchor=(.5, 0))
-    fig.suptitle(title, x=.01, ha="left", fontsize=10 * fs)
-    fig.tight_layout(rect=(0, .07, 1, .97))
+        *([Line2D([], [], ls="none", marker=_marker(DYN_SHOW[v][0]), ms=11, mfc="none", mec=INK2, color=INK2,
+                  label=DYN_SHOW[v][1]) for v in dict.fromkeys(dyn["variable"])] if dyn is not None else [])],
+        loc="lower center", ncol=3 if dyn is not None else 2, fontsize=7.5, bbox_to_anchor=(.5, 0))
+    fig.suptitle(title, x=.01, ha="left", fontsize=10)
+    rows = int(np.ceil((3 + len(meaning) + (dyn["variable"].nunique() if dyn is not None else 0)) / (3 if dyn is not None else 2)))
+    layout(fig, cfg, rect=(0, rows * 7.5 * cfg.font_scale * 1.7 / 72 / fig.get_figheight(), 1, .97))
     save(fig, name, cfg)
     plt.show()
