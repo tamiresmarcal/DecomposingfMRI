@@ -703,7 +703,7 @@ class Study:
         return s[(s["model"] == model["model"]) & (s["arm"] == model["arm"]) & (s["atlas"] == space["atlas"])
                  & np.isclose(s["window_s"], space["window_s"]) & (s["states"] == space["states"])][["seed", "score"]]
 
-    def performance_trees(self, space, arm, model, base):
+    def performance_trees(self, space, arm, model, base, fc_arm=None):
         """E1: one model (`model`, e.g. "hgb") in each panel: the bstm row of the chosen space and arm,
         and the fcm row of the same atlas, the same model and `fc_arm` (none when fcm has no such
         atlas), with that model's Age + Sex baseline. One row per (task, phenotype, tree)."""
@@ -714,7 +714,7 @@ class Study:
                 b = base[(base["phenotype"] == lab) & (base["model"] == model)]
                 bstm = p[(p["tree"] == "bstm") & (p["arm"] == arm) & (p["atlas"] == space["atlas"])
                          & np.isclose(p["window_s"], space["window_s"]) & (p["states"] == space["states"])]
-                fcm = p[(p["tree"] == "fcm") & (p["arm"] == c.fc_arm) & (p["atlas"] == space["atlas"])]
+                fcm = p[(p["tree"] == "fcm") & (p["arm"] == (fc_arm or c.fc_arm)) & (p["atlas"] == space["atlas"])]
                 for tree, r in (("bstm", bstm), ("fcm", fcm)):
                     if len(r) and len(b):
                         out.append(dict(task=task, phenotype=lab, tree=tree, mean=r["mean"].iloc[0], std=r["std"].iloc[0],
