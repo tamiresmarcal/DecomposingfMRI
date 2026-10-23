@@ -106,7 +106,7 @@ class Settings:
     font_scale: float = 2.0                            # every text of every figure x this
     fig_scale: float = 1.5                             # every figure's size x this, to make room for it
     dyn_gap: float = 2.0                               # D3 / E3: the dynamics column's distance from the diagram
-    dyn_icon: float = 2.0                              # D3 / E3: its symbols' size, x the font
+    dyn_icon: float = 1.0                              # D3 / E3: its symbols' size, x the font
     save_dir: Path | None = None
     # running
     cache_dir: Path | None = Path(__file__).resolve().parent / "cache"
