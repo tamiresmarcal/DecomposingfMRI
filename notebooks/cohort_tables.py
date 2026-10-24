@@ -1,0 +1,205 @@
+"""Tables behind 11_normal_brain_cohorts.ipynb: the normal brain's state dynamics across cohorts.
+
+The question is what the cohorts SHARE, not how they differ. `Cohorts(cfg)` reads one state set's
+`transitions/` tables for every cohort, splits each cohort's scans into rest and movie, and averages
+a subject's runs or films into one row. Every method returns one table:
+
+    graphs()          per (cohort, rest|movie) and their mean: p(j | i) and time in state
+    task_change()     movie vs rest in the same people, per cohort: what passes, and the dynamics
+    agreement(vars)   each cohort vs all the others, TOST: is it equivalent within +-SESOI?
+    cohort_means()    every variable's mean per cohort, for train vs projected
+
+Equivalence, not "no difference": a cohort is equivalent to the others on a variable when the 90%
+CI of the difference lies inside +-SESOI (two one-sided tests at 5%, Lakens 2017). SESOI is
+`sesoi_d` x the pooled SD of that variable: 0.2 = Cohen's "small effect", a convention to justify.
+A small cohort has a wide CI and so often cannot be shown equivalent: that is not a difference.
+"""
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+import hads_tables as ht
+
+DYNAMICS = ["switch_rate", "mean_dwell_s", "entropy_rate_bits", "dispersion", "n_distinct_transitions"]
+
+
+@dataclass
+class Settings:
+    root: Path = Path(os.environ.get("FMRIDECOMP_OUTPUTS", "/project/6008063/tamires/DecomposingfMRI/outputs"))
+    # one state set, as in notebook 10's SPACE
+    space: dict = field(default_factory=lambda: dict(atlas="yeo7", window_s=30.0, states="HMM1_pca3_8"))
+    # label -> the cohort= directories it reads, and its role in the state fit (train / projected)
+    cohorts: dict = field(default_factory=lambda: {
+        "ds002837": dict(dirs=["ds002837"], role="train"),
+        "cneuromod": dict(dirs=["cneuromod"], role="train"),
+        "camcan": dict(dirs=["camcan", "camcan_rest"], role="projected")})
+    rest_pattern: str = r"rest"                       # a task= value matching this (any case) is rest; the rest is movie
+    dynamics: list = field(default_factory=lambda: list(DYNAMICS))
+    # figure 1: movie vs rest
+    alpha: float = 0.10                               # BH-FDR
+    fc_task: float = 1.0                              # |log2FC| for the graph (1 = twofold)
+    fc_dyn: float = 0.25                              # |log2FC| for the dynamics
+    shrink: float = .015                              # log2FC pseudocount for probabilities
+    edge_top: int = 12                                # the mean's strongest arrows, per task
+    # figures 2 and 4: equivalence
+    sesoi_d: float = 0.2                              # TOST bounds, in pooled SDs
+    top_transitions: int = 8                          # figure 2: the strongest transitions shown
+    save_dir: Path | None = None
+
+    @property
+    def K(self):
+        return ht.n_states(self.space["states"])
+
+
+class Cohorts:
+    def __init__(self, cfg: Settings | None = None):
+        self.cfg = cfg or Settings()
+        self.base = (self.cfg.root / "transitions" / f"atlas={self.cfg.space['atlas']}"
+                     / f"window_s={ht.fmt_window(self.cfg.space['window_s'])}" / f"states={self.cfg.space['states']}")
+        self.data = self._load()
+
+    # -- reading ---------------------------------------------------------------------------
+    def _files(self, label):
+        out = {"rest": [], "movie": []}
+        for d in self.cfg.cohorts[label]["dirs"]:
+            for f in sorted(self.base.glob(f"cohort={d}/**/subjects.parquet")):
+                task = ht.hive(f, "task") or ""
+                out["rest" if re.search(self.cfg.rest_pattern, task, re.I) else "movie"].append(f)
+        return out
+
+    def _load(self):
+        """{(cohort, rest|movie): one row per subject}, cells as p(j | i), runs and films averaged."""
+        K, data = self.cfg.K, {}
+        for label in self.cfg.cohorts:
+            for kind, files in self._files(label).items():
+                if not files:
+                    continue
+                d = pd.concat(map(pd.read_parquet, files), ignore_index=True)
+                d["sub"] = d["sub"].astype(str).str.strip().str.upper()
+                self.cells = ht.cell_cols(d)
+                d[self.cells] = ht.as_p_cond(d, K)
+                cols = [*self.cells, *self.occ, *[v for v in self.cfg.dynamics if v in d]]
+                data[label, kind] = d.groupby("sub")[cols].mean()
+        if not data:
+            raise SystemExit(f"no transition tables under {self.base}")
+        return data
+
+    @property
+    def occ(self):
+        return [f"occ_{k}" for k in range(self.cfg.K)]
+
+    @property
+    def dyn(self):
+        return [v for v in self.cfg.dynamics if all(v in d for d in self.data.values())]
+
+    @property
+    def variables(self):
+        return [*self.cells, *self.occ, *self.dyn]
+
+    def role(self, label):
+        return self.cfg.cohorts[label]["role"]
+
+    def counts(self):
+        """Subjects per cohort and task."""
+        return pd.DataFrame({k: len(v) for k, v in self.data.items()}, index=["n"]).T.unstack().droplevel(0, axis=1)
+
+    def movie(self):
+        """Every cohort's movie subjects, one table, with a cohort column."""
+        return pd.concat([self.data[c, "movie"].assign(cohort=c) for c in self.cfg.cohorts if (c, "movie") in self.data])
+
+    # -- figure 1 -------------------------------------------------------------------------------
+    def _graph(self, means):
+        K = self.cfg.K
+        T = means[self.cells].to_numpy(float).reshape(K, K).copy()
+        T /= np.where(T.sum(1, keepdims=True) > 0, T.sum(1, keepdims=True), 1)
+        return T, means[self.occ].to_numpy(float)
+
+    def graphs(self):
+        """{(cohort | "mean", rest|movie): (p(j | i), occupancy)}; the mean weighs every cohort once."""
+        out = {k: self._graph(v.mean()) for k, v in self.data.items()}
+        for kind in ("rest", "movie"):
+            m = [v.mean() for (c, k), v in self.data.items() if k == kind]
+            if m:
+                out["mean", kind] = self._graph(pd.concat(m, axis=1).mean(axis=1))
+        return out
+
+    def task_change(self):
+        """Movie vs rest per cohort (and all cohorts together, "mean"): paired in the people with both
+        scans (Welch when fewer than 3 have both), BH-FDR over every variable. Returns (marks, dynamics):
+        marks = one row per variable with its test; dynamics = the values beside each diagram."""
+        c = self.cfg
+        marks, dyn = [], []
+        labels = [x for x in c.cohorts if (x, "rest") in self.data and (x, "movie") in self.data]
+        for label in [*labels, "mean"]:
+            group = labels if label == "mean" else [label]
+            r = pd.concat([self.data[x, "rest"].rename(index=lambda s, x=x: f"{x}:{s}") for x in group])
+            m = pd.concat([self.data[x, "movie"].rename(index=lambda s, x=x: f"{x}:{s}") for x in group])
+            v = self.variables
+            both = r.index.intersection(m.index)
+            if len(both) >= 3:
+                p, test = stats.ttest_rel(m.loc[both, v], r.loc[both, v]).pvalue, "paired"
+            else:
+                p, test = stats.ttest_ind(m[v], r[v], equal_var=False).pvalue, "Welch"
+            q = stats.false_discovery_control(np.nan_to_num(p, nan=1))
+            fc = np.log2((m[v].mean() + c.shrink) / (r[v].mean() + c.shrink))
+            line = pd.Series(c.fc_task, v)
+            line[self.dyn] = c.fc_dyn
+            t = pd.DataFrame(dict(cohort=label, variable=v, x=fc.to_numpy(), p=p, p_fdr=q, test=test,
+                                  n=len(both) if test == "paired" else min(len(m), len(r)),
+                                  rest=r[v].mean().to_numpy(), movie=m[v].mean().to_numpy()))
+            t["hit"] = (t["p_fdr"] < c.alpha) & (t["x"].abs() >= line.to_numpy())
+            marks.append(t)
+            for kind, d in (("rest", r), ("movie", m)):
+                dd = t[t["variable"].isin(self.dyn)]
+                dyn.append(pd.DataFrame(dict(cohort=label, task=kind, variable=dd["variable"],
+                                             value=dd[kind].to_numpy(),
+                                             change=(dd["movie"] / dd["rest"] - 1).to_numpy() if kind == "movie" else np.nan,
+                                             hit=dd["hit"].to_numpy() & (kind == "movie"))))
+        return pd.concat(marks, ignore_index=True), pd.concat(dyn, ignore_index=True)
+
+    # -- figures 2 and 4: equivalence ----------------------------------------------------------
+    def agreement(self, variables=None):
+        """Movie, each cohort vs all the others pooled, per variable: Welch difference, its 90% CI,
+        and TOST at 5% with bounds +-sesoi_d x the pooled SD."""
+        mv, rows = self.movie(), []
+        for v in variables or self.variables:
+            bound = self.cfg.sesoi_d * mv[v].std()
+            for label in mv["cohort"].unique():
+                a, b = mv.loc[mv["cohort"] == label, v], mv.loc[mv["cohort"] != label, v]
+                va, vb = a.var(ddof=1) / len(a), b.var(ddof=1) / len(b)
+                se = np.sqrt(va + vb)
+                df = (va + vb) ** 2 / (va ** 2 / max(len(a) - 1, 1) + vb ** 2 / max(len(b) - 1, 1))
+                d, h = a.mean() - b.mean(), stats.t.ppf(.95, df) * se
+                rows.append(dict(variable=v, cohort=label, n=len(a), diff=d, lo=d - h, hi=d + h, bound=bound,
+                                 equivalent=bool((d - h > -bound) & (d + h < bound))))
+        return pd.DataFrame(rows)
+
+    def strongest(self, n=None):
+        """The movie mean's `n` strongest transitions (figure 2)."""
+        m = pd.concat([self.data[c, "movie"].mean() for c in self.cfg.cohorts if (c, "movie") in self.data], axis=1).mean(axis=1)
+        return sorted(self.cells, key=lambda c: -m[c])[:n or self.cfg.top_transitions]
+
+    # -- figure 3 -----------------------------------------------------------------------------
+    def cohort_means(self):
+        """Every variable's movie mean, one row per cohort, with its role."""
+        mv = self.movie()
+        out = mv.groupby("cohort")[self.variables].mean()
+        return out.assign(role=[self.role(c) for c in out.index])
+
+
+def available_sets(root, cohorts):
+    """Every state set with a table for every cohort label (any of its dirs)."""
+    found = {}
+    for p in (Path(root) / "transitions").rglob("subjects.parquet"):
+        key = (ht.hive(p, "atlas"), float(ht.hive(p, "window_s")), ht.hive(p, "states"))
+        found.setdefault(key, set()).add(ht.hive(p, "cohort"))
+    rows = [dict(atlas=a, window_s=w, states=s) for (a, w, s), have in sorted(found.items())
+            if all(set(c["dirs"]) & have for c in cohorts.values())]
+    return pd.DataFrame(rows)
