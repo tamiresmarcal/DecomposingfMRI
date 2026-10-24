@@ -40,7 +40,8 @@ class Settings:
         "ds002837": dict(dirs=["ds002837"], role="train"),
         "cneuromod": dict(dirs=["cneuromod"], role="train"),
         "camcan": dict(dirs=["camcan", "camcan_rest"], role="projected")})
-    rest_pattern: str = r"rest"                       # a task= value matching this (any case) is rest; the rest is movie
+    rest_pattern: str = r"rest"                       # a task= value that IS this (whole name, any case) is rest;
+                                                      # every other task is movie ("theprestige" is a film)
     dynamics: list = field(default_factory=lambda: list(DYNAMICS))
     # figure 1: movie vs rest
     alpha: float = 0.10                               # BH-FDR
@@ -71,7 +72,7 @@ class Cohorts:
         for d in self.cfg.cohorts[label]["dirs"]:
             for f in sorted(self.base.glob(f"cohort={d}/**/subjects.parquet")):
                 task = ht.hive(f, "task") or ""
-                out["rest" if re.search(self.cfg.rest_pattern, task, re.I) else "movie"].append(f)
+                out["rest" if re.fullmatch(self.cfg.rest_pattern, task, re.I) else "movie"].append(f)
         return out
 
     def _load(self):
@@ -105,6 +106,17 @@ class Cohorts:
 
     def role(self, label):
         return self.cfg.cohorts[label]["role"]
+
+    def tasks(self):
+        """What is read, from where, and as which kind: one row per (cohort, directory, task)."""
+        rows = []
+        for label in self.cfg.cohorts:
+            for kind, files in self._files(label).items():
+                for f in files:
+                    rows.append(dict(cohort=label, dir=ht.hive(f, "cohort"), task=ht.hive(f, "task"), kind=kind,
+                                     subjects=pd.read_parquet(f, columns=["sub"])["sub"].nunique()))
+        t = pd.DataFrame(rows)
+        return t.groupby(["cohort", "dir", "kind", "task"])["subjects"].sum().to_frame()
 
     def counts(self):
         """Subjects per cohort and task."""
@@ -177,8 +189,23 @@ class Cohorts:
                 se = np.sqrt(va + vb)
                 df = (va + vb) ** 2 / (va ** 2 / max(len(a) - 1, 1) + vb ** 2 / max(len(b) - 1, 1))
                 d, h = a.mean() - b.mean(), stats.t.ppf(.95, df) * se
+                ha = stats.t.ppf(.95, max(len(a) - 1, 1)) * a.std(ddof=1) / np.sqrt(len(a))
                 rows.append(dict(variable=v, cohort=label, n=len(a), diff=d, lo=d - h, hi=d + h, bound=bound,
-                                 equivalent=bool((d - h > -bound) & (d + h < bound))))
+                                 equivalent=bool((d - h > -bound) & (d + h < bound)),
+                                 mean=a.mean(), mean_lo=a.mean() - ha, mean_hi=a.mean() + ha, others=b.mean()))
+        return pd.DataFrame(rows)
+
+    def cohen(self, variables=None):
+        """Movie, each cohort vs all the others pooled, per variable: Cohen's d (pooled SD) and its 95% CI."""
+        mv, rows = self.movie(), []
+        for v in variables or self.variables:
+            for label in mv["cohort"].unique():
+                a, b = mv.loc[mv["cohort"] == label, v], mv.loc[mv["cohort"] != label, v]
+                na, nb = len(a), len(b)
+                sd = np.sqrt(((na - 1) * a.var() + (nb - 1) * b.var()) / max(na + nb - 2, 1))
+                d = (a.mean() - b.mean()) / sd if sd > 0 else 0.0
+                se = np.sqrt(1 / na + 1 / nb + d ** 2 / (2 * (na + nb)))
+                rows.append(dict(variable=v, cohort=label, n=na, d=d, lo=d - 1.96 * se, hi=d + 1.96 * se))
         return pd.DataFrame(rows)
 
     def strongest(self, n=None):
