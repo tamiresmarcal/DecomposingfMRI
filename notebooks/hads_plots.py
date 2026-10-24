@@ -414,7 +414,9 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None):
                 ax.plot(-.022, r, marker[task], ms=6, color=colour[task], transform=tr, clip_on=False)
             for r in range(len(tasks), len(rows), len(tasks)):
                 ax.axhline(r - .5, color=MUTED, lw=.5)
-            ax.set_yticks(range(len(rows)), [b for b, _ in rows], fontsize=7.5)
+            short = {"cells": "Transitions", "occupancy": "Occupancy", "dynamics": "Dynamics", "covariates": "Covariates"}
+            centres = [len(tasks) * k + (len(tasks) - 1) / 2 for k in range(len(order))]   # one name per type
+            ax.set_yticks(centres, [short[b] for b in order] if j == 0 else [""] * len(order), fontsize=7.5)
             ax.tick_params(axis="y", pad=16, length=0)         # room for the task's marker
             ax.invert_yaxis()
             ax.set_xlim(0, 1)
