@@ -750,6 +750,31 @@ class Study:
                                         base_mean=b["mean"].iloc[0], base_sd=b["std"].iloc[0]))
         return pd.DataFrame(out, columns=["task", "phenotype", "tree", "mean", "std", "base_mean", "base_sd"])
 
+    def tree_seeds(self, space, arm, model, fc_arm=None):
+        """E1's dots: the per-seed scores of the bstm row (select-bstm's scores.csv) and of the fcm
+        row of the same atlas and model (select-fcm's scores.csv), where they exist."""
+        c, out = self.cfg, []
+        for task in c.tasks:
+            for lab in c.targets:
+                b = self._scores(task, lab, space, dict(model=model, arm=arm))
+                out += [dict(task=task, phenotype=lab, tree="bstm", seed=r.seed, score=r.score) for r in b.itertuples()]
+                p = c.root / "fcm_selection" / f"task={task}" / f"target={c.targets[lab]}" / "scores.csv"
+                if p.exists():
+                    f = pd.read_csv(p)
+                    f = f[(f["model"] == model) & (f["arm"] == (fc_arm or c.fc_arm)) & (f["atlas"] == space["atlas"])]
+                    out += [dict(task=task, phenotype=lab, tree="fcm", seed=r.seed, score=r.score) for r in f.itertuples()]
+        return pd.DataFrame(out, columns=["task", "phenotype", "tree", "seed", "score"])
+
+    def block_shares(self, deep):
+        """Each variable type's share of the model's mean |SHAP|, per panel and fold seed (seeds_stab)."""
+        out = []
+        for (task, lab), d in deep.items():
+            blocks = np.array(d["blocks"])
+            for seed, row in zip(self.cfg.seeds_stab, d["by_seed"]):
+                out += [dict(task=task, phenotype=lab, seed=seed, block=b, share=row[blocks == b].sum() / row.sum())
+                        for b in dict.fromkeys(blocks)]
+        return pd.DataFrame(out)
+
     def deep(self, space, model):
         """E2 / E3: the chosen model refit in each panel, out-of-fold SHAP at every seed of
         seeds_stab (and shap_seed). Per panel: X, y, names, blocks; S and pred at shap_seed;

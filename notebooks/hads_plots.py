@@ -4,6 +4,7 @@ Every function takes a table and the Settings (`cfg`) and draws one figure; noth
 computes a statistic. The state diagram's rules (sizes, label placement) are in `diagram`.
 """
 import dataclasses
+import re
 from pathlib import Path
 
 import matplotlib
@@ -56,10 +57,31 @@ def _size(cfg, w, h):
     """A figure size, grown by cfg.fig_scale so the larger fonts (cfg.font_scale) still fit."""
     return (w * cfg.fig_scale, h * cfg.fig_scale)
 
+# what the figures call things; every other lowercase word starts with a capital (pretty)
+NAMES = {"bstm": "BSTM", "fcm": "FC Model", "cells": "Brain States Transitions",
+         "occupancy": "Brain States Occupancy", "dynamics": "Brain States Dynamics",
+         "hgb": "HGB", "lgbm": "LGBM", "fdr": "FDR", "shap": "SHAP", "cv": "CV", "hads": "HADS", "sd": "SD"}
+KEEP = {"vs", "pp", "s", "bits", "x", "p", "n", "i", "j", "stay"}         # units and symbols stay as they are
+_WORD = re.compile(r"(?<![\w\[])([a-z][a-z]*)(?![\w])")
+
+def pretty(text):
+    """A figure's text with the report's names: bstm -> BSTM, cells -> Brain States Transitions, ...,
+    and every other plain lowercase word capitalised. Variable names (switch_rate), set names
+    (HMM1_pca3_8), arm options ([cond]) and math ($...$) are left alone."""
+    if not text or "$" in text:
+        return text
+    return _WORD.sub(lambda m: m[1] if m[1] in KEEP else NAMES.get(m[1], m[1].capitalize()), text)
+
 def layout(fig, cfg, **kw):
-    """Every text of the figure x cfg.font_scale (but those drawn already scaled, gid "scaled"),
-    then tight_layout(**kw), so the layout makes room for the larger text."""
+    """Every text of the figure through pretty() and x cfg.font_scale (but those drawn already
+    scaled, gid "scaled"), then tight_layout(**kw), so the layout makes room for the larger text."""
+    for ax in fig.axes:                                       # named ticks are re-made by their formatter
+        for axis in (ax.xaxis, ax.yaxis):
+            f = axis.get_major_formatter()
+            if isinstance(f, (matplotlib.ticker.FixedFormatter, matplotlib.ticker.FuncFormatter)):
+                axis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda x, pos, f=f: pretty(f(x, pos))))
     for t in fig.findobj(matplotlib.text.Text):
+        t.set_text(pretty(t.get_text()))
         if t.get_gid() != "scaled":
             t.set_fontsize(t.get_fontsize() * cfg.font_scale)
     fig.tight_layout(**kw)
@@ -332,14 +354,24 @@ def fig_factors(rows, cfg):
         save(fig, f"B2_{k}_{col}", cfg)
         plt.show()
 
-def fig_performance(perf, cfg, title, legend, model):
+def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None):
     """E1: one model, one panel per phenotype; x = bstm | fcm, colour = task, a line per task
-    from bstm to fcm; mean ± sd over seeds, over that model's Age + Sex baseline.
-    legend = the label of each tree (what was selected)."""
+    from bstm to fcm; mean ± sd over the fold seeds (and each seed as a dot, from `seeds`), over
+    that model's Age + Sex baseline. legend = the label of each tree (what was selected).
+    Underneath (shares, Study.block_shares): what the bstm model uses, one row per variable type
+    and task, bar = mean share of its |SHAP|, dots = each fold seed."""
     tasks, trees = list(cfg.tasks), ["bstm", "fcm"]
     colour, marker = dict(zip(tasks, TASK_COLOURS)), dict(zip(tasks, TASK_MARKERS))
-    fig, axes = plt.subplots(1, len(cfg.targets), squeeze=False, sharey=True, figsize=_size(cfg, 4.5 * len(cfg.targets), 5.8))
-    for ax, lab in zip(axes[0], cfg.targets):
+    order = ["covariates", "cells", "occupancy", "dynamics"]
+    n = len(cfg.targets)
+    fig = plt.figure(figsize=_size(cfg, 5 * n, 5 + (4.4 if shares is not None else 0)))
+    gs = fig.add_gridspec(2 if shares is not None else 1, n, height_ratios=[5, 4.4] if shares is not None else [1])
+    axes = [fig.add_subplot(gs[0, j]) for j in range(n)]
+    rng = np.random.default_rng(0)
+    for j, (ax, lab) in enumerate(zip(axes, cfg.targets)):
+        if j:
+            ax.sharey(axes[0])
+            ax.tick_params(labelleft=False)
         p = perf[perf["phenotype"] == lab]
         ax.set_xlim(-.4, 1.4)
         if len(p):
@@ -347,13 +379,18 @@ def fig_performance(perf, cfg, title, legend, model):
         ends = []                                              # (y, x, task): the line's name at its end
         for k, task in enumerate(tasks):
             h = p[p["task"] == task].set_index("tree").reindex(trees)
-            x = np.arange(len(trees)) + (k - (len(tasks) - 1) / 2) * .06
+            x = np.arange(len(trees)) + (k - (len(tasks) - 1) / 2) * .1
             ax.plot(x, h["mean"], color=colour[task], lw=1.4, alpha=.7)
             ax.errorbar(x, h["mean"], yerr=h["std"], fmt=marker[task], ls="none", ms=8, lw=1.6, color=colour[task],
                         mec=SURFACE, mew=1, zorder=3)
+            if seeds is not None:                              # each fold seed, beside its mean
+                for i, tree in enumerate(trees):
+                    v = seeds[(seeds["phenotype"] == lab) & (seeds["task"] == task) & (seeds["tree"] == tree)]["score"]
+                    ax.scatter(x[i] + (k - .5) * .12 + rng.uniform(-.02, .02, len(v)), v, s=10, color=colour[task],
+                               alpha=.45, lw=0, zorder=2)
             last = h["mean"].last_valid_index()
             if last is not None:
-                ends.append([h.loc[last, "mean"], x[trees.index(last)] + .1, task])
+                ends.append([h.loc[last, "mean"], x[trees.index(last)] + .12, task])
         ax.autoscale_view()
         gap = .05 * np.diff(ax.get_ylim())[0]                  # names never closer than this
         ends.sort()
@@ -361,15 +398,36 @@ def fig_performance(perf, cfg, title, legend, model):
             e1[0] = max(e1[0], e0[0] + gap)
         for y, x, task in ends:
             ax.text(x, y, task, color=colour[task], va="center", fontsize=8)
-        ax.set_xticks(range(len(trees)), ["bstm\n(transitions)", "fcm\n(static FC)"])
+        ax.set_xticks(range(len(trees)), trees)
         ax.set_title(lab)
-    axes[0, 0].set_ylabel("CV score (Spearman), mean ± sd over seeds")
+    axes[0].set_ylabel("CV score (Spearman)\nmean ± sd" + (", dots = fold seeds" if seeds is not None else ""))
+    if shares is not None:
+        rows = [(b, t) for b in order for t in tasks]
+        for j, lab in enumerate(cfg.targets):
+            ax = fig.add_subplot(gs[1, j])
+            tr = matplotlib.transforms.blended_transform_factory(ax.transAxes, ax.transData)
+            for r, (b, task) in enumerate(rows):
+                v = shares[(shares["phenotype"] == lab) & (shares["task"] == task) & (shares["block"] == b)]["share"]
+                ax.barh(r, v.mean(), height=.7, color=BLOCK_COLOUR[b], alpha=.5 if task == tasks[0] else .8, lw=0)
+                ax.scatter(v, np.full(len(v), r), s=10, color=INK, zorder=3, lw=0)
+                ax.text(max(v.max(), v.mean()) + .02, r, f"{100 * v.mean():.0f}%", va="center", fontsize=7, color=INK2)
+                ax.plot(-.022, r, marker[task], ms=6, color=colour[task], transform=tr, clip_on=False)
+            for r in range(len(tasks), len(rows), len(tasks)):
+                ax.axhline(r - .5, color=MUTED, lw=.5)
+            ax.set_yticks(range(len(rows)), [b for b, _ in rows], fontsize=7.5)
+            ax.tick_params(axis="y", pad=16, length=0)         # room for the task's marker
+            ax.invert_yaxis()
+            ax.set_xlim(0, 1)
+            ax.xaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1))
+            ax.set_xlabel("share of mean |SHAP| (out-of-fold), one dot per fold seed", fontsize=8)
+            ax.set_title(f"bstm · what the {model} model uses ({lab})", fontsize=9)
     fig.legend(handles=[Line2D([], [], ls="none", marker=marker[t], ms=7, color=colour[t], label=t) for t in tasks] +
-                       [Line2D([], [], ls="none", label=f"{tree} = {legend[tree]}") for tree in trees] +
-                       [Patch(color=MUTED, alpha=.35, label=f"{model} on Age + Sex only (the baseline) ± sd")],
-               loc="lower center", ncol=1, fontsize=7.5)
+                       ([Patch(color=BLOCK_COLOUR[b], label=b) for b in order] if shares is not None else []) +
+                       [Patch(color=MUTED, alpha=.35, label=f"{model} on Age + Sex only (the baseline) ± sd")] +
+                       [Line2D([], [], ls="none", label=f"{tree} = {legend[tree]}") for tree in trees],
+               loc="lower center", ncol=4, fontsize=7.5)
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
-    layout(fig, cfg, rect=(0, .3, 1, .95))
+    layout(fig, cfg, rect=(0, .1, 1, .96))
     save(fig, "E1_performance", cfg)
     plt.show()
 
