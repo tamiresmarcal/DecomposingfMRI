@@ -384,6 +384,8 @@ def fig_matrix_cohen(co, graphs, d):
     od = d[d["variable"].isin(co.occ)].assign(a=lambda x: x["d"].abs()).groupby("variable")["a"].max().reindex(co.occ)
     ax.set_title(f"Cohen's d per cell\n{int((W < .2).sum())}/{K * K} with every |d| < 0.2", fontsize=11)
     _occ_bars(co, graphs, axes, labels, (od.to_numpy(), [cmap(norm(v)) for v in od], "largest |d|"))
+    if not d["variable"].isin(co.row_h).any():                    # the row entropies, if the table lacks them
+        d = pd.concat([d, co.cohen(co.row_h)], ignore_index=True)
     hd = d[d["variable"].isin(co.row_h)].assign(a=lambda x: x["d"].abs()).groupby("variable")["a"].max().reindex(co.row_h)
     dd = d[d["variable"].isin(co.dyn)].assign(a=lambda x: x["d"].abs()).groupby("variable")["a"].max().reindex(co.dyn)
     _margins(co, axes, labels, (hd.to_numpy(), [cmap(norm(v)) for v in hd], "largest |d|"),
