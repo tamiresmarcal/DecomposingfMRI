@@ -266,7 +266,7 @@ def fig_train_vs_projected(co, means):
 def _matrices(co, graphs, fig_w_extra=1):
     cfg, col = co.cfg, colours(co.cfg)
     labels = [c for c in cfg.cohorts if (c, "movie") in graphs]
-    fig, axes = plt.subplots(1, len(labels) + 1, figsize=(4.3 * (len(labels) + 1), 5))
+    fig, axes = plt.subplots(1, len(labels) + 1, figsize=(4.3 * (len(labels) + 1), 6.2))
     vmax = max(graphs[c, "movie"][0].max() for c in labels)
     for ax, c in zip(axes, labels):
         im = ax.imshow(graphs[c, "movie"][0], cmap="Blues", vmin=0, vmax=vmax)
@@ -275,6 +275,36 @@ def _matrices(co, graphs, fig_w_extra=1):
     for a in axes:
         a.set_xticks(range(cfg.K)); a.set_yticks(range(cfg.K)); a.set_xlabel("to state j"); a.set_ylabel("from state i")
     return fig, axes, labels
+
+def _occ_bars(co, graphs, axes, labels, compare):
+    """A bar chart of time in each state above every matrix, aligned with its columns (state j).
+    compare = (values per state, colours per state, label) for the bars above the comparison matrix."""
+    from mpl_toolkits.axes_grid1 import make_axes_locatable
+    col, K = colours(co.cfg), co.cfg.K
+    ymax = max(graphs[c, "movie"][1].max() for c in labels) * 1.15
+    tops = []
+    for ax, c in zip(axes, labels):
+        top = make_axes_locatable(ax).append_axes("top", size="28%", pad=.08, sharex=ax)
+        top.bar(range(K), graphs[c, "movie"][1], width=.8, color=col[c], alpha=.75)
+        top.set_ylim(0, ymax)
+        top.yaxis.set_major_formatter(plt.matplotlib.ticker.PercentFormatter(1, decimals=0))
+        tops.append(top)
+    values, colours_, label = compare
+    top = make_axes_locatable(axes[-1]).append_axes("top", size="28%", pad=.08, sharex=axes[-1])
+    top.bar(range(K), values, width=.8, color=colours_)
+    if label == "largest |d|":                                    # d on its own scale: 0.8 = large
+        top.set_ylim(0, max(1, np.nanmax(values) * 1.1))
+        for w in (.2, .5, .8):
+            top.axhline(w, color=hp.MUTED, lw=.5, ls=":")
+    top.set_ylabel(label, fontsize=7)
+    tops.append(top)
+    tops[0].set_ylabel("time in state", fontsize=8)
+    for t, ax in zip(tops, axes):
+        t.tick_params(labelbottom=False, labelsize=7)
+        t.spines["right"].set_visible(False); t.spines["top"].set_visible(False)
+        t.set_title(ax.get_title(), fontsize=11, color=ax.title.get_color())
+        ax.set_title("")
+    return tops
 
 def fig_matrix_cohen(co, graphs, d):
     """4b. Movie p(j | i) per cohort, then per cell the largest |Cohen's d| of a cohort vs the others."""
@@ -293,6 +323,9 @@ def fig_matrix_cohen(co, graphs, d):
                 ax.text(j, i, f"{W[i, j]:.1f}", ha="center", va="center", fontsize=7, color=hp.INK)
     cb = fig.colorbar(im2, ax=ax, shrink=.8, pad=.04, ticks=[0, .2, .5, .8])
     cb.set_label("largest |d|, cohort vs the others")
+    od = d[d["variable"].isin(co.occ)].assign(a=lambda x: x["d"].abs()).groupby("variable")["a"].max().reindex(co.occ)
+    ax.set_title(f"Cohen's d per cell\n{int((W < .2).sum())}/{K * K} with every |d| < 0.2", fontsize=11)
+    _occ_bars(co, graphs, axes, labels, (od.to_numpy(), [cmap(norm(v)) for v in od], "largest |d|"))
     ax.set_title(f"Cohen's d per cell\n{int((W < .2).sum())}/{K * K} with every |d| < 0.2", fontsize=11)
     fig.suptitle(f"4b  Movie transitions per cohort · per cell the cohort furthest from the others, Cohen's d "
                  f"(< 0.2 small, 0.5 medium, 0.8 large) · {ht.set_label(cfg.space)}", x=.01, ha="left", fontsize=11)
@@ -307,7 +340,7 @@ def fig_matrix(co, graphs, agree):
     worst = t.assign(a=t[["lo", "hi"]].abs().max(axis=1)).groupby("variable")["a"].max()
     eq = t.groupby("variable")["equivalent"].all()
     n_eq = t.groupby("variable")["equivalent"].sum()
-    fig, axes = plt.subplots(1, len(labels) + 1, figsize=(4.3 * (len(labels) + 1), 5))
+    fig, axes = plt.subplots(1, len(labels) + 1, figsize=(4.3 * (len(labels) + 1), 6.2))
     vmax = max(graphs[c, "movie"][0].max() for c in labels)
     for ax, c in zip(axes, labels):
         im = ax.imshow(graphs[c, "movie"][0], cmap="Blues", vmin=0, vmax=vmax)
@@ -328,6 +361,10 @@ def fig_matrix(co, graphs, agree):
                 ax.text(j, i, f"{n_eq[c]}/{len(labels)}", ha="center", va="center", fontsize=7, color=hp.RED)
     fig.colorbar(im2, ax=ax, shrink=.8, pad=.04).set_label("largest |cohort − others| (pp)")
     ax.set_title(f"TOST per cell\n{int(eq.sum())}/{len(eq)} equivalent in every cohort", fontsize=11)
+    o = agree[agree["variable"].isin(co.occ)]
+    ow = o.assign(a=o[["lo", "hi"]].abs().max(axis=1)).groupby("variable")["a"].max().reindex(co.occ)
+    oe = o.groupby("variable")["equivalent"].all().reindex(co.occ)
+    _occ_bars(co, graphs, axes, labels, (100 * ow.to_numpy(), [hp.MUTED if e else hp.RED for e in oe], "largest |diff| (pp)"))
     for a in axes:
         a.set_xticks(range(K)); a.set_yticks(range(K)); a.set_xlabel("to state j"); a.set_ylabel("from state i")
     fig.suptitle(f"4a  Movie transitions per cohort · ✓ = every cohort equivalent to the others (bounds ± {cfg.sesoi_d:g} SD); "
