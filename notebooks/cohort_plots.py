@@ -290,7 +290,7 @@ def _panels(n, height=7.4):
     outer = fig.add_gridspec(1, n, wspace=.38, left=.04, right=.95, top=.86, bottom=.03)
     out = []
     for k in range(n):
-        g = outer[k].subgridspec(3, 2, width_ratios=[.28, 1], height_ratios=[.3, 1, .3], wspace=.04, hspace=.12)
+        g = outer[k].subgridspec(3, 2, width_ratios=[.001, 1], height_ratios=[.3, 1, .3], wspace=.04, hspace=.12)
         main = fig.add_subplot(g[1, 1])
         out.append(dict(main=main, top=fig.add_subplot(g[0, 1], sharex=main), left=fig.add_subplot(g[1, 0], sharey=main),
                         bottom=fig.add_subplot(g[2, :])))
@@ -301,26 +301,14 @@ FMT = {"switch_rate": "{:.2f}", "mean_dwell_s": "{:.0f} s", "entropy_rate_bits":
        "n_distinct_transitions": "{:.0f}"}
 
 def _margins(co, axes, labels, compare_left, compare_icons):
-    """Row entropy H(p(. | i)) left of every matrix (aligned with 'from state i'), and the dynamics as
-    icons + values under it. compare_left = (values per state, colours, label); compare_icons =
+    """The dynamics as icons + values under every matrix. compare_left = (values per state, colours, label); compare_icons =
     (texts per dynamics, colours) for the comparison matrix."""
     col, K = colours(co.cfg), co.cfg.K
     mv = co.movie()
     for P, c in zip(axes, [*labels, None]):
         ax, left, bottom = P["main"], P["left"], P["bottom"]
-        if c is not None:
-            left.barh(range(K), mv.loc[mv["cohort"] == c, co.row_h].mean().to_numpy(), height=.8, color=col[c], alpha=.75)
-            left.set_xlim(np.log2(K), 0)                             # up to the most K states allow, growing away
-            left.set_xlabel("H row (bits)", fontsize=7)
-        else:
-            vals, cs, lab = compare_left
-            left.barh(range(K), vals, height=.8, color=cs)
-            left.set_xlim(max(1, np.nanmax(vals) * 1.1) if lab == "largest |d|" else np.nanmax(vals) * 1.15, 0)
-            left.set_xlabel(lab, fontsize=7)
-        left.tick_params(labelsize=7)
-        left.spines["left"].set_visible(False); left.spines["top"].set_visible(False)
-        ax.tick_params(labelleft=False)
-        left.set_ylabel("from state i", fontsize=9)
+        left.axis("off")                                          # no side panel: the dynamics are below
+        ax.set_ylabel("from state i", fontsize=9)
         bottom.set_xlim(-.5, len(co.dyn) - .5); bottom.set_ylim(0, 1); bottom.axis("off")
         for k, v in enumerate(co.dyn):
             if c is not None:
