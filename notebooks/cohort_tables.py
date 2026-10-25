@@ -52,10 +52,8 @@ class Settings:
     # figures 2 and 4: equivalence
     sesoi_d: float = 0.2                              # TOST bounds, in pooled SDs
     top_transitions: int = 8                          # figure 2: the strongest transitions shown
-    # figure 2a's x ranges: probabilities 0-1; each dynamics its own (entropy in bits, distinct out of K*K)
-    ranges: dict = field(default_factory=lambda: {"switch_rate": (0, 1), "mean_dwell_s": (0, 60),
-                                                  "entropy_rate_bits": (0, 1), "dispersion": (0, 10),
-                                                  "n_distinct_transitions": (0, 64)})
+    # figure 2a's x ranges: probabilities 0-1; entropy 0-log2(K) bits and distinct 0-K*K are set from K
+    ranges: dict = field(default_factory=lambda: {"switch_rate": (0, 1), "mean_dwell_s": (0, 60), "dispersion": (0, 10)})
     save_dir: Path | None = None
 
     @property

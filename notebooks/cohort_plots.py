@@ -10,7 +10,9 @@ import hads_tables as ht
 
 # one colour per cohort, in the order they are listed; a new cohort takes the next
 PALETTE = ["#eda100", "#008300", "#6250d6", "#52514e", "#e34948", "#1baf7a", "#8c6d4f"]
-DYN_UNIT = {"mean_dwell_s": " (s)", "entropy_rate_bits": " (bits)"}
+DYN_UNIT = {"switch_rate": " (share of steps)", "mean_dwell_s": " (s)", "entropy_rate_bits": " (bits)",
+            "dispersion": " (latent-space units)", "n_distinct_transitions": " (cells of K×K)",
+            "self_transition_rate": " (share of steps)", "switches_per_min": " (per min)", "n_states_visited": " (states)"}
 
 
 def colours(cfg):
@@ -156,7 +158,10 @@ def fig_tost(co, agree):
         t = agree[agree["variable"] == v]
         _rows(ax, t, 0, "mean", "mean_lo", "mean_hi", 1, col, offsets, eqf)
         stars(ax, t, 0, 1)
-        if v in cfg.ranges:
+        top = {"entropy_rate_bits": np.log2(cfg.K), "n_distinct_transitions": cfg.K ** 2}   # the most K states allow
+        if v in top:
+            ax.set_xlim(0, top[v])
+        elif v in cfg.ranges:
             ax.set_xlim(*cfg.ranges[v])
         ax.set_title(v + DYN_UNIT.get(v, ""), fontsize=9, loc="left", pad=3)
 
