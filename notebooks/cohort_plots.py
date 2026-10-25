@@ -447,69 +447,92 @@ def fig_matrix(co, graphs, agree, sd=False):
 
 
 # ------------------------------------------------------------------ 5 the latent space
-def fig_latents(co, lat, by="participant", who=None, embedding="umap3", paths=False, same_axes=True):
-    """One 3D panel per cohort, a dot per window. by = "participant" (a gradient, one colour per
-    person), "task" (rest / movie, and each film), "cluster" (the state of cfg.space), or "single"
-    (`who` = "cohort:SUB", that person in colour over everyone else in grey). paths = join each
-    person's windows in time order."""
+def _hex(c):
+    return plt.matplotlib.colors.to_hex(c)
+
+def fig_latents(co, lat, by="participant", who=None, embedding="umap3", paths=False, same_axes=True, height=560):
+    """5. One interactive 3D panel per cohort (plotly: drag to rotate, scroll to zoom), a dot per
+    window. by = "participant" (a gradient, one colour per person), "task" (rest, each film),
+    "cluster" (the state of cfg.space) or "single": one person per cohort in colour, with their path,
+    over everyone else in grey; who = {cohort: subject id} (a cohort left out gets its first subject).
+    paths = join each person's windows in time order. Saved as an .html in cfg.save_dir."""
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        raise SystemExit("figure 5 needs plotly: pip install --user plotly")
     cfg, col = co.cfg, colours(co.cfg)
     labels = [c for c in cfg.cohorts if c in set(lat["cohort"])]
-    lim = [(lat[a].min(), lat[a].max()) for a in "xyz"]
-    fig = plt.figure(figsize=(6.6 * len(labels), 6.6))
     if by == "cluster" and cfg.space["states"] not in lat:
         raise SystemExit(f"the latents carry no {cfg.space['states']} column: run the clustering stage first")
-    if by == "task":
-        tasks = sorted(lat["task"].astype(str).unique(), key=lambda t: (t.lower() != "rest", t))
-        tcol = {t: (hp.INK2 if t.lower() == "rest" else plt.cm.tab20(k % 20)) for k, t in enumerate(tasks)}
-    if by == "cluster":
-        K = cfg.K
-        scol = {k: plt.cm.tab10(k % 10) for k in range(K)}
+    pick = {}
     if by == "single":
-        if not who or ":" not in who:
-            raise SystemExit('by="single" needs who="cohort:SUB", e.g. who="camcan:CC110033"')
-        wc, ws = who.split(":", 1)
-        ws = ws.strip().upper()
-    for j, c in enumerate(labels):
-        ax = fig.add_subplot(1, len(labels), j + 1, projection="3d")
+        who = {k: str(v).strip().upper() for k, v in (who or {}).items()}
+        for c in labels:
+            subs = sorted(lat.loc[lat["cohort"] == c, "sub"].unique())
+            pick[c] = who.get(c, subs[0])
+            if pick[c] not in subs:
+                raise SystemExit(f"{pick[c]} is not in {c}; e.g. {subs[:3]}")
+    titles = [f"{c} · {co.role(c)} · {lat.loc[lat['cohort'] == c, 'sub'].nunique()} participants"
+              + (f"<br>{pick[c]}" if by == "single" else "") for c in labels]
+    fig = make_subplots(1, len(labels), specs=[[{"type": "scene"}] * len(labels)], subplot_titles=titles,
+                        horizontal_spacing=.02)
+    tasks = sorted(lat["task"].astype(str).unique(), key=lambda t: (t.lower() != "rest", t))
+    tcol = {t: (hp.INK2 if t.lower() == "rest" else _hex(plt.cm.tab20(k % 20))) for k, t in enumerate(tasks)}
+    seen = set()
+
+    def dots(x, colour, name, j, size=2, opacity=.5, group=None, hover=None):
+        show = group is not None and group not in seen
+        if group is not None:
+            seen.add(group)
+        return go.Scatter3d(x=x["x"], y=x["y"], z=x["z"], mode="markers", name=name, legendgroup=group,
+                            showlegend=show, marker=dict(size=size, color=colour, opacity=opacity),
+                            text=hover, hoverinfo="text" if hover is not None else "skip")
+
+    for j, c in enumerate(labels, start=1):
         g = lat[lat["cohort"] == c]
-        subs = sorted(g["sub"].unique())
+        hover = g["sub"] + " · " + g["task"].astype(str)
         if by == "participant":
-            cmap = plt.cm.viridis
-            for k, (s_, h) in enumerate(g.groupby("sub", sort=True)):
-                ax.scatter(h["x"], h["y"], h["z"], s=4, color=cmap(k / max(len(subs) - 1, 1)), alpha=.5, lw=0, depthshade=False)
-            sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(1, len(subs)))
-            fig.colorbar(sm, ax=ax, shrink=.5, pad=.08).set_label("participant (1 … n)", fontsize=9)
+            subs = sorted(g["sub"].unique())
+            rank = g["sub"].map({s_: k for k, s_ in enumerate(subs)})
+            fig.add_trace(go.Scatter3d(x=g["x"], y=g["y"], z=g["z"], mode="markers", showlegend=False, text=hover,
+                                       hoverinfo="text", marker=dict(size=2, opacity=.5, color=rank, colorscale="Viridis",
+                                       colorbar=dict(title="participant", x=j / len(labels) - .02, len=.6, thickness=10))),
+                          1, j)
         elif by == "task":
             for t, h in g.groupby(g["task"].astype(str)):
-                ax.scatter(h["x"], h["y"], h["z"], s=4, color=tcol[t], alpha=.5, lw=0, depthshade=False, label=t)
-            ax.legend(markerscale=4, fontsize=7, loc="upper left", frameon=False)
+                fig.add_trace(dots(h, tcol[t], t, j, group=t, hover=h["sub"] + " · " + t), 1, j)
         elif by == "cluster":
             for k, h in g.groupby(cfg.space["states"]):
-                ax.scatter(h["x"], h["y"], h["z"], s=4, color=scol[int(k)], alpha=.5, lw=0, depthshade=False, label=f"state {int(k)}")
-            ax.legend(markerscale=4, fontsize=7, loc="upper left", frameon=False)
+                fig.add_trace(dots(h, _hex(plt.cm.tab10(int(k) % 10)), f"state {int(k)}", j, group=f"s{int(k)}",
+                                   hover=h["sub"] + f" · state {int(k)}"), 1, j)
         elif by == "single":
-            mine = (g["sub"] == ws) & (c == wc)
-            ax.scatter(g.loc[~mine, "x"], g.loc[~mine, "y"], g.loc[~mine, "z"], s=3, color=hp.MUTED, alpha=.25, lw=0, depthshade=False)
-            if mine.any():
-                h = g[mine]
-                ax.scatter(h["x"], h["y"], h["z"], s=14, color=col[c], alpha=.95, lw=0, depthshade=False)
-                ax.plot(h["x"], h["y"], h["z"], color=col[c], lw=.6, alpha=.6)
+            mine = g["sub"] == pick[c]
+            fig.add_trace(dots(g[~mine], hp.MUTED, "everyone else", j, opacity=.25, group="others"), 1, j)
+            h = g[mine]
+            fig.add_trace(go.Scatter3d(x=h["x"], y=h["y"], z=h["z"], mode="markers+lines", name=f"{c}: {pick[c]}",
+                                       marker=dict(size=4, color=col[c]), line=dict(color=col[c], width=2),
+                                       text=h["task"].astype(str), hoverinfo="text"), 1, j)
         if paths and by != "single":
             for _, h in g.groupby("sub"):
-                ax.plot(h["x"], h["y"], h["z"], color=hp.INK2, lw=.3, alpha=.25)
+                fig.add_trace(go.Scatter3d(x=h["x"], y=h["y"], z=h["z"], mode="lines", showlegend=False, hoverinfo="skip",
+                                           line=dict(color=hp.INK2, width=1), opacity=.25), 1, j)
+    e = embedding[:-1]
+    rng = {a: [lat[a].min(), lat[a].max()] for a in "xyz"}
+    for j in range(1, len(labels) + 1):
+        scene = dict(xaxis_title=f"{e} 1", yaxis_title=f"{e} 2", zaxis_title=f"{e} 3", aspectmode="cube")
         if same_axes:
-            ax.set_xlim(*lim[0]); ax.set_ylim(*lim[1]); ax.set_zlim(*lim[2])
-        e = embedding[:-1]
-        ax.set_xlabel(f"{e} 1"); ax.set_ylabel(f"{e} 2"); ax.set_zlabel(f"{e} 3")
-        ax.view_init(elev=22, azim=-55)
-        ax.set_title(f"{c} · {co.role(c)} · {len(subs)} participants" + (f"\n{who}" if by == "single" and c == wc else ""), fontsize=12)
+            scene.update(xaxis_range=rng["x"], yaxis_range=rng["y"], zaxis_range=rng["z"])
+        fig.update_layout(**{f"scene{'' if j == 1 else j}": scene})
     what = {"participant": "participant (gradient)", "task": "task", "cluster": f"state ({cfg.space['states']})",
-            "single": f"{who} vs everyone else"}[by]
-    fig.suptitle(f"5  Latent space ({embedding}) per cohort · one dot per window · colour = {what} · "
-                 f"{cfg.space['atlas']} · {window_name(cfg)}", x=.01, ha="left", fontsize=13)
-    fig.tight_layout(rect=(0, 0, 1, .93))
-    save(fig, f"5_latents_{embedding}_{by}", cfg)
-    plt.show()
+            "single": "one person per cohort vs everyone else"}[by]
+    fig.update_layout(height=height, width=520 * len(labels), margin=dict(l=0, r=0, t=90, b=0),
+                      title=f"5  Latent space ({embedding}) per cohort · one dot per window · colour = {what} · "
+                            f"{cfg.space['atlas']} · {window_name(cfg)}", legend=dict(itemsizing="constant"))
+    if cfg.save_dir:
+        hp.Path(cfg.save_dir).mkdir(parents=True, exist_ok=True)
+        fig.write_html(hp.Path(cfg.save_dir) / f"5_latents_{embedding}_{by}.html", include_plotlyjs="cdn")
+    return fig
 
 
 def window_name(cfg):
