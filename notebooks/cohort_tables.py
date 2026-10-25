@@ -88,7 +88,12 @@ class Cohorts:
                 d["sub"] = d["sub"].astype(str).str.strip().str.upper()
                 self.cells = ht.cell_cols(d)
                 d[self.cells] = ht.as_p_cond(d, K)
-                cols = [*self.cells, *self.occ, *[v for v in self.cfg.dynamics if v in d]]
+                P = d[self.cells].to_numpy(float).reshape(len(d), K, K)        # each subject's row entropies
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    H = -np.where(P > 0, P * np.log2(P), 0).sum(2)
+                H[P.sum(2) == 0] = np.nan                                      # a state the subject never left
+                d[self.row_h] = H
+                cols = [*self.cells, *self.occ, *self.row_h, *[v for v in self.cfg.dynamics if v in d]]
                 data[label, kind] = d.groupby("sub")[cols].mean()
         if not data:
             raise SystemExit(f"no transition tables under {self.base}")
@@ -97,6 +102,11 @@ class Cohorts:
     @property
     def occ(self):
         return [f"occ_{k}" for k in range(self.cfg.K)]
+
+    @property
+    def row_h(self):
+        """H(p(. | i)) per state i, in bits: the entropy rate is their occupancy-weighted mean."""
+        return [f"H_{k}" for k in range(self.cfg.K)]
 
     @property
     def dyn(self):
@@ -186,7 +196,7 @@ class Cohorts:
         for v in variables or self.variables:
             bound = self.cfg.sesoi_d * mv[v].std()
             for label in mv["cohort"].unique():
-                a, b = mv.loc[mv["cohort"] == label, v], mv.loc[mv["cohort"] != label, v]
+                a, b = mv.loc[mv["cohort"] == label, v].dropna(), mv.loc[mv["cohort"] != label, v].dropna()
                 va, vb = a.var(ddof=1) / len(a), b.var(ddof=1) / len(b)
                 se = np.sqrt(va + vb)
                 df = (va + vb) ** 2 / (va ** 2 / max(len(a) - 1, 1) + vb ** 2 / max(len(b) - 1, 1))
@@ -206,7 +216,7 @@ class Cohorts:
         mv, rows = self.movie(), []
         for v in variables or self.variables:
             for label in mv["cohort"].unique():
-                a, b = mv.loc[mv["cohort"] == label, v], mv.loc[mv["cohort"] != label, v]
+                a, b = mv.loc[mv["cohort"] == label, v].dropna(), mv.loc[mv["cohort"] != label, v].dropna()
                 na, nb = len(a), len(b)
                 sd = np.sqrt(((na - 1) * a.var() + (nb - 1) * b.var()) / max(na + nb - 2, 1))
                 d = (a.mean() - b.mean()) / sd if sd > 0 else 0.0
