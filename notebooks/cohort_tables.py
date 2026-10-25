@@ -237,6 +237,34 @@ class Cohorts:
         return out.assign(role=[self.role(c) for c in out.index])
 
 
+def load_latents(co, embedding="umap3", max_windows=150, seed=0):
+    """Every cohort's windows in the latent space (stage 4, latents/atlas=/window_s=/cohort=/data.parquet):
+    sub, task, the embedding's 3 coordinates and, when the latents carry it, the state of cfg.space.
+    At most `max_windows` windows per (cohort, subject), drawn at random, so a cohort with long scans
+    (cneuromod) does not bury the others."""
+    import pyarrow.parquet as pq
+    c = co.cfg
+    xyz = [f"{embedding[:-1]}{k}/{embedding[-1]}" for k in range(3)]
+    base = c.root / "latents" / f"atlas={c.space['atlas']}" / f"window_s={ht.fmt_window(c.space['window_s'])}"
+    frames = []
+    for label, spec in c.cohorts.items():
+        for d in spec["dirs"]:
+            for f in sorted((base / f"cohort={d}").rglob("*.parquet")):
+                have = set(pq.read_schema(f).names)
+                if not set(xyz) <= have:
+                    raise SystemExit(f"{f} has no {embedding} columns ({xyz}); was it fitted?")
+                cols = ["sub", "task", *xyz, *([c.space["states"]] if c.space["states"] in have else [])]
+                frames.append(pd.read_parquet(f, columns=cols).assign(cohort=label))
+    if not frames:
+        raise SystemExit(f"no latents under {base}")
+    lat = pd.concat(frames, ignore_index=True)
+    lat["sub"] = lat["sub"].astype(str).str.strip().str.upper()
+    lat["kind"] = np.where(lat["task"].astype(str).str.fullmatch(c.rest_pattern, case=False), "rest", "movie")
+    lat = lat.sample(frac=1, random_state=seed)                   # shuffled, then the first max_windows each
+    lat = lat[lat.groupby(["cohort", "sub"]).cumcount() < max_windows].sort_index()
+    return lat.rename(columns=dict(zip(xyz, ["x", "y", "z"]))).reset_index(drop=True)
+
+
 def available_sets(root, cohorts):
     """Every state set with a table for every cohort label (any of its dirs)."""
     found = {}

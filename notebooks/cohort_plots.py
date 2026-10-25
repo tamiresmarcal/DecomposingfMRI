@@ -444,3 +444,73 @@ def fig_matrix(co, graphs, agree, sd=False):
     _bigger(fig)
     save(fig, "4a_matrix_tost" + ("_sd" if sd else ""), cfg)
     plt.show()
+
+
+# ------------------------------------------------------------------ 5 the latent space
+def fig_latents(co, lat, by="participant", who=None, embedding="umap3", paths=False, same_axes=True):
+    """One 3D panel per cohort, a dot per window. by = "participant" (a gradient, one colour per
+    person), "task" (rest / movie, and each film), "cluster" (the state of cfg.space), or "single"
+    (`who` = "cohort:SUB", that person in colour over everyone else in grey). paths = join each
+    person's windows in time order."""
+    cfg, col = co.cfg, colours(co.cfg)
+    labels = [c for c in cfg.cohorts if c in set(lat["cohort"])]
+    lim = [(lat[a].min(), lat[a].max()) for a in "xyz"]
+    fig = plt.figure(figsize=(6.6 * len(labels), 6.6))
+    if by == "cluster" and cfg.space["states"] not in lat:
+        raise SystemExit(f"the latents carry no {cfg.space['states']} column: run the clustering stage first")
+    if by == "task":
+        tasks = sorted(lat["task"].astype(str).unique(), key=lambda t: (t.lower() != "rest", t))
+        tcol = {t: (hp.INK2 if t.lower() == "rest" else plt.cm.tab20(k % 20)) for k, t in enumerate(tasks)}
+    if by == "cluster":
+        K = cfg.K
+        scol = {k: plt.cm.tab10(k % 10) for k in range(K)}
+    if by == "single":
+        if not who or ":" not in who:
+            raise SystemExit('by="single" needs who="cohort:SUB", e.g. who="camcan:CC110033"')
+        wc, ws = who.split(":", 1)
+        ws = ws.strip().upper()
+    for j, c in enumerate(labels):
+        ax = fig.add_subplot(1, len(labels), j + 1, projection="3d")
+        g = lat[lat["cohort"] == c]
+        subs = sorted(g["sub"].unique())
+        if by == "participant":
+            cmap = plt.cm.viridis
+            for k, (s_, h) in enumerate(g.groupby("sub", sort=True)):
+                ax.scatter(h["x"], h["y"], h["z"], s=4, color=cmap(k / max(len(subs) - 1, 1)), alpha=.5, lw=0, depthshade=False)
+            sm = plt.cm.ScalarMappable(cmap=cmap, norm=plt.Normalize(1, len(subs)))
+            fig.colorbar(sm, ax=ax, shrink=.5, pad=.08).set_label("participant (1 … n)", fontsize=9)
+        elif by == "task":
+            for t, h in g.groupby(g["task"].astype(str)):
+                ax.scatter(h["x"], h["y"], h["z"], s=4, color=tcol[t], alpha=.5, lw=0, depthshade=False, label=t)
+            ax.legend(markerscale=4, fontsize=7, loc="upper left", frameon=False)
+        elif by == "cluster":
+            for k, h in g.groupby(cfg.space["states"]):
+                ax.scatter(h["x"], h["y"], h["z"], s=4, color=scol[int(k)], alpha=.5, lw=0, depthshade=False, label=f"state {int(k)}")
+            ax.legend(markerscale=4, fontsize=7, loc="upper left", frameon=False)
+        elif by == "single":
+            mine = (g["sub"] == ws) & (c == wc)
+            ax.scatter(g.loc[~mine, "x"], g.loc[~mine, "y"], g.loc[~mine, "z"], s=3, color=hp.MUTED, alpha=.25, lw=0, depthshade=False)
+            if mine.any():
+                h = g[mine]
+                ax.scatter(h["x"], h["y"], h["z"], s=14, color=col[c], alpha=.95, lw=0, depthshade=False)
+                ax.plot(h["x"], h["y"], h["z"], color=col[c], lw=.6, alpha=.6)
+        if paths and by != "single":
+            for _, h in g.groupby("sub"):
+                ax.plot(h["x"], h["y"], h["z"], color=hp.INK2, lw=.3, alpha=.25)
+        if same_axes:
+            ax.set_xlim(*lim[0]); ax.set_ylim(*lim[1]); ax.set_zlim(*lim[2])
+        e = embedding[:-1]
+        ax.set_xlabel(f"{e} 1"); ax.set_ylabel(f"{e} 2"); ax.set_zlabel(f"{e} 3")
+        ax.view_init(elev=22, azim=-55)
+        ax.set_title(f"{c} · {co.role(c)} · {len(subs)} participants" + (f"\n{who}" if by == "single" and c == wc else ""), fontsize=12)
+    what = {"participant": "participant (gradient)", "task": "task", "cluster": f"state ({cfg.space['states']})",
+            "single": f"{who} vs everyone else"}[by]
+    fig.suptitle(f"5  Latent space ({embedding}) per cohort · one dot per window · colour = {what} · "
+                 f"{cfg.space['atlas']} · {window_name(cfg)}", x=.01, ha="left", fontsize=13)
+    fig.tight_layout(rect=(0, 0, 1, .93))
+    save(fig, f"5_latents_{embedding}_{by}", cfg)
+    plt.show()
+
+
+def window_name(cfg):
+    return ht.window_name(cfg.space["window_s"])
