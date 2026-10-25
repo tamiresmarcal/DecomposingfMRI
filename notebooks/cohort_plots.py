@@ -104,10 +104,10 @@ def _rows(ax, t, y0, x, lo, hi, scale, col, offsets, filled):
         f = filled(r)
         ax.plot(scale * getattr(r, x), y, "o", ms=5, color=col[r.cohort], mfc=col[r.cohort] if f else "white", mew=1.4)
 
-def _three_panels(co, title, draw_block, draw_dyn, legend, name, dyn_title):
+def _three_panels(co, title, draw_block, draw_dyn, legend, name, dyn_title, height=8):
     """Transitions (the strongest), occupancy, and each dynamics on its own axis."""
     cfg = co.cfg
-    fig = plt.figure(figsize=(17, 8))
+    fig = plt.figure(figsize=(17, height))
     outer = fig.add_gridspec(1, 3, width_ratios=[1, 1, 1.1], wspace=.4)
     draw_block(fig.add_subplot(outer[0]), f"Transitions p(j | i) · the {cfg.top_transitions} strongest", co.strongest())
     draw_block(fig.add_subplot(outer[1]), "Occupancy (time in state)", co.occ)
@@ -120,7 +120,7 @@ def _three_panels(co, title, draw_block, draw_dyn, legend, name, dyn_title):
         dyn_axes[0].text(.5, 2.3, dyn_title, transform=dyn_axes[0].transAxes, ha="center", fontsize=11)
     fig.legend(handles=legend, loc="lower center", ncol=4, fontsize=9)
     fig.suptitle(f"{title} · {ht.set_label(cfg.space)}", x=.01, ha="left", fontsize=11)
-    fig.subplots_adjust(left=.05, right=.95, top=.87, bottom=.13)
+    fig.subplots_adjust(left=.05, right=.95, top=1 - .9 / height, bottom=1.05 / height)
     save(fig, name, cfg)
     plt.show()
 
@@ -129,39 +129,42 @@ def _check(ax, ok, y=None):
     ax.text(kw.pop("x"), kw.pop("y"), "✓" if ok else "✗", va="center", fontsize=11, color=hp.INK if ok else hp.RED, **kw)
 
 def fig_tost(co, agree):
-    """2a. Movie, in the variables' own units: each cohort's mean (90% CI); grey = the mean of the
-    cohorts ± the TOST bound. Filled = equivalent to the others (TOST, 5%); ✓ = every cohort is."""
-    col = colours(co.cfg)
+    """2a. Movie, in the variables' own units and fixed ranges: each cohort's mean (90% CI). Filled =
+    equivalent to the others (TOST, 5%); * = differs from the others (Welch, BH-FDR < alpha)."""
+    cfg, col = co.cfg, colours(co.cfg)
     labels = list(agree["cohort"].unique())
-    offsets = dict(zip(labels, np.linspace(.3, -.3, len(labels)) if len(labels) > 1 else [0]))
+    offsets = dict(zip(labels, np.linspace(.28, -.28, len(labels)) if len(labels) > 1 else [0]))
     eqf = lambda r: r.equivalent
+
+    def stars(ax, t, y0, scale):
+        for r in t[t["differs"]].itertuples():
+            ax.text(scale * r.mean_hi, y0 + offsets[r.cohort], " *", va="center", fontsize=11, color=col[r.cohort],
+                    fontweight="bold")
 
     def block(ax, title, vs):
         for y, v in enumerate(vs[::-1]):
             t = agree[agree["variable"] == v]
-            c, b = 100 * t["mean"].mean(), 100 * t["bound"].iloc[0]
-            ax.plot([c - b, c + b], [y, y], color=hp.MUTED, lw=10, alpha=.35, solid_capstyle="butt")
             _rows(ax, t, y, "mean", "mean_lo", "mean_hi", 100, col, offsets, eqf)
-            _check(ax, t["equivalent"].all(), y)
+            stars(ax, t, y, 100)
         ax.set_yticks(range(len(vs)), vs[::-1], fontsize=9)
+        ax.set_xlim(0, 100)
         ax.xaxis.set_major_formatter(plt.matplotlib.ticker.PercentFormatter(100))
         ax.set_xlabel("cohort mean, 90% CI", fontsize=9)
         ax.set_title(title, fontsize=11)
 
     def dyn(ax, v):
         t = agree[agree["variable"] == v]
-        c, b = t["mean"].mean(), t["bound"].iloc[0]
-        ax.axvspan(c - b, c + b, color=hp.MUTED, alpha=.35, lw=0)
         _rows(ax, t, 0, "mean", "mean_lo", "mean_hi", 1, col, offsets, eqf)
+        stars(ax, t, 0, 1)
+        if v in cfg.ranges:
+            ax.set_xlim(*cfg.ranges[v])
         ax.set_title(v + DYN_UNIT.get(v, ""), fontsize=9, loc="left", pad=3)
-        _check(ax, t["equivalent"].all())
 
     legend = ([Line2D([], [], ls="none", marker="o", color=col[c], label=f"{c} ({co.role(c)})") for c in labels] +
-              [Line2D([], [], ls="none", marker="o", mfc="white", mec=hp.INK2, label="hollow = not shown equivalent"),
-               Line2D([], [], color=hp.MUTED, lw=8, alpha=.5, label=f"mean of the cohorts ± {co.cfg.sesoi_d:g} pooled SD (the bound)"),
-               Line2D([], [], ls="none", label="✓ = every cohort equivalent to the others (TOST, 5%)")])
-    _three_panels(co, "2a  Movie: is every cohort equivalent to the others? (TOST, in the variables' units)",
-                  block, dyn, legend, "2a_tost", "Dynamics (each on its own axis)")
+              [Line2D([], [], ls="none", marker="o", mfc="white", mec=hp.INK2, label="hollow = not shown equivalent (TOST, 5%)"),
+               Line2D([], [], ls="none", marker="$*$", ms=9, color=hp.INK2, label=f"* = differs from the others (Welch, FDR<{cfg.alpha:g})")])
+    _three_panels(co, "2a  Movie: is every cohort equivalent to the others? (cohort means, in the variables' units)",
+                  block, dyn, legend, "2a_tost", "Dynamics (each on its own axis)", height=6.2)
 
 def fig_cohen(co, d):
     """2b. Movie: each cohort vs all the others as Cohen's d (95% CI); bands at 0.2 / 0.5 / 0.8."""

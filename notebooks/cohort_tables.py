@@ -52,6 +52,10 @@ class Settings:
     # figures 2 and 4: equivalence
     sesoi_d: float = 0.2                              # TOST bounds, in pooled SDs
     top_transitions: int = 8                          # figure 2: the strongest transitions shown
+    # figure 2a's x ranges: probabilities 0-1; each dynamics its own (entropy in bits, distinct out of K*K)
+    ranges: dict = field(default_factory=lambda: {"switch_rate": (0, 1), "mean_dwell_s": (0, 60),
+                                                  "entropy_rate_bits": (0, 1), "dispersion": (0, 10),
+                                                  "n_distinct_transitions": (0, 64)})
     save_dir: Path | None = None
 
     @property
@@ -192,8 +196,12 @@ class Cohorts:
                 ha = stats.t.ppf(.95, max(len(a) - 1, 1)) * a.std(ddof=1) / np.sqrt(len(a))
                 rows.append(dict(variable=v, cohort=label, n=len(a), diff=d, lo=d - h, hi=d + h, bound=bound,
                                  equivalent=bool((d - h > -bound) & (d + h < bound)),
-                                 mean=a.mean(), mean_lo=a.mean() - ha, mean_hi=a.mean() + ha, others=b.mean()))
-        return pd.DataFrame(rows)
+                                 mean=a.mean(), mean_lo=a.mean() - ha, mean_hi=a.mean() + ha, others=b.mean(),
+                                 p=stats.ttest_ind(a, b, equal_var=False).pvalue))
+        out = pd.DataFrame(rows)
+        out["p_fdr"] = stats.false_discovery_control(out["p"].fillna(1))     # the difference, BH over everything
+        out["differs"] = out["p_fdr"] < self.cfg.alpha
+        return out
 
     def cohen(self, variables=None):
         """Movie, each cohort vs all the others pooled, per variable: Cohen's d (pooled SD) and its 95% CI."""
