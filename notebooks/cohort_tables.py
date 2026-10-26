@@ -95,9 +95,12 @@ class Cohorts:
                 H[P.sum(2) == 0] = np.nan                                      # a state the subject never left
                 d[self.row_h] = H
                 cols = [*self.cells, *self.occ, *self.row_h, *[v for v in self.cfg.dynamics if v in d]]
-                data[label, kind] = d.groupby("sub")[cols].mean()
+                # the scan time used: windows x their stride (provenance written by `transitions`), summed
+                d["scan_s"] = (d["n_windows"] * d["stride_s"]).astype(float) if {"n_windows", "stride_s"} <= set(d) else np.nan
+                per_sub = lambda t: t.groupby("sub")[cols].mean().assign(scan_s=t.groupby("sub")["scan_s"].sum(min_count=1))
+                data[label, kind] = per_sub(d)
                 for task, t in d.groupby(d["task"].astype(str)):              # and one table per task (film)
-                    self.by_task[label, kind, task] = t.groupby("sub")[cols].mean()
+                    self.by_task[label, kind, task] = per_sub(t)
         if not data:
             raise SystemExit(f"no transition tables under {self.base}")
         return data

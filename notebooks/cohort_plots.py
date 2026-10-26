@@ -321,7 +321,9 @@ def fig_matrices(co, groups, test="tost", sd=False, title=None, name="4_matrix")
     for P, g in zip(axes, labels):
         P["main"].imshow(G[g][0], cmap="Blues", vmin=0, vmax=vmax, aspect="auto")
         role = f" ({co.role(g)})" if g in cfg.cohorts else ""
-        P["main"].set_title(f"{g}{role} · n={len(groups[g])}", fontsize=11, color=col[g])
+        h = groups[g]["scan_s"].sum() / 3600 if "scan_s" in groups[g] else np.nan
+        P["main"].set_title(f"{g}{role} · n={len(groups[g])}" + (f" · {h:.1f} h" if np.isfinite(h) else ""),
+                            fontsize=11, color=col[g])
         if sd:
             _cell_text(P["main"], G[g][0], vmax, groups[g][co.cells].std().to_numpy().reshape(K, K))
     im = axes[0]["main"].images[0]
