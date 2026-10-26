@@ -80,6 +80,7 @@ class Cohorts:
     def _load(self):
         """{(cohort, rest|movie): one row per subject}, cells as p(j | i), runs and films averaged."""
         K, data = self.cfg.K, {}
+        self.by_task = {}                                                     # (cohort, rest|movie, task) -> subjects
         for label in self.cfg.cohorts:
             for kind, files in self._files(label).items():
                 if not files:
@@ -95,6 +96,8 @@ class Cohorts:
                 d[self.row_h] = H
                 cols = [*self.cells, *self.occ, *self.row_h, *[v for v in self.cfg.dynamics if v in d]]
                 data[label, kind] = d.groupby("sub")[cols].mean()
+                for task, t in d.groupby(d["task"].astype(str)):              # and one table per task (film)
+                    self.by_task[label, kind, task] = t.groupby("sub")[cols].mean()
         if not data:
             raise SystemExit(f"no transition tables under {self.base}")
         return data
@@ -189,10 +192,39 @@ class Cohorts:
         return pd.concat(marks, ignore_index=True), pd.concat(dyn, ignore_index=True)
 
     # -- figures 2 and 4: equivalence ----------------------------------------------------------
-    def agreement(self, variables=None):
-        """Movie, each cohort vs all the others pooled, per variable: Welch difference, its 90% CI,
-        and TOST at 5% with bounds +-sesoi_d x the pooled SD."""
-        mv, rows = self.movie(), []
+    def groups(self, by="cohort", tasks="kind", cohort=None):
+        """{label: one row per subject} -- what figures 2 and 4 compare.
+        by="cohort": each cohort's movie (the default).
+        by="task", tasks="kind": rest vs movie; tasks="film": every movie task (film, episode) apart.
+        cohort = one cohort label to stay within; None pools every cohort (a film is then "cohort:film").
+        Rest vs movie are often the same people: the tests treat the groups as independent, which is
+        conservative for the difference and makes equivalence harder to show, not easier."""
+        if by == "cohort":
+            return {c: self.data[c, "movie"] for c in self.cfg.cohorts if (c, "movie") in self.data}
+        if by != "task":
+            raise SystemExit(f'by must be "cohort" or "task", not {by!r}')
+        labels = [cohort] if cohort else list(self.cfg.cohorts)
+        tag = lambda c, s: s if cohort else f"{c}:{s}"
+        if tasks == "kind":
+            out = {}
+            for kind in ("rest", "movie"):
+                parts = [self.data[c, kind].rename(index=lambda x, c=c: f"{c}:{x}") for c in labels if (c, kind) in self.data]
+                if parts:
+                    out[kind] = pd.concat(parts)
+            return out
+        if tasks == "film":
+            return {tag(c, t): d for (c, k, t), d in sorted(self.by_task.items()) if k == "movie" and c in labels}
+        raise SystemExit(f'tasks must be "kind" or "film", not {tasks!r}')
+
+    def _long(self, groups):
+        """The groups as one table with a `cohort` column holding the group label."""
+        groups = groups if groups is not None else self.groups()
+        return pd.concat([d.assign(cohort=g) for g, d in groups.items()])
+
+    def agreement(self, variables=None, groups=None):
+        """Each group vs all the others pooled, per variable: Welch difference, its 90% CI, and TOST
+        at 5% with bounds +-sesoi_d x the pooled SD. groups: from groups(); None = the cohorts' movie."""
+        mv, rows = self._long(groups), []
         for v in variables or self.variables:
             bound = self.cfg.sesoi_d * mv[v].std()
             for label in mv["cohort"].unique():
@@ -211,9 +243,9 @@ class Cohorts:
         out["differs"] = out["p_fdr"] < self.cfg.alpha
         return out
 
-    def cohen(self, variables=None):
-        """Movie, each cohort vs all the others pooled, per variable: Cohen's d (pooled SD) and its 95% CI."""
-        mv, rows = self.movie(), []
+    def cohen(self, variables=None, groups=None):
+        """Each group vs all the others pooled, per variable: Cohen's d (pooled SD) and its 95% CI."""
+        mv, rows = self._long(groups), []
         for v in variables or self.variables:
             for label in mv["cohort"].unique():
                 a, b = mv.loc[mv["cohort"] == label, v].dropna(), mv.loc[mv["cohort"] != label, v].dropna()

@@ -268,27 +268,6 @@ def _cax(fig, ax):
     b = ax.get_position()
     return fig.add_axes([b.x1 + .006, b.y0, .007, b.height])
 
-def _matrices(co, graphs, sd=False):
-    """The panels, and every cohort's movie p(j | i) drawn in its own; the comparison's main is
-    returned as axes[-1]["main"] for the caller."""
-    cfg, col = co.cfg, colours(co.cfg)
-    labels = [c for c in cfg.cohorts if (c, "movie") in graphs]
-    fig, axes = _panels(len(labels) + 1)
-    vmax = max(graphs[c, "movie"][0].max() for c in labels)
-    for P, c in zip(axes, labels):
-        im = P["main"].imshow(graphs[c, "movie"][0], cmap="Blues", vmin=0, vmax=vmax, aspect="auto")
-        P["main"].set_title(f"{c} ({co.role(c)})", fontsize=11, color=col[c])
-        if sd:                                                    # the between-subject SD of each cell, in pp
-            M, SD = graphs[c, "movie"][0], co.data[c, "movie"][co.cells].std().to_numpy().reshape(cfg.K, cfg.K)
-            for i in range(cfg.K):
-                for j in range(cfg.K):
-                    P["main"].text(j, i, f"±{100 * SD[i, j]:.0f}", ha="center", va="center", fontsize=6.5,
-                                   color="white" if M[i, j] > .6 * vmax else hp.INK)
-    fig.colorbar(im, cax=_cax(fig, axes[-2]["main"])).set_label("p(j | i)")
-    for P in axes:
-        P["main"].set_xticks(range(cfg.K)); P["main"].set_yticks(range(cfg.K)); P["main"].set_xlabel("to state j", fontsize=9)
-    return fig, axes, labels
-
 def _panels(n, height=10):
     """One fixed grid per panel: occupancy on top, row entropy on the left, the matrix, icons below.
     Returns the figure and, per panel, dict(top, left, main, bottom)."""
@@ -316,134 +295,144 @@ ICON = {"switch_rate": "⇄", "mean_dwell_s": "⏱", "entropy_rate_bits": "H", "
 FMT = {"switch_rate": "{:.2f}", "mean_dwell_s": "{:.0f} s", "entropy_rate_bits": "{:.2f} bits", "dispersion": "{:.2f}",
        "n_distinct_transitions": "{:.0f}"}
 
-def _margins(co, axes, labels, compare_left, compare_icons, sd=False):
-    """The dynamics as icons + values under every matrix. compare_left = (values per state, colours, label); compare_icons =
-    (texts per dynamics, colours) for the comparison matrix."""
-    col, K = colours(co.cfg), co.cfg.K
-    mv = co.movie()
-    for P, c in zip(axes, [*labels, None]):
-        ax, left, bottom = P["main"], P["left"], P["bottom"]
-        left.axis("off")                                          # no side panel: the dynamics are below
-        ax.set_ylabel("from state i", fontsize=9)
-        bottom.set_xlim(-.5, len(co.dyn) - .5); bottom.set_ylim(0, 1); bottom.axis("off")
-        for k, v in enumerate(co.dyn):
-            if c is not None:
-                x = mv.loc[mv["cohort"] == c, v]
-                f = FMT.get(v, "{:.2f}").split(" ")
-                text = f[0].format(x.mean()) + (" " + f[1] if len(f) > 1 else "") + (f"\n± {sig1(x.std())}" if sd else "")
-                colour = hp.INK2
-            else:
-                text, colour = compare_icons[0][k], compare_icons[1][k]
-            if ICON.get(v) == "⏱":
-                bottom.plot(k, .62, marker=hp.STOPWATCH, ms=26, mfc="none", mec=colour, mew=1.6)
-            else:
-                bottom.text(k, .62, ICON.get(v, v[:2]), ha="center", va="center", fontsize=13, color=colour)
-            bottom.text(k, .1, text, ha="center", va="center", fontsize=6, color=colour, linespacing=1.1)
+def _group_colours(co, labels):
+    """A cohort keeps its colour; any other group (a task, a film) takes the palette in order."""
+    col = colours(co.cfg)
+    return {g: col.get(g, PALETTE[k % len(PALETTE)]) for k, g in enumerate(labels)}
 
-def _occ_bars(co, graphs, axes, labels, compare, sd=False):
-    """A bar chart of time in each state above every matrix, aligned with its columns (state j).
-    compare = (values per state, colours per state, label) for the bars above the comparison matrix."""
-    col, K = colours(co.cfg), co.cfg.K
-    ymax = max((graphs[c, "movie"][1] + (co.data[c, "movie"][co.occ].std().to_numpy() if sd else 0)).max() for c in labels) * 1.15
-    tops = []
-    for P, c in zip(axes, labels):
-        top, ax = P["top"], P["main"]
-        err = co.data[c, "movie"][co.occ].std().to_numpy() if sd else None
-        top.bar(range(K), graphs[c, "movie"][1], width=.8, color=col[c], alpha=.75, yerr=err,
-                error_kw=dict(lw=1, capsize=2, ecolor=hp.INK2))
-        top.set_ylim(0, ymax)
-        top.yaxis.set_major_formatter(plt.matplotlib.ticker.PercentFormatter(1, decimals=0))
-        tops.append(top)
-    values, colours_, label = compare
-    top = axes[-1]["top"]
-    top.bar(range(K), values, width=.8, color=colours_)
-    if label == "largest |d|":                                    # d on its own scale: 0.8 = large
-        top.set_ylim(0, max(1, np.nanmax(values) * 1.1))
-        for w in (.2, .5, .8):
-            top.axhline(w, color=hp.MUTED, lw=.5, ls=":")
-    top.set_ylabel(label, fontsize=7)
-    tops.append(top)
-    tops[0].set_ylabel("time in state", fontsize=8)
-    for t, P in zip(tops, axes):
-        ax = P["main"]
-        t.tick_params(labelbottom=False, labelsize=7)
-        t.spines["right"].set_visible(False); t.spines["top"].set_visible(False)
-        t.set_title(ax.get_title(), fontsize=11, color=ax.title.get_color())
-        ax.set_title("")
-    return tops
+def _cell_text(ax, M, vmax, sd_matrix):
+    K = len(M)
+    for i in range(K):
+        for j in range(K):
+            ax.text(j, i, f"±{100 * sd_matrix[i, j]:.0f}", ha="center", va="center", fontsize=6.5,
+                    color="white" if M[i, j] > .6 * vmax else hp.INK)
 
-def fig_matrix_cohen(co, graphs, d, sd=False):
-    """4b. Movie p(j | i) per cohort, then per cell the largest |Cohen's d| of a cohort vs the others."""
+def fig_matrices(co, groups, test="tost", sd=False, title=None, name="4_matrix"):
+    """4. One matrix per group (p(j | i), time in each state on top, the dynamics below), and with
+    test="tost" or "cohen" a last panel testing every cell, occupancy and dynamics: each group vs all
+    the others. test=None draws the groups only. groups = co.groups(...): {label: one row per subject}.
+    sd = each cell's between-subject SD (pp), occupancy ± SD, dynamics ± SD."""
     cfg, K = co.cfg, co.cfg.K
-    labels = [c for c in cfg.cohorts if (c, "movie") in graphs]
-    fig, axes, labels = _matrices(co, graphs, sd)
-    t = d[d["variable"].isin(co.cells)]
-    worst = t.assign(a=t["d"].abs()).groupby("variable")["a"].max()
-    W = np.array([worst.get(c, np.nan) for c in co.cells]).reshape(K, K)
-    ax = axes[-1]["main"]
-    cmap = plt.matplotlib.colors.ListedColormap(["#f3f2ee", "#d8d6cf", "#f0a8a2", "#e34948"])
-    norm = plt.matplotlib.colors.BoundaryNorm([0, .2, .5, .8, max(1, np.nanmax(W) + .01)], cmap.N)
-    im2 = ax.imshow(W, cmap=cmap, norm=norm, aspect="auto")
-    for i in range(K):
-        for j in range(K):
-            if np.isfinite(W[i, j]):
-                ax.text(j, i, f"{W[i, j]:.1f}", ha="center", va="center", fontsize=7, color=hp.INK)
-    cb = fig.colorbar(im2, cax=_cax(fig, ax), ticks=[0, .2, .5, .8])
-    cb.set_label("largest |d|, cohort vs the others")
-    od = d[d["variable"].isin(co.occ)].assign(a=lambda x: x["d"].abs()).groupby("variable")["a"].max().reindex(co.occ)
-    ax.set_title(f"Cohen's d per cell\n{int((W < .2).sum())}/{K * K} with every |d| < 0.2", fontsize=11)
-    _occ_bars(co, graphs, axes, labels, (od.to_numpy(), [cmap(norm(v)) for v in od], "largest |d|"), sd)
-    if not d["variable"].isin(co.row_h).any():                    # the row entropies, if the table lacks them
-        d = pd.concat([d, co.cohen(co.row_h)], ignore_index=True)
-    hd = d[d["variable"].isin(co.row_h)].assign(a=lambda x: x["d"].abs()).groupby("variable")["a"].max().reindex(co.row_h)
-    dd = d[d["variable"].isin(co.dyn)].assign(a=lambda x: x["d"].abs()).groupby("variable")["a"].max().reindex(co.dyn)
-    _margins(co, axes, labels, (hd.to_numpy(), [cmap(norm(v)) for v in hd], "largest |d|"),
-             ([f"|d| {v:.2f}" for v in dd], [hp.RED if v >= .5 else hp.INK2 for v in dd]), sd)
-    fig.suptitle(f"4b  Movie transitions per cohort · per cell the cohort furthest from the others, Cohen's d "
-                 f"(< 0.2 small, 0.5 medium, 0.8 large) · {ht.set_label(cfg.space)}", x=.01, ha="left", fontsize=11)
+    labels = list(groups)
+    col = _group_colours(co, labels)
+    G = {g: co._graph(d.mean()) for g, d in groups.items()}
+    fig, axes = _panels(len(labels) + (test is not None))
+    vmax = max(G[g][0].max() for g in labels)
+    for P, g in zip(axes, labels):
+        P["main"].imshow(G[g][0], cmap="Blues", vmin=0, vmax=vmax, aspect="auto")
+        role = f" ({co.role(g)})" if g in cfg.cohorts else ""
+        P["main"].set_title(f"{g}{role} · n={len(groups[g])}", fontsize=11, color=col[g])
+        if sd:
+            _cell_text(P["main"], G[g][0], vmax, groups[g][co.cells].std().to_numpy().reshape(K, K))
+    im = axes[0]["main"].images[0]
+    fig.colorbar(im, cax=_cax(fig, axes[len(labels) - 1]["main"])).set_label("p(j | i)")
+    for P in axes:
+        P["main"].set_xticks(range(K)); P["main"].set_yticks(range(K)); P["main"].set_xlabel("to state j", fontsize=9)
+        P["main"].set_ylabel("from state i", fontsize=9)
+        P["left"].axis("off")
+
+    # occupancy on top of every group
+    ymax = max((G[g][1] + (groups[g][co.occ].std().to_numpy() if sd else 0)).max() for g in labels) * 1.15
+    for P, g in zip(axes, labels):
+        P["top"].bar(range(K), G[g][1], width=.8, color=col[g], alpha=.75,
+                     yerr=groups[g][co.occ].std().to_numpy() if sd else None, error_kw=dict(lw=1, capsize=2, ecolor=hp.INK2))
+        P["top"].set_ylim(0, ymax)
+        P["top"].yaxis.set_major_formatter(plt.matplotlib.ticker.PercentFormatter(1, decimals=0))
+    axes[0]["top"].set_ylabel("time in state", fontsize=8)
+
+    # the dynamics under every group
+    def icons(P, texts, colours_):
+        b = P["bottom"]
+        b.set_xlim(-.5, len(co.dyn) - .5); b.set_ylim(0, 1); b.axis("off")
+        for k, (v, text, c) in enumerate(zip(co.dyn, texts, colours_)):
+            if ICON.get(v) == "⏱":
+                b.plot(k, .62, marker=hp.STOPWATCH, ms=26, mfc="none", mec=c, mew=1.6)
+            else:
+                b.text(k, .62, ICON.get(v, v[:2]), ha="center", va="center", fontsize=13, color=c)
+            b.text(k, .1, text, ha="center", va="center", fontsize=6, color=c, linespacing=1.1)
+
+    for P, g in zip(axes, labels):
+        texts = []
+        for v in co.dyn:
+            x = groups[g][v]
+            f = FMT.get(v, "{:.2f}").split(" ")
+            texts.append(f[0].format(x.mean()) + (" " + f[1] if len(f) > 1 else "") + (f"\n± {sig1(x.std())}" if sd else ""))
+        icons(P, texts, [hp.INK2] * len(co.dyn))
+
+    # the test panel
+    what = ""
+    if test is not None:
+        P = axes[-1]
+        ax = P["main"]
+        variables = [*co.cells, *co.occ, *co.dyn]
+        if test == "cohen":
+            d = co.cohen(variables, groups)
+            worst = d.assign(a=d["d"].abs()).groupby("variable")["a"].max()
+            cmap = plt.matplotlib.colors.ListedColormap(["#f3f2ee", "#d8d6cf", "#f0a8a2", "#e34948"])
+            norm = plt.matplotlib.colors.BoundaryNorm([0, .2, .5, .8, max(1, worst.max() + .01)], cmap.N)
+            W = np.array([worst.get(c, np.nan) for c in co.cells]).reshape(K, K)
+            ax.imshow(W, cmap=cmap, norm=norm, aspect="auto")
+            for i in range(K):
+                for j in range(K):
+                    if np.isfinite(W[i, j]):
+                        ax.text(j, i, f"{W[i, j]:.1f}", ha="center", va="center", fontsize=7, color=hp.INK)
+            fig.colorbar(ax.images[0], cax=_cax(fig, ax), ticks=[0, .2, .5, .8]).set_label("largest |d|, group vs the others")
+            ax.set_title(f"Cohen's d\n{int((W < .2).sum())}/{K * K} cells with every |d| < 0.2", fontsize=11)
+            od = worst.reindex(co.occ)
+            P["top"].bar(range(K), od.to_numpy(), width=.8, color=[cmap(norm(v)) for v in od])
+            P["top"].set_ylim(0, max(1, np.nanmax(od) * 1.1))
+            for w in (.2, .5, .8):
+                P["top"].axhline(w, color=hp.MUTED, lw=.5, ls=":")
+            P["top"].set_ylabel("largest |d|", fontsize=7)
+            dd = worst.reindex(co.dyn)
+            icons(P, [f"|d| {v:.2f}" for v in dd], [hp.RED if v >= .5 else hp.INK2 for v in dd])
+            what = "Cohen's d per cell (< 0.2 small, 0.5 medium, 0.8 large)"
+        elif test == "tost":
+            t = co.agreement(variables, groups)
+            far = t.assign(a=t[["lo", "hi"]].abs().max(axis=1)).groupby("variable")["a"].max()
+            eq = t.groupby("variable")["equivalent"].all()
+            n_eq = t.groupby("variable")["equivalent"].sum()
+            W = np.array([100 * far.get(c, np.nan) for c in co.cells]).reshape(K, K)
+            ax.imshow(W, cmap="Greys", vmin=0, vmax=2.5 * np.nanmax(W), aspect="auto")       # light: the marks stay readable
+            for i in range(K):
+                for j in range(K):
+                    c = co.cells[i * K + j]
+                    if c not in eq:
+                        continue
+                    if eq[c]:
+                        ax.text(j, i, "✓", ha="center", va="center", fontsize=9, color=hp.BLUE)
+                    else:
+                        ax.add_patch(plt.Rectangle((j - .5, i - .5), 1, 1, fill=False, ec=hp.RED, lw=2))
+                        ax.text(j, i, f"{n_eq[c]}/{len(labels)}", ha="center", va="center", fontsize=7, color=hp.RED)
+            fig.colorbar(ax.images[0], cax=_cax(fig, ax)).set_label("largest |group − others| (pp)")
+            ax.set_title(f"TOST\n{int(eq.reindex(co.cells).sum())}/{K * K} cells equivalent in every group", fontsize=11)
+            P["top"].bar(range(K), 100 * far.reindex(co.occ).to_numpy(), width=.8,
+                         color=[hp.MUTED if e else hp.RED for e in eq.reindex(co.occ)])
+            P["top"].set_ylabel("largest |diff| (pp)", fontsize=7)
+            de = eq.reindex(co.dyn)
+            icons(P, ["✓ equiv." if e else "✗" for e in de], [hp.INK2 if e else hp.RED for e in de])
+            what = f"TOST per cell, ✓ = every group equivalent (± {cfg.sesoi_d:g} SD), red = k/N"
+        else:
+            raise SystemExit(f'test must be "tost", "cohen" or None, not {test!r}')
+    for P in axes:                                               # titles above the occupancy bars
+        P["top"].tick_params(labelbottom=False, labelsize=7)
+        P["top"].spines["right"].set_visible(False); P["top"].spines["top"].set_visible(False)
+        P["top"].set_title(P["main"].get_title(), fontsize=11, color=P["main"].title.get_color())
+        P["main"].set_title("")
+    head = title or "4  transitions per group"
+    fig.suptitle(f"{head}" + (f" · {what}" if what else "") + f" · {ht.set_label(cfg.space)}", x=.01, ha="left", fontsize=11)
     _bigger(fig)
-    save(fig, "4b_matrix_cohen" + ("_sd" if sd else ""), cfg)
+    save(fig, name + (f"_{test}" if test else "") + ("_sd" if sd else ""), cfg)
     plt.show()
 
-def fig_matrix(co, graphs, agree, sd=False):
-    """4a. Movie p(j | i) per cohort, then a TOST per cell: ✓ = every cohort equivalent, red = k/N."""
-    cfg, col, K = co.cfg, colours(co.cfg), co.cfg.K
-    labels = [c for c in cfg.cohorts if (c, "movie") in graphs]
-    t = agree[agree["variable"].isin(co.cells)]
-    worst = t.assign(a=t[["lo", "hi"]].abs().max(axis=1)).groupby("variable")["a"].max()
-    eq = t.groupby("variable")["equivalent"].all()
-    n_eq = t.groupby("variable")["equivalent"].sum()
-    fig, axes, labels = _matrices(co, graphs, sd)
-    ax = axes[-1]["main"]
-    W = np.array([100 * worst.get(c, np.nan) for c in co.cells]).reshape(K, K)
-    im2 = ax.imshow(W, cmap="Greys", vmin=0, vmax=2.5 * np.nanmax(W), aspect="auto")         # light: the marks stay readable
-    for i in range(K):
-        for j in range(K):
-            c = co.cells[i * K + j]
-            if c not in eq:
-                continue
-            if eq[c]:
-                ax.text(j, i, "✓", ha="center", va="center", fontsize=9, color=hp.BLUE)
-            else:
-                ax.add_patch(plt.Rectangle((j - .5, i - .5), 1, 1, fill=False, ec=hp.RED, lw=2))
-                ax.text(j, i, f"{n_eq[c]}/{len(labels)}", ha="center", va="center", fontsize=7, color=hp.RED)
-    fig.colorbar(im2, cax=_cax(fig, ax)).set_label("largest |cohort − others| (pp)")
-    ax.set_title(f"TOST per cell\n{int(eq.sum())}/{len(eq)} equivalent in every cohort", fontsize=11)
-    o = agree[agree["variable"].isin(co.occ)]
-    ow = o.assign(a=o[["lo", "hi"]].abs().max(axis=1)).groupby("variable")["a"].max().reindex(co.occ)
-    oe = o.groupby("variable")["equivalent"].all().reindex(co.occ)
-    _occ_bars(co, graphs, axes, labels, (100 * ow.to_numpy(), [hp.MUTED if e else hp.RED for e in oe], "largest |diff| (pp)"), sd)
-    extra = co.agreement([*co.row_h])
-    hw = extra.assign(a=extra[["lo", "hi"]].abs().max(axis=1)).groupby("variable")["a"].max().reindex(co.row_h)
-    he = extra.groupby("variable")["equivalent"].all().reindex(co.row_h)
-    de = agree[agree["variable"].isin(co.dyn)].groupby("variable")["equivalent"].all().reindex(co.dyn)
-    _margins(co, axes, labels, (hw.to_numpy(), [hp.MUTED if e else hp.RED for e in he], "largest |diff| (bits)"),
-             (["✓ equiv." if e else "✗" for e in de], [hp.INK2 if e else hp.RED for e in de]), sd)
-    fig.suptitle(f"4a  Movie transitions per cohort · ✓ = every cohort equivalent to the others (bounds ± {cfg.sesoi_d:g} SD); "
-                 f"red = k/N cohorts equivalent · {ht.set_label(cfg.space)}", x=.01, ha="left", fontsize=11)
-    _bigger(fig)
-    save(fig, "4a_matrix_tost" + ("_sd" if sd else ""), cfg)
-    plt.show()
+
+def fig_matrix(co, graphs=None, agree=None, sd=False):
+    """4a, the cohorts' movie with the TOST (kept for the notebook's earlier calls)."""
+    fig_matrices(co, co.groups("cohort"), "tost", sd, "4a  Movie transitions per cohort", "4a_matrix")
+
+def fig_matrix_cohen(co, graphs=None, d=None, sd=False):
+    """4b, the cohorts' movie with Cohen's d (kept for the notebook's earlier calls)."""
+    fig_matrices(co, co.groups("cohort"), "cohen", sd, "4b  Movie transitions per cohort", "4b_matrix")
 
 
 # ------------------------------------------------------------------ 5 the latent space
