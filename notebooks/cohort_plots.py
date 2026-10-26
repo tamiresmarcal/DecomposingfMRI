@@ -268,14 +268,18 @@ def _cax(fig, ax):
     b = ax.get_position()
     return fig.add_axes([b.x1 + .006, b.y0, .007, b.height])
 
-def _panels(n, height=10):
-    """One fixed grid per panel: occupancy on top, row entropy on the left, the matrix, icons below.
-    Returns the figure and, per panel, dict(top, left, main, bottom)."""
-    fig = plt.figure(figsize=(7.4 * n, height))
-    outer = fig.add_gridspec(1, n, wspace=.38, left=.04, right=.95, top=.86, bottom=.03)
+def _panels(n, height=10, per_row=None):
+    """One fixed grid per panel: occupancy on top, the matrix, icons below; `per_row` panels a row
+    (None = all in one row). Returns the figure and, per panel, dict(top, left, main, bottom)."""
+    cols = min(n, per_row or n)
+    rows = int(np.ceil(n / cols))
+    fig = plt.figure(figsize=(7.4 * cols, height * rows))
+    outer = fig.add_gridspec(rows, cols, wspace=.38, hspace=.3, left=.04, right=.95,
+                             top=1 - .14 / rows, bottom=.03 / rows)
     out = []
     for k in range(n):
-        g = outer[k].subgridspec(3, 2, width_ratios=[.001, 1], height_ratios=[.3, 1, .3], wspace=.04, hspace=.12)
+        g = outer[k // cols, k % cols].subgridspec(3, 2, width_ratios=[.001, 1], height_ratios=[.3, 1, .3],
+                                                   wspace=.04, hspace=.12)
         main = fig.add_subplot(g[1, 1])
         out.append(dict(main=main, top=fig.add_subplot(g[0, 1], sharex=main), left=fig.add_subplot(g[1, 0], sharey=main),
                         bottom=fig.add_subplot(g[2, :])))
@@ -307,16 +311,17 @@ def _cell_text(ax, M, vmax, sd_matrix):
             ax.text(j, i, f"±{100 * sd_matrix[i, j]:.0f}", ha="center", va="center", fontsize=6.5,
                     color="white" if M[i, j] > .6 * vmax else hp.INK)
 
-def fig_matrices(co, groups, test="tost", sd=False, title=None, name="4_matrix"):
+def fig_matrices(co, groups, test="tost", sd=False, title=None, name="4_matrix", per_row=5):
     """4. One matrix per group (p(j | i), time in each state on top, the dynamics below), and with
     test="tost" or "cohen" a last panel testing every cell, occupancy and dynamics: each group vs all
     the others. test=None draws the groups only. groups = co.groups(...): {label: one row per subject}.
-    sd = each cell's between-subject SD (pp), occupancy ± SD, dynamics ± SD."""
+    sd = each cell's between-subject SD (pp), occupancy ± SD, dynamics ± SD. per_row = panels a row
+    (the test panel counts as one)."""
     cfg, K = co.cfg, co.cfg.K
     labels = list(groups)
     col = _group_colours(co, labels)
     G = {g: co._graph(d.mean()) for g, d in groups.items()}
-    fig, axes = _panels(len(labels) + (test is not None))
+    fig, axes = _panels(len(labels) + (test is not None), per_row=per_row)
     vmax = max(G[g][0].max() for g in labels)
     for P, g in zip(axes, labels):
         P["main"].imshow(G[g][0], cmap="Blues", vmin=0, vmax=vmax, aspect="auto")
