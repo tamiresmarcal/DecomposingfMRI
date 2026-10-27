@@ -288,6 +288,9 @@ def state_means_from_source(root: Path, atlas: str, window_s, state_col: str, fi
     the saved model). The mean of a state is then the mean of the source
     features over its rows: exact, with no inverse transform at all. Read one
     dfc shard at a time, so 6,105 edges never sit in memory for a whole cohort.
+    Only the (task, sub) present in the latents are read -- the set decompose
+    fitted on, after its censor policy -- so a subject the pipeline excluded is
+    never opened here either.
     Returns the same (group, per-subject) pair as the latent-space route.
     """
     from fmri_decomposition import decompose, frames
@@ -314,12 +317,18 @@ def state_means_from_source(root: Path, atlas: str, window_s, state_col: str, fi
     for cohort, parts in by_cohort.items():
         lab = pd.concat(parts, ignore_index=True)
         lab["window_id"] = lab["window_id"].astype("int64")
+        lab["task"], lab["sub"] = lab["task"].astype(str), lab["sub"].astype(str)
         lab = lab.set_index(["task", "sub", "window_id"])[state_col]
+        # Read ONLY the (task, sub) the latents have: exactly what decompose read
+        # after its censor policy. Subjects it excluded (e.g. a duplicated
+        # acquisition the frame reader refuses) are never opened.
+        kept = set(zip(lab.index.get_level_values(0), lab.index.get_level_values(1)))
         if str(window_s) == "-1":
             # absent = the fit used frames' default band; None = "as extracted"
             band = models["match_bandpass"] if "match_bandpass" in models else frames.DEFAULT_BANDPASS
             ident, X, _ = frames.read_cohort(
-                root, atlas, cohort, features, censor=None,
+                root, atlas, cohort, features,
+                censor={"policy": "latents", "subjects": kept, "windows": None},
                 band=tuple(band) if band else None,
                 zscore=bool(models.get("zscore_runs", True)), log=lambda *_: None)
             idx = pd.MultiIndex.from_arrays([ident["task"].astype(str), ident["sub"].astype(str),
@@ -333,6 +342,8 @@ def state_means_from_source(root: Path, atlas: str, window_s, state_col: str, fi
             continue
         for shard in decompose.shard_paths(root, atlas, window_s, cohort):
             kv = dict(x.split("=", 1) for x in shard.parts if "=" in x)
+            if (kv["task"], kv["sub"]) not in kept:
+                continue
             df = pd.read_parquet(shard, columns=["window_id"] + features)
             idx = pd.MultiIndex.from_arrays([[kv["task"]] * len(df), [kv["sub"]] * len(df),
                                              df["window_id"].astype("int64")])
