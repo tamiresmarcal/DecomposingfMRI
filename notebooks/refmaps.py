@@ -633,16 +633,23 @@ def vertex_labels(parc: Parcellator, surf: Surface) -> dict:
     sphere. Sphere atlases are left as they are -- 5 mm balls are meant to
     look like balls, not to tile the cortex.
     """
-    from nilearn.surface import InMemoryMesh, vol_to_surf
+    from nilearn.surface import vol_to_surf
     from scipy.spatial import cKDTree
 
     lab_img = nib.Nifti1Image(parc.label_volume().astype(np.float32), parc.ref.affine)
     hemi_of = np.concatenate([["-"], parc.spec.labels["hemi"].astype(str).to_numpy()])
     out = {}
     for h in HEMIS:
-        v = vol_to_surf(lab_img, InMemoryMesh(*surf.pial[h]),
-                        inner_mesh=InMemoryMesh(*surf.white[h]),
-                        interpolation="nearest_most_frequent")
+        # Meshes as (coords, faces) pairs: every nilearn version takes them.
+        # "nearest_most_frequent" is >= 0.11; plain "nearest" before that.
+        try:
+            v = vol_to_surf(lab_img, list(surf.pial[h]), inner_mesh=list(surf.white[h]),
+                            interpolation="nearest_most_frequent")
+        except ValueError:
+            # Old nilearn would AVERAGE nearest labels over depths -- labels that
+            # do not exist. One sample at mid-thickness keeps them integers.
+            v = vol_to_surf(lab_img, list(surf.pial[h]), inner_mesh=list(surf.white[h]),
+                            interpolation="nearest", kind="depth", depth=[0.5])
         lab = np.rint(np.nan_to_num(v)).astype(int)
         if parc.spec.kind == "labels":
             wrong = np.isin(hemi_of[lab], ["L", "R"]) & (hemi_of[lab] != h)

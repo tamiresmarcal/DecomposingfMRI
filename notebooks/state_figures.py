@@ -69,8 +69,11 @@ class Brains:
 
         self.parc = parc
         self.deep = deep.reshape(parc.ref.shape[:3]) > 0   # slices show subcortex only
-        self.fs = datasets.load_fsaverage("fsaverage5")
-        self.sulc = datasets.load_fsaverage_data(mesh="fsaverage5", data_type="sulcal")
+        # fetch_surf_fsaverage: bundled with nilearn (no download) and present in
+        # every version; load_fsaverage only exists from 0.11 on.
+        fs = datasets.fetch_surf_fsaverage("fsaverage5")
+        self.infl = {"left": fs["infl_left"], "right": fs["infl_right"]}
+        self.sulc = {"left": fs["sulc_left"], "right": fs["sulc_right"]}
         self.template = datasets.load_mni152_template(resolution=1)
         self.vlab = rm.vertex_labels(parc, surf)
 
@@ -82,11 +85,14 @@ class Brains:
             ax = fig.add_subplot(cell, projection="3d")
             h = "L" if hemi == "left" else "R"
             plotting.plot_surf(
-                self.fs["inflated"].parts[hemi], surf_map=vals[self.vlab[h]],
-                bg_map=self.sulc.data.parts[hemi], hemi=hemi, view=view, axes=ax,
+                self.infl[hemi], surf_map=vals[self.vlab[h]],
+                bg_map=self.sulc[hemi], hemi=hemi, view=view, axes=ax,
                 figure=fig, cmap=diverging_cmap(), vmin=-vlim, vmax=vlim,
                 colorbar=False, avg_method="median")
-            ax.set_box_aspect(None, zoom=1.42)
+            try:
+                ax.set_box_aspect(None, zoom=1.42)
+            except TypeError:                     # matplotlib < 3.3
+                pass
             ax.set_axis_off()
 
     def slices(self, fig, cells, values, vlim):
@@ -96,12 +102,15 @@ class Brains:
         img = img.__class__(np.where(self.deep, img.get_fdata(), 0).astype(np.float32), img.affine)
         for cell, (mode, cut) in zip(cells, SLICES):
             ax = fig.add_subplot(cell)
-            plotting.plot_stat_map(
-                img, bg_img=self.template, display_mode=mode, cut_coords=[cut],
-                axes=ax, figure=fig, colorbar=False, cmap=diverging_cmap(),
-                vmin=-vlim, vmax=vlim, symmetric_cbar=True, threshold=1e-3,
-                annotate=False, draw_cross=False, black_bg=False, dim=-0.6,
-                resampling_interpolation="nearest")
+            kw = dict(bg_img=self.template, display_mode=mode, cut_coords=[cut],
+                      axes=ax, figure=fig, colorbar=False, cmap=diverging_cmap(),
+                      vmax=vlim, symmetric_cbar=True, threshold=1e-3,
+                      annotate=False, draw_cross=False, black_bg=False, dim=-0.6,
+                      resampling_interpolation="nearest")
+            try:
+                plotting.plot_stat_map(img, vmin=-vlim, **kw)
+            except TypeError:                     # older nilearn: no vmin, symmetric anyway
+                plotting.plot_stat_map(img, **kw)
             ax.text(0.03, 0.03, f"{mode}={cut}", transform=ax.transAxes, fontsize=6,
                     color=MUTED, va="bottom")
 
