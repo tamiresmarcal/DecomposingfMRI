@@ -154,14 +154,92 @@ def load_states(states: str, atlas: str, parc, components, seed: int,
         return simulate_state_means(parc, components, seed)
     if Path(states).suffix == ".csv":
         return checked(pd.read_csv(states, index_col="state"), parc, states)
-    from fmri_decomposition.state_means import means_in_feature_units
-
-    if window_s is None:
-        raise SystemExit(f"STATES={states!r} is a state column: set WINDOW_S (--window-s), "
-                         f"the aperture it was fitted on -- -1 for the per-TR activation states")
     root = Path(output_root) if output_root else default_output_root()
-    t = means_in_feature_units(root, atlas, window_s, states, cohorts)
+    if window_s is None:
+        window_s = find_window(root, atlas, states)
+    t = state_means_any_layout(root, atlas, window_s, states, cohorts)
     return checked(t, parc, f"{states} at atlas={atlas} window_s={window_s}")
+
+
+def _has_column(path: Path, col: str) -> bool:
+    import pyarrow.parquet as pq
+
+    return col in pq.ParquetFile(path).schema_arrow.names
+
+
+def latent_files(root: Path, atlas: str, window_s, cohorts=None) -> list:
+    """Every latents file of one (atlas, aperture) cell, in either layout:
+    `cohort=<c>/data.parquet` or `cohort=<c>/task=<t>/data.parquet`."""
+    from fmri_decomposition.io import latents_root
+
+    cell = latents_root(root, atlas, window_s)
+    out = []
+    for p in sorted(cell.rglob("data.parquet")):
+        cohort = next((x.split("=", 1)[1] for x in p.parts if x.startswith("cohort=")), None)
+        if cohorts is None or cohort in cohorts:
+            out.append(p)
+    return out
+
+
+def find_window(root: Path, atlas: str, state_col: str):
+    """The aperture whose latents carry `state_col`, when WINDOW_S is not given."""
+    from fmri_decomposition.io import latents_root
+
+    found = []
+    for wdir in sorted(latents_root(root, atlas).glob("window_s=*")):
+        w = wdir.name.split("=", 1)[1]
+        if any(_has_column(p, state_col) for p in latent_files(root, atlas, w)):
+            found.append(w)
+    if len(found) != 1:
+        raise SystemExit(f"{state_col!r} is in {found or 'no'} window_s of atlas={atlas} "
+                         f"under {root / 'latents'}: set WINDOW_S"
+                         + ("" if found else " and check ATLASES / OUTPUT_ROOT"))
+    print(f"[{atlas}] {state_col}: window_s={found[0]} (found in the latents)")
+    return found[0]
+
+
+def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
+                           cohorts=None) -> pd.DataFrame:
+    """`fmri_decomposition.state_means.means_in_feature_units`, for a cell whose
+    files may be split by task as well as cohort. Same inverse transform --
+    scaler(.inverse) after PCA(.inverse), or the scaler alone for raw<N> --
+    pooled over every file asked for, weighted by its rows."""
+    from fmri_decomposition.io import RAW_PREFIX, read_file
+    from fmri_decomposition.state_means import embedding_of, load_models
+
+    files = [p for p in latent_files(root, atlas, window_s, cohorts) if _has_column(p, state_col)]
+    if not files:
+        raise SystemExit(f"no latents with {state_col!r} at atlas={atlas} window_s={window_s}"
+                         f"{'' if cohorts is None else f' for cohorts {cohorts}'} under {root}")
+    emb, cols = embedding_of(files[0], state_col)
+    is_raw = all(c.startswith(RAW_PREFIX) for c in cols)
+    if not is_raw and not all(c.startswith("pca") for c in cols):
+        raise SystemExit(f"{state_col!r} was fitted on {emb!r} (not invertible): use a pca<N> "
+                         f"or raw<N> state set for maps in parcel units")
+    df = pd.concat([read_file(p, columns=cols + [state_col]).to_pandas() for p in files],
+                   ignore_index=True)
+    g = df.groupby(state_col, sort=True)
+    arr = g[cols].mean().to_numpy(float)
+    counts = g.size()
+    models = load_models(root, atlas, window_s)
+    features = list(models["edges"])
+    if is_raw:
+        names = [c[len(RAW_PREFIX):] for c in cols]
+        idx = [features.index(n) for n in names]
+        full = np.zeros((len(arr), len(features)))
+        full[:, idx] = arr
+        out = pd.DataFrame(models["scaler"].inverse_transform(full)[:, idx],
+                           index=counts.index, columns=names)
+    else:
+        n = int(cols[0].partition("/")[2])
+        back = models["scaler"].inverse_transform(models["pca"][n].inverse_transform(arr))
+        out = pd.DataFrame(back, index=counts.index, columns=features)
+    out.insert(0, "n_rows", counts.to_numpy())
+    out.insert(1, "share", counts.to_numpy() / counts.sum())
+    out.index.name = "state"
+    print(f"[{atlas}] {state_col}: {len(out)} states from {len(files)} file(s), "
+          f"{int(counts.sum())} rows")
+    return out
 
 
 def default_output_root() -> Path:
