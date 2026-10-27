@@ -549,15 +549,25 @@ def surrogates(parcel_maps: np.ndarray, centroids: np.ndarray, n: int,
 
 
 def null_test(states: np.ndarray, parcel_maps: np.ndarray, centroids: np.ndarray,
-              n: int, seed: int = 0, method: str = "moran") -> dict:
-    """r, two-sided p against surrogates, BH q within the family."""
+              n: int, seed: int = 0, method: str = "moran", chunk: int = 500) -> dict:
+    """r, two-sided p against surrogates, BH q within the family.
+
+    The surrogates are drawn and scored `chunk` at a time: 10,000 of them for
+    45 maps over 254 parcels would otherwise be gigabytes held at once just
+    to count exceedances.
+    """
     r = correlate(states, parcel_maps)
     if n <= 0 or parcel_maps.shape[1] < MIN_PARCELS_FOR_NULL:
         nan = np.full_like(r, np.nan)
         return {"r": r, "p": nan, "q": nan}
-    null = correlate(states, surrogates(parcel_maps, centroids, n, seed, method))  # n, K, M
-    valid = np.isfinite(null).all(0)
-    p = (1 + (np.abs(null) >= np.abs(r)[None]).sum(0)) / (1 + n)
+    exceed = np.zeros(r.shape)
+    valid = np.ones(r.shape, dtype=bool)
+    for k, start in enumerate(range(0, n, chunk)):
+        m = min(chunk, n - start)
+        null = correlate(states, surrogates(parcel_maps, centroids, m, seed + 7919 * k, method))
+        valid &= np.isfinite(null).all(0)
+        exceed += (np.abs(null) >= np.abs(r)[None]).sum(0)
+    p = (1 + exceed) / (1 + n)
     p = np.where(valid & np.isfinite(r), p, np.nan)
     return {"r": r, "p": p, "q": fdr_bh(p)}
 

@@ -442,7 +442,10 @@ def main(argv=None) -> int:
                    help="CSV from `fmri-decomp state-means --csv` (one atlas only)")
     p.add_argument("--behavioural", type=Path,
                    help="real Brainnetome behavioural table (bn_index + one column per category)")
-    p.add_argument("--n-nulls", type=int, default=1000)
+    p.add_argument("--n-nulls", type=int, default=10000,
+                   help="surrogates per map. The smallest p is 1/(n+1), and BH over a "
+                        "family of 114 (6 states x 19 PET maps) needs it well under "
+                        "0.05/114: 1000 cannot reach q<.05 at all")
     p.add_argument("--null", choices=rm.NULLS, default="moran",
                    help="moran: Moran spectral randomisation (seconds); burt: brainsmash "
                         "variogram matching (hours for every family -- a cluster job)")
