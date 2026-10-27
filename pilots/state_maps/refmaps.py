@@ -394,16 +394,32 @@ def load_behavioural_table(path: Path) -> pd.DataFrame:
     return t
 
 
+BN_LEVELS = ("subregion", "gyrus")
+
+
 def behavioural_maps(data: Path, surf: Surface, table: pd.DataFrame | None = None,
-                     seed: int = 0) -> ReferenceMaps:
+                     seed: int = 0, level: str = "subregion") -> ReferenceMaps:
+    """BrainMap domain profiles painted on Brainnetome, at one of its levels.
+
+    `subregion` is the 210 cortical subregions the profiles are published at.
+    `gyrus` is the atlas' own coarser level: the 20 cortical gyri per
+    hemisphere (SFG, MFG, ... LOcC) that the subregions subdivide. Each gyrus
+    gets the mean profile of its subregions, so both levels come from ONE
+    table and differ only in grain -- what changes between the two panels is
+    the resolution, never the data.
+    """
+    if level not in BN_LEVELS:
+        raise ValueError(f"level must be one of {BN_LEVELS}, got {level!r}")
     bn, labels = brainnetome_on_surface(data)
     simulated = table is None
     if simulated:
         table = simulate_behavioural_table(bn, seed=seed)
     domains = [c for c in table.columns
                if c not in ("bn_index", "hemi", "name", "gyrus", "local")]
-    t = bn[["bn_index", "hemi", "local"]].merge(table[["bn_index"] + domains],
-                                                on="bn_index", how="left")
+    t = bn[["bn_index", "hemi", "local", "gyrus"]].merge(
+        table[["bn_index"] + domains], on="bn_index", how="left")
+    if level == "gyrus":
+        t[domains] = t.groupby(["hemi", "gyrus"])[domains].transform("mean")
     vertex = {}
     for h in HEMIS:
         th = t[t["hemi"] == h].sort_values("local")
@@ -414,7 +430,9 @@ def behavioural_maps(data: Path, surf: Surface, table: pd.DataFrame | None = Non
         vertex[h] = v
     src = ("SIMULATED stand-in on the real Brainnetome parcellation" if simulated
            else "BrainMap behavioural domains on Brainnetome (Fan et al. 2016)")
-    return ReferenceMaps("behavioural", domains, vertex, simulated=simulated, source=src)
+    src += f", {level} level ({'210 subregions' if level == 'subregion' else '40 gyri'})"
+    family = "behavioural" if level == "subregion" else f"behavioural_{level}"
+    return ReferenceMaps(family, domains, vertex, simulated=simulated, source=src)
 
 
 # -------------------------------------------------------------- spin test ---

@@ -8,7 +8,7 @@ no córtex e, ao lado, a correlação desse padrão com três famílias de mapas
 | família | o que é | fonte usada aqui | status |
 |---|---|---|---|
 | **Molecular** | 19 mapas PET de receptores/transportadores (5-HT, DA, NE, ACh, GABA, Glu, CB1, MOR, H3) | conjunto de Hansen et al. 2022, que é o que o `neuromaps` serve como anotações MNI152; baixado do repositório do artigo | **real** |
-| **Comportamental** | perfil de domínios comportamentais do BrainMap para cada sub-região do Brainnetome (Fan et al. 2016) | parcelação Brainnetome real (210 regiões corticais, TemplateFlow); **tabela de domínios simulada** | **parcelação real, perfis SIMULADOS** |
+| **Comportamental** | perfil de domínios comportamentais do BrainMap para cada sub-região do Brainnetome (Fan et al. 2016), em dois níveis da hierarquia do atlas: 210 sub-regiões e os 40 giros que elas formam | parcelação Brainnetome real (TemplateFlow); **tabela de domínios simulada** | **parcelação real, perfis SIMULADOS** |
 | **Canônico** | redes de Yeo 2011 (7 redes) | TemplateFlow, fsaverage5 | **real** |
 | **Estados** | médias por estado sobre as 96 parcelas corticais do `harvardoxford` | simulados (veja abaixo) ou `fmri-decomp state-means --csv` | **simulados** neste piloto |
 
@@ -97,6 +97,15 @@ partir de um prior de livro-texto por giro (IFG → linguagem, PrG → execuçã
 motora, MVOcC → visão etc.) mais ruído. A tabela só existe para construir e
 testar o painel. A figura marca esse painel com hachura e "SIMULATED" e não
 deve ser lida como resultado.
+
+**Níveis.** O Brainnetome é hierárquico: as 210 sub-regiões corticais se
+agrupam em 20 giros por hemisfério (SFG, MFG, …, LOcC; Fan et al. 2016,
+Tabela 1). `--bn-levels subregion gyrus` (o padrão) mostra os dois níveis lado
+a lado. O nível de giro é a média do perfil das sub-regiões de cada giro, então
+os dois painéis vêm da mesma tabela e diferem só na granularidade. Com a
+tabela simulada eles quase coincidem, porque o prior simulado é definido por
+giro. Com os perfis reais, a diferença entre os dois mostra quanto a
+especialização dentro de cada giro importa para o estado.
 
 Para usar os perfis reais, monte um CSV com `bn_index` (1..246, numeração do
 BNA: ímpar = esquerdo, par = direito) e uma coluna por domínio, com qualquer

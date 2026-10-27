@@ -58,7 +58,25 @@
       "simulated": false
     },
     "behavioural": {
-      "source": "SIMULATED stand-in on the real Brainnetome parcellation",
+      "source": "SIMULATED stand-in on the real Brainnetome parcellation, subregion level (210 subregions)",
+      "maps": [
+        "Action.Execution",
+        "Action.Observation",
+        "Cognition.Attention",
+        "Cognition.Language",
+        "Cognition.Memory",
+        "Cognition.Reasoning",
+        "Cognition.Social",
+        "Emotion",
+        "Interoception",
+        "Perception.Audition",
+        "Perception.Somesthesis",
+        "Perception.Vision"
+      ],
+      "simulated": true
+    },
+    "behavioural_gyrus": {
+      "source": "SIMULATED stand-in on the real Brainnetome parcellation, gyrus level (40 gyri)",
       "maps": [
         "Action.Execution",
         "Action.Observation",

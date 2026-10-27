@@ -45,6 +45,19 @@ DIVERGING = ["#104281", "#3987e5", "#cde2fb", "#f0efec", "#f8d3d2", "#e34948", "
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#8a8984"
 SIMULATED_INK = "#b4560f"
 
+FAMILY_TITLES = {
+    "molecular": "Molecular  ·  PET receptors (neuromaps)",
+    "behavioural": "Behavioural  ·  BrainMap × Brainnetome\n210 subregions",
+    "behavioural_gyrus": "Behavioural  ·  BrainMap × Brainnetome\n40 gyri",
+    "canonical": "Canonical  ·  Yeo 7 networks",
+}
+CARD_TITLES = {
+    "molecular": "Molecular (PET)",
+    "behavioural": "Behavioural · 210 subregions",
+    "behavioural_gyrus": "Behavioural · 40 gyri",
+    "canonical": "Canonical (Yeo 7)",
+}
+
 # Ground truth of the simulation: state -> {Yeo network: weight}.
 SIM_STATES = {
     "Default": {"Default": 1.0, "Dorsal Attention": -0.6, "Somatomotor": -0.3},
@@ -167,7 +180,8 @@ def heat_panel(ax, r, p, q, names, simulated=False, header_colors=None):
             mark = ("★" if q[i, j] < 0.01 else "✱" if q[i, j] < 0.05
                     else "•" if p[i, j] < 0.05 else "")
             if mark:
-                ax.text(j, i, mark, ha="center", va="center", fontsize=7.5,
+                ax.text(j, i, mark, ha="center", va="center",
+                        fontsize=11 if mark == "•" else 7.5,
                         color="white" if abs(r[i, j]) > 0.55 else INK)
     ax.set_xticks(range(M))
     ax.set_xticklabels([rm.short(n) for n in names], rotation=60, ha="left",
@@ -200,12 +214,12 @@ def overview_figure(state_df, names, parc, results, out: Path, simulated_states)
     Z = (X - X.mean(1, keepdims=True)) / X.std(1, keepdims=True)
     K = len(Z)
 
-    fams = [("molecular", "Molecular  ·  PET receptors (neuromaps)"),
-            ("behavioural", "Behavioural  ·  BrainMap × Brainnetome"),
-            ("canonical", "Canonical  ·  Yeo 7 networks")]
-    widths = [0.9, 5.2, 0.25] + [len(results[f]["names"]) * 0.26 for f, _ in fams[:1]] \
-        + [0.3, len(results["behavioural"]["names"]) * 0.26, 0.3,
-           len(results["canonical"]["names"]) * 0.26]
+    fams = list(results)
+    widths, cols = [0.9, 5.2], {}
+    for f in fams:                      # a spacer, then one heat strip per family
+        widths.append(0.3)
+        cols[f] = len(widths)
+        widths.append(len(results[f]["names"]) * 0.26)
     H = 1.25 * K + 3.1
     fig = plt.figure(figsize=(sum(widths) + 0.6, H), facecolor="white")
     gs = GridSpec(K, len(widths), figure=fig, width_ratios=widths, left=0.01,
@@ -223,8 +237,8 @@ def overview_figure(state_df, names, parc, results, out: Path, simulated_states)
                  transform=lab.transAxes)
         draw_brain(fig, gs[i, 1], Z[i], parc, fs, sulc, vlim=2.5)
 
-    cols = {"molecular": 3, "behavioural": 5, "canonical": 7}
-    for fam, title in fams:
+    for fam in fams:
+        title = FAMILY_TITLES[fam]
         res = results[fam]
         ax = fig.add_subplot(gs[:, cols[fam]])
         im = heat_panel(ax, res["r"], res["p"], res["q"], res["names"],
@@ -234,11 +248,12 @@ def overview_figure(state_df, names, parc, results, out: Path, simulated_states)
         # whatever the length of their tick labels.
         sim = res["simulated"]
         fig.text(ax.get_position().x0, 1 - 0.75 / H,
-                 title + ("\nSIMULATED table" if sim else ""), ha="left", va="top",
+                 title + ("  ·  SIMULATED" if sim else ""), ha="left", va="top",
                  fontsize=9.5, fontweight="bold", color=SIMULATED_INK if sim else INK)
-    if results["behavioural"]["simulated"]:
-        fig.text(0.99, 0.004, "Behavioural panel: SIMULATED stand-in table on the real "
-                 "Brainnetome parcellation (BrainMap profiles not loaded yet).",
+    if any(results[f]["simulated"] for f in fams):
+        fig.text(0.99, 0.004, "Behavioural panels: SIMULATED stand-in table on the real "
+                 "Brainnetome parcellation (BrainMap profiles not loaded yet); the gyrus "
+                 "level averages the same table over each gyrus's subregions.",
                  ha="right", va="bottom", fontsize=7, color=SIMULATED_INK)
 
     # Colour bars: r for the heat strips, z for the brains.
@@ -281,8 +296,9 @@ def state_card(i, state_df, names, parc, results, out: Path, top=8):
     X = state_df[parc.columns].to_numpy(float)
     z = (X[i] - X[i].mean()) / X[i].std()
 
-    fig = plt.figure(figsize=(13, 4.6), facecolor="white")
-    gs = GridSpec(2, 4, figure=fig, width_ratios=[4.4, 2.2, 2.2, 2.2],
+    fams = list(results)
+    fig = plt.figure(figsize=(6.0 + 2.35 * len(fams), 4.6), facecolor="white")
+    gs = GridSpec(2, 1 + len(fams), figure=fig, width_ratios=[4.4] + [2.2] * len(fams),
                   height_ratios=[1, 1], left=0.01, right=0.985, top=0.80,
                   bottom=0.1, wspace=0.55, hspace=0.05)
     from matplotlib.gridspec import GridSpecFromSubplotSpec
@@ -300,9 +316,7 @@ def state_card(i, state_df, names, parc, results, out: Path, top=8):
         ax.set_box_aspect(None, zoom=1.35)
         ax.set_axis_off()
 
-    titles = {"molecular": "Molecular (PET)", "behavioural": "Behavioural (BrainMap)",
-              "canonical": "Canonical (Yeo 7)"}
-    for c, fam in enumerate(["molecular", "behavioural", "canonical"], start=1):
+    for c, fam in enumerate(fams, start=1):
         res = results[fam]
         r, q, nm = res["r"][i], res["q"][i], np.array(res["names"])
         order = np.argsort(-np.abs(r))[:top] if fam != "canonical" else np.argsort(-r)
@@ -332,7 +346,7 @@ def state_card(i, state_df, names, parc, results, out: Path, top=8):
         ax.spines["bottom"].set_color(MUTED)
         ax.set_xlabel("r (parcels)", fontsize=7.5, color=INK2)
         sim = res["simulated"]
-        ax.set_title(titles[fam] + ("  SIMULATED" if sim else "")
+        ax.set_title(CARD_TITLES[fam] + ("  SIMULATED" if sim else "")
                      + ("" if fam == "canonical" else f"\ntop {top} by |r|"),
                      fontsize=9, color=SIMULATED_INK if sim else INK, loc="left")
     fig.text(0.01, 0.975, f"S{i + 1} · {names[i]}", fontsize=14, fontweight="bold",
@@ -355,6 +369,10 @@ def main(argv=None) -> int:
                    help="CSV from `fmri-decomp state-means --atlas harvardoxford --csv`")
     p.add_argument("--behavioural", type=Path,
                    help="real Brainnetome behavioural table (bn_index + one column per domain)")
+    p.add_argument("--bn-levels", nargs="+", default=list(rm.BN_LEVELS),
+                   choices=rm.BN_LEVELS,
+                   help="Brainnetome level(s) for the behavioural panel: the 210 "
+                        "subregions, the 40 gyri they group into, or both side by side")
     p.add_argument("--n-spins", type=int, default=1000)
     p.add_argument("--out", type=Path, default=HERE / "figures")
     p.add_argument("--seed", type=int, default=7)
@@ -365,12 +383,11 @@ def main(argv=None) -> int:
     parc = rm.harvard_oxford_on_surface(args.data, surf)
     print(f"[atlas] Harvard-Oxford cortical: {len(parc.names)} parcels on fsaverage5")
 
-    refs = [rm.receptor_maps(args.data, surf),
-            rm.behavioural_maps(args.data, surf,
-                                rm.load_behavioural_table(args.behavioural)
-                                if args.behavioural else None),
-            rm.yeo7_maps(args.data, surf)]
-    yeo_parcel = parc.parcellate(refs[2].vertex)
+    bt = rm.load_behavioural_table(args.behavioural) if args.behavioural else None
+    refs = ([rm.receptor_maps(args.data, surf)]
+            + [rm.behavioural_maps(args.data, surf, bt, level=lv) for lv in args.bn_levels]
+            + [rm.yeo7_maps(args.data, surf)])
+    yeo_parcel = parc.parcellate(refs[-1].vertex)
 
     if args.state_means:
         state_df = read_state_means(args.state_means, parc)
