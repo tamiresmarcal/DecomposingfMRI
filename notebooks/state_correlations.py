@@ -219,155 +219,124 @@ def find_window(root: Path, atlas: str, state_col: str):
 
 
 def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
-                           cohorts=None) -> pd.DataFrame:
-    """`fmri_decomposition.state_means.means_in_feature_units`, for a cell whose
-    files may be split by task as well as cohort. Same inverse transform --
-    scaler(.inverse) after PCA(.inverse), or the scaler alone for raw<N> --
-    pooled over every file asked for, weighted by its rows."""
-    from fmri_decomposition.io import RAW_PREFIX, read_file
-    from fmri_decomposition.state_means import embedding_of, load_models
+                           cohorts=None):
+    """Group and per-subject state means, in ACTIVATION, for any state set.
+
+    Same route for PCA, raw and UMAP state sets: no inverse transform. The
+    labels are joined back to the per-TR parcel activations in
+    outputs/activation/, so a state's map is always the mean activation over
+    the time it covers:
+
+      window_s = -1   each label is a frame: joined on (task, sub, window_id),
+                      frames rebuilt with the fit's band-pass and z-scoring
+                      (read from the saved model)
+      window_s > 0    each label is a DFC window; a window covers the frames
+                      with stimulus_time_s in [stimulus_start_s,
+                      stimulus_start_s + window_s) -- windows.py's own rule --
+                      so a state's map is the mean over the frames its windows
+                      cover (overlapping windows weight a frame once each).
+                      Frames use frames.py's defaults (band-pass 0.01-0.1 Hz,
+                      z-scored per run), the activation fit's defaults.
+
+    Only the (task, sub) the latents have are read: the set decompose fitted
+    on, after its censor policy. Returns (group table, per-subject table
+    indexed by (subject, state)).
+    """
+    from fmri_decomposition import frames
+    from fmri_decomposition.io import read_file
 
     files = [p for p in latent_files(root, atlas, window_s, cohorts) if _has_column(p, state_col)]
     if not files:
         raise SystemExit(f"no latents with {state_col!r} at atlas={atlas} window_s={window_s}"
                          f"{'' if cohorts is None else f' for cohorts {cohorts}'} under {root}")
-    emb, cols = embedding_of(files[0], state_col)
-    is_raw = all(c.startswith(RAW_PREFIX) for c in cols)
-    if not is_raw and not all(c.startswith("pca") for c in cols):
-        print(f"[{atlas}] {state_col}: fitted on {emb!r}, which has no inverse -- averaging "
-              f"the source data over each state's rows instead")
-        return state_means_from_source(root, atlas, window_s, state_col, files)
-    import pyarrow.parquet as pq
+    per_tr = str(window_s) == "-1"
+    if per_tr:
+        from fmri_decomposition.state_means import load_models
 
-    frames = []
-    for p in files:
-        have = set(pq.ParquetFile(p).schema_arrow.names)
-        keys = [k for k in ("cohort", "sub") if k in have]
-        t = read_file(p, columns=cols + [state_col] + keys).to_pandas()
-        cohort = next((x.split("=", 1)[1] for x in p.parts if x.startswith("cohort=")), "")
-        sub = t["sub"].astype(str) if "sub" in t else pd.Series("all", index=t.index)
-        coh = t["cohort"].astype(str) if "cohort" in t else pd.Series(cohort, index=t.index)
-        t["subject"] = coh + ":" + sub
-        frames.append(t[cols + [state_col, "subject"]])
-    df = pd.concat(frames, ignore_index=True)
-    models = load_models(root, atlas, window_s)
-    features = list(models["edges"])
+        models = load_models(root, atlas, window_s)
+        # absent = the fit used frames' default band; None = "as extracted"
+        band = models["match_bandpass"] if "match_bandpass" in models else frames.DEFAULT_BANDPASS
+        zscore = bool(models.get("zscore_runs", True))
+    else:
+        band, zscore, width = frames.DEFAULT_BANDPASS, True, float(window_s)
 
-    def to_features(arr: np.ndarray, index) -> pd.DataFrame:
-        if is_raw:
-            names = [c[len(RAW_PREFIX):] for c in cols]
-            idx = [features.index(n) for n in names]
-            full = np.zeros((len(arr), len(features)))
-            full[:, idx] = arr
-            return pd.DataFrame(models["scaler"].inverse_transform(full)[:, idx],
-                                index=index, columns=names)
-        n = int(cols[0].partition("/")[2])
-        back = models["scaler"].inverse_transform(models["pca"][n].inverse_transform(arr))
-        return pd.DataFrame(back, index=index, columns=features)
-
-    g = df.groupby(state_col, sort=True)
-    counts = g.size()
-    out = to_features(g[cols].mean().to_numpy(float), counts.index)
-    out.insert(0, "n_rows", counts.to_numpy())
-    out.insert(1, "share", counts.to_numpy() / counts.sum())
-    out.index.name = "state"
-    gs = df.groupby(["subject", state_col], sort=True)[cols].mean()
-    subj = to_features(gs.to_numpy(float), gs.index.set_names(["subject", "state"]))
-    print(f"[{atlas}] {state_col}: {len(out)} states from {len(files)} file(s), "
-          f"{int(counts.sum())} rows, {subj.index.get_level_values(0).nunique()} subjects")
-    return out, subj
-
-
-def state_means_from_source(root: Path, atlas: str, window_s, state_col: str, files: list):
-    """State means for ANY state set, UMAP included: the labels joined back to
-    the rows they label, in the data the fit was made on.
-
-    Every latents row carries (task, sub, window_id), and so does every row of
-    the source -- dfc windows, or per-TR activation frames rebuilt by
-    `frames.read_cohort` with the fit's own band-pass and z-scoring (read from
-    the saved model). The mean of a state is then the mean of the source
-    features over its rows: exact, with no inverse transform at all. Read one
-    dfc shard at a time, so 6,105 edges never sit in memory for a whole cohort.
-    Only the (task, sub) present in the latents are read -- the set decompose
-    fitted on, after its censor policy -- so a subject the pipeline excluded is
-    never opened here either.
-    Returns the same (group, per-subject) pair as the latent-space route.
-    """
-    from fmri_decomposition import decompose, frames
-    from fmri_decomposition.io import read_file
-    from fmri_decomposition.state_means import load_models
-
-    models = load_models(root, atlas, window_s)
-    features = list(models["edges"])
-    keys = ["task", "sub", "window_id"]
-    sums: dict = {}
-
-    def add(subject, labels: np.ndarray, X: np.ndarray):
-        for k in np.unique(labels):
-            sel = labels == k
-            acc = sums.setdefault((subject, k), [np.zeros(len(features)), 0])
-            acc[0] += X[sel].sum(0)
-            acc[1] += int(sel.sum())
-
+    keys = ["task", "sub", "window_id"] + ([] if per_tr else ["stimulus_start_s"])
     by_cohort: dict = {}
     for p in files:
         cohort = next((x.split("=", 1)[1] for x in p.parts if x.startswith("cohort=")), "")
         t = read_file(p, columns=keys + [state_col]).to_pandas().dropna(subset=[state_col])
         by_cohort.setdefault(cohort, []).append(t)
+
+    sums: dict = {}
+    features = None
     for cohort, parts in by_cohort.items():
         lab = pd.concat(parts, ignore_index=True)
-        lab["window_id"] = lab["window_id"].astype("int64")
         lab["task"], lab["sub"] = lab["task"].astype(str), lab["sub"].astype(str)
-        lab = lab.set_index(["task", "sub", "window_id"])[state_col]
-        # Read ONLY the (task, sub) the latents have: exactly what decompose read
-        # after its censor policy. Subjects it excluded (e.g. a duplicated
-        # acquisition the frame reader refuses) are never opened.
-        kept = set(zip(lab.index.get_level_values(0), lab.index.get_level_values(1)))
-        if str(window_s) == "-1":
-            # absent = the fit used frames' default band; None = "as extracted"
-            band = models["match_bandpass"] if "match_bandpass" in models else frames.DEFAULT_BANDPASS
-            ident, X, _ = frames.read_cohort(
-                root, atlas, cohort, features,
-                censor={"policy": "latents", "subjects": kept, "windows": None},
-                band=tuple(band) if band else None,
-                zscore=bool(models.get("zscore_runs", True)), log=lambda *_: None)
-            idx = pd.MultiIndex.from_arrays([ident["task"].astype(str), ident["sub"].astype(str),
-                                             ident["window_id"].astype("int64")])
-            got = lab.reindex(idx).to_numpy()
-            ok = ~pd.isna(got)
-            subj = (cohort + ":" + ident["sub"].astype(str)).to_numpy()
-            for sname in np.unique(subj[ok]):
-                m = ok & (subj == sname)
-                add(sname, got[m].astype(int), X[m])
-            continue
-        for shard in decompose.shard_paths(root, atlas, window_s, cohort):
-            kv = dict(x.split("=", 1) for x in shard.parts if "=" in x)
-            if (kv["task"], kv["sub"]) not in kept:
+        lab["window_id"] = lab["window_id"].astype("int64")
+        lab[state_col] = lab[state_col].astype(int)
+        kept = set(zip(lab["task"], lab["sub"]))
+        shards = frames.shard_paths(root, atlas, cohort)
+        if not shards:
+            raise SystemExit(f"no activation shards for cohort={cohort} at atlas={atlas}: "
+                             f"the state maps are read from outputs/activation/")
+        feats = frames.feature_columns(shards[0])
+        if features is None:
+            features = feats
+        ident, X, _ = frames.read_cohort(
+            root, atlas, cohort, feats, band=band, zscore=zscore, log=lambda *_: None,
+            censor={"policy": "latents", "subjects": kept, "windows": None})
+        ident = ident.reset_index(drop=True)
+        ident["task"], ident["sub"] = ident["task"].astype(str), ident["sub"].astype(str)
+        for (task, sub), fi in ident.groupby(["task", "sub"], sort=False).groups.items():
+            L = lab[(lab["task"] == task) & (lab["sub"] == sub)]
+            if L.empty:
                 continue
-            df = pd.read_parquet(shard, columns=["window_id"] + features)
-            idx = pd.MultiIndex.from_arrays([[kv["task"]] * len(df), [kv["sub"]] * len(df),
-                                             df["window_id"].astype("int64")])
-            got = lab.reindex(idx).to_numpy()
-            ok = ~pd.isna(got)
-            if ok.any():
-                add(f"{cohort}:{kv['sub']}", got[ok].astype(int),
-                    df.loc[ok, features].to_numpy(np.float64))
+            fi = np.asarray(fi)
+            if per_tr:
+                pos = pd.Series(np.arange(len(fi)), index=ident.loc[fi, "window_id"].astype("int64"))
+                hit = L["window_id"].map(pos)
+                ok = hit.notna().to_numpy()
+                rows, states = fi[hit[ok].astype(int).to_numpy()], L[state_col].to_numpy()[ok]
+                W = None
+            else:
+                tt = ident.loc[fi, "stimulus_start_s"].to_numpy(float)   # frame stimulus time
+                s0 = L["stimulus_start_s"].to_numpy(float)[:, None]
+                W = (tt[None] >= s0 - 1e-6) & (tt[None] < s0 + width - 1e-6)   # windows x frames
+                states = L[state_col].to_numpy()
+            for k in np.unique(states):
+                if W is None:
+                    w_rows = rows[states == k]
+                    tot, n = X[w_rows].astype(np.float64).sum(0), len(w_rows)
+                else:
+                    wts = W[states == k].sum(0).astype(np.float64)        # frame weights
+                    n = wts.sum()
+                    if n == 0:
+                        continue
+                    tot = wts @ X[fi].astype(np.float64)
+                acc = sums.setdefault((f"{cohort}:{sub}", int(k)), [0.0, 0.0])
+                acc[0] = acc[0] + tot
+                acc[1] += n
     if not sums:
-        raise SystemExit(f"{state_col}: no source rows matched the latents' "
-                         f"(task, sub, window_id) at atlas={atlas} window_s={window_s}")
+        raise SystemExit(f"{state_col}: no activation frames matched the latents at "
+                         f"atlas={atlas} window_s={window_s}")
     idx = pd.MultiIndex.from_tuples(sorted(sums), names=["subject", "state"])
     S = np.array([sums[k][0] for k in idx])
-    N = np.array([sums[k][1] for k in idx])
+    N = np.array([sums[k][1] for k in idx], dtype=float)
     subj = pd.DataFrame(S / N[:, None], index=idx, columns=features)
     states = idx.get_level_values("state")
     tot = pd.Series(N, index=states).groupby(level=0).sum()
     grp = pd.DataFrame(pd.DataFrame(S, index=states).groupby(level=0).sum().to_numpy()
                        / tot.to_numpy()[:, None], index=tot.index, columns=features)
-    grp.insert(0, "n_rows", tot.to_numpy())
-    grp.insert(1, "share", tot.to_numpy() / tot.sum())
+    n_rows = pd.concat([pd.concat(v) for v in by_cohort.values()])[state_col] \
+        .astype(int).value_counts().reindex(grp.index).fillna(0).to_numpy()
+    grp.insert(0, "n_rows", n_rows.astype(int))
+    grp.insert(1, "share", n_rows / n_rows.sum())
     grp.index.name = "state"
-    print(f"[{atlas}] {state_col}: {len(grp)} states from the source data, "
-          f"{int(tot.sum())} rows, {subj.index.get_level_values(0).nunique()} subjects")
+    grp.attrs["measure"] = "mean activation" + ("" if per_tr else
+                                                f" over each state's {window_s} s windows")
+    print(f"[{atlas}] {state_col}: {len(grp)} states, activation from "
+          f"{subj.index.get_level_values(0).nunique()} subjects "
+          f"({'frames' if per_tr else f'frames under {int(n_rows.sum())} windows'})")
     return grp, subj
 
 

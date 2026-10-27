@@ -193,11 +193,17 @@ Cada estado ocupa uma linha:
 
 O painel antigo de faixas de calor e os cards por estado continuam disponíveis com `draw(..., overview=True, cards=True)`, ou `--overview --cards` na linha de comando.
 
-## Estados UMAP (ou qualquer embedding sem inversa)
+## De onde vem o mapa de cada estado
 
-Para estados ajustados em PCA ou raw, a média de cada estado é recuperada no espaço latente e desfeita a rotação (como faz o `state-means`). O UMAP não tem inversa, então, para ele, a média é calculada **nos dados de origem**. Os rótulos dos latents são juntados às linhas que eles rotulam pela chave `(task, sub, window_id)`:
+O mapa de cada estado é sempre **ativação**, lida de `outputs/activation/`. O caminho é o mesmo para PCA, raw e UMAP, e não usa transformação inversa:
 
-- **Janelas de DFC:** as arestas de cada janela, lendo um arquivo de sujeito por vez.
-- **Frames de ativação (`window_s=-1`):** reconstruídos por `frames.read_cohort` com o mesmo band-pass e o mesmo z-score usados no ajuste (lidos do modelo salvo).
+1. Dos latents saem o rótulo de cada linha e a chave `(task, sub, window_id)`, mais `stimulus_start_s` nas janelas.
+2. São lidos apenas os sujeitos presentes nos latents, ou seja, o conjunto em que o `decompose` ajustou o modelo depois da política de censura. Sujeitos excluídos pelo pipeline nunca são abertos.
+3. As ativações por TR são reconstruídas por `frames.read_cohort`:
+   - **`window_s = −1`:** com o band-pass e o z-score do próprio ajuste. Cada frame rotulado entra na média do seu estado.
+   - **Janelas de DFC (`window_s > 0`):** com os padrões de `frames.py` (band-pass 0,01–0,1 Hz e z-score por run). Uma janela cobre os frames com `stimulus_time_s` em `[stimulus_start_s, stimulus_start_s + window_s)`, a mesma regra de `windows.py`. O mapa do estado é a média de ativação sobre os frames cobertos pelas suas janelas. Com janelas sobrepostas, cada frame conta uma vez por janela.
+4. As médias são calculadas por estado (grupo) e por sujeito × estado (para o desvio padrão).
 
-Assim a média é exata, sem transformação inversa. Funciona para qualquer conjunto de estados e é escolhida automaticamente quando o embedding não é invertível. Foi testado nos arquivos sintéticos do próprio pipeline (`fixtures`): todas as janelas e frames foram encontrados, e a diferença em relação a um cálculo manual foi de 6×10⁻⁸.
+Testado nos arquivos sintéticos do pipeline (`fixtures`), nos dois casos: a diferença em relação a um cálculo manual foi de cerca de 5×10⁻⁸.
+
+O resultado para os estados de DFC mudou. Antes, cada estado virava a força nodal da conectividade; agora é a ativação média durante as janelas do estado. A força nodal continua sendo usada só quando a entrada é um CSV do `state-means` em unidades de aresta.
