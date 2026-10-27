@@ -35,7 +35,7 @@ SIMULATED_INK = "#b4560f"
 TITLES = {
     "molecular": "Molecular · PET receptors (neuromaps)",
     "behavioural_domain": "Behavioural · BrainMap domains",
-    "behavioural": "Behavioural · BrainMap subcategories × Brainnetome (246)",
+    "behavioural": "Behavioural · BrainMap taxonomy × Brainnetome (246)",
     "yeo7": "Canonical · Yeo 7",
     "networks14": "Canonical · our 14 networks",
 }
@@ -208,7 +208,9 @@ def overview_figure(atlas, src, state_df, names, results, brains, out: Path, sim
         im = heat_panel(ax, res, header_colors=rm.YEO7_COLORS if fam == "yeo7" else None)
         sim = res["simulated"]
         fig.text(ax.get_position().x0, 1 - 0.78 / H,
-                 TITLES[fam] + ("\nSIMULATED table" if sim else ""), ha="left", va="top",
+                 TITLES[fam] + ("\nSIMULATED table" if sim else
+                                ("\nNeurosynth data" if "Neurosynth" in res.get("source", "") else "")),
+                 ha="left", va="top",
                  fontsize=9.5, fontweight="bold", color=SIMULATED_INK if sim else INK)
 
     P = brains.parc.n
@@ -326,7 +328,8 @@ def load_results(atlas_dir: Path, families) -> tuple[pd.DataFrame, dict, dict]:
         names = list(dict.fromkeys(c["map"]))
         piv = {k: c.pivot(index="state", columns="map", values=v).loc[states, names].to_numpy(float)
                for k, v in (("r", "r"), ("p", "p_null"), ("q", "q_fdr"))}
-        results[fam] = dict(piv, names=names, simulated=bool(c["map_simulated"].iloc[0]))
+        results[fam] = dict(piv, names=names, simulated=bool(c["map_simulated"].iloc[0]),
+                            source=prov.get("families", {}).get(fam, {}).get("source", ""))
     return sm, results, prov
 
 

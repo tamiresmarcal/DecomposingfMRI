@@ -152,3 +152,19 @@ OSF dá para trocar por `fetch_annotation` e usar o `neuromaps.nulls`.
 - **Estados de DFC** (janelas de conectividade) não são mapas de ativação. Para entrarem aqui, é preciso derivar um mapa por parcela, por exemplo a força nodal.
 - **`networks_nodes`**: as esferas de 5 mm amostram pouco tecido. Nos mapas PET de baixa resolução (3 mm), uma esfera tem poucos voxels independentes.
 - **`harvardoxford` reconstruído vs. nilearn**: o `symmetric_split` do nilearn e a versão lateralizada do FSL (HOCPAL) podem diferir em alguns voxels na linha média. Com os estados reais, use o atlas do cluster.
+
+## Perfis comportamentais a partir do Neurosynth (padrão)
+
+`BEHAVIOURAL = "neurosynth"` (o padrão) mantém a **taxonomia do BrainMap** e
+as **246 regiões do Brainnetome**, mas calcula os perfis a partir do Neurosynth
+v7 (14.371 estudos), sem simulação. O cálculo:
+
+1. Cada categoria do BrainMap recebe os termos do vocabulário do Neurosynth que a representam (`refmaps.NEUROSYNTH_TERMS`). Por exemplo, `Perception.Vision.Motion` usa "visual motion" e "motion". Um estudo pertence à categoria se algum desses termos passa do limiar usual de tf-idf do Neurosynth (0,001).
+2. Um estudo "ativa" uma sub-região se algum pico dele cai dentro dela ou a até 6 mm. Os picos em Talairach vão para MNI pela transformação de Lancaster 2007.
+3. Para cada região e categoria, calcula-se a **inferência direta**, a mesma pergunta que Fan et al. 2016 fizeram ao BrainMap: os estudos da categoria ativam a região mais que os estudos em geral? O escore é z = (k − n·p0) / √(n·p0·(1−p0)), a aproximação normal do teste binomial.
+
+Categorias sem termo no vocabulário ficam de fora: Air Hunger, Bladder, Thermoregulation e Thirst. O resultado é salvo em `state_maps_data/neurosynth/brainnetome_neurosynth.csv`, junto com o número de estudos por categoria (`..._n_studies.csv`).
+
+Conferência: as regiões no topo saem como esperado. V5/MT+ em Vision·Motion, A41/42 em Audition, a amígdala em Fear, o hipocampo em Explicit memory, SMA/M1 em Execution e a ínsula dorsal/SII em Pain.
+
+Os exemplos em `state_maps_results/simulated/` foram gerados antes, com a tabela simulada. Rode o notebook de novo para vê-los com os perfis do Neurosynth.
