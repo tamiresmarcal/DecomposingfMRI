@@ -140,6 +140,11 @@ def _tf(data: Path, name: str) -> Path:
 
 def reference_grid(data: Path):
     """MNI152NLin6Asym 2 mm, the grid every map is parcellated on."""
+    if not (Path(data) / "templateflow").is_dir():
+        raise SystemExit(
+            f"no reference maps in {data}.\n"
+            f"  They are not in git (~285 MB). Fetch them once, on a node with internet:\n"
+            f"    {Path(__file__).parent / 'fetch_reference_maps.sh'} {data}")
     return nib.load(str(_tf(data, "tpl-MNI152NLin6Asym_res-02_atlas-HOCPAL_desc-th25_dseg.nii.gz")))
 
 
