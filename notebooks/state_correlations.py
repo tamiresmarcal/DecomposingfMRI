@@ -269,6 +269,7 @@ def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
 
     sums: dict = {}
     features = None
+    skipped: list = []
     for cohort, parts in by_cohort.items():
         lab = pd.concat(parts, ignore_index=True)
         lab["task"], lab["sub"] = lab["task"].astype(str), lab["sub"].astype(str)
@@ -282,9 +283,8 @@ def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
         feats = frames.feature_columns(shards[0])
         if features is None:
             features = feats
-        ident, X, _ = frames.read_cohort(
-            root, atlas, cohort, feats, band=band, zscore=zscore, log=lambda *_: None,
-            censor={"policy": "latents", "subjects": kept, "windows": None})
+        ident, X, dropped = _read_frames(root, atlas, cohort, feats, band, zscore, kept)
+        skipped += dropped
         ident = ident.reset_index(drop=True)
         ident["task"], ident["sub"] = ident["task"].astype(str), ident["sub"].astype(str)
         for (task, sub), fi in ident.groupby(["task", "sub"], sort=False).groups.items():
@@ -334,10 +334,51 @@ def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
     grp.index.name = "state"
     grp.attrs["measure"] = "mean activation" + ("" if per_tr else
                                                 f" over each state's {window_s} s windows")
+    if skipped:
+        print(f"[{atlas}] {state_col}: {len(skipped)} subject(s) left out -- their activation "
+              f"frames cannot be assembled into one time series:")
+        for who, why in skipped:
+            print(f"    {who}: {why.splitlines()[0][:160]}")
     print(f"[{atlas}] {state_col}: {len(grp)} states, activation from "
           f"{subj.index.get_level_values(0).nunique()} subjects "
           f"({'frames' if per_tr else f'frames under {int(n_rows.sum())} windows'})")
     return grp, subj
+
+
+def _read_frames(root, atlas, cohort, feats, band, zscore, kept):
+    """frames.read_cohort over the latents' subjects, without letting one bad
+    subject sink the cohort.
+
+    The frame reader refuses a subject whose acquisitions overlap in stimulus
+    time (two runs on one span: no single order for the frames). The dfc stage
+    can still have windowed such a subject, so it can be in the latents. One
+    pass over everyone first; only if that fails, subject by subject, keeping
+    who was refused and why. -> (ident, X, [(cohort:sub, reason), ...])
+    """
+    from fmri_decomposition import frames
+
+    def read(subjects):
+        return frames.read_cohort(root, atlas, cohort, feats, band=band, zscore=zscore,
+                                  log=lambda *_: None,
+                                  censor={"policy": "latents", "subjects": subjects,
+                                          "windows": None})[:2]
+    try:
+        ident, X = read(kept)
+        return ident, X, []
+    except SystemExit:
+        pass
+    idents, blocks, dropped = [], [], []
+    for subject in sorted(kept):
+        try:
+            i, x = read({subject})
+        except SystemExit as e:
+            dropped.append((f"{cohort}:{subject[1]} ({subject[0]})", str(e)))
+            continue
+        idents.append(i)
+        blocks.append(x)
+    if not idents:
+        raise SystemExit(f"no subject of cohort={cohort} could be read from outputs/activation/")
+    return pd.concat(idents, ignore_index=True), np.vstack(blocks), dropped
 
 
 def default_output_root() -> Path:
