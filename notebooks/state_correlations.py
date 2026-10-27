@@ -166,6 +166,11 @@ def load_states(states: str, atlas: str, parc, components, seed: int,
     root = Path(output_root) if output_root else default_output_root()
     if window_s is None:
         window_s = find_window(root, atlas, states)
+    if cohorts == "train":                 # the cohorts decompose fitted on, from the model
+        from fmri_decomposition.state_means import load_models
+
+        cohorts = list(load_models(root, atlas, window_s)["train_cohorts"])
+        print(f"[{atlas}] COHORTS='train' -> {cohorts}")
     grp, subj = state_means_any_layout(root, atlas, window_s, states, cohorts)
     what = f"{states} at atlas={atlas} window_s={window_s}"
     return checked(grp, parc, what), subject_maps(subj, parc, what)
@@ -346,39 +351,64 @@ def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
 
 
 def _read_frames(root, atlas, cohort, feats, band, zscore, kept):
-    """frames.read_cohort over the latents' subjects, without letting one bad
-    subject sink the cohort.
+    """Per-TR activation frames for the latents' subjects -> (ident, X, dropped).
 
-    The frame reader refuses a subject whose acquisitions overlap in stimulus
-    time (two runs on one span: no single order for the frames). The dfc stage
-    can still have windowed such a subject, so it can be in the latents. One
-    pass over everyone first; only if that fails, subject by subject, keeping
-    who was refused and why. -> (ident, X, [(cohort:sub, reason), ...])
+    Two things make this cheap across many state sets and robust to bad data:
+
+    * a cache: one cohort's frames do not depend on the state set, so they are
+      read once per (atlas, cohort, band, z-score) into
+      state_maps_data/cache/ and every later state set only filters them;
+    * one refused subject does not sink the cohort. frames.read_cohort refuses
+      a subject whose acquisitions overlap in stimulus time (two runs on one
+      span) -- which the dfc stage may still have windowed, so it can be in the
+      latents. The refused subject is named in the error; it is dropped and the
+      cohort re-read in ONE pass, not subject by subject.
     """
+    import re
+
     from fmri_decomposition import frames
 
-    def read(subjects):
-        return frames.read_cohort(root, atlas, cohort, feats, band=band, zscore=zscore,
-                                  log=lambda *_: None,
-                                  censor={"policy": "latents", "subjects": subjects,
-                                          "windows": None})[:2]
-    try:
-        ident, X = read(kept)
-        return ident, X, []
-    except SystemExit:
-        pass
-    idents, blocks, dropped = [], [], []
-    for subject in sorted(kept):
-        try:
-            i, x = read({subject})
-        except SystemExit as e:
-            dropped.append((f"{cohort}:{subject[1]} ({subject[0]})", str(e)))
-            continue
-        idents.append(i)
-        blocks.append(x)
-    if not idents:
-        raise SystemExit(f"no subject of cohort={cohort} could be read from outputs/activation/")
-    return pd.concat(idents, ignore_index=True), np.vstack(blocks), dropped
+    tag = f"{atlas}_{cohort}_band-{'none' if not band else '-'.join(map(str, band))}_z-{int(zscore)}"
+    cache = Path(__file__).resolve().parent / "state_maps_data" / "cache" / f"frames_{tag}.npz"
+    if cache.exists():
+        z = np.load(cache, allow_pickle=True)
+        ident = pd.DataFrame({c: z[f"ident_{c}"] for c in z["ident_cols"]})
+        X, dropped = z["X"], [tuple(d) for d in z["dropped"]]
+    else:
+        everyone = {tuple(x) for x in _all_subjects(frames.shard_paths(root, atlas, cohort))}
+        dropped, subjects = [], set(everyone)
+        while True:
+            try:
+                ident, X = frames.read_cohort(
+                    root, atlas, cohort, feats, band=band, zscore=zscore, log=lambda *_: None,
+                    censor={"policy": "readable", "subjects": subjects, "windows": None})[:2]
+                break
+            except SystemExit as e:
+                msg = str(e)
+                bad = {x for x in subjects
+                       if re.search(rf"sub-{re.escape(x[1])}(?![A-Za-z0-9])", msg)
+                       and re.search(rf"task-{re.escape(x[0])}(?![A-Za-z0-9])", msg)}
+                if not bad:
+                    raise
+                for x in sorted(bad):
+                    dropped.append((f"{cohort}:{x[1]} ({x[0]})", msg.splitlines()[0][:160]))
+                subjects -= bad
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        ident = ident.reset_index(drop=True)
+        np.savez(cache, X=X, ident_cols=np.array(list(ident.columns)),
+                 dropped=np.array(dropped, dtype=object).reshape(-1, 2),
+                 **{f"ident_{c}": ident[c].to_numpy() for c in ident.columns})
+    keep = np.array([(str(t), str(s_)) in kept for t, s_ in zip(ident["task"], ident["sub"])])
+    dropped = [d for d in dropped if any(f":{k[1]} ({k[0]})" in d[0] for k in kept)]
+    return ident[keep].reset_index(drop=True), X[keep], dropped
+
+
+def _all_subjects(paths) -> set:
+    out = set()
+    for p in paths:
+        kv = dict(x.split("=", 1) for x in p.parts if "=" in x)
+        out.add((kv["task"], kv["sub"]))
+    return out
 
 
 def default_output_root() -> Path:
