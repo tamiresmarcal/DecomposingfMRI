@@ -437,6 +437,7 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
             order = order[np.argsort(-m[order])]
             y = np.arange(len(order))[::-1]
             colors = ([rm.YEO7_COLORS[j] for j in order] if fam == "yeo7" else
+                      ["#8a8984"] * len(order) if pos else      # one sign: colour adds nothing
                       [DIVERGING[5] if v >= 0 else DIVERGING[1] for v in m[order]])
             ax = fig.add_subplot(gs[i, c])
             ax.barh(y, m[order], xerr=None if sd is None else sd[order], color=colors,
