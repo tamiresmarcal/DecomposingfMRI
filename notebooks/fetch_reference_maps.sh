@@ -30,6 +30,7 @@ TF=https://templateflow.s3.amazonaws.com
 HR=https://raw.githubusercontent.com/netneurolab/hansen_receptors/main/data/PET_nifti_images
 DPABI=https://raw.githubusercontent.com/Chaogan-Yan/DPABI/master/Templates
 NEUROPARC=https://raw.githubusercontent.com/neurodata/neuroparc/master/atlases/label/Human
+NEUROSYNTH=https://raw.githubusercontent.com/neurosynth/neurosynth-data/master
 
 PET=(
   5HT1a_way_hc36_savli.nii
@@ -71,7 +72,12 @@ get() {  # url dest -- skip what is already there, never leave a partial file
   curl -sSf --retry 3 -o "$2.part" "$1" && mv "$2.part" "$2"
 }
 
-mkdir -p "$DATA/pet" "$DATA/templateflow" "$DATA/brainnetome" "$DATA/yeo"
+mkdir -p "$DATA/pet" "$DATA/templateflow" "$DATA/brainnetome" "$DATA/yeo" "$DATA/neurosynth"
+# Neurosynth v7 (14,371 studies): the behavioural profiles are computed from it
+for f in coordinates.tsv.gz metadata.tsv.gz vocab-terms_source-abstract_type-tfidf_features.npz \
+         vocab-terms_vocabulary.txt; do
+  get "$NEUROSYNTH/data-neurosynth_version-7_$f" "$DATA/neurosynth/data-neurosynth_version-7_$f" &
+done
 for f in "${PET[@]}"; do get "$HR/$f" "$DATA/pet/$f" & done
 for f in BrainnetomeAtlas_BNA_MPM_thr25_1.25mm.nii.gz BrainnetomeAtlas_BNA_subregions.xlsx; do
   get "$DPABI/$f" "$DATA/brainnetome/$f" &

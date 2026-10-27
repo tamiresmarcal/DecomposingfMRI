@@ -34,13 +34,13 @@ SIMULATED_INK = "#b4560f"
 
 TITLES = {
     "molecular": "Molecular · PET receptors (neuromaps)",
-    "behavioural_domain": "Behavioural · BrainMap domains",
-    "behavioural": "Behavioural · BrainMap subcategories × Brainnetome (246)",
+    "behavioural_domain": "Behavioural · {tax} domains",
+    "behavioural": "Behavioural · {tax} subcategories × Brainnetome (246)",
     "yeo7": "Canonical · Yeo 7",
     "networks14": "Canonical · our 14 networks",
 }
-CARD_TITLES = {"molecular": "Molecular (PET)", "behavioural_domain": "BrainMap domains",
-               "behavioural": "BrainMap subcategories", "yeo7": "Yeo 7 networks",
+CARD_TITLES = {"molecular": "Molecular (PET)", "behavioural_domain": "{tax} domains",
+               "behavioural": "{tax} subcategories", "yeo7": "Yeo 7 networks",
                "networks14": "Our 14 networks"}
 CARD_TOP = {"molecular": 8, "behavioural_domain": 5, "behavioural": 10, "yeo7": 7,
             "networks14": 14}
@@ -49,6 +49,10 @@ CELL_W = {"molecular": 0.25, "behavioural_domain": 0.3, "behavioural": 0.2, "yeo
 NULL_LABEL = {"moran": "Moran spectral null", "burt": "variogram null (brainsmash)"}
 
 SLICES = [("z", 2), ("y", -10)]          # basal ganglia + thalamus; amygdala/hippocampus
+
+
+def taxonomy_label(res: dict) -> str:
+    return "Beam 2021" if "Beam" in res.get("source", "") else "BrainMap"
 
 
 def diverging_cmap():
@@ -168,7 +172,7 @@ def heat_panel(ax, res, header_colors=None):
 
 
 def overview_figure(atlas, src, state_df, names, results, brains, out: Path, simulated_states,
-                    null="moran"):
+                    null="moran", measure="mean activation"):
     import matplotlib.pyplot as plt
     from matplotlib.cm import ScalarMappable
     from matplotlib.colors import Normalize
@@ -208,7 +212,9 @@ def overview_figure(atlas, src, state_df, names, results, brains, out: Path, sim
         im = heat_panel(ax, res, header_colors=rm.YEO7_COLORS if fam == "yeo7" else None)
         sim = res["simulated"]
         fig.text(ax.get_position().x0, 1 - 0.78 / H,
-                 TITLES[fam] + ("\nSIMULATED table" if sim else ""), ha="left", va="top",
+                 TITLES[fam].format(tax=taxonomy_label(res)) + ("\nSIMULATED table" if sim else
+                                ("\nNeurosynth data" if "Neurosynth" in res.get("source", "") else "")),
+                 ha="left", va="top",
                  fontsize=9.5, fontweight="bold", color=SIMULATED_INK if sim else INK)
 
     P = brains.parc.n
@@ -222,7 +228,7 @@ def overview_figure(atlas, src, state_df, names, results, brains, out: Path, sim
     bax = fig.add_axes([0.08, 0.42 / H, 0.12, 0.10 / H])
     cb2 = fig.colorbar(ScalarMappable(Normalize(-2.5, 2.5), diverging_cmap()), cax=bax,
                        orientation="horizontal", ticks=[-2, 0, 2])
-    cb2.set_label("state mean activation (z across parcels)", fontsize=7, color=INK2)
+    cb2.set_label(f"state {measure} (z across parcels)", fontsize=7, color=INK2)
     for c in (cb, cb2):
         c.ax.tick_params(labelsize=7, length=2, colors=INK2)
         c.outline.set_visible(False)
@@ -244,7 +250,8 @@ def overview_figure(atlas, src, state_df, names, results, brains, out: Path, sim
     plt.close(fig)
 
 
-def state_card(i, state_df, names, results, brains, out: Path, null="moran"):
+def state_card(i, state_df, names, results, brains, out: Path, null="moran",
+               measure="mean activation"):
     """One state at reading size: brain + ranked bars per family."""
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
@@ -294,13 +301,14 @@ def state_card(i, state_df, names, results, brains, out: Path, null="moran"):
         ax.set_xlabel("r (parcels)", fontsize=7.5, color=INK2)
         sim = res["simulated"]
         sub = "" if top >= len(nm) else f"\ntop {top} by |r|"
-        ax.set_title(CARD_TITLES[fam] + ("  SIMULATED" if sim else "") + sub,
+        ax.set_title(CARD_TITLES[fam].format(tax=taxonomy_label(res))
+                     + ("  SIMULATED" if sim else "") + sub,
                      fontsize=9, color=SIMULATED_INK if sim else INK, loc="left")
     P = brains.parc.n
     has_p = any(np.isfinite(r["p"]).any() for r in results.values())
     fig.text(0.008, 0.975, f"S{i + 1} · {names[i]}   ({brains.parc.spec.name}, {P} parcels)",
              fontsize=14, fontweight="bold", color=INK, va="top")
-    fig.text(0.008, 0.91, f"{state_df['share'].iloc[i]:.0%} of frames · mean activation, z "
+    fig.text(0.008, 0.91, f"{state_df['share'].iloc[i]:.0%} of frames · {measure}, z "
              f"across parcels · " + (f"{NULL_LABEL[null]}: • p<.05 uncorrected, ✱ q<.05, ★ q<.01 "
                                      "(BH within family)" if has_p else
                                      f"no p-values ({P} parcels)"),
@@ -325,7 +333,8 @@ def load_results(atlas_dir: Path, families) -> tuple[pd.DataFrame, dict, dict]:
         names = list(dict.fromkeys(c["map"]))
         piv = {k: c.pivot(index="state", columns="map", values=v).loc[states, names].to_numpy(float)
                for k, v in (("r", "r"), ("p", "p_null"), ("q", "q_fdr"))}
-        results[fam] = dict(piv, names=names, simulated=bool(c["map_simulated"].iloc[0]))
+        results[fam] = dict(piv, names=names, simulated=bool(c["map_simulated"].iloc[0]),
+                            source=prov.get("families", {}).get(fam, {}).get("source", ""))
     return sm, results, prov
 
 
@@ -356,12 +365,14 @@ def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
         null = prov.get("null_method", "moran")
         out = d / "state_maps_overview.png"
         overview_figure(atlas, prov["atlas_source"], sm, names, results, brains, out,
-                        simulated_states=prov["states"] == "simulate", null=null)
+                        simulated_states=prov["states"] == "simulate", null=null,
+                        measure=prov.get("state_measure", "mean activation"))
         paths.append(out)
         if cards:
             for i in range(len(sm)):
                 p = d / f"state_card_S{i + 1}.png"
-                state_card(i, sm, names, results, brains, p, null=null)
+                state_card(i, sm, names, results, brains, p, null=null,
+                           measure=prov.get("state_measure", "mean activation"))
                 paths.append(p)
         print(f"[{atlas}] figures -> {d}")
     return paths

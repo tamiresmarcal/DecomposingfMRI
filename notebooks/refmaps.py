@@ -440,6 +440,183 @@ def simulate_behavioural_table(bn: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
     return out
 
 
+# BrainMap category -> the Neurosynth (v7, abstract tf-idf) terms that stand
+# for it. A study belongs to a category if any of its terms passes Neurosynth's
+# usual 0.001 threshold. Categories with no term in the vocabulary (air hunger,
+# bladder, thermoregulation, thirst) are left out rather than forced.
+NEUROSYNTH_TERMS = {
+    "Action.Execution.Speech": ["speech production", "articulatory"],
+    "Action.Execution.Other": ["motor", "movement", "movements", "finger tapping"],
+    "Action.Imagination": ["motor imagery", "imagined"],
+    "Action.Inhibition": ["response inhibition", "inhibitory control", "stop signal", "nogo"],
+    "Action.Motor Learning": ["skill"],
+    "Action.Observation": ["action observation"],
+    "Action.Preparation": ["preparation", "preparatory"],
+    "Action.Rest": ["resting state", "rest"],
+    "Cognition.Attention": ["attention", "attentional", "selective attention"],
+    "Cognition.Language.Orthography": ["orthographic", "letters", "reading"],
+    "Cognition.Language.Phonology": ["phonological"],
+    "Cognition.Language.Semantics": ["semantic", "semantics"],
+    "Cognition.Language.Speech": ["speech perception"],
+    "Cognition.Language.Syntax": ["syntactic", "sentence comprehension"],
+    "Cognition.Memory.Explicit": ["episodic memory", "memory retrieval", "memory encoding",
+                                  "recognition memory"],
+    "Cognition.Memory.Working": ["working memory"],
+    "Cognition.Music": ["music", "musical"],
+    "Cognition.Reasoning": ["reasoning", "inference"],
+    "Cognition.Social Cognition": ["social cognition", "mentalizing", "theory mind"],
+    "Cognition.Soma": ["body"],
+    "Cognition.Space": ["spatial", "navigation"],
+    "Cognition.Time": ["timing", "duration"],
+    "Emotion.Anger": ["anger"],
+    "Emotion.Anxiety": ["anxiety"],
+    "Emotion.Disgust": ["disgust"],
+    "Emotion.Fear": ["fear", "fearful"],
+    "Emotion.Happiness": ["happy"],
+    "Emotion.Sadness": ["sad"],
+    "Interoception.Baroregulation": ["heart rate"],
+    "Interoception.Hunger": ["food", "eating"],
+    "Interoception.Sexuality": ["sexual"],
+    "Interoception.Sleep": ["sleep"],
+    "Perception.Audition": ["auditory", "sounds"],
+    "Perception.Gustation": ["taste"],
+    "Perception.Olfaction": ["olfactory"],
+    "Perception.Somesthesis.Pain": ["pain", "painful", "nociceptive"],
+    "Perception.Somesthesis.Other": ["somatosensory", "tactile", "touch"],
+    "Perception.Vision.Color": ["color"],
+    "Perception.Vision.Motion": ["visual motion", "motion"],
+    "Perception.Vision.Shape": ["shape", "shapes", "object recognition"],
+    "Perception.Vision.Other": ["visual", "primary visual"],
+}
+
+# Beam, Potts, Poldrack & Etkin 2021 (Nat Neurosci 24:1733), data-driven
+# ontology, 6 domains: each domain's term list as published with the paper
+# (ehbeam/neuro-knowledge-engine, ontology/lists/lists_data-driven_lr.csv).
+# Each term is its own Neurosynth category, so the taxonomy has two depths
+# like BrainMap's -- domain, and the terms under it. Terms absent from the
+# Neurosynth vocabulary (mostly multi-word phrases) drop out at run time.
+BEAM2021_TERMS = {
+    "Memory": ["memory", "episodic memory", "declarative memory", "recognition memory",
+               "remembering", "emotion", "fear", "recognition", "emotional memory", "encoding",
+               "retrieval", "valence", "facial expression", "picture", "recall",
+               "autobiographical memory", "face", "memory process", "source memory",
+               "encoding task", "arousal", "episodic simulation"],
+    "Reward": ["reward", "reward processing", "reward anticipation", "anticipation",
+               "monetary incentive delay task", "reward learning"],
+    "Cognition": ["monitoring", "cognitive control", "arousal", "cognitive process",
+                  "reaction time", "retrieval", "decision making", "strategy", "error detection",
+                  "context", "valence", "cognitive", "manipulation", "working memory",
+                  "response selection", "goal", "word", "judgment", "anticipation", "memory",
+                  "remembering", "decision", "autobiographical memory", "salience", "emotion"],
+    "Vision": ["recognition", "face perception", "familiarity", "vision", "object recognition",
+               "retrieval", "visual perception", "memory", "remembering", "word",
+               "visual attention", "picture", "visual object", "visual angle",
+               "recognition memory", "reading", "semantic processing", "encoding",
+               "visual imagery", "naming"],
+    "Manipulation": ["execution", "hand", "movement", "working memory", "manipulation",
+                     "rehearsal", "attention", "spatial attention", "action", "covert",
+                     "motor control", "strategy", "reaction time", "grasping"],
+    "Language": ["speech", "hearing", "listening", "speech perception", "speech processing",
+                 "tone", "language", "music", "passive listening", "syllable", "melody",
+                 "speech production", "auditory perception", "language processing", "prosody",
+                 "intonation", "audition", "pitch discrimination", "language comprehension",
+                 "articulation", "phonetics", "word", "semantic processing", "syntax",
+                 "voice perception"],
+}
+TAXONOMIES = {
+    "brainmap": ("BrainMap (Fox et al. 2005)", NEUROSYNTH_TERMS),
+    "beam2021": ("Beam et al. 2021",
+                 {f"{d}.{t}": [t] for d, terms in BEAM2021_TERMS.items() for t in terms}),
+}
+
+
+# Lancaster et al. 2007, icbm_spm2tal; its inverse takes Talairach peaks to MNI.
+_ICBM_SPM2TAL = np.array([[0.9254, 0.0024, -0.0118, -1.0207],
+                          [-0.0048, 0.9316, -0.0871, -1.7667],
+                          [0.0152, 0.0883, 0.8924, 4.0926],
+                          [0.0, 0.0, 0.0, 1.0]])
+
+
+def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
+                                 radius_mm: float = 6.0,
+                                 threshold: float = 0.001) -> pd.DataFrame:
+    """Brainnetome x BrainMap categories, from Neurosynth instead of BrainMap.
+
+    Same question Fan et al. 2016 asked of BrainMap (forward inference): do
+    the studies of a category report activation in this subregion more often
+    than studies in general? A study "activates" a subregion when one of its
+    peaks lies inside it or within `radius_mm` of it. For category c with n
+    studies, k of which activate region r, against the base rate p0 of all
+    studies activating r: z = (k - n p0) / sqrt(n p0 (1 - p0)), the normal
+    approximation of the binomial test BrainMap's behavioural analysis uses.
+
+    `taxonomy` picks the categories: "brainmap" (BrainMap's, as Brainnetome
+    reports them) or "beam2021" (Beam et al. 2021's data-driven domains).
+    Cached as neurosynth/brainnetome_neurosynth_<taxonomy>.csv; delete to recompute.
+    """
+    import scipy.sparse as sp
+    from scipy.ndimage import distance_transform_edt
+
+    nsd = Path(data) / "neurosynth"
+    if taxonomy not in TAXONOMIES:
+        raise SystemExit(f"taxonomy must be one of {sorted(TAXONOMIES)}, got {taxonomy!r}")
+    label, categories = TAXONOMIES[taxonomy]
+    cache = nsd / f"brainnetome_neurosynth_{taxonomy}.csv"
+    if cache.exists():
+        out = pd.read_csv(cache)
+        out.attrs["source"] = f"Neurosynth v7 forward inference (z), {label} taxonomy"
+        return out
+    pre = nsd / "data-neurosynth_version-7_"
+    if not (nsd / "data-neurosynth_version-7_coordinates.tsv.gz").exists():
+        raise SystemExit(f"no Neurosynth data in {nsd}: run fetch_reference_maps.sh")
+    coords = pd.read_table(f"{pre}coordinates.tsv.gz")
+    meta = pd.read_table(f"{pre}metadata.tsv.gz")
+    feats = sp.load_npz(f"{pre}vocab-terms_source-abstract_type-tfidf_features.npz").tocsc()
+    vocab = open(f"{pre}vocab-terms_vocabulary.txt").read().strip().split("\n")
+
+    # Peaks to MNI, then to the nearest Brainnetome label within radius_mm.
+    space = coords["id"].map(meta.set_index("id")["space"])
+    xyz = coords[["x", "y", "z"]].to_numpy(float)
+    tal = (space == "TAL").to_numpy()
+    xyz[tal] = nib.affines.apply_affine(np.linalg.inv(_ICBM_SPM2TAL), xyz[tal])
+    lab = brainnetome_labels(data, ref).reshape(ref.shape[:3])
+    dist, idx = distance_transform_edt(lab == 0, return_indices=True,
+                                       sampling=np.abs(np.diag(ref.affine)[:3]))
+    near = np.where(dist <= radius_mm, lab[tuple(idx)], 0)
+    ijk = np.rint(nib.affines.apply_affine(np.linalg.inv(ref.affine), xyz)).astype(int)
+    inside = np.all((ijk >= 0) & (ijk < np.array(ref.shape[:3])), axis=1)
+    peak_lab = np.zeros(len(xyz), dtype=int)
+    peak_lab[inside] = near[ijk[inside, 0], ijk[inside, 1], ijk[inside, 2]]
+
+    study = {sid: i for i, sid in enumerate(meta["id"])}
+    rows = coords["id"].map(study).to_numpy()
+    ok = peak_lab > 0
+    A = sp.csr_matrix((np.ones(ok.sum()), (rows[ok], peak_lab[ok] - 1)),
+                      shape=(len(meta), 246))
+    A.data[:] = 1.0                                     # study x region, 0/1
+    act = (A > 0).astype(float)
+    p0 = np.asarray(act.mean(0)).ravel()                # base rate per region
+
+    out = pd.DataFrame({"bn_index": np.arange(1, 247)})
+    n_studies = {}
+    for cat, terms in categories.items():
+        cols = [vocab.index(t) for t in terms if t in vocab]
+        if not cols:
+            continue
+        member = np.asarray((feats[:, cols] > threshold).sum(1)).ravel() > 0
+        n = int(member.sum())
+        k = np.asarray(act[member].sum(0)).ravel()
+        with np.errstate(invalid="ignore", divide="ignore"):
+            z = (k - n * p0) / np.sqrt(n * p0 * (1 - p0))
+        out[cat] = np.nan_to_num(z)
+        n_studies[cat] = n
+    out.to_csv(cache, index=False)
+    pd.Series(n_studies, name="n_studies").to_csv(
+        nsd / f"brainnetome_neurosynth_{taxonomy}_n_studies.csv")
+    out.attrs["source"] = f"Neurosynth v7 forward inference (z), {label} taxonomy"
+    return out
+
+
 def load_behavioural_table(path: Path) -> pd.DataFrame:
     """The real profiles: CSV keyed by `bn_index` (1..246, BNA numbering),
     one column per BrainMap category named by its dotted path
@@ -463,7 +640,8 @@ def behavioural_maps(data: Path, ref, table: pd.DataFrame | None = None,
     lab = brainnetome_labels(data, ref)
     vox = lut[lab].T                                    # (n_cats, V); label 0 -> NaN
     src = ("SIMULATED stand-in on the real Brainnetome atlas (246 incl. subcortex)"
-           if simulated else "BrainMap behavioural domains on Brainnetome (Fan et al. 2016)")
+           if simulated else table.attrs.get(
+               "source", "BrainMap behavioural domains on Brainnetome (Fan et al. 2016)"))
     return ReferenceMaps("behavioural", cats, vox, simulated=simulated, source=src)
 
 

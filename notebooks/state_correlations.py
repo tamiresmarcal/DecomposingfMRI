@@ -102,14 +102,47 @@ def simulate_state_means(parc: rm.Parcellator, components: dict, seed: int,
     return out
 
 
+def node_strength(t: pd.DataFrame, parc: rm.Parcellator) -> pd.DataFrame | None:
+    """DFC states -> one value per parcel: its nodal strength.
+
+    A state fitted on windowed connectivity has, as its mean, an edge vector
+    (`A__B` columns, the atlas's upper triangle), not an activation map. The
+    map that can be set beside receptor densities or networks is each parcel's
+    mean connectivity with every other parcel in that state. Returns None when
+    the table is not edges.
+    """
+    edges = parc.spec.edge_names()
+    if not set(edges) <= set(t.columns):
+        return None
+    P = parc.n
+    iu, ju = np.triu_indices(P, k=1)
+    E = t[edges].to_numpy(float)
+    M = np.zeros((len(t), P, P))
+    M[:, iu, ju] = E
+    M[:, ju, iu] = E
+    out = pd.DataFrame(M.sum(2) / (P - 1), index=t.index, columns=parc.columns)
+    for c in ("n_rows", "share", "name"):
+        if c in t:
+            out.insert(len([x for x in ("n_rows", "share", "name") if x in out]), c, t[c])
+    out.attrs["measure"] = "node strength (mean connectivity with every other parcel)"
+    return out
+
+
 def checked(t: pd.DataFrame, parc: rm.Parcellator, what: str) -> pd.DataFrame:
     """Keep the atlas's columns. One the atlas has and the table lacks means
-    the states came from another atlas: hard error, not a silent subset."""
+    the states came from another atlas: hard error, not a silent subset.
+    Edge tables (DFC states) are first reduced to node strength."""
+    strength = node_strength(t, parc)
+    if strength is not None:
+        print(f"[{parc.spec.name}] {what}: connectivity states -> node strength per parcel")
+        t = strength
     missing = [c for c in parc.columns if c not in t.columns]
     if missing:
         raise SystemExit(f"{what}: {len(missing)} of {parc.n} `{parc.spec.name}` columns "
                          f"missing, e.g. {missing[:3]} -- states from another atlas?")
+    measure = t.attrs.get("measure", "mean activation")
     t = t.copy()
+    t.attrs["measure"] = measure
     if "name" not in t:
         t.insert(0, "name", [f"state {s}" for s in t.index])
     return t[["n_rows", "share", "name"] + parc.columns]
@@ -121,14 +154,92 @@ def load_states(states: str, atlas: str, parc, components, seed: int,
         return simulate_state_means(parc, components, seed)
     if Path(states).suffix == ".csv":
         return checked(pd.read_csv(states, index_col="state"), parc, states)
-    from fmri_decomposition.state_means import means_in_feature_units
-
-    if window_s is None:
-        raise SystemExit(f"STATES={states!r} is a state column: set WINDOW_S (--window-s), "
-                         f"the aperture it was fitted on -- -1 for the per-TR activation states")
     root = Path(output_root) if output_root else default_output_root()
-    t = means_in_feature_units(root, atlas, window_s, states, cohorts)
+    if window_s is None:
+        window_s = find_window(root, atlas, states)
+    t = state_means_any_layout(root, atlas, window_s, states, cohorts)
     return checked(t, parc, f"{states} at atlas={atlas} window_s={window_s}")
+
+
+def _has_column(path: Path, col: str) -> bool:
+    import pyarrow.parquet as pq
+
+    return col in pq.ParquetFile(path).schema_arrow.names
+
+
+def latent_files(root: Path, atlas: str, window_s, cohorts=None) -> list:
+    """Every latents file of one (atlas, aperture) cell, in either layout:
+    `cohort=<c>/data.parquet` or `cohort=<c>/task=<t>/data.parquet`."""
+    from fmri_decomposition.io import latents_root
+
+    cell = latents_root(root, atlas, window_s)
+    out = []
+    for p in sorted(cell.rglob("data.parquet")):
+        cohort = next((x.split("=", 1)[1] for x in p.parts if x.startswith("cohort=")), None)
+        if cohorts is None or cohort in cohorts:
+            out.append(p)
+    return out
+
+
+def find_window(root: Path, atlas: str, state_col: str):
+    """The aperture whose latents carry `state_col`, when WINDOW_S is not given."""
+    from fmri_decomposition.io import latents_root
+
+    found = []
+    for wdir in sorted(latents_root(root, atlas).glob("window_s=*")):
+        w = wdir.name.split("=", 1)[1]
+        if any(_has_column(p, state_col) for p in latent_files(root, atlas, w)):
+            found.append(w)
+    if len(found) != 1:
+        raise SystemExit(f"{state_col!r} is in {found or 'no'} window_s of atlas={atlas} "
+                         f"under {root / 'latents'}: set WINDOW_S"
+                         + ("" if found else " and check ATLASES / OUTPUT_ROOT"))
+    print(f"[{atlas}] {state_col}: window_s={found[0]} (found in the latents)")
+    return found[0]
+
+
+def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
+                           cohorts=None) -> pd.DataFrame:
+    """`fmri_decomposition.state_means.means_in_feature_units`, for a cell whose
+    files may be split by task as well as cohort. Same inverse transform --
+    scaler(.inverse) after PCA(.inverse), or the scaler alone for raw<N> --
+    pooled over every file asked for, weighted by its rows."""
+    from fmri_decomposition.io import RAW_PREFIX, read_file
+    from fmri_decomposition.state_means import embedding_of, load_models
+
+    files = [p for p in latent_files(root, atlas, window_s, cohorts) if _has_column(p, state_col)]
+    if not files:
+        raise SystemExit(f"no latents with {state_col!r} at atlas={atlas} window_s={window_s}"
+                         f"{'' if cohorts is None else f' for cohorts {cohorts}'} under {root}")
+    emb, cols = embedding_of(files[0], state_col)
+    is_raw = all(c.startswith(RAW_PREFIX) for c in cols)
+    if not is_raw and not all(c.startswith("pca") for c in cols):
+        raise SystemExit(f"{state_col!r} was fitted on {emb!r} (not invertible): use a pca<N> "
+                         f"or raw<N> state set for maps in parcel units")
+    df = pd.concat([read_file(p, columns=cols + [state_col]).to_pandas() for p in files],
+                   ignore_index=True)
+    g = df.groupby(state_col, sort=True)
+    arr = g[cols].mean().to_numpy(float)
+    counts = g.size()
+    models = load_models(root, atlas, window_s)
+    features = list(models["edges"])
+    if is_raw:
+        names = [c[len(RAW_PREFIX):] for c in cols]
+        idx = [features.index(n) for n in names]
+        full = np.zeros((len(arr), len(features)))
+        full[:, idx] = arr
+        out = pd.DataFrame(models["scaler"].inverse_transform(full)[:, idx],
+                           index=counts.index, columns=names)
+    else:
+        n = int(cols[0].partition("/")[2])
+        back = models["scaler"].inverse_transform(models["pca"][n].inverse_transform(arr))
+        out = pd.DataFrame(back, index=counts.index, columns=features)
+    out.insert(0, "n_rows", counts.to_numpy())
+    out.insert(1, "share", counts.to_numpy() / counts.sum())
+    out.index.name = "state"
+    print(f"[{atlas}] {state_col}: {len(out)} states from {len(files)} file(s), "
+          f"{int(counts.sum())} rows")
+    return out
 
 
 def default_output_root() -> Path:
@@ -144,14 +255,20 @@ def default_output_root() -> Path:
 
 
 # ------------------------------------------------------------- reference ---
-def reference_families(data: Path, ref, families, behavioural_csv=None, seed: int = 7) -> dict:
+def reference_families(data: Path, ref, families, behavioural_csv=None, seed: int = 7,
+                       taxonomy: str = "brainmap") -> dict:
     """Voxel-level reference maps for the families asked for, built once and
     shared across atlases (the PET resampling is the slow part)."""
     out = {}
     if "molecular" in families:
         out["molecular"] = rm.receptor_maps(data, ref)
     if {"behavioural", "behavioural_domain"} & set(families):
-        table = rm.load_behavioural_table(behavioural_csv) if behavioural_csv else None
+        if behavioural_csv == "neurosynth":
+            table = rm.neurosynth_behavioural_table(data, ref, taxonomy)
+        elif behavioural_csv:
+            table = rm.load_behavioural_table(behavioural_csv)
+        else:
+            table = None
         leaves = rm.behavioural_maps(data, ref, table, seed=seed)
         if "behavioural" in families:
             out["behavioural"] = leaves
@@ -166,17 +283,21 @@ def reference_families(data: Path, ref, families, behavioural_csv=None, seed: in
 # ------------------------------------------------------------------- run ---
 def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
             out: Path = HERE / "state_maps_results", data: Path = HERE / "state_maps_data",
-            output_root=None, window_s=None, cohorts=None, behavioural_csv=None,
+            output_root=None, window_s=None, cohorts=None, behavioural_csv="neurosynth",
             n_nulls: int = 10000, null: str = "moran", seed: int = 7,
+            taxonomy: str = "brainmap",
             verbose: bool = True) -> dict:
     """Write the tables for every atlas; return {atlas: its directory}."""
     families = [f for f in FAMILIES if f in families]
     ref = rm.reference_grid(data)
-    refs = reference_families(data, ref, families, behavioural_csv, seed)
+    refs = reference_families(data, ref, families, behavioural_csv, seed, taxonomy)
     subcort = rm.subcortical_structures(data, ref)
     label = "simulated" if states == "simulate" else Path(states).stem
     if window_s is not None and states != "simulate" and Path(states).suffix != ".csv":
         label = f"{states}_window-{window_s}"
+    if behavioural_csv == "neurosynth" and taxonomy != "brainmap" and \
+            {"behavioural", "behavioural_domain"} & set(families):
+        label += f"_{taxonomy}"
     dirs = {}
     for atlas in atlases:
         spec, src = rm.state_atlas(atlas, data)
@@ -188,6 +309,7 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
         comps = {n: parcel["yeo7"][k] for k, n in enumerate(rm.YEO7)}
         comps.update({g: parc.parcellate(v) for g, v in subcort.items()})
         sm = load_states(states, atlas, parc, comps, seed, output_root, window_s, cohorts)
+        measure = sm.attrs.get("measure", "mean activation")
         sm.to_csv(d / "state_means.csv")
         X = sm[parc.columns].to_numpy(float)
 
@@ -208,6 +330,7 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
         (d / "provenance.json").write_text(json.dumps({
             "atlas": atlas, "atlas_source": src, "n_parcels": parc.n,
             "states": states, "window_s": window_s, "cohorts": cohorts,
+            "state_measure": measure,
             "simulation_truth": SIM_STATES if states == "simulate" else None,
             "families": {f: {"source": refs[f].source, "maps": refs[f].names,
                              "simulated": refs[f].simulated} for f in families},
@@ -231,7 +354,11 @@ def main(argv=None) -> int:
     p.add_argument("--window-s", help="aperture of the state column; -1 = per-TR")
     p.add_argument("--cohorts", nargs="*", default=None)
     p.add_argument("--output-root", help="the pipeline's outputs/ (for a state column)")
-    p.add_argument("--behavioural", help="real Brainnetome behavioural table (README.md)")
+    p.add_argument("--behavioural", default="neurosynth",
+                   help="`neurosynth` (default): profiles computed from Neurosynth; a CSV: "
+                        "the real BrainMap table (README); `none`: the simulated stand-in")
+    p.add_argument("--taxonomy", choices=sorted(rm.TAXONOMIES), default="brainmap",
+                   help="behavioural categories for the Neurosynth profiles")
     p.add_argument("--n-nulls", type=int, default=10000,
                    help="surrogates per map; the smallest p is 1/(n+1), and BH over 114 "
                         "molecular tests needs it well under .05/114")
@@ -242,7 +369,8 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
     compute(a.states, a.atlases, a.families, out=a.out, data=a.data,
             output_root=a.output_root, window_s=a.window_s, cohorts=a.cohorts,
-            behavioural_csv=a.behavioural, n_nulls=a.n_nulls, null=a.null, seed=a.seed)
+            behavioural_csv=None if a.behavioural == "none" else a.behavioural, n_nulls=a.n_nulls, null=a.null, seed=a.seed,
+            taxonomy=a.taxonomy)
     return 0
 
 
