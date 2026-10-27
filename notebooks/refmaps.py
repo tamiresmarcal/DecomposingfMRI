@@ -472,8 +472,10 @@ def behavioural_domains(leaves: ReferenceMaps) -> ReferenceMaps:
     (Action, Cognition, ...) is the mean of its subcategories, voxel by voxel.
     One table, two depths -- the panels differ in grain, never in data."""
     domains = list(dict.fromkeys(n.split(".")[0] for n in leaves.names))
-    vox = np.stack([np.nanmean(leaves.voxels[[n.split(".")[0] == d for n in leaves.names]], 0)
-                    for d in domains])
+    with warnings.catch_warnings():     # voxels outside Brainnetome: all-NaN, stay NaN
+        warnings.simplefilter("ignore", RuntimeWarning)
+        vox = np.stack([np.nanmean(leaves.voxels[[n.split(".")[0] == d for n in leaves.names]], 0)
+                        for d in domains])
     return ReferenceMaps("behavioural_domain", domains, vox, simulated=leaves.simulated,
                          source=leaves.source + ", domain level")
 
