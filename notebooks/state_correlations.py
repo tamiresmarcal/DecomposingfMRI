@@ -166,6 +166,11 @@ def load_states(states: str, atlas: str, parc, components, seed: int,
     root = Path(output_root) if output_root else default_output_root()
     if window_s is None:
         window_s = find_window(root, atlas, states)
+    if cohorts == "train":                 # the cohorts decompose fitted on, from the model
+        from fmri_decomposition.state_means import load_models
+
+        cohorts = list(load_models(root, atlas, window_s)["train_cohorts"])
+        print(f"[{atlas}] COHORTS='train' -> {cohorts}")
     grp, subj = state_means_any_layout(root, atlas, window_s, states, cohorts)
     what = f"{states} at atlas={atlas} window_s={window_s}"
     return checked(grp, parc, what), subject_maps(subj, parc, what)
