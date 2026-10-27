@@ -378,7 +378,7 @@ def _label(name: str, fam: str) -> str:
 
 def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7", "behavioural"),
                   top=7, subjects: pd.DataFrame | None = None, measure="mean activation",
-                  title_note=""):
+                  title_note="", positive_only=()):
     """One row per state: brain in 2 x 3 (L lat · R lat · axial / L med · R med ·
     coronal), then one ranked bar chart per panel family. Bars are the mean r
     over subjects with +-SD when per-subject correlations exist, else the
@@ -429,11 +429,15 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
             else:
                 m, sd = res["r"][i].astype(float), None
             m = np.where([n.endswith(".Other") for n in nm], np.nan, m)
+            pos = fam in positive_only
+            if pos:                          # only what the state is associated WITH
+                m = np.where(m > 0, m, np.nan)
             k = min(top, int(np.isfinite(m).sum())) if fam != "yeo7" else len(nm)
             order = np.argsort(-np.nan_to_num(np.abs(m), nan=-1))[:k]
             order = order[np.argsort(-m[order])]
             y = np.arange(len(order))[::-1]
             colors = ([rm.YEO7_COLORS[j] for j in order] if fam == "yeo7" else
+                      ["#8a8984"] * len(order) if pos else      # one sign: colour adds nothing
                       [DIVERGING[5] if v >= 0 else DIVERGING[1] for v in m[order]])
             ax = fig.add_subplot(gs[i, c])
             ax.barh(y, m[order], xerr=None if sd is None else sd[order], color=colors,
@@ -448,10 +452,13 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
             for sp in ("top", "right", "left"):
                 ax.spines[sp].set_visible(False)
             ax.spines["bottom"].set_color(MUTED)
+            if pos:
+                ax.set_xlim(0, 1)
+                ax.set_xticks([0, 0.5, 1])
             if i == 0:
                 title = PANEL_TITLES[fam].format(tax=taxonomy_label(res))
                 if fam != "yeo7":
-                    title += f" · top {top} by |r|"
+                    title += f" · top {top} positive r" if fam in positive_only else f" · top {top} by |r|"
                 if res["simulated"]:
                     title += " · SIMULATED"
                 ax.set_title(title, loc="left", fontsize=26, fontweight="bold",
@@ -494,7 +501,7 @@ def load_results(atlas_dir: Path, families) -> tuple[pd.DataFrame, dict, dict]:
 
 def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
          data: Path = HERE / "state_maps_data", cards: bool = False, overview: bool = False,
-         panels=("yeo7", "behavioural"), top: int = 7) -> list:
+         panels=("yeo7", "behavioural"), top: int = 7, positive_only=()) -> list:
     """Draw every atlas under `run_dir`; return the figure paths.
 
     `families` picks the non-behavioural panels; `bn_levels` ("domain",
@@ -525,6 +532,7 @@ def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
         subjects = pd.read_parquet(subj_path) if subj_path.exists() else None
         out = d / "states_figure.png"
         states_figure(atlas, sm, names, results, brains, out, panels=panels, top=top,
+                      positive_only=tuple(positive_only),
                       subjects=subjects, measure=measure,
                       title_note="  (simulated states)" if prov["states"] == "simulate" else "")
         paths.append(out)
@@ -562,12 +570,14 @@ def main(argv=None) -> int:
     p.add_argument("--panels", nargs="+", default=["yeo7", "behavioural"], choices=FAMILIES,
                    help="bar charts beside each state's brain, in order")
     p.add_argument("--top", type=int, default=7, help="bars per panel (Yeo 7 always shows 7)")
+    p.add_argument("--positive-only", nargs="*", default=[], choices=FAMILIES,
+                   help="panels that show only positive r (e.g. behavioural)")
     p.add_argument("--cards", action="store_true", help="also one card per state")
     p.add_argument("--overview", action="store_true", help="also the heat-strip overview")
     p.add_argument("--data", type=Path, default=HERE / "state_maps_data")
     a = p.parse_args(argv)
     draw(a.run_dir, a.atlases, a.families, a.bn_levels, data=a.data, cards=a.cards,
-         overview=a.overview, panels=a.panels, top=a.top)
+         overview=a.overview, panels=a.panels, top=a.top, positive_only=a.positive_only)
     return 0
 
 
