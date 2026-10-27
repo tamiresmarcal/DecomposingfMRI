@@ -393,7 +393,7 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
     fig = plt.figure(figsize=(16 + 8.5 * len(panels), H), facecolor="white")
     gs = GridSpec(K, 2 + len(panels), figure=fig,
                   width_ratios=[2.2, 9.0] + [7.5 if p != "yeo7" else 6.5 for p in panels],
-                  left=0.01, right=0.985, top=1 - 1.5 / H, bottom=0.5 / H, wspace=0.55, hspace=0.32)
+                  left=0.01, right=0.985, top=1 - 1.9 / H, bottom=0.5 / H, wspace=0.55, hspace=0.32)
     n_sub = None if subjects is None else subjects["subject"].nunique()
     for i in range(K):
         a = fig.add_subplot(gs[i, 0])
@@ -444,6 +444,15 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
                     height=.7, edgecolor="white", lw=1.5,
                     error_kw=dict(ecolor=INK2, elinewidth=2, capsize=4))
             ax.axvline(0, color=MUTED, lw=.8)
+            # significance of the GROUP map against the spatial null, BH within family
+            qv = np.asarray(res["q"][i], float)
+            for yy, j in zip(y, order):
+                if not np.isfinite(qv[j]) or qv[j] >= 0.05:
+                    continue
+                reach = m[j] + (0 if sd is None or not np.isfinite(sd[j]) else np.sign(m[j]) * sd[j])
+                ax.text(reach + (0.03 if m[j] >= 0 else -0.03), yy, "**" if qv[j] < 0.01 else "*",
+                        ha="left" if m[j] >= 0 else "right", va="center", fontsize=24,
+                        fontweight="bold", color=INK)
             ax.set_xlim(-1, 1)
             ax.set_xticks([-1, 0, 1])
             ax.set_yticks(y)
@@ -472,7 +481,9 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
              fontsize=28, fontweight="bold", color=INK, va="top")
     fig.text(0.01, 1 - 0.75 / H,
              f"brain: {measure}, z across parcels · top = L lateral · R lateral · axial "
-             f"z={SLICES[0][1]}    bottom = L medial · R medial · coronal y={SLICES[1][1]}",
+             f"z={SLICES[0][1]}    bottom = L medial · R medial · coronal y={SLICES[1][1]}"
+             + ("\nbars: * q<.05, ** q<.01 (group map vs spatial null, FDR within family)"
+                if any(np.isfinite(results[f]["q"]).any() for f in panels) else ""),
              fontsize=20, color=INK2, va="top")
     fig.savefig(out, dpi=150, facecolor="white")
     plt.close(fig)
