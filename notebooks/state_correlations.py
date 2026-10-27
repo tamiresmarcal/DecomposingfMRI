@@ -123,10 +123,24 @@ def load_states(states: str, atlas: str, parc, components, seed: int,
         return checked(pd.read_csv(states, index_col="state"), parc, states)
     from fmri_decomposition.state_means import means_in_feature_units
 
-    if output_root is None or window_s is None:
-        raise SystemExit(f"--states {states} is a state column: give --output-root and --window-s")
-    t = means_in_feature_units(Path(output_root), atlas, window_s, states, cohorts)
+    if window_s is None:
+        raise SystemExit(f"STATES={states!r} is a state column: set WINDOW_S (--window-s), "
+                         f"the aperture it was fitted on -- -1 for the per-TR activation states")
+    root = Path(output_root) if output_root else default_output_root()
+    t = means_in_feature_units(root, atlas, window_s, states, cohorts)
     return checked(t, parc, f"{states} at atlas={atlas} window_s={window_s}")
+
+
+def default_output_root() -> Path:
+    """Where `fmri-decomp state-means` looks when not told: $FMRIDECOMP_OUTPUTS,
+    else `output_root` in config/camcan_movie.yaml."""
+    import os
+
+    if os.environ.get("FMRIDECOMP_OUTPUTS"):
+        return Path(os.environ["FMRIDECOMP_OUTPUTS"])
+    import yaml
+
+    return Path(yaml.safe_load((rm.REPO / "config" / "camcan_movie.yaml").read_text())["output_root"])
 
 
 # ------------------------------------------------------------- reference ---
