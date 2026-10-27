@@ -234,8 +234,9 @@ def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
     emb, cols = embedding_of(files[0], state_col)
     is_raw = all(c.startswith(RAW_PREFIX) for c in cols)
     if not is_raw and not all(c.startswith("pca") for c in cols):
-        raise SystemExit(f"{state_col!r} was fitted on {emb!r} (not invertible): use a pca<N> "
-                         f"or raw<N> state set for maps in parcel units")
+        print(f"[{atlas}] {state_col}: fitted on {emb!r}, which has no inverse -- averaging "
+              f"the source data over each state's rows instead")
+        return state_means_from_source(root, atlas, window_s, state_col, files)
     import pyarrow.parquet as pq
 
     frames = []
@@ -275,6 +276,88 @@ def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
     print(f"[{atlas}] {state_col}: {len(out)} states from {len(files)} file(s), "
           f"{int(counts.sum())} rows, {subj.index.get_level_values(0).nunique()} subjects")
     return out, subj
+
+
+def state_means_from_source(root: Path, atlas: str, window_s, state_col: str, files: list):
+    """State means for ANY state set, UMAP included: the labels joined back to
+    the rows they label, in the data the fit was made on.
+
+    Every latents row carries (task, sub, window_id), and so does every row of
+    the source -- dfc windows, or per-TR activation frames rebuilt by
+    `frames.read_cohort` with the fit's own band-pass and z-scoring (read from
+    the saved model). The mean of a state is then the mean of the source
+    features over its rows: exact, with no inverse transform at all. Read one
+    dfc shard at a time, so 6,105 edges never sit in memory for a whole cohort.
+    Returns the same (group, per-subject) pair as the latent-space route.
+    """
+    from fmri_decomposition import decompose, frames
+    from fmri_decomposition.io import read_file
+    from fmri_decomposition.state_means import load_models
+
+    models = load_models(root, atlas, window_s)
+    features = list(models["edges"])
+    keys = ["task", "sub", "window_id"]
+    sums: dict = {}
+
+    def add(subject, labels: np.ndarray, X: np.ndarray):
+        for k in np.unique(labels):
+            sel = labels == k
+            acc = sums.setdefault((subject, k), [np.zeros(len(features)), 0])
+            acc[0] += X[sel].sum(0)
+            acc[1] += int(sel.sum())
+
+    by_cohort: dict = {}
+    for p in files:
+        cohort = next((x.split("=", 1)[1] for x in p.parts if x.startswith("cohort=")), "")
+        t = read_file(p, columns=keys + [state_col]).to_pandas().dropna(subset=[state_col])
+        by_cohort.setdefault(cohort, []).append(t)
+    for cohort, parts in by_cohort.items():
+        lab = pd.concat(parts, ignore_index=True)
+        lab["window_id"] = lab["window_id"].astype("int64")
+        lab = lab.set_index(["task", "sub", "window_id"])[state_col]
+        if str(window_s) == "-1":
+            # absent = the fit used frames' default band; None = "as extracted"
+            band = models["match_bandpass"] if "match_bandpass" in models else frames.DEFAULT_BANDPASS
+            ident, X, _ = frames.read_cohort(
+                root, atlas, cohort, features, censor=None,
+                band=tuple(band) if band else None,
+                zscore=bool(models.get("zscore_runs", True)), log=lambda *_: None)
+            idx = pd.MultiIndex.from_arrays([ident["task"].astype(str), ident["sub"].astype(str),
+                                             ident["window_id"].astype("int64")])
+            got = lab.reindex(idx).to_numpy()
+            ok = ~pd.isna(got)
+            subj = (cohort + ":" + ident["sub"].astype(str)).to_numpy()
+            for sname in np.unique(subj[ok]):
+                m = ok & (subj == sname)
+                add(sname, got[m].astype(int), X[m])
+            continue
+        for shard in decompose.shard_paths(root, atlas, window_s, cohort):
+            kv = dict(x.split("=", 1) for x in shard.parts if "=" in x)
+            df = pd.read_parquet(shard, columns=["window_id"] + features)
+            idx = pd.MultiIndex.from_arrays([[kv["task"]] * len(df), [kv["sub"]] * len(df),
+                                             df["window_id"].astype("int64")])
+            got = lab.reindex(idx).to_numpy()
+            ok = ~pd.isna(got)
+            if ok.any():
+                add(f"{cohort}:{kv['sub']}", got[ok].astype(int),
+                    df.loc[ok, features].to_numpy(np.float64))
+    if not sums:
+        raise SystemExit(f"{state_col}: no source rows matched the latents' "
+                         f"(task, sub, window_id) at atlas={atlas} window_s={window_s}")
+    idx = pd.MultiIndex.from_tuples(sorted(sums), names=["subject", "state"])
+    S = np.array([sums[k][0] for k in idx])
+    N = np.array([sums[k][1] for k in idx])
+    subj = pd.DataFrame(S / N[:, None], index=idx, columns=features)
+    states = idx.get_level_values("state")
+    tot = pd.Series(N, index=states).groupby(level=0).sum()
+    grp = pd.DataFrame(pd.DataFrame(S, index=states).groupby(level=0).sum().to_numpy()
+                       / tot.to_numpy()[:, None], index=tot.index, columns=features)
+    grp.insert(0, "n_rows", tot.to_numpy())
+    grp.insert(1, "share", tot.to_numpy() / tot.sum())
+    grp.index.name = "state"
+    print(f"[{atlas}] {state_col}: {len(grp)} states from the source data, "
+          f"{int(tot.sum())} rows, {subj.index.get_level_values(0).nunique()} subjects")
+    return grp, subj
 
 
 def default_output_root() -> Path:

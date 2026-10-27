@@ -192,3 +192,12 @@ Cada estado ocupa uma linha:
 - **Barras = média de r entre sujeitos ± desvio padrão entre sujeitos.** Isso vale quando os estados vêm de uma coluna de estados (cada sujeito tem o seu mapa por estado; o arquivo é `subject_correlations.parquet`) ou da simulação (30 sujeitos). Com um CSV do `state-means` só existe o mapa do grupo, e as barras saem sem erro.
 
 O painel antigo de faixas de calor e os cards por estado continuam disponíveis com `draw(..., overview=True, cards=True)`, ou `--overview --cards` na linha de comando.
+
+## Estados UMAP (ou qualquer embedding sem inversa)
+
+Para estados ajustados em PCA ou raw, a média de cada estado é recuperada no espaço latente e desfeita a rotação (como faz o `state-means`). O UMAP não tem inversa, então, para ele, a média é calculada **nos dados de origem**. Os rótulos dos latents são juntados às linhas que eles rotulam pela chave `(task, sub, window_id)`:
+
+- **Janelas de DFC:** as arestas de cada janela, lendo um arquivo de sujeito por vez.
+- **Frames de ativação (`window_s=-1`):** reconstruídos por `frames.read_cohort` com o mesmo band-pass e o mesmo z-score usados no ajuste (lidos do modelo salvo).
+
+Assim a média é exata, sem transformação inversa. Funciona para qualquer conjunto de estados e é escolhida automaticamente quando o embedding não é invertível. Foi testado nos arquivos sintéticos do próprio pipeline (`fixtures`): todas as janelas e frames foram encontrados, e a diferença em relação a um cálculo manual foi de 6×10⁻⁸.
