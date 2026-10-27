@@ -2,39 +2,40 @@
 
 A brain state, as `fmri-decomp state-means` writes it, is one number per parcel
 of the atlas it was fitted on. Interpreting it means correlating that vector
-with maps that carry meaning -- receptor densities, behavioural domains,
-canonical networks. The maps come in three different shapes:
+with maps that carry meaning, parcellated into THE SAME parcels:
 
-    molecular    PET volumes, MNI152, mixed grids        (neuromaps / Hansen 2022)
-    behavioural  a table over Brainnetome subregions     (BrainMap domains)
-    canonical    a label map, fsaverage                  (Yeo 2011, 7 networks)
+    molecular    19 PET receptor/transporter volumes      (neuromaps / Hansen 2022)
+    behavioural  BrainMap domain profiles per Brainnetome  (Fan et al. 2016)
+                 subregion, at every level of the BrainMap taxonomy
+    canonical    Yeo 2011 7 networks, and this repo's own 14 coordinate networks
 
-and the only place all three meet is a cortical surface. So everything goes to
-fsaverage5 (10,242 vertices per hemisphere), and from there into the parcels of
-the state atlas. The correlation is computed across those parcels: one value
-per parcel on both sides, never voxels against parcels.
+Everything is parcellated in the pipeline's own space (MNI152NLin6Asym, 2 mm)
+with the pipeline's own operator, `AtlasSpec.membership` -- the matrix that
+turned voxels into the parcel time series the states were fitted on. So a
+reference map's value for parcel k is computed exactly the way the state's
+value for parcel k was, subcortex included. The surface appears only when a
+state is drawn.
 
-WHY A SPIN TEST
----------------
+WHY NOT A PARAMETRIC P
+----------------------
 Two smooth brain maps correlate far more often than two random vectors of the
-same length, because neighbouring parcels are not independent. A parametric
-p-value over ~96 parcels treats them as 96 independent observations and is
-badly anticonservative. The null here is the spin test (Alexander-Bloch et al.
-2018): rotate the reference map on the sphere, which keeps its spatial
-autocorrelation and destroys its alignment with the state, re-parcellate, and
-correlate again. The right hemisphere gets the mirror image of the left one's
-rotation so the two stay homologous. Vertices that rotate in from the medial
-wall carry no value and drop out of the parcel means.
+same length: neighbouring parcels are not independent, so a p-value over ~100
+parcels counts ~100 observations where there are far fewer. The null is a set
+of surrogate maps that keep the reference map's spatial autocorrelation over
+the distances between parcel centroids: Moran spectral randomisation by
+default (fast), brainsmash's variogram matching (Burt et al. 2020) on request.
+Unlike the surface spin test both are defined for subcortical parcels and for
+sphere atlases, i.e. for every atlas this pipeline has.
 
-Cortex only. Subcortical parcels of the state atlas have no vertices and are
-ignored -- they are reported, not silently dropped.
+An atlas with a handful of parcels (yeo7, networks: 7 and 14) gets no p-value
+at all: a correlation over 7 points is a description, and no null makes it
+more than that.
 """
 
 from __future__ import annotations
 
-import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import nibabel as nib
@@ -43,14 +44,14 @@ import pandas as pd
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
-from fmri_decomposition.atlases.registry import clean_name  # noqa: E402
+from fmri_decomposition.atlases.registry import AtlasSpec, get_atlas  # noqa: E402
 
 HEMIS = ("L", "R")
+MIN_PARCELS_FOR_NULL = 30
 
-# Harvard-Oxford cortical labels in atlas order. TemplateFlow's HOCPAL table
-# lists only 52 of the 96 lateralised labels, so the names come from here: the
-# image interleaves them, value 2i+1 = Left <name i>, 2i+2 = Right <name i>,
-# which is the order nilearn's symmetric_split produces and therefore the order
+# Harvard-Oxford cortical labels in atlas order (TemplateFlow's HOCPAL table
+# lists only 52 of the 96). The image interleaves them -- 2i+1 = Left <i>,
+# 2i+2 = Right <i> -- which is nilearn's symmetric_split order, hence the order
 # of the pipeline's `harvardoxford` columns.
 HO_CORTICAL = [
     "Frontal Pole", "Insular Cortex", "Superior Frontal Gyrus",
@@ -86,12 +87,10 @@ HO_CORTICAL = [
 
 YEO7 = ["Visual", "Somatomotor", "Dorsal Attention", "Ventral Attention",
         "Limbic", "Frontoparietal", "Default"]
-YEO7_SHORT = ["Vis", "SomMot", "DorsAttn", "SalVentAttn", "Limbic", "Cont", "Default"]
 # Yeo et al. 2011's own colours -- the field reads these as the networks' names.
 YEO7_COLORS = ["#781286", "#4682b4", "#00760e", "#c43afa", "#dcf8a4",
                "#e69422", "#cd3e4e"]
 
-# Display names for the PET files, keyed by the target before the first "_".
 RECEPTOR_LABELS = {
     "5HT1a": "5-HT1A", "5HT1b": "5-HT1B", "5HT2a": "5-HT2A", "5HT4": "5-HT4",
     "5HT6": "5-HT6", "5HTT": "5-HTT", "A4B2": "α4β2", "CB1": "CB1", "D1": "D1",
@@ -99,421 +98,531 @@ RECEPTOR_LABELS = {
     "mGluR5": "mGluR5", "MU": "MOR", "NAT": "NET", "NMDA": "NMDA",
     "VAChT": "VAChT",
 }
-# Grouped by transmitter system, which is how the panel reads best.
+# Grouped by transmitter system: 5-HT, DA, NE, ACh, GABA/Glu, other.
 RECEPTOR_ORDER = ["5-HT1A", "5-HT1B", "5-HT2A", "5-HT4", "5-HT6", "5-HTT",
                   "D1", "D2", "DAT", "NET", "α4β2", "M1", "VAChT", "GABA-A",
                   "NMDA", "mGluR5", "CB1", "MOR", "H3"]
 
-# BrainMap behavioural (sub)domains shown in the behavioural panel. BrainMap
-# has 5 domains and ~50 subdomains; these 12 are the ones a naturalistic-
-# viewing state is likely to load on. Whatever the real table carries, the
-# panel shows the columns it is given.
-BRAINMAP_DOMAINS = [
-    "Action.Execution", "Action.Observation", "Cognition.Attention",
-    "Cognition.Language", "Cognition.Memory", "Cognition.Reasoning",
-    "Cognition.Social", "Emotion", "Interoception", "Perception.Audition",
-    "Perception.Somesthesis", "Perception.Vision",
+# The BrainMap behavioural-domain taxonomy (Fox et al. 2005; brainmap.org/
+# taxonomy), as the leaves Brainnetome's profiles are reported at: domain,
+# then subdomain, then -- where BrainMap splits further -- sub-subdomain.
+# Written out by hand here because brainmap.org was unreachable; a real
+# behavioural table brings its own columns and this list is then unused.
+BRAINMAP_TAXONOMY = [
+    "Action.Execution.Speech", "Action.Execution.Other", "Action.Imagination",
+    "Action.Inhibition", "Action.Motor Learning", "Action.Observation",
+    "Action.Preparation", "Action.Rest",
+    "Cognition.Attention", "Cognition.Language.Orthography",
+    "Cognition.Language.Phonology", "Cognition.Language.Semantics",
+    "Cognition.Language.Speech", "Cognition.Language.Syntax",
+    "Cognition.Memory.Explicit", "Cognition.Memory.Working",
+    "Cognition.Music", "Cognition.Reasoning", "Cognition.Social Cognition",
+    "Cognition.Soma", "Cognition.Space", "Cognition.Time",
+    "Emotion.Anger", "Emotion.Anxiety", "Emotion.Disgust", "Emotion.Fear",
+    "Emotion.Happiness", "Emotion.Sadness",
+    "Interoception.Air Hunger", "Interoception.Baroregulation",
+    "Interoception.Bladder", "Interoception.Hunger", "Interoception.Sexuality",
+    "Interoception.Sleep", "Interoception.Thermoregulation", "Interoception.Thirst",
+    "Perception.Audition", "Perception.Gustation", "Perception.Olfaction",
+    "Perception.Somesthesis.Pain", "Perception.Somesthesis.Other",
+    "Perception.Vision.Color", "Perception.Vision.Motion",
+    "Perception.Vision.Shape", "Perception.Vision.Other",
 ]
 
-
-# --------------------------------------------------------------- surface ---
-@dataclass
-class Surface:
-    """fsaverage5, both hemispheres, plus the cortex mask (Yeo's medial wall)."""
-
-    pial: dict
-    white: dict
-    sphere: dict
-    cortex: dict                    # hemi -> bool (10242,)
-
-    @property
-    def n_vertices(self) -> int:
-        return len(self.cortex["L"])
+# Brainnetome's own grouping: 24 gyri per hemisphere, 20 cortical + 4 deep.
+BN_SUBCORTICAL = ("Amyg", "Hipp", "BG", "Tha")
 
 
+# ------------------------------------------------------------------ grid ---
 def _tf(data: Path, name: str) -> Path:
     return Path(data) / "templateflow" / name
 
 
-def _gifti_mesh(path: Path):
-    g = nib.load(str(path))
-    return (g.darrays[0].data.astype(float), g.darrays[1].data.astype(int))
+def reference_grid(data: Path):
+    """MNI152NLin6Asym 2 mm, the grid every map is parcellated on."""
+    return nib.load(str(_tf(data, "tpl-MNI152NLin6Asym_res-02_atlas-HOCPAL_desc-th25_dseg.nii.gz")))
 
 
-def _gifti_labels(path: Path) -> np.ndarray:
-    return np.asarray(nib.load(str(path)).darrays[0].data).astype(int)
+def resample(img, ref, interpolation: str):
+    from nilearn.image import resample_to_img
+
+    try:
+        return resample_to_img(img, ref, interpolation=interpolation,
+                               force_resample=True, copy_header=True)
+    except TypeError:                                   # older nilearn
+        return resample_to_img(img, ref, interpolation=interpolation)
 
 
-def load_surface(data: Path) -> Surface:
-    pial, white, sphere, cortex = {}, {}, {}, {}
-    for h in HEMIS:
-        pial[h] = _gifti_mesh(_tf(data, f"tpl-fsaverage_hemi-{h}_den-10k_pial.surf.gii"))
-        white[h] = _gifti_mesh(_tf(data, f"tpl-fsaverage_hemi-{h}_den-10k_white.surf.gii"))
-        sphere[h] = _gifti_mesh(_tf(data, f"tpl-fsaverage_hemi-{h}_den-10k_sphere.surf.gii"))
-        cortex[h] = _gifti_labels(_tf(
-            data, f"tpl-fsaverage_hemi-{h}_den-10k_atlas-Yeo2011_seg-7n_dseg.label.gii")) > 0
-    return Surface(pial, white, sphere, cortex)
+# ----------------------------------------------------------- state atlas ---
+def state_atlas(name: str, data: Path) -> tuple[AtlasSpec, str]:
+    """The pipeline's atlas `name`, and where it came from.
 
-
-def vol_to_fsaverage(img, surf: Surface, interpolation: str = "linear",
-                     mask_img=None) -> dict:
-    """Volume -> {hemi: (10242,)}, sampled between the white and pial surfaces.
-
-    This is nilearn's registration-free projection: fsaverage coordinates are
-    taken to be MNI coordinates. It is the standard shortcut and good enough
-    for parcels of a few cm; neuromaps' `mni152_to_fsaverage` (registration-
-    fusion) is the better tool where it can be fetched.
+    `get_atlas` first: on a machine where nilearn's cache or its download
+    hosts are there, this IS the atlas the states were fitted on. Where they
+    are not, `harvardoxford` and `yeo7` are rebuilt from the same source
+    images (TemplateFlow / neuroparc) by the same code path the repo uses --
+    `plan_harvard_oxford_merge`, `AtlasSpec.from_label_image` -- so the
+    parcel names, order and count are the pipeline's.
     """
-    from nilearn.surface import InMemoryMesh, vol_to_surf
+    try:
+        return get_atlas(name), "fmri_decomposition.get_atlas"
+    except Exception as e:                              # noqa: BLE001
+        why = f"{type(e).__name__}"
+    key = name.lower().replace("_", "")
+    if key == "harvardoxford":
+        return _harvard_oxford_offline(data), f"rebuilt from TemplateFlow ({why} on fetch)"
+    if key == "yeo7":
+        return _yeo7_offline(data), f"rebuilt from neuroparc ({why} on fetch)"
+    raise
 
-    out = {}
-    for h in HEMIS:
-        pial = InMemoryMesh(*surf.pial[h])
-        white = InMemoryMesh(*surf.white[h])
-        v = vol_to_surf(img, pial, inner_mesh=white, interpolation=interpolation,
-                        mask_img=mask_img)
-        out[h] = np.asarray(v, dtype=float)
-    return out
+
+def _harvard_oxford_offline(data: Path) -> AtlasSpec:
+    from fmri_decomposition.atlases.labels import SUB_DROP, plan_harvard_oxford_merge
+    from fmri_decomposition.atlases.resample import resample_labels_to
+
+    cort = nib.load(str(_tf(data, "tpl-MNI152NLin6Asym_res-02_atlas-HOCPAL_desc-th25_dseg.nii.gz")))
+    sub = nib.load(str(_tf(data, "tpl-MNI152NLin6Asym_res-02_atlas-HOSPA_desc-th25_dseg.nii.gz")))
+    cort_labels = ["Background"] + [f"{s} {n}" for n in HO_CORTICAL for s in ("Left", "Right")]
+    sub_tsv = pd.read_csv(_tf(data, "tpl-MNI152NLin6Asym_atlas-HOSPA_dseg.tsv"), sep="\t")
+    # FSL's XML spells it "Ventrical"; nilearn's list (which SUB_DROP is
+    # written against) does not. Normalise so the same six are dropped.
+    sub_labels = [str(n).strip().replace("Ventrical", "Ventricle")
+                  for n in sub_tsv.sort_values("index")["name"]]
+    plan = plan_harvard_oxford_merge(cort_labels, sub_labels, drop=SUB_DROP)
+    merged = np.asarray(cort.dataobj).astype(np.int16)
+    sub_data = np.asarray(resample_labels_to(sub, cort).dataobj).astype(np.int16)
+    for old_id, new_id in plan.sub_remap.items():
+        merged[sub_data == old_id] = new_id
+    img = nib.Nifti1Image(merged, cort.affine, cort.header)
+    network = ["cortical"] * plan.n_cort + ["subcortical"] * plan.n_sub
+    return AtlasSpec.from_label_image(
+        name="harvardoxford", labels_img=img, names=plan.names,
+        indices=plan.final_ids, network=network,
+        provenance={"atlas": "Harvard-Oxford", "source": "TemplateFlow HOCPAL+HOSPA th25 2mm"})
 
 
-# ------------------------------------------------------------ state atlas ---
+def _yeo7_offline(data: Path) -> AtlasSpec:
+    img = nib.load(str(Path(data) / "yeo" / "Yeo-7-liberal_space-MNI152NLin6_res-1x1x1.nii.gz"))
+    names = ["Visual", "Somatomotor", "DorsalAttention", "VentralAttention",
+             "Limbic", "Frontoparietal", "Default"]
+    return AtlasSpec.from_label_image(
+        name="yeo7", labels_img=img, names=names, indices=list(range(1, 8)),
+        network=names, provenance={"atlas": "Yeo2011", "variant": "liberal (neuroparc)"})
+
+
 @dataclass
-class SurfaceParcellation:
-    """A label per cortical vertex, and the parcel names those labels mean."""
+class Parcellator:
+    """The pipeline's voxel -> parcel operator, on the reference grid."""
 
-    names: list                     # parcel names, in label order (1..n)
-    labels: dict                    # hemi -> int (10242,), 0 = not in any parcel
+    spec: AtlasSpec
+    ref: object
+    support: object = field(repr=False)                 # sparse (P, V) 0/1
+
+    @classmethod
+    def build(cls, spec: AtlasSpec, ref) -> "Parcellator":
+        M, _ = spec.membership(ref)
+        return cls(spec, ref, (M > 0).astype(np.float64).tocsr())
+
+    @property
+    def names(self) -> list:
+        return list(self.spec.labels["name"])
 
     @property
     def columns(self) -> list:
-        return [clean_name(n) for n in self.names]
+        return self.spec.columns
 
-    def parcellate(self, maps: dict) -> np.ndarray:
-        """{hemi: (..., 10242)} -> (..., n_parcels). NaN vertices drop out."""
-        n = len(self.names)
-        lead = np.shape(maps["L"])[:-1]
-        sums = np.zeros(lead + (n + 1,))
-        counts = np.zeros(lead + (n + 1,))
-        for h in HEMIS:
-            v = np.asarray(maps[h], dtype=float)
-            ok = np.isfinite(v)
-            lab = self.labels[h]
-            for arr, w in ((sums, np.where(ok, v, 0.0)), (counts, ok.astype(float))):
-                flat = w.reshape(-1, w.shape[-1])
-                acc = np.stack([np.bincount(lab, weights=row, minlength=n + 1)
-                                for row in flat])
-                arr += acc.reshape(lead + (n + 1,))
+    @property
+    def n(self) -> int:
+        return self.spec.n_nodes
+
+    @property
+    def centroids(self) -> np.ndarray:
+        return self.spec.labels[["x", "y", "z"]].to_numpy(float)
+
+    def parcellate(self, vols: np.ndarray) -> np.ndarray:
+        """(..., V) voxel values -> (..., P) parcel means, NaN voxels skipped."""
+        v = np.asarray(vols, float)
+        lead = v.shape[:-1]
+        v = v.reshape(-1, v.shape[-1])
+        ok = np.isfinite(v)
+        sums = self.support @ np.where(ok, v, 0.0).T
+        counts = self.support @ ok.T.astype(float)
         with np.errstate(invalid="ignore", divide="ignore"):
-            return (sums / counts)[..., 1:]
+            out = (sums / counts).T
+        return out.reshape(lead + (self.n,))
 
-    def paint(self, values: np.ndarray) -> dict:
-        """(n_parcels,) -> {hemi: (10242,)}, NaN off-parcel, for plotting."""
-        vals = np.concatenate([[np.nan], np.asarray(values, dtype=float)])
-        return {h: vals[self.labels[h]] for h in HEMIS}
+    def label_volume(self) -> np.ndarray:
+        """Voxel -> parcel (1..P, 0 = none); the first parcel wins an overlap."""
+        S = self.support.tocoo()
+        order = np.argsort(-S.row, kind="stable")     # lowest parcel written last
+        lab = np.zeros(S.shape[1], dtype=np.int32)
+        lab[S.col[order]] = S.row[order] + 1
+        return lab.reshape(self.ref.shape[:3])
 
-
-def harvard_oxford_on_surface(data: Path, surf: Surface) -> SurfaceParcellation:
-    """The cortical 96 of the pipeline's `harvardoxford`, on fsaverage5.
-
-    Two repairs after projection, both of which only matter near the midline
-    and the label edges. A vertex that picked up the other hemisphere's label
-    (the medial wall is ~1 voxel from the midline) gets its own hemisphere's
-    homologue -- the parity bit of the label. A cortical vertex that landed in
-    no label at all (thr25 leaves gaps) takes its nearest labelled neighbour
-    on the sphere, so every cortical vertex belongs to exactly one parcel.
-    """
-    from scipy.spatial import cKDTree
-
-    img = nib.load(str(_tf(data, "tpl-MNI152NLin6Asym_res-02_atlas-HOCPAL_desc-th25_dseg.nii.gz")))
-    proj = vol_to_fsaverage(img, surf, interpolation="nearest_most_frequent")
-    names = [f"{side} {n}" for n in HO_CORTICAL for side in ("Left", "Right")]
-    labels = {}
-    for h in HEMIS:
-        lab = np.rint(np.nan_to_num(proj[h])).astype(int)
-        wrong_side = (lab > 0) & ((lab % 2 == 1) != (h == "L"))
-        lab[wrong_side] += -1 if h == "L" else 1   # Right 2i+2 <-> Left 2i+1
-        cortex = surf.cortex[h]
-        have = cortex & (lab > 0)
-        need = cortex & (lab == 0)
-        if need.any():
-            xyz = surf.sphere[h][0]
-            _, nn = cKDTree(xyz[have]).query(xyz[need])
-            lab[need] = lab[have][nn]
-        lab[~cortex] = 0
-        labels[h] = lab
-    return SurfaceParcellation(names, labels)
+    def paint(self, values: np.ndarray):
+        """(P,) -> NIfTI on the reference grid, 0 off-parcel (for plotting)."""
+        vals = np.concatenate([[0.0], np.asarray(values, float)])
+        return nib.Nifti1Image(vals[self.label_volume()].astype(np.float32), self.ref.affine)
 
 
 # --------------------------------------------------------- reference maps ---
 @dataclass
 class ReferenceMaps:
-    """Vertex-level maps of one family, plus their names and provenance."""
-
     family: str
     names: list
-    vertex: dict                    # hemi -> (n_maps, 10242), NaN off-cortex
+    voxels: np.ndarray                  # (n_maps, V) on the reference grid, NaN = no data
     simulated: bool = False
     source: str = ""
 
 
-def receptor_maps(data: Path, surf: Surface) -> ReferenceMaps:
-    """The 19 PET maps, projected, z-scored over cortex per map.
+def _flat(img) -> np.ndarray:
+    return np.asarray(img.dataobj, dtype=np.float64).reshape(-1)
 
-    Several of the volumes are zero outside a brain mask. A zero there is "not
-    measured", not "no receptor", so those zeros are masked out of the
-    sampling rather than averaged into the cortical ribbon's edge.
+
+def receptor_maps(data: Path, ref) -> ReferenceMaps:
+    """The 19 PET maps, resampled to the reference grid.
+
+    Several volumes are zero outside a brain mask. Zero there is "not
+    measured", not "no receptor": those voxels are NaN, so they drop out of
+    the parcel mean instead of pulling the edge parcels toward zero.
     """
     files = {}
     for f in sorted((Path(data) / "pet").glob("*.nii*")):
         key = f.name.split("_")[0]
         files[RECEPTOR_LABELS.get(key, key)] = f
     names = [n for n in RECEPTOR_ORDER if n in files]
-    vertex = {h: [] for h in HEMIS}
+    vox = []
     for n in names:
         img = nib.load(str(files[n]))
         arr = np.asarray(img.dataobj, dtype=np.float32)
         if arr.ndim == 4:
             arr = arr[..., 0]
-            img = nib.Nifti1Image(arr, img.affine)
-        mask = None
+        img = nib.Nifti1Image(arr, img.affine)
+        v = _flat(resample(img, ref, "continuous"))
         if (arr != 0).mean() < 0.5:
-            mask = nib.Nifti1Image((arr != 0).astype(np.int8), img.affine)
-        proj = vol_to_fsaverage(img, surf, mask_img=mask)
-        for h in HEMIS:
-            proj[h][~surf.cortex[h]] = np.nan
-        both = np.concatenate([proj["L"], proj["R"]])
-        mu, sd = np.nanmean(both), np.nanstd(both)
-        for h in HEMIS:
-            vertex[h].append((proj[h] - mu) / sd)
-    return ReferenceMaps("molecular", names,
-                         {h: np.stack(vertex[h]) for h in HEMIS},
+            m = nib.Nifti1Image((arr != 0).astype(np.float32), img.affine)
+            v[_flat(resample(m, ref, "linear")) < 0.5] = np.nan
+        vox.append(v)
+    return ReferenceMaps("molecular", names, np.stack(vox),
                          source="Hansen et al. 2022 PET atlas (neuromaps MNI152 annotations)")
 
 
-def yeo7_maps(data: Path, surf: Surface) -> ReferenceMaps:
-    """One indicator map per network. Parcellated, it is each parcel's share
-    of that network -- the correlation with a state then asks how much the
-    state's pattern follows the network's footprint."""
-    vertex = {}
-    for h in HEMIS:
-        lab = _gifti_labels(_tf(
-            data, f"tpl-fsaverage_hemi-{h}_den-10k_atlas-Yeo2011_seg-7n_dseg.label.gii"))
-        ind = np.stack([(lab == k).astype(float) for k in range(1, 8)])
-        ind[:, ~surf.cortex[h]] = np.nan
-        vertex[h] = ind
-    return ReferenceMaps("canonical", list(YEO7), vertex,
-                         source="Yeo et al. 2011, 7 networks (TemplateFlow fsaverage)")
+def yeo7_maps(data: Path, ref) -> ReferenceMaps:
+    """One indicator per network; parcellated = each parcel's share of it."""
+    img = resample(nib.load(str(Path(data) / "yeo" / "Yeo-7-liberal_space-MNI152NLin6_res-1x1x1.nii.gz")),
+                   ref, "nearest")
+    lab = np.rint(_flat(img)).astype(int)
+    return ReferenceMaps("yeo7", list(YEO7),
+                         np.stack([(lab == k).astype(float) for k in range(1, 8)]),
+                         source="Yeo et al. 2011, 7 networks, liberal mask (neuroparc, MNI152NLin6)")
+
+
+def network14_maps(ref) -> ReferenceMaps:
+    """This repo's 14 coordinate networks as indicator maps: a voxel is in a
+    network if it is in any of that network's 5 mm spheres."""
+    spec = get_atlas("networks")
+    M, _ = spec.membership(ref)
+    ind = (M > 0).astype(float).toarray()
+    return ReferenceMaps("networks14", list(spec.labels["name"]), ind,
+                         source="fmri_decomposition `networks` (14 networks, 254 spheres, 5 mm)")
 
 
 # ------------------------------------------------------------ Brainnetome ---
-# Brainnetome cortical subregions per hemisphere, in BNA order, grouped by the
-# gyrus they subdivide (Fan et al. 2016, Table 1). Needed to give each
-# subregion an identity beyond its abbreviation.
-BN_GYRI = [("SFG", 7), ("MFG", 7), ("IFG", 6), ("OrG", 6), ("PrG", 6),
-           ("PCL", 2), ("STG", 6), ("MTG", 4), ("ITG", 7), ("FuG", 3),
-           ("PhG", 6), ("pSTS", 2), ("SPL", 5), ("IPL", 6), ("Pcun", 4),
-           ("PoG", 4), ("INS", 6), ("CG", 7), ("MVOcC", 5), ("LOcC", 6)]
+def brainnetome_table(data: Path) -> pd.DataFrame:
+    """The 246 BNA subregions: bn_index, hemi, gyrus (abbrev.), short name."""
+    x = pd.read_excel(Path(data) / "brainnetome" / "BrainnetomeAtlas_BNA_subregions.xlsx")
+    x.columns = ["lobe", "gyrus", "region", "id_l", "id_r", "short", "descr", "mni_l", "mni_r"]
+    x["gyrus"] = x["gyrus"].ffill().str.split(",").str[0].str.strip()
+    x["lobe"] = x["lobe"].ffill()
+    rows = []
+    for _, r in x.iterrows():
+        short = str(r["short"]).split(",")[0].strip()
+        for h, col in (("L", "id_l"), ("R", "id_r")):
+            rows.append({"bn_index": int(r[col]), "hemi": h, "gyrus": r["gyrus"],
+                         "lobe": r["lobe"], "name": short})
+    return pd.DataFrame(rows).sort_values("bn_index").reset_index(drop=True)
 
 
-def brainnetome_on_surface(data: Path) -> tuple[pd.DataFrame, dict]:
-    """Brainnetome's 210 cortical subregions -> (table, {hemi: labels}).
-
-    TemplateFlow has the atlas on fsaverage (164k) only. fsaverage5 is the
-    first 10,242 vertices of fsaverage -- the icosahedra are nested -- so the
-    downsampling is a slice, not a resampling. `bn_index` is the 1..246
-    numbering of the BNA tables (odd = left, even = right), which is what a
-    behavioural table downloaded from the Brainnetome site is keyed by.
-    """
-    tsv = pd.read_csv(_tf(data, "tpl-fsaverage_atlas-brainnetome_dseg.tsv"), sep="\t")
-    gyri = [g for g, n in BN_GYRI for _ in range(n)]
-    rows, labels = [], {}
-    for h in HEMIS:
-        names = tsv.loc[(tsv["hemi"] == h) & ~tsv["name"].str.contains("unknown"), "name"]
-        names = list(names)
-        if len(names) != 105:
-            raise ValueError(f"expected 105 Brainnetome cortical regions in {h}, got {len(names)}")
-        for k, n in enumerate(names):
-            rows.append({"bn_index": 2 * k + (1 if h == "L" else 2), "hemi": h,
-                         "name": n, "gyrus": gyri[k], "local": k + 1})
-        g = nib.load(str(_tf(data, f"tpl-fsaverage_hemi-{h}_den-164k_atlas-brainnetome_dseg.label.gii")))
-        labels[h] = np.asarray(g.darrays[0].data).astype(int)[:10242]
-    return pd.DataFrame(rows).sort_values("bn_index").reset_index(drop=True), labels
+def brainnetome_labels(data: Path, ref) -> np.ndarray:
+    img = nib.load(str(Path(data) / "brainnetome" / "BrainnetomeAtlas_BNA_MPM_thr25_1.25mm.nii.gz"))
+    return np.rint(_flat(resample(img, ref, "nearest"))).astype(int)
 
 
 def simulate_behavioural_table(bn: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
-    """A STAND-IN for the BrainMap behavioural-domain profiles. Not data.
+    """A STAND-IN for the BrainMap profiles of Fan et al. 2016. Not data.
 
-    The real profiles (Fan et al. 2016, per-subregion forward inference over
-    BrainMap) are served by atlas.brainnetome.org, which this pilot could not
-    reach. This builds a table of the same shape -- one row per subregion, one
-    column per domain -- from a textbook prior on what each gyrus does, plus
-    noise. It exists so the panel and its statistics can be built and checked;
-    every figure that uses it says SIMULATED, and `load_behavioural_table`
-    replaces it the moment the real table is on disk.
+    The real per-subregion profiles are served by atlas.brainnetome.org, which
+    could not be reached. This fills a table of the same shape -- 246
+    subregions x the BrainMap leaves -- from a textbook prior: what each gyrus
+    does, sharpened for the handful of subregions whose name says more (MT+,
+    A41/42, A44/45, tongue/larynx motor cortex ...), plus noise. It exists so
+    the panel and its statistics can be built; every figure that uses it says
+    SIMULATED, and `load_behavioural_table` replaces it when the real table is
+    on disk.
     """
-    prior = {
-        "SFG": {"Cognition.Reasoning": .6, "Action.Execution": .4, "Cognition.Social": .3},
-        "MFG": {"Cognition.Reasoning": .9, "Cognition.Attention": .7, "Cognition.Memory": .6},
-        "IFG": {"Cognition.Language": 1.0, "Cognition.Reasoning": .4, "Action.Observation": .3},
-        "OrG": {"Emotion": .8, "Interoception": .5, "Cognition.Reasoning": .3},
-        "PrG": {"Action.Execution": 1.0, "Action.Observation": .3},
-        "PCL": {"Action.Execution": .8, "Perception.Somesthesis": .6},
-        "STG": {"Perception.Audition": 1.0, "Cognition.Language": .6},
-        "MTG": {"Cognition.Language": .7, "Cognition.Social": .5, "Cognition.Memory": .3},
-        "ITG": {"Perception.Vision": .5, "Cognition.Memory": .4, "Cognition.Language": .3},
-        "FuG": {"Perception.Vision": .9, "Cognition.Social": .3},
-        "PhG": {"Cognition.Memory": 1.0, "Emotion": .5},
-        "pSTS": {"Cognition.Social": 1.0, "Cognition.Language": .5, "Action.Observation": .5},
-        "SPL": {"Cognition.Attention": .9, "Action.Observation": .5, "Perception.Somesthesis": .3},
-        "IPL": {"Cognition.Attention": .6, "Cognition.Social": .4, "Cognition.Language": .3},
-        "Pcun": {"Cognition.Memory": .7, "Cognition.Social": .5},
-        "PoG": {"Perception.Somesthesis": 1.0, "Action.Execution": .4},
-        "INS": {"Interoception": 1.0, "Emotion": .7, "Perception.Somesthesis": .3},
-        "CG": {"Emotion": .7, "Cognition.Attention": .5, "Interoception": .4},
-        "MVOcC": {"Perception.Vision": 1.0},
-        "LOcC": {"Perception.Vision": .9, "Action.Observation": .4},
+    gyrus = {
+        "SFG": {"Cognition.Reasoning": .6, "Action.Preparation": .5, "Cognition.Social Cognition": .3,
+                "Cognition.Memory.Working": .3},
+        "MFG": {"Cognition.Reasoning": .8, "Cognition.Attention": .6, "Cognition.Memory.Working": .9,
+                "Action.Inhibition": .3},
+        "IFG": {"Cognition.Language.Semantics": .7, "Cognition.Language.Syntax": .7,
+                "Cognition.Language.Phonology": .6, "Action.Inhibition": .5,
+                "Action.Observation": .3},
+        "OrG": {"Emotion.Happiness": .5, "Emotion.Disgust": .3, "Perception.Gustation": .6,
+                "Perception.Olfaction": .6, "Interoception.Hunger": .4, "Cognition.Reasoning": .3},
+        "PrG": {"Action.Execution.Other": 1.0, "Action.Imagination": .5, "Action.Motor Learning": .4},
+        "PCL": {"Action.Execution.Other": .8, "Perception.Somesthesis.Other": .6,
+                "Interoception.Bladder": .5},
+        "STG": {"Perception.Audition": 1.0, "Cognition.Language.Speech": .6, "Cognition.Music": .6},
+        "MTG": {"Cognition.Language.Semantics": .8, "Cognition.Social Cognition": .5,
+                "Perception.Vision.Motion": .3},
+        "ITG": {"Perception.Vision.Shape": .6, "Cognition.Language.Semantics": .4,
+                "Cognition.Memory.Explicit": .3},
+        "FuG": {"Perception.Vision.Shape": .9, "Perception.Vision.Color": .5,
+                "Cognition.Language.Orthography": .6},
+        "PhG": {"Cognition.Memory.Explicit": 1.0, "Cognition.Space": .6, "Emotion.Fear": .3},
+        "pSTS": {"Cognition.Social Cognition": 1.0, "Cognition.Language.Speech": .5,
+                 "Action.Observation": .6},
+        "SPL": {"Cognition.Attention": .8, "Cognition.Space": .8, "Action.Observation": .4},
+        "IPL": {"Cognition.Attention": .5, "Cognition.Social Cognition": .4,
+                "Cognition.Language.Phonology": .4, "Perception.Somesthesis.Other": .3},
+        "Pcun": {"Cognition.Memory.Explicit": .7, "Cognition.Social Cognition": .5,
+                 "Action.Rest": .6, "Cognition.Space": .4},
+        "PoG": {"Perception.Somesthesis.Other": 1.0, "Perception.Somesthesis.Pain": .5,
+                "Action.Execution.Other": .4},
+        "INS": {"Interoception.Thirst": .4, "Interoception.Air Hunger": .4, "Emotion.Disgust": .8,
+                "Perception.Somesthesis.Pain": .7, "Perception.Gustation": .7,
+                "Interoception.Baroregulation": .4},
+        "CG": {"Emotion.Sadness": .5, "Perception.Somesthesis.Pain": .7, "Action.Inhibition": .5,
+               "Cognition.Attention": .4, "Emotion.Anxiety": .4},
+        "MVOcC": {"Perception.Vision.Other": 1.0, "Perception.Vision.Color": .6},
+        "LOcC": {"Perception.Vision.Shape": .8, "Perception.Vision.Motion": .6,
+                 "Action.Observation": .4},
+        "Amyg": {"Emotion.Fear": 1.0, "Emotion.Anxiety": .7, "Emotion.Sadness": .5,
+                 "Emotion.Anger": .5, "Interoception.Sexuality": .4},
+        "Hipp": {"Cognition.Memory.Explicit": 1.0, "Cognition.Space": .6, "Emotion.Anxiety": .3},
+        "BG": {"Action.Motor Learning": .8, "Action.Execution.Other": .6, "Emotion.Happiness": .5,
+               "Interoception.Hunger": .3, "Cognition.Time": .5},
+        "Tha": {"Perception.Somesthesis.Pain": .6, "Cognition.Attention": .5,
+                "Interoception.Sleep": .6, "Interoception.Thermoregulation": .3},
+    }
+    by_name = {
+        "A41/42": {"Perception.Audition": 1.4}, "TE1.0 and TE1.2": {"Perception.Audition": 1.4},
+        "V5/MT+": {"Perception.Vision.Motion": 1.5}, "A44d": {"Cognition.Language.Phonology": 1.0},
+        "A44op": {"Cognition.Language.Speech": .9}, "A45c": {"Cognition.Language.Semantics": 1.0},
+        "A45r": {"Cognition.Language.Semantics": 1.0}, "A4tl": {"Action.Execution.Speech": 1.4},
+        "A1/2/3tonIa": {"Action.Execution.Speech": .8}, "A6vl": {"Action.Execution.Speech": .7},
+        "A22c": {"Cognition.Language.Speech": .9}, "A37mv": {"Perception.Vision.Color": .9},
+        "A39rd": {"Cognition.Social Cognition": .8}, "cCunG": {"Perception.Vision.Other": .5},
+        "vIa": {"Interoception.Thirst": .6}, "G": {"Perception.Gustation": 1.0},
     }
     rng = np.random.default_rng(seed)
-    out = bn[["bn_index", "hemi", "name", "gyrus"]].copy()
-    for d in BRAINMAP_DOMAINS:
-        base = out["gyrus"].map(lambda g: prior[g].get(d, 0.0)).to_numpy()
-        out[d] = np.clip(base + rng.normal(0, 0.15, len(out)), 0, None)
-    out.attrs["simulated"] = True
+    out = bn[["bn_index", "hemi", "gyrus", "name"]].copy()
+    for d in BRAINMAP_TAXONOMY:
+        base = np.array([gyrus.get(g, {}).get(d, 0.0) + by_name.get(n, {}).get(d, 0.0)
+                         for g, n in zip(out["gyrus"], out["name"])])
+        out[d] = np.clip(base + rng.normal(0, 0.12, len(out)), 0, None)
     return out
 
 
 def load_behavioural_table(path: Path) -> pd.DataFrame:
-    """The real profiles: a CSV keyed by `bn_index` (1..246), one column per
-    domain, any monotone score (z, likelihood ratio, 0/1). Subcortical rows
-    (211..246) are allowed and ignored -- they have no surface."""
+    """The real profiles: CSV keyed by `bn_index` (1..246, BNA numbering),
+    one column per BrainMap category named by its dotted path
+    (`Perception.Vision.Motion`), any monotone score (z, LR, 0/1)."""
     t = pd.read_csv(path)
     if "bn_index" not in t:
         raise SystemExit(f"{path}: needs a `bn_index` column (1..246, BNA numbering)")
-    t = t[t["bn_index"] <= 210].copy()
-    t.attrs["simulated"] = False
     return t
 
 
-BN_LEVELS = ("subregion", "gyrus")
-
-
-def behavioural_maps(data: Path, surf: Surface, table: pd.DataFrame | None = None,
-                     seed: int = 0, level: str = "subregion") -> ReferenceMaps:
-    """BrainMap domain profiles painted on Brainnetome, at one of its levels.
-
-    `subregion` is the 210 cortical subregions the profiles are published at.
-    `gyrus` is the atlas' own coarser level: the 20 cortical gyri per
-    hemisphere (SFG, MFG, ... LOcC) that the subregions subdivide. Each gyrus
-    gets the mean profile of its subregions, so both levels come from ONE
-    table and differ only in grain -- what changes between the two panels is
-    the resolution, never the data.
-    """
-    if level not in BN_LEVELS:
-        raise ValueError(f"level must be one of {BN_LEVELS}, got {level!r}")
-    bn, labels = brainnetome_on_surface(data)
+def behavioural_maps(data: Path, ref, table: pd.DataFrame | None = None,
+                     seed: int = 0) -> ReferenceMaps:
+    bn = brainnetome_table(data)
     simulated = table is None
     if simulated:
         table = simulate_behavioural_table(bn, seed=seed)
-    domains = [c for c in table.columns
-               if c not in ("bn_index", "hemi", "name", "gyrus", "local")]
-    t = bn[["bn_index", "hemi", "local", "gyrus"]].merge(
-        table[["bn_index"] + domains], on="bn_index", how="left")
-    if level == "gyrus":
-        t[domains] = t.groupby(["hemi", "gyrus"])[domains].transform("mean")
-    vertex = {}
-    for h in HEMIS:
-        th = t[t["hemi"] == h].sort_values("local")
-        lut = np.full((106, len(domains)), np.nan)
-        lut[th["local"].to_numpy()] = th[domains].to_numpy(float)
-        v = lut[labels[h]].T                       # (n_domains, 10242)
-        v[:, ~surf.cortex[h]] = np.nan
-        vertex[h] = v
-    src = ("SIMULATED stand-in on the real Brainnetome parcellation" if simulated
-           else "BrainMap behavioural domains on Brainnetome (Fan et al. 2016)")
-    src += f", {level} level ({'210 subregions' if level == 'subregion' else '40 gyri'})"
-    family = "behavioural" if level == "subregion" else f"behavioural_{level}"
-    return ReferenceMaps(family, domains, vertex, simulated=simulated, source=src)
+    cats = [c for c in table.columns if "." in c or c in ("Action", "Cognition", "Emotion",
+                                                           "Interoception", "Perception")]
+    lut = np.full((247, len(cats)), np.nan)
+    lut[table["bn_index"].to_numpy(int)] = table[cats].to_numpy(float)
+    lab = brainnetome_labels(data, ref)
+    vox = lut[lab].T                                    # (n_cats, V); label 0 -> NaN
+    src = ("SIMULATED stand-in on the real Brainnetome atlas (246 incl. subcortex)"
+           if simulated else "BrainMap behavioural domains on Brainnetome (Fan et al. 2016)")
+    return ReferenceMaps("behavioural", cats, vox, simulated=simulated, source=src)
 
 
-# -------------------------------------------------------------- spin test ---
-def spin_indices(surf: Surface, n_spins: int, seed: int = 0) -> dict:
-    """{hemi: (n_spins, 10242) int} -- rotated vertex i takes the value of
-    original vertex idx[s, i]. Left gets R, right gets R mirrored in x."""
-    from scipy.spatial import cKDTree
-    from scipy.spatial.transform import Rotation
-
-    rots = Rotation.random(n_spins, random_state=seed).as_matrix()
-    flip = np.diag([-1.0, 1.0, 1.0])
-    out = {}
-    for h in HEMIS:
-        xyz = surf.sphere[h][0]
-        xyz = xyz / np.linalg.norm(xyz, axis=1, keepdims=True)
-        tree = cKDTree(xyz)
-        idx = np.empty((n_spins, len(xyz)), dtype=np.int32)
-        for s, R in enumerate(rots):
-            Rh = R if h == "L" else flip @ R @ flip
-            idx[s] = tree.query(xyz @ Rh.T)[1]
-        out[h] = idx
-    return out
+def subcortical_structures(data: Path, ref) -> dict:
+    """Brainnetome's four deep gyri as indicator volumes -- for the
+    simulation's ground truth, so simulated states have subcortex too."""
+    bn = brainnetome_table(data)
+    lab = brainnetome_labels(data, ref)
+    return {g: np.isin(lab, bn.loc[bn["gyrus"] == g, "bn_index"]).astype(float)
+            for g in BN_SUBCORTICAL}
 
 
-def null_parcel_maps(ref: ReferenceMaps, parc: SurfaceParcellation,
-                     spins: dict) -> np.ndarray:
-    """(n_spins, n_maps, n_parcels): each reference map, rotated and
-    re-parcellated. Medial-wall vertices are NaN and stay NaN when rotated,
-    so a parcel that rotates onto the wall averages over fewer vertices."""
-    n_spins = spins["L"].shape[0]
-    out = np.empty((n_spins, len(ref.names), len(parc.names)))
-    for s in range(n_spins):
-        rotated = {}
-        for h in HEMIS:
-            v = ref.vertex[h][:, spins[h][s]]
-            v[:, ~parc.labels[h].astype(bool)] = np.nan
-            rotated[h] = v
-        out[s] = parc.parcellate(rotated)
-    return out
-
-
+# ------------------------------------------------------------- statistics ---
 def correlate(states: np.ndarray, maps: np.ndarray) -> np.ndarray:
     """(K, P) x (..., M, P) -> (..., K, M) Pearson r over parcels, NaN-safe
     per pair: a parcel missing from either side drops out of that pair."""
-    s = np.asarray(states, float)[:, None, :]          # K,1,P
-    m = np.asarray(maps, float)[..., None, :, :]       # ...,1,M,P
+    s = np.asarray(states, float)[:, None, :]
+    m = np.asarray(maps, float)[..., None, :, :]
     ok = np.isfinite(s) & np.isfinite(m)
     n = ok.sum(-1)
-    sx = np.where(ok, s, 0.0)
-    mx = np.where(ok, m, 0.0)
-    ms = sx.sum(-1) / n
-    mm = mx.sum(-1) / n
+    ms = np.where(ok, s, 0.0).sum(-1) / n
+    mm = np.where(ok, m, 0.0).sum(-1) / n
     ds = np.where(ok, s - ms[..., None], 0.0)
     dm = np.where(ok, m - mm[..., None], 0.0)
-    num = (ds * dm).sum(-1)
-    den = np.sqrt((ds ** 2).sum(-1) * (dm ** 2).sum(-1))
     with np.errstate(invalid="ignore", divide="ignore"):
-        return num / den
+        return (ds * dm).sum(-1) / np.sqrt((ds ** 2).sum(-1) * (dm ** 2).sum(-1))
 
 
 def fdr_bh(p: np.ndarray) -> np.ndarray:
-    """Benjamini-Hochberg q-values over every entry of `p`."""
     flat = np.asarray(p, float).ravel()
-    order = np.argsort(flat)
-    ranked = flat[order] * len(flat) / np.arange(1, len(flat) + 1)
+    out = np.full_like(flat, np.nan)
+    ok = np.isfinite(flat)
+    f = flat[ok]
+    order = np.argsort(f)
+    ranked = f[order] * len(f) / np.arange(1, len(f) + 1)
     q = np.minimum.accumulate(ranked[::-1])[::-1]
-    out = np.empty_like(flat)
-    out[order] = np.minimum(q, 1.0)
+    tmp = np.empty_like(f)
+    tmp[order] = np.minimum(q, 1.0)
+    out[ok] = tmp
     return out.reshape(np.shape(p))
 
 
-def spin_test(states: np.ndarray, ref: ReferenceMaps, parc: SurfaceParcellation,
-              spins: dict) -> dict:
-    """r, two-sided spin p, and BH q within the family (all states x maps)."""
-    obs = parc.parcellate(ref.vertex)                    # M, P
-    r = correlate(states, obs)                           # K, M
-    null = correlate(states, null_parcel_maps(ref, parc, spins))  # S, K, M
-    p = (1 + (np.abs(null) >= np.abs(r)[None]).sum(0)) / (1 + null.shape[0])
-    return {"r": r, "p": p, "q": fdr_bh(p), "parcel_maps": obs}
+NULLS = ("moran", "burt")
+
+
+def _moran_surrogates(x: np.ndarray, D: np.ndarray, n: int, rng) -> np.ndarray:
+    """Moran spectral randomisation, singleton procedure (Wagner & Dray 2015,
+    as in BrainSpace). The map is written in the eigenbasis of the doubly-
+    centred inverse-distance matrix (Moran eigenvector maps); flipping the
+    sign of each coefficient at random keeps its projection on every spatial
+    scale, hence its Moran's I, exactly -- and costs one matrix product."""
+    W = np.zeros_like(D)
+    off = D > 0
+    W[off] = 1.0 / D[off]
+    C = np.eye(len(x)) - 1.0 / len(x)
+    lam, V = np.linalg.eigh(C @ W @ C)
+    V = V[:, np.abs(lam) > 1e-10]
+    a = V.T @ (x - x.mean())
+    signs = rng.choice([-1.0, 1.0], size=(n, len(a)))
+    return x.mean() + (signs * a) @ V.T
+
+
+def surrogates(parcel_maps: np.ndarray, centroids: np.ndarray, n: int,
+               seed: int = 0, method: str = "moran") -> np.ndarray:
+    """(M, P) -> (n, M, P) surrogates that keep each map's spatial autocorrelation.
+
+    `moran` (default): Moran spectral randomisation, milliseconds per map.
+    `burt`: variogram matching (Burt et al. 2020, brainsmash), the usual choice
+    for a final analysis -- ~45 s per map at 111 parcels, ~2.5 min at 254, so
+    a full run is hours: a cluster job, not a pilot.
+
+    Parcels a map has no value for stay NaN in every surrogate; a constant map
+    (a network with no voxel in this atlas) gets NaN surrogates and no p.
+    """
+    from scipy.spatial.distance import cdist
+
+    if method not in NULLS:
+        raise ValueError(f"null must be one of {NULLS}, got {method!r}")
+    if method == "burt":
+        from brainsmash.mapgen.base import Base
+
+        if not hasattr(np, "row_stack"):   # brainsmash 0.11 still calls it; numpy >= 2.4 dropped it
+            np.row_stack = np.vstack
+    rng = np.random.default_rng(seed)
+    M, P = parcel_maps.shape
+    out = np.full((n, M, P), np.nan)
+    for m in range(M):
+        x = parcel_maps[m]
+        ok = np.isfinite(x)
+        if ok.sum() < MIN_PARCELS_FOR_NULL or np.nanstd(x) == 0:
+            continue
+        D = cdist(centroids[ok], centroids[ok])
+        if method == "moran":
+            out[:, m, ok] = _moran_surrogates(x[ok], D, n, rng)
+        else:
+            out[:, m, ok] = Base(x=x[ok], D=D, seed=seed + m, resample=True)(n=n)
+    return out
+
+
+def null_test(states: np.ndarray, parcel_maps: np.ndarray, centroids: np.ndarray,
+              n: int, seed: int = 0, method: str = "moran") -> dict:
+    """r, two-sided p against surrogates, BH q within the family."""
+    r = correlate(states, parcel_maps)
+    if n <= 0 or parcel_maps.shape[1] < MIN_PARCELS_FOR_NULL:
+        nan = np.full_like(r, np.nan)
+        return {"r": r, "p": nan, "q": nan}
+    null = correlate(states, surrogates(parcel_maps, centroids, n, seed, method))  # n, K, M
+    valid = np.isfinite(null).all(0)
+    p = (1 + (np.abs(null) >= np.abs(r)[None]).sum(0)) / (1 + n)
+    p = np.where(valid & np.isfinite(r), p, np.nan)
+    return {"r": r, "p": p, "q": fdr_bh(p)}
+
+
+# ---------------------------------------------------------------- surface ---
+@dataclass
+class Surface:
+    pial: dict
+    white: dict
+    sphere: dict
+    cortex: dict
+
+
+def load_surface(data: Path) -> Surface:
+    def mesh(p):
+        g = nib.load(str(p))
+        return g.darrays[0].data.astype(float), g.darrays[1].data.astype(int)
+
+    pial, white, sphere, cortex = {}, {}, {}, {}
+    for h in HEMIS:
+        pial[h] = mesh(_tf(data, f"tpl-fsaverage_hemi-{h}_den-10k_pial.surf.gii"))
+        white[h] = mesh(_tf(data, f"tpl-fsaverage_hemi-{h}_den-10k_white.surf.gii"))
+        sphere[h] = mesh(_tf(data, f"tpl-fsaverage_hemi-{h}_den-10k_sphere.surf.gii"))
+        cortex[h] = np.asarray(nib.load(str(_tf(
+            data, f"tpl-fsaverage_hemi-{h}_den-10k_atlas-Yeo2011_seg-7n_dseg.label.gii"
+        ))).darrays[0].data) > 0
+    return Surface(pial, white, sphere, cortex)
+
+
+def vertex_labels(parc: Parcellator, surf: Surface) -> dict:
+    """Parcel (1..P, 0 = none) per fsaverage5 vertex, for drawing a state.
+
+    Sampled between white and pial with the most frequent label. For a label
+    atlas two repairs follow, both near the midline or label edges: a vertex
+    holding the other hemisphere's parcel is cleared, and every cleared or
+    unlabelled cortical vertex takes its nearest labelled neighbour on the
+    sphere. Sphere atlases are left as they are -- 5 mm balls are meant to
+    look like balls, not to tile the cortex.
+    """
+    from nilearn.surface import InMemoryMesh, vol_to_surf
+    from scipy.spatial import cKDTree
+
+    lab_img = nib.Nifti1Image(parc.label_volume().astype(np.float32), parc.ref.affine)
+    hemi_of = np.concatenate([["-"], parc.spec.labels["hemi"].astype(str).to_numpy()])
+    out = {}
+    for h in HEMIS:
+        v = vol_to_surf(lab_img, InMemoryMesh(*surf.pial[h]),
+                        inner_mesh=InMemoryMesh(*surf.white[h]),
+                        interpolation="nearest_most_frequent")
+        lab = np.rint(np.nan_to_num(v)).astype(int)
+        if parc.spec.kind == "labels":
+            wrong = np.isin(hemi_of[lab], ["L", "R"]) & (hemi_of[lab] != h)
+            lab[wrong] = 0
+            have = surf.cortex[h] & (lab > 0)
+            need = surf.cortex[h] & (lab == 0)
+            if need.any() and have.any():
+                xyz = surf.sphere[h][0]
+                _, nn = cKDTree(xyz[have]).query(xyz[need])
+                lab[need] = lab[have][nn]
+        lab[~surf.cortex[h]] = 0
+        out[h] = lab
+    return out
 
 
 def short(name: str) -> str:
-    """Compact axis label for long names."""
-    return re.sub(r"^(Perception|Cognition|Action)\.", lambda m: m.group(1)[0] + ".", name)
+    """`Perception.Vision.Motion` -> `Vision · Motion`; one level -> itself."""
+    parts = name.split(".")
+    return " · ".join(parts[1:]) if len(parts) > 1 else name

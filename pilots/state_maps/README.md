@@ -1,131 +1,139 @@
 # Piloto: brain states × mapas de referência
 
-Como ler um brain state em termos neuroanatômicos: a ativação média do estado
-no córtex e, ao lado, a correlação desse padrão com três famílias de mapas.
+Como ler um brain state em termos neuroanatômicos: a ativação média do estado,
+no córtex e no subcórtex, e ao lado a correlação desse padrão com quatro
+famílias de mapas. Há uma figura para cada atlas do pipeline.
 
-![overview](figures/state_maps_overview.png)
+![harvardoxford](figures/harvardoxford/state_maps_overview.png)
 
-| família | o que é | fonte usada aqui | status |
+| família | o que é | fonte | status |
 |---|---|---|---|
-| **Molecular** | 19 mapas PET de receptores/transportadores (5-HT, DA, NE, ACh, GABA, Glu, CB1, MOR, H3) | conjunto de Hansen et al. 2022, que é o que o `neuromaps` serve como anotações MNI152; baixado do repositório do artigo | **real** |
-| **Comportamental** | perfil de domínios comportamentais do BrainMap para cada sub-região do Brainnetome (Fan et al. 2016), em dois níveis da hierarquia do atlas: 210 sub-regiões e os 40 giros que elas formam | parcelação Brainnetome real (TemplateFlow); **tabela de domínios simulada** | **parcelação real, perfis SIMULADOS** |
-| **Canônico** | redes de Yeo 2011 (7 redes) | TemplateFlow, fsaverage5 | **real** |
-| **Estados** | médias por estado sobre as 96 parcelas corticais do `harvardoxford` | simulados (veja abaixo) ou `fmri-decomp state-means --csv` | **simulados** neste piloto |
+| **Molecular** | 19 mapas PET de receptores/transportadores (5-HT, DA, NE, ACh, GABA, Glu, CB1, MOR, H3) | conjunto de Hansen et al. 2022, que é o que o `neuromaps` serve em MNI152; baixado do repositório do artigo | **real** |
+| **Comportamental** | perfil de cada sub-região do Brainnetome na taxonomia do BrainMap, em todas as subcategorias (ex.: Perception → Vision → Motion), agrupadas por domínio | atlas Brainnetome real (246 regiões, **com subcórtex**); **perfis simulados** | **atlas real, perfis SIMULADOS** |
+| **Canônico: Yeo 7** | redes de Yeo 2011 | volume liberal MNI152, o mesmo que o `yeo7` do repo usa | **real** |
+| **Canônico: nossas 14 redes** | o atlas `networks` deste repo (254 esferas de 5 mm) | `fmri_decomposition.get_atlas("networks")` | **real** |
+| **Estados** | médias por estado no atlas em que foram ajustados | simulados, ou `fmri-decomp state-means --csv` | **simulados** neste piloto |
 
 ```bash
-pilots/state_maps/fetch_reference_maps.sh          # ~280 MB em pilots/state_maps/data/
-python pilots/state_maps/pilot.py                  # estados simulados, ~2 min
-# com dados reais:
+pip install -e ".[atlases]" matplotlib openpyxl      # + brainsmash para --null burt
+pilots/state_maps/fetch_reference_maps.sh             # ~285 MB em pilots/state_maps/data/
+python pilots/state_maps/pilot.py                     # 4 atlases, estados simulados, ~10 min
+
+# com dados reais (um atlas por vez):
 fmri-decomp state-means --atlas harvardoxford --window-s -1 \
     --states HMM2_pca14_10 --csv sm.csv
-python pilots/state_maps/pilot.py --state-means sm.csv [--behavioural bna_brainmap.csv]
+python pilots/state_maps/pilot.py --atlases harvardoxford --state-means sm.csv \
+    [--behavioural bna_brainmap.csv] [--null burt]
 ```
 
-Dependências além do pacote: `nilearn` (`pip install -e ".[atlases]"`) e
-`matplotlib`. O `neuromaps` não é necessário; veja a seção sobre ele abaixo.
+Saídas em `figures/<atlas>/`:
 
-Saídas em `figures/`:
+- `state_maps_overview.png`: uma linha por estado. Mostra o córtex (lateral e medial, esquerda e depois direita), dois cortes subcorticais (axial z=2 e coronal y=−10) e as quatro faixas de correlação.
+- `state_card_S<k>.png`: um estado em tamanho de leitura, com barras ordenadas por família.
+- `state_map_correlations.csv`: r, p e q (FDR) para cada estado × mapa.
+- `simulated_state_means.csv`: os estados simulados, no formato do `state-means --csv`.
+- `provenance.json`: de onde veio o atlas e cada família, o que é simulado e a verdade da simulação.
 
-- `state_maps_overview.png/.pdf`: uma linha por estado, cérebro em 4 vistas (lateral e medial, esquerda e direita) e as três faixas de correlação.
-- `state_card_S<k>.png`: um estado em tamanho de leitura, com barras ordenadas por família (top 8 por |r|, todas as 7 redes de Yeo).
-- `state_map_correlations.csv`: r, p do spin test e q (FDR) para cada estado × mapa.
-- `provenance.json`: de onde veio cada família, o que é simulado e a verdade da simulação.
+## Os nossos atlas
 
-## Como funciona
+O piloto roda nos quatro atlas que o pipeline extrai, com o código do próprio
+repo:
 
-**Espaço comum.** Os três tipos de mapa têm formatos diferentes: volume PET em
-MNI, tabela por região do Brainnetome e rótulos em fsaverage. O único lugar
-onde os três se encontram é a superfície cortical, então tudo vai para o
-fsaverage5 (10.242 vértices por hemisfério) e de lá para as **parcelas do
-atlas dos estados**. A correlação é calculada entre parcelas (n = 96), com um
-valor por parcela dos dois lados.
+| atlas | parcelas | de onde veio aqui |
+|---|---|---|
+| `harvardoxford` | 111 (96 corticais + 15 subcorticais) | `get_atlas` primeiro. Como o nilearn baixa do NITRC, que estava bloqueado, o atlas foi **reconstruído pelo mesmo caminho de código** (`plan_harvard_oxford_merge`, `AtlasSpec.from_label_image`) a partir das mesmas imagens FSL vindas do TemplateFlow: os mesmos 111 nomes, na mesma ordem. |
+| `networks_nodes` | 254 esferas | `get_atlas`, sem download (o CSV está no repo) |
+| `networks` | 14 redes | `get_atlas` |
+| `yeo7` | 7 redes | `get_atlas` primeiro. Como o nilearn baixa do servidor do FreeSurfer, que estava bloqueado, o atlas foi reconstruído a partir do mesmo volume (`Yeo2011_7Networks…LiberalMask`, cópia do neuroparc) |
 
-- PET → superfície por `nilearn.vol_to_surf`, amostrando entre a superfície white e a pial. Os zeros fora da máscara de cada PET são tratados como "não medido", não como zero. Cada mapa é z-scored no córtex.
-- Brainnetome: o TemplateFlow só tem o atlas em fsaverage 164k. O fsaverage5 corresponde aos primeiros 10.242 vértices do fsaverage (os icosaedros são aninhados), então a reamostragem é só um corte do array.
-- Yeo7: um mapa indicador por rede. Parcelado, ele vira a fração de cada parcela que pertence à rede.
-- Harvard-Oxford: o volume `HOCPAL` thr25 é projetado com rótulo mais frequente. Vértices que pegaram o rótulo do outro hemisfério recebem o homólogo do próprio lado, e buracos do thr25 recebem o vizinho mais próximo na esfera.
+No cluster, onde o cache do nilearn existe, o `get_atlas` funciona direto. O
+`provenance.json` registra qual caminho foi usado.
 
-**Estatística.** Dois mapas cerebrais suaves se correlacionam muito mais do
-que dois vetores aleatórios, porque parcelas vizinhas não são independentes. O
-p paramétrico sobre 96 parcelas é anticonservador. Por isso o piloto usa o
-**spin test** (Alexander-Bloch et al. 2018): o mapa de referência é girado na
-esfera (o hemisfério direito recebe a rotação espelhada do esquerdo), parcelado
-de novo e correlacionado de novo, 1000 vezes. O FDR (BH) é aplicado dentro de
-cada família, sobre todos os pares estado × mapa.
+**Tudo é parcelado no espaço do pipeline** (MNI152NLin6Asym, 2 mm) com
+`AtlasSpec.membership`. É a mesma matriz que transformou voxels nas séries
+temporais em que os estados foram ajustados, então o valor de um mapa na
+parcela k é calculado exatamente como o valor do estado na parcela k,
+subcórtex incluído. A superfície só entra no desenho.
 
-Na figura, `•` marca p < .05 sem correção, `✱` marca q < .05 e `★` marca q < .01.
+## Estatística
 
-**Limitação de resolução.** Com 1000 rotações o menor p possível é 1/1001. Com
-114 testes na família molecular, o menor q possível fica perto de 0,11, então
-nada ali pode sobreviver ao FDR. A melhor correlação molecular, Visual × MOR
-(r = −0,74, p_spin = .001), é um exemplo. Para os dados reais, rode com
-`--n-spins 10000` (cerca de 10 min).
+Mapas cerebrais suaves se correlacionam muito mais do que vetores
+aleatórios, porque parcelas vizinhas não são independentes. Por isso o p vem de
+**mapas substitutos que preservam a autocorrelação espacial** de cada mapa de
+referência, medida pelas distâncias entre os centróides das parcelas. Isso vale
+para subcórtex e para atlas de esferas, onde o spin test não se aplica.
+
+- `--null moran` (padrão): Moran spectral randomization (Wagner & Dray 2015, como no BrainSpace), com 10.000 substitutos por mapa (`--n-nulls`). Roda em segundos.
+- `--null burt`: variogram matching (Burt et al. 2020, brainsmash). Leva cerca de 45 s por mapa com 111 parcelas e cerca de 2,5 min com 254; com 85 mapas, isso dá horas. É um job de cluster, para a análise final.
+
+O FDR (BH) é aplicado dentro de cada família, sobre todos os pares estado ×
+mapa. O número de substitutos importa: o menor p possível é 1/(n+1), e na
+família molecular (6 estados × 19 mapas = 114 testes) 1000 substitutos não
+deixam nenhum q chegar a .05. Por isso o padrão é 10.000. Na figura, `•` marca p < .05 sem correção, `✱` marca q < .05 e `★` marca
+q < .01.
+
+**`yeo7` (7) e `networks` (14) não têm p-valor.** Uma correlação sobre 7 ou 14
+pontos é descrição, e nenhum modelo nulo transforma isso em inferência. Para
+esses atlas a figura mostra o padrão e as correlações sem marcas.
 
 ## Os estados simulados têm resposta conhecida
 
-Cada estado é uma mistura com sinal de redes de Yeo, mais ruído espacialmente
-suave (kernel gaussiano de 25 mm entre centróides). O piloto sorteia 6000
-frames ruidosos numa cadeia de Markov "pegajosa" e tira a média por rótulo, o
-mesmo groupby que o `state-means` faz.
+Cada estado é uma mistura, com sinal, de redes de Yeo e das quatro estruturas
+profundas do Brainnetome (amígdala, hipocampo, núcleos da base e tálamo), mais
+ruído espacialmente suave. O piloto sorteia 6000 frames ruidosos numa cadeia
+de Markov "pegajosa" e tira a média por rótulo, o mesmo groupby do
+`state-means`.
 
-| estado | mistura (verdade) | rede de Yeo recuperada com maior r |
-|---|---|---|
-| S1 Default | +Default −DorsAttn −SomMot | Default r = .78 ★, DorsAttn −.47 ★, SomMot −.51 ★ |
-| S2 Visual | +Visual −Default | Visual .85 ★, Default −.57 ★ |
-| S3 Sensorimotor | +SomMot +VentAttn −FPN | SomMot .87 ★ |
-| S4 Task-positive | +DorsAttn +FPN −Default | DorsAttn .67 ★, FPN .46 ★, Default −.47 ★ |
-| S5 Limbic | +Limbic +Default −Visual | Limbic .77 ★, Visual −.62 ★ |
-| S6 Salience | +VentAttn +SomMot −Default | VentAttn .73 ★, Default −.61 ★ |
+| estado | mistura (verdade) |
+|---|---|
+| Default | +Default −DorsAttn −SomMot +hipocampo |
+| Visual | +Visual −Default +tálamo |
+| Sensorimotor | +SomMot +VentAttn −FPN +núcleos da base +tálamo |
+| Task-positive | +DorsAttn +FPN −Default +núcleos da base |
+| Limbic | +Limbic +Default −Visual +amígdala +hipocampo |
+| Salience | +VentAttn +SomMot −Default +tálamo +amígdala |
 
-O painel canônico recupera a mistura em todos os estados, o que valida a
-cadeia projeção → parcelamento → correlação → spin. Os padrões moleculares que
-aparecem (por exemplo Visual × MOR e CB1 negativos, Sensorimotor × VAChT
-positivo) são correlações **reais** entre mapas de receptores e esses padrões
-sintéticos. Como os estados são construídos a partir das redes, essas
-correlações descrevem as redes, não um achado.
+Se o painel de Yeo não recupera a mistura, o problema está no pipeline, não nos
+estados. As correlações moleculares são **reais**, mas são entre mapas de
+receptores e padrões sintéticos construídos a partir das redes. Descrevem as
+redes, não um achado.
 
-## Por que a parte comportamental está simulada
+## A parte comportamental: taxonomia completa, perfis simulados
 
-Os perfis de domínio comportamental do BrainMap por sub-região (forward
-inference de Fan et al. 2016) são servidos pelo site atlas.brainnetome.org.
-Daqui, o site não respondeu: nem o DNS resolve. Também não estão no repositório
-GitHub oficial (`BrainnetomeAtlas/HUMAN-BRAINNETOME-ATLAS`, que só tem o README;
-os arquivos ficam em releases/LFS) nem no TemplateFlow.
+O Brainnetome caracteriza cada sub-região pelos rótulos do BrainMap (Fan et al.
+2016), que são hierárquicos: domínio → subdomínio → sub-subdomínio. O painel
+mostra **todas as folhas**, por exemplo `Vision · Motion`, `Language ·
+Semantics`, `Somesthesis · Pain`, `Memory · Working`, agrupadas sob os cinco
+domínios (Action, Cognition, Emotion, Interoception e Perception).
 
-`refmaps.simulate_behavioural_table` gera uma tabela **no mesmo formato** a
-partir de um prior de livro-texto por giro (IFG → linguagem, PrG → execução
-motora, MVOcC → visão etc.) mais ruído. A tabela só existe para construir e
-testar o painel. A figura marca esse painel com hachura e "SIMULATED" e não
-deve ser lida como resultado.
+**Os perfis estão simulados.** Os perfis reais por sub-região estão em
+atlas.brainnetome.org, e nem o DNS desse site resolveu daqui; brainmap.org
+também não. O atlas em si (volume com as 246 regiões e a tabela de
+sub-regiões) veio da cópia que o DPABI distribui. A tabela simulada usa um
+prior de livro-texto por giro, refinado para as sub-regiões cujo nome diz mais
+(V5/MT+ → Vision·Motion, A41/42 → Audition, A44/45 → Language, A4tl →
+Execution·Speech, etc.), mais ruído. A figura marca esse painel com hachura e
+"SIMULATED".
 
-**Níveis.** O Brainnetome é hierárquico: as 210 sub-regiões corticais se
-agrupam em 20 giros por hemisfério (SFG, MFG, …, LOcC; Fan et al. 2016,
-Tabela 1). `--bn-levels subregion gyrus` (o padrão) mostra os dois níveis lado
-a lado. O nível de giro é a média do perfil das sub-regiões de cada giro, então
-os dois painéis vêm da mesma tabela e diferem só na granularidade. Com a
-tabela simulada eles quase coincidem, porque o prior simulado é definido por
-giro. Com os perfis reais, a diferença entre os dois mostra quanto a
-especialização dentro de cada giro importa para o estado.
+A lista de categorias em `refmaps.BRAINMAP_TAXONOMY` foi escrita à mão a partir
+da taxonomia publicada, sem consulta à fonte. Confira contra a tabela real; quando ela entrar,
+as colunas passam a vir dela.
 
-Para usar os perfis reais, monte um CSV com `bn_index` (1..246, numeração do
-BNA: ímpar = esquerdo, par = direito) e uma coluna por domínio, com qualquer
-escore monotônico (z, razão de verossimilhança ou 0/1). Depois rode com
-`--behavioural arquivo.csv`. As linhas subcorticais (211..246) são aceitas e
-ignoradas.
+**Formato da tabela real** (`--behavioural arquivo.csv`): uma coluna
+`bn_index` (1..246, numeração do BNA: ímpar = esquerdo, par = direito) e uma
+coluna por categoria com o caminho completo (`Perception.Vision.Motion`), com
+qualquer escore monotônico (z, razão de verossimilhança ou 0/1). Os grupos de
+domínio da figura saem do primeiro nível do nome.
 
 ## Sobre o `neuromaps`
 
-`pip install neuromaps` funciona, mas `neuromaps.datasets.fetch_annotation`
-baixa do OSF, que estava bloqueado neste ambiente. Por isso os PET vêm do
-repositório do artigo (`netneurolab/hansen_receptors`), que tem os mesmos
-volumes. Num ambiente com OSF dá para trocar por `fetch_annotation` e usar o
-`neuromaps.transforms.mni152_to_fsaverage` (registration fusion), que é mais
-preciso que a projeção direta do nilearn usada aqui. Também dá para usar o
-`neuromaps.nulls` no lugar do spin implementado em `refmaps.py`.
+`neuromaps.datasets.fetch_annotation` baixa do OSF, que estava bloqueado
+neste ambiente. Os PET vêm do repositório do artigo
+(`netneurolab/hansen_receptors`), que tem os mesmos volumes. Num ambiente com
+OSF dá para trocar por `fetch_annotation` e usar o `neuromaps.nulls`.
 
-## Decisões a revisitar no projeto real
+## Decisões a revisitar
 
-- **Só córtex.** As 15 parcelas subcorticais do `harvardoxford` são ignoradas e o script lista quais. Uma versão volumétrica (parcelar os PET direto no volume do HO) resolveria isso para a família molecular.
-- **Atlas dos estados.** Os estados `yeo7` e `networks` (14 redes) têm poucas parcelas para uma correlação espacial ter poder estatístico. Este painel só faz sentido para `harvardoxford`. Para os outros, o natural é mostrar a média por rede, sem correlação.
-- **Yeo7 como correlação ou como média.** Aqui é a correlação com a fração de cada rede. A alternativa, mais direta de ler, é a ativação média do estado dentro de cada rede (um radar plot).
-- **Estados de DFC** (janelas de conectividade) não são mapas de ativação. Para eles seria preciso derivar um mapa por parcela, por exemplo a força nodal, antes de entrar aqui.
+- **Estados de DFC** (janelas de conectividade) não são mapas de ativação. Para entrarem aqui, é preciso derivar um mapa por parcela, por exemplo a força nodal.
+- **`networks_nodes`**: as esferas de 5 mm amostram pouco tecido. Nos mapas PET de baixa resolução (3 mm), uma esfera tem poucos voxels independentes.
+- **`harvardoxford` reconstruído vs. nilearn**: o `symmetric_split` do nilearn e a versão lateralizada do FSL (HOCPAL) podem diferir em alguns voxels na linha média. Com os estados reais, use o atlas do cluster.

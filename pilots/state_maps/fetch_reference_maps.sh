@@ -4,26 +4,32 @@
 #   pilots/state_maps/fetch_reference_maps.sh [DATA_DIR]     (default: pilots/state_maps/data)
 #
 # Every file comes from a host that serves plain HTTPS -- TemplateFlow's S3
-# bucket and raw.githubusercontent.com -- so this runs where OSF, NITRC and
-# atlas.brainnetome.org are unreachable (a cluster login node, a sandbox).
-# ~280 MB, almost all of it the PET volumes.
+# bucket and raw.githubusercontent.com -- so this runs where OSF, NITRC,
+# surfer.nmr.mgh.harvard.edu and atlas.brainnetome.org are unreachable (a
+# cluster login node, a sandbox). ~285 MB, almost all of it PET.
 #
 #   molecular   19 PET receptor/transporter maps, one tracer per target: the
 #               set of Hansen et al. 2022 (Nat Neurosci), which is what
 #               neuromaps serves as its MNI152 annotations. Pulled from the
 #               paper's repo because neuromaps' own fetcher needs OSF.
-#   canonical   Yeo 2011 7-network, fsaverage5, from TemplateFlow
-#   behavioural Brainnetome cortical parcellation (210), fsaverage, from
-#               TemplateFlow. The BrainMap behavioural-domain profiles per
-#               subregion are NOT here -- see README.md.
-#   state atlas Harvard-Oxford cortical, lateralised, thr25, 2 mm (the cortical
-#               half of the pipeline's `harvardoxford` atlas), from TemplateFlow
-#   surfaces    fsaverage5 pial / white / sphere, from TemplateFlow
+#   behavioural Brainnetome 246 (incl. subcortex), MNI 1.25 mm, and its
+#               subregion table, from DPABI's bundled copy. The BrainMap
+#               profiles per subregion are NOT here -- see README.md.
+#   canonical   Yeo 2011 7 networks, liberal mask, MNI152NLin6 1 mm (neuroparc)
+#               -- the volume nilearn's `thick_7` is, which the repo's `yeo7`
+#               atlas uses. The 14 `networks` ship with this repo.
+#   state atlas Harvard-Oxford cortical (lateralised) + subcortical, thr25,
+#               2 mm, from TemplateFlow -- the sources of the repo's
+#               `harvardoxford`, for where nilearn cannot fetch it
+#   surfaces    fsaverage5 pial / white / sphere and the Yeo labels whose
+#               medial wall is the cortex mask, from TemplateFlow
 set -euo pipefail
 
 DATA="${1:-$(dirname "$0")/data}"
 TF=https://templateflow.s3.amazonaws.com
 HR=https://raw.githubusercontent.com/netneurolab/hansen_receptors/main/data/PET_nifti_images
+DPABI=https://raw.githubusercontent.com/Chaogan-Yan/DPABI/master/Templates
+NEUROPARC=https://raw.githubusercontent.com/neurodata/neuroparc/master/atlases/label/Human
 
 PET=(
   5HT1a_way_hc36_savli.nii
@@ -49,9 +55,8 @@ PET=(
 
 TEMPLATEFLOW=(
   tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-02_atlas-HOCPAL_desc-th25_dseg.nii.gz
-  tpl-fsaverage/tpl-fsaverage_atlas-brainnetome_dseg.tsv
-  tpl-fsaverage/tpl-fsaverage_hemi-L_den-164k_atlas-brainnetome_dseg.label.gii
-  tpl-fsaverage/tpl-fsaverage_hemi-R_den-164k_atlas-brainnetome_dseg.label.gii
+  tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_res-02_atlas-HOSPA_desc-th25_dseg.nii.gz
+  tpl-MNI152NLin6Asym/tpl-MNI152NLin6Asym_atlas-HOSPA_dseg.tsv
   tpl-fsaverage/tpl-fsaverage_hemi-L_den-10k_atlas-Yeo2011_seg-7n_dseg.label.gii
   tpl-fsaverage/tpl-fsaverage_hemi-R_den-10k_atlas-Yeo2011_seg-7n_dseg.label.gii
 )
@@ -66,8 +71,13 @@ get() {  # url dest -- skip what is already there, never leave a partial file
   curl -sSf --retry 3 -o "$2.part" "$1" && mv "$2.part" "$2"
 }
 
-mkdir -p "$DATA/pet" "$DATA/templateflow"
+mkdir -p "$DATA/pet" "$DATA/templateflow" "$DATA/brainnetome" "$DATA/yeo"
 for f in "${PET[@]}"; do get "$HR/$f" "$DATA/pet/$f" & done
+for f in BrainnetomeAtlas_BNA_MPM_thr25_1.25mm.nii.gz BrainnetomeAtlas_BNA_subregions.xlsx; do
+  get "$DPABI/$f" "$DATA/brainnetome/$f" &
+done
+get "$NEUROPARC/Yeo-7-liberal_space-MNI152NLin6_res-1x1x1.nii.gz" \
+    "$DATA/yeo/Yeo-7-liberal_space-MNI152NLin6_res-1x1x1.nii.gz" &
 for f in "${TEMPLATEFLOW[@]}"; do get "$TF/$f" "$DATA/templateflow/$(basename "$f")" & done
 wait
 echo "reference maps in $DATA: $(find "$DATA" -type f | wc -l) files, $(du -sh "$DATA" | cut -f1)"
