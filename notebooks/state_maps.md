@@ -207,3 +207,7 @@ O mapa de cada estado é sempre **ativação**, lida de `outputs/activation/`. O
 Testado nos arquivos sintéticos do pipeline (`fixtures`), nos dois casos: a diferença em relação a um cálculo manual foi de cerca de 5×10⁻⁸.
 
 O resultado para os estados de DFC mudou. Antes, cada estado virava a força nodal da conectividade; agora é a ativação média durante as janelas do estado. A força nodal continua sendo usada só quando a entrada é um CSV do `state-means` em unidades de aresta.
+
+## Matriz entre mapas de referência
+
+`state_figures.reference_matrix(atlas, rows, cols)` calcula a correlação espacial entre cada mapa de uma família e cada mapa de outra, entre as parcelas do atlas escolhido. O padrão é Yeo 7 × as 38 subcategorias do BrainMap (sem as "Other"). Os asteriscos vêm do mesmo teste espacial das figuras de estados, com FDR sobre a matriz inteira. A função grava `state_maps_results/reference_matrix/reference_matrix_<atlas>_<rows>_x_<cols>.{png,csv}`. No notebook, a seção 3 tem os parâmetros `MATRIX_ATLAS`, `MATRIX_ROWS` e `MATRIX_COLS`.
