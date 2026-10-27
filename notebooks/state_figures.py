@@ -395,6 +395,12 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
                   width_ratios=[2.2, 9.0] + [7.5 if p != "yeo7" else 6.5 for p in panels],
                   left=0.01, right=0.985, top=1 - 1.9 / H, bottom=0.5 / H, wspace=0.55, hspace=0.32)
     n_sub = None if subjects is None else subjects["subject"].nunique()
+    # Subcortical slices only when the atlas has something there: yeo7 and the
+    # 14 coordinate networks are cortical, and empty slices read as a bug.
+    lab = brains.parc.label_volume()
+    inside = np.bincount(lab[brains.deep], minlength=brains.parc.n + 1)[1:]
+    total = np.bincount(lab.ravel(), minlength=brains.parc.n + 1)[1:]
+    has_deep = bool((inside > 0.5 * np.maximum(total, 1)).any())   # a parcel mostly deep
     for i in range(K):
         a = fig.add_subplot(gs[i, 0])
         a.set_axis_off()
@@ -405,15 +411,16 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
         a.text(.95, .28, f"{sm['share'].iloc[i]:.0%} of frames", ha="right", va="center",
                fontsize=18, color=MUTED, transform=a.transAxes)
         z = (X[i] - X[i].mean()) / X[i].std()
-        g = GridSpecFromSubplotSpec(2, 3, subplot_spec=gs[i, 1], wspace=0.03, hspace=0.04,
-                                    width_ratios=[1, 1, 0.81])
+        g = GridSpecFromSubplotSpec(2, 3 if has_deep else 2, subplot_spec=gs[i, 1],
+                                    wspace=0.03, hspace=0.04,
+                                    width_ratios=[1, 1, 0.81] if has_deep else [1, 1])
         for cell, (hemi, view) in zip([g[0, 0], g[0, 1], g[1, 0], g[1, 1]],
                                       [("left", "lateral"), ("right", "lateral"),
                                        ("left", "medial"), ("right", "medial")]):
             ax = fig.add_subplot(cell)
             ax.imshow(surface_image(brains, hemi, view, z, 2.5))
             ax.set_axis_off()
-        for cell, (mode, cut) in zip([g[0, 2], g[1, 2]], SLICES):
+        for cell, (mode, cut) in zip([g[0, 2], g[1, 2]] if has_deep else [], SLICES):
             ax = fig.add_subplot(cell)
             ax.imshow(slice_image(brains, mode, cut, z, 2.5))
             ax.set_axis_off()
@@ -480,8 +487,11 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
     fig.text(0.01, 1 - 0.15 / H, f"Brain states — {atlas} ({P} parcels){title_note}",
              fontsize=28, fontweight="bold", color=INK, va="top")
     fig.text(0.01, 1 - 0.75 / H,
-             f"brain: {measure}, z across parcels · top = L lateral · R lateral · axial "
-             f"z={SLICES[0][1]}    bottom = L medial · R medial · coronal y={SLICES[1][1]}"
+             (f"brain: {measure}, z across parcels · top = L lateral · R lateral · axial "
+              f"z={SLICES[0][1]}    bottom = L medial · R medial · coronal y={SLICES[1][1]}"
+              if has_deep else
+              f"brain: {measure}, z across parcels · top = L lateral · R lateral    bottom = "
+              f"L medial · R medial    (no subcortical parcels in {atlas}: slices omitted)")
              + ("\nbars: * q<.05, ** q<.01 (group map vs spatial null, FDR within family)"
                 if any(np.isfinite(results[f]["q"]).any() for f in panels) else ""),
              fontsize=20, color=INK2, va="top")
