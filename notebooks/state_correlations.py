@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Brain states x reference maps: the correlation TABLES. No figures.
 
-    python pilots/state_maps/state_correlations.py --states simulate
-    python pilots/state_maps/state_correlations.py --states HMM2_pca14_10 \\
+    python notebooks/state_correlations.py --states simulate
+    python notebooks/state_correlations.py --states HMM2_pca14_10 \\
         --window-s -1 --atlases harvardoxford networks_nodes --output-root /path/outputs
 
 For each state atlas, the states' mean per parcel is correlated across parcels
@@ -151,7 +151,7 @@ def reference_families(data: Path, ref, families, behavioural_csv=None, seed: in
 
 # ------------------------------------------------------------------- run ---
 def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
-            out: Path = HERE / "results", data: Path = HERE / "data",
+            out: Path = HERE / "state_maps_results", data: Path = HERE / "state_maps_data",
             output_root=None, window_s=None, cohorts=None, behavioural_csv=None,
             n_nulls: int = 10000, null: str = "moran", seed: int = 7,
             verbose: bool = True) -> dict:
@@ -222,8 +222,8 @@ def main(argv=None) -> int:
                    help="surrogates per map; the smallest p is 1/(n+1), and BH over 114 "
                         "molecular tests needs it well under .05/114")
     p.add_argument("--null", choices=rm.NULLS, default="moran")
-    p.add_argument("--data", type=Path, default=HERE / "data")
-    p.add_argument("--out", type=Path, default=HERE / "results")
+    p.add_argument("--data", type=Path, default=HERE / "state_maps_data")
+    p.add_argument("--out", type=Path, default=HERE / "state_maps_results")
     p.add_argument("--seed", type=int, default=7)
     a = p.parse_args(argv)
     compute(a.states, a.atlases, a.families, out=a.out, data=a.data,

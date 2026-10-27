@@ -10,7 +10,7 @@ Exploration of what the pipeline wrote. Nothing here writes to `outputs/`.
 | `04_activation_pca.ipynb` | open activation → filter by a `{cohort: [subs]}` dict → PCA (standalone, no `nbtools`) |
 | `06_visualize.ipynb` | the latent-space figures, three cohorts, plus one coloured by symptom |
 | `07_transitions_phenotype.ipynb` | brain-state transitions vs. phenotype: one subject-level table and a volcano over every state set |
-| `08_state_maps.ipynb` | brain states × reference maps: pick a state set, atlases, families and BrainMap depth; tables then figures, via `pilots/state_maps/` |
+| `08_state_maps.ipynb` | brain states × reference maps: pick a state set, atlases, families and BrainMap depth; tables then figures, via `state_correlations.py` + `state_figures.py` (here; see `state_maps.md`) |
 | `nbtools.py` | the loaders they use: inventory, pruned reads, the participants join |
 
 **QC lives in one place.** `03_qc.ipynb` owns subject-level quality control —

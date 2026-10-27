@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reference maps for the brain-state x maps pilot.
 #
-#   pilots/state_maps/fetch_reference_maps.sh [DATA_DIR]     (default: pilots/state_maps/data)
+#   notebooks/fetch_reference_maps.sh [DATA_DIR]     (default: notebooks/state_maps_data)
 #
 # Every file comes from a host that serves plain HTTPS -- TemplateFlow's S3
 # bucket and raw.githubusercontent.com -- so this runs where OSF, NITRC,
@@ -25,7 +25,7 @@
 #               medial wall is the cortex mask, from TemplateFlow
 set -euo pipefail
 
-DATA="${1:-$(dirname "$0")/data}"
+DATA="${1:-$(dirname "$0")/state_maps_data}"
 TF=https://templateflow.s3.amazonaws.com
 HR=https://raw.githubusercontent.com/netneurolab/hansen_receptors/main/data/PET_nifti_images
 DPABI=https://raw.githubusercontent.com/Chaogan-Yan/DPABI/master/Templates

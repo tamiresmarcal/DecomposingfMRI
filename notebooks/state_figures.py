@@ -2,8 +2,8 @@
 """Brain states x reference maps: the FIGURES, drawn from the tables
 `state_correlations.py` wrote. Nothing here recomputes a number.
 
-    python pilots/state_maps/state_figures.py pilots/state_maps/results/simulated
-    python pilots/state_maps/state_figures.py RUN_DIR --atlases harvardoxford \
+    python notebooks/state_figures.py notebooks/state_maps_results/simulated
+    python notebooks/state_figures.py RUN_DIR --atlases harvardoxford \
         --bn-levels domain subcategory
 
 Per atlas: one overview -- a row per state: cortex (lateral and medial, left
@@ -321,7 +321,7 @@ def load_results(atlas_dir: Path, families) -> tuple[pd.DataFrame, dict, dict]:
 
 
 def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
-         data: Path = HERE / "data", cards: bool = True) -> list:
+         data: Path = HERE / "state_maps_data", cards: bool = True) -> list:
     """Draw every atlas under `run_dir`; return the figure paths.
 
     `families` picks the non-behavioural panels; `bn_levels` ("domain",
@@ -367,7 +367,7 @@ def main(argv=None) -> int:
                    choices=["molecular", "yeo7", "networks14"])
     p.add_argument("--bn-levels", nargs="+", default=["subcategory"], choices=list(BN_LEVELS))
     p.add_argument("--no-cards", action="store_true")
-    p.add_argument("--data", type=Path, default=HERE / "data")
+    p.add_argument("--data", type=Path, default=HERE / "state_maps_data")
     a = p.parse_args(argv)
     draw(a.run_dir, a.atlases, a.families, a.bn_levels, data=a.data, cards=not a.no_cards)
     return 0

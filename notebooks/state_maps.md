@@ -4,7 +4,7 @@ Como ler um brain state em termos neuroanatômicos: a ativação média do estad
 no córtex e no subcórtex, e ao lado a correlação desse padrão com quatro
 famílias de mapas. Há uma figura para cada atlas do pipeline.
 
-![harvardoxford](results/simulated/harvardoxford/state_maps_overview.png)
+![harvardoxford](state_maps_results/simulated/harvardoxford/state_maps_overview.png)
 
 | família | o que é | fonte | status |
 |---|---|---|---|
@@ -24,15 +24,15 @@ O notebook chama dois scripts, que também rodam pela linha de comando:
 
 ```bash
 pip install -e ".[atlases]" matplotlib               # + brainsmash para --null burt
-pilots/state_maps/fetch_reference_maps.sh             # uma vez, ~285 MB em data/
+notebooks/fetch_reference_maps.sh             # uma vez, ~285 MB em notebooks/state_maps_data/
 
-# 1. tabelas -> results/<estados>/<atlas>/{state_means,correlations}.csv + provenance.json
-python pilots/state_maps/state_correlations.py --states simulate
-python pilots/state_maps/state_correlations.py --states HMM2_pca14_10 --window-s -1 \
+# 1. tabelas -> state_maps_results/<estados>/<atlas>/{state_means,correlations}.csv + provenance.json
+python notebooks/state_correlations.py --states simulate
+python notebooks/state_correlations.py --states HMM2_pca14_10 --window-s -1 \
     --atlases harvardoxford --output-root /caminho/outputs
 
 # 2. figuras, a partir das tabelas (nenhum número é recalculado aqui)
-python pilots/state_maps/state_figures.py pilots/state_maps/results/simulated \
+python notebooks/state_figures.py notebooks/state_maps_results/simulated \
     --atlases harvardoxford --bn-levels domain subcategory
 ```
 
@@ -40,7 +40,7 @@ python pilots/state_maps/state_figures.py pilots/state_maps/results/simulated \
 `fmri_decomposition.state_means`, a mesma tabela que o `fmri-decomp state-means`
 imprime) ou um CSV do `state-means --csv`.
 
-Saídas em `results/<estados>/<atlas>/`:
+Saídas em `state_maps_results/<estados>/<atlas>/`:
 
 - `state_maps_overview.png`: uma linha por estado. Mostra o córtex (lateral e medial, esquerda e depois direita), dois cortes subcorticais (axial z=2 e coronal y=−10) e uma faixa de correlação por família.
 - `state_card_S<k>.png`: um estado em tamanho de leitura, com barras ordenadas.
