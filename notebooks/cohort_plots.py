@@ -449,8 +449,9 @@ def _hex(c):
 def fig_latents(co, lat, by="participant", who=None, embedding="umap3", paths=False, same_axes=True, height=560):
     """5. One interactive 3D panel per cohort (plotly: drag to rotate, scroll to zoom), a dot per
     window. by = "participant" (a gradient, one colour per person), "task" (rest, each film),
-    "cluster" (the state of cfg.space) or "single": one person per cohort in colour, with their path,
-    over everyone else in grey; who = {cohort: subject id} (a cohort left out gets its first subject).
+    "cluster" (the state set the latents were loaded with) or "single": one person per cohort in
+    colour, with their path, over everyone else in grey. who = {cohort: subject id, or n = the n-th
+    subject in alphabetical order}, or one n for every cohort; a cohort left out gets its first.
     paths = join each person's windows in time order. Saved as an .html in cfg.save_dir."""
     try:
         import plotly.graph_objects as go
@@ -459,18 +460,27 @@ def fig_latents(co, lat, by="participant", who=None, embedding="umap3", paths=Fa
         raise SystemExit("figure 5 needs plotly: pip install --user plotly")
     cfg, col = co.cfg, colours(co.cfg)
     labels = [c for c in cfg.cohorts if c in set(lat["cohort"])]
-    if by == "cluster" and cfg.space["states"] not in lat:
-        raise SystemExit(f"the latents carry no {cfg.space['states']} column: run the clustering stage first")
+    A = {"atlas": cfg.space["atlas"], "window_s": cfg.space["window_s"], "states": cfg.space["states"], **lat.attrs}
+    states = A["states"]
+    if by == "cluster" and states not in lat:
+        raise SystemExit(f"the latents carry no {states} column; latent_options(co) lists the state sets")
     pick = {}
     if by == "single":
-        who = {k: str(v).strip().upper() for k, v in (who or {}).items()}
+        who = {c: who for c in labels} if isinstance(who, (int, np.integer)) else (who or {})
         for c in labels:
             subs = sorted(lat.loc[lat["cohort"] == c, "sub"].unique())
-            pick[c] = who.get(c, subs[0])
-            if pick[c] not in subs:
-                raise SystemExit(f"{pick[c]} is not in {c}; e.g. {subs[:3]}")
+            w = who.get(c, 1)
+            if isinstance(w, (int, np.integer)):                  # 1 = the first subject, alphabetically
+                if not 1 <= w <= len(subs):
+                    raise SystemExit(f"{c} has {len(subs)} subjects: who must be 1..{len(subs)}, not {w}")
+                pick[c] = subs[w - 1]
+            else:
+                pick[c] = str(w).strip().upper()
+                if pick[c] not in subs:
+                    raise SystemExit(f"{pick[c]} is not in {c}; e.g. {subs[:3]}")
     titles = [f"{c} · {co.role(c)} · {lat.loc[lat['cohort'] == c, 'sub'].nunique()} participants"
-              + (f"<br>{pick[c]}" if by == "single" else "") for c in labels]
+              + (f"<br>{pick[c]} (#{sorted(lat.loc[lat['cohort'] == c, 'sub'].unique()).index(pick[c]) + 1})"
+                 if by == "single" else "") for c in labels]
     fig = make_subplots(1, len(labels), specs=[[{"type": "scene"}] * len(labels)], subplot_titles=titles,
                         horizontal_spacing=.02)
     tasks = sorted(lat["task"].astype(str).unique(), key=lambda t: (t.lower() != "rest", t))
@@ -499,7 +509,7 @@ def fig_latents(co, lat, by="participant", who=None, embedding="umap3", paths=Fa
             for t, h in g.groupby(g["task"].astype(str)):
                 fig.add_trace(dots(h, tcol[t], t, j, group=t, hover=h["sub"] + " · " + t), 1, j)
         elif by == "cluster":
-            for k, h in g.groupby(cfg.space["states"]):
+            for k, h in g.groupby(states):
                 fig.add_trace(dots(h, _hex(plt.cm.tab10(int(k) % 10)), f"state {int(k)}", j, group=f"s{int(k)}",
                                    hover=h["sub"] + f" · state {int(k)}"), 1, j)
         elif by == "single":
@@ -520,11 +530,11 @@ def fig_latents(co, lat, by="participant", who=None, embedding="umap3", paths=Fa
         if same_axes:
             scene.update(xaxis_range=rng["x"], yaxis_range=rng["y"], zaxis_range=rng["z"])
         fig.update_layout(**{f"scene{'' if j == 1 else j}": scene})
-    what = {"participant": "participant (gradient)", "task": "task", "cluster": f"state ({cfg.space['states']})",
+    what = {"participant": "participant (gradient)", "task": "task", "cluster": f"state ({states})",
             "single": "one person per cohort vs everyone else"}[by]
     fig.update_layout(height=height, width=520 * len(labels), margin=dict(l=0, r=0, t=90, b=0),
                       title=f"5  Latent space ({embedding}) per cohort · one dot per window · colour = {what} · "
-                            f"{cfg.space['atlas']} · {window_name(cfg)}", legend=dict(itemsizing="constant"))
+                            f"{A['atlas']} · {ht.window_name(A['window_s'])}", legend=dict(itemsizing="constant"))
     if cfg.save_dir:
         hp.Path(cfg.save_dir).mkdir(parents=True, exist_ok=True)
         fig.write_html(hp.Path(cfg.save_dir) / f"5_latents_{embedding}_{by}.html", include_plotlyjs="cdn")

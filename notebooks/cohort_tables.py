@@ -272,15 +272,39 @@ class Cohorts:
         return out.assign(role=[self.role(c) for c in out.index])
 
 
-def load_latents(co, embedding="umap3", max_windows=150, seed=0):
+def latent_options(co, atlas=None, window_s=None):
+    """What stage 4 wrote: every (atlas, window_s) with latents, and the embeddings and state sets
+    (cluster columns) in them. Narrow with atlas / window_s."""
+    import pyarrow.parquet as pq
+    rows = {}
+    for f in (co.cfg.root / "latents").rglob("*.parquet"):
+        a, w = ht.hive(f, "atlas"), ht.hive(f, "window_s")
+        if (atlas and a != atlas) or (window_s is not None and float(w) != float(window_s)):
+            continue
+        names = pq.read_schema(f).names
+        emb = sorted({n.split("/")[0][:-1] + n.split("/")[1] for n in names if "/" in n and n[0].isalpha()})
+        states = sorted(n for n in names if re.fullmatch(r"[A-Za-z0-9]+_[a-z]+\d+_\d+", n))
+        r = rows.setdefault((a, float(w)), dict(atlas=a, window_s=float(w), embeddings=set(), states=set()))
+        r["embeddings"] |= set(emb); r["states"] |= set(states)
+    t = pd.DataFrame(rows.values())
+    if len(t):
+        t["embeddings"] = t["embeddings"].map(sorted); t["states"] = t["states"].map(sorted)
+    return t
+
+
+def load_latents(co, embedding="umap3", max_windows=150, seed=0, atlas=None, window_s=None, states=None):
     """Every cohort's windows in the latent space (stage 4, latents/atlas=/window_s=/cohort=/data.parquet):
-    sub, task, the embedding's 3 coordinates and, when the latents carry it, the state of cfg.space.
+    sub, task, the embedding's 3 coordinates and the state column `states` when the latents carry it.
+    atlas / window_s / states: any that stage 4 wrote (latent_options lists them); None = cfg.space's.
     At most `max_windows` windows per (cohort, subject), drawn at random, so a cohort with long scans
     (cneuromod) does not bury the others."""
     import pyarrow.parquet as pq
     c = co.cfg
+    atlas = atlas or c.space["atlas"]
+    window_s = c.space["window_s"] if window_s is None else window_s
+    states = states or c.space["states"]
     xyz = [f"{embedding[:-1]}{k}/{embedding[-1]}" for k in range(3)]
-    base = c.root / "latents" / f"atlas={c.space['atlas']}" / f"window_s={ht.fmt_window(c.space['window_s'])}"
+    base = c.root / "latents" / f"atlas={atlas}" / f"window_s={ht.fmt_window(window_s)}"
     frames = []
     for label, spec in c.cohorts.items():
         for d in spec["dirs"]:
@@ -288,16 +312,18 @@ def load_latents(co, embedding="umap3", max_windows=150, seed=0):
                 have = set(pq.read_schema(f).names)
                 if not set(xyz) <= have:
                     raise SystemExit(f"{f} has no {embedding} columns ({xyz}); was it fitted?")
-                cols = ["sub", "task", *xyz, *([c.space["states"]] if c.space["states"] in have else [])]
+                cols = ["sub", "task", *xyz, *([states] if states in have else [])]
                 frames.append(pd.read_parquet(f, columns=cols).assign(cohort=label))
     if not frames:
-        raise SystemExit(f"no latents under {base}")
+        raise SystemExit(f"no latents under {base}; latent_options(co) lists what exists")
     lat = pd.concat(frames, ignore_index=True)
     lat["sub"] = lat["sub"].astype(str).str.strip().str.upper()
     lat["kind"] = np.where(lat["task"].astype(str).str.fullmatch(c.rest_pattern, case=False), "rest", "movie")
     lat = lat.sample(frac=1, random_state=seed)                   # shuffled, then the first max_windows each
     lat = lat[lat.groupby(["cohort", "sub"]).cumcount() < max_windows].sort_index()
-    return lat.rename(columns=dict(zip(xyz, ["x", "y", "z"]))).reset_index(drop=True)
+    lat = lat.rename(columns=dict(zip(xyz, ["x", "y", "z"]))).reset_index(drop=True)
+    lat.attrs.update(atlas=atlas, window_s=float(window_s), states=states, embedding=embedding)
+    return lat
 
 
 def available_sets(root, cohorts):
