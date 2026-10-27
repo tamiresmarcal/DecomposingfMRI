@@ -23,7 +23,7 @@ nulos (`N_NULLS`, `NULL`).
 O notebook chama dois scripts, que também rodam pela linha de comando:
 
 ```bash
-pip install -e ".[atlases]" matplotlib openpyxl      # + brainsmash para --null burt
+pip install -e ".[atlases]" matplotlib               # + brainsmash para --null burt
 pilots/state_maps/fetch_reference_maps.sh             # uma vez, ~285 MB em data/
 
 # 1. tabelas -> results/<estados>/<atlas>/{state_means,correlations}.csv + provenance.json

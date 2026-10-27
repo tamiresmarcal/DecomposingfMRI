@@ -35,6 +35,7 @@ more than that.
 from __future__ import annotations
 
 import sys
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -306,7 +307,9 @@ def receptor_maps(data: Path, ref) -> ReferenceMaps:
         v = _flat(resample(img, ref, "continuous"))
         if (arr != 0).mean() < 0.5:
             m = nib.Nifti1Image((arr != 0).astype(np.float32), img.affine)
-            v[_flat(resample(m, ref, "linear")) < 0.5] = np.nan
+            with warnings.catch_warnings():   # linear on a 0/1 mask is the point: >.5 = mostly measured
+                warnings.simplefilter("ignore", UserWarning)
+                v[_flat(resample(m, ref, "linear")) < 0.5] = np.nan
         vox.append(v)
     return ReferenceMaps("molecular", names, np.stack(vox),
                          source="Hansen et al. 2022 PET atlas (neuromaps MNI152 annotations)")
@@ -335,6 +338,13 @@ def network14_maps(ref) -> ReferenceMaps:
 # ------------------------------------------------------------ Brainnetome ---
 def brainnetome_table(data: Path) -> pd.DataFrame:
     """The 246 BNA subregions: bn_index, hemi, gyrus (abbrev.), short name."""
+    # Shipped as CSV (derived from BNA_subregions.xlsx by `_brainnetome_from_xlsx`)
+    # so reading it needs no Excel engine on the cluster.
+    return pd.read_csv(Path(__file__).parent / "brainnetome_subregions.csv")
+
+
+def _brainnetome_from_xlsx(data: Path) -> pd.DataFrame:
+    """How brainnetome_subregions.csv was made, from the atlas's own table."""
     x = pd.read_excel(Path(data) / "brainnetome" / "BrainnetomeAtlas_BNA_subregions.xlsx")
     x.columns = ["lobe", "gyrus", "region", "id_l", "id_r", "short", "descr", "mni_l", "mni_r"]
     x["gyrus"] = x["gyrus"].ffill().str.split(",").str[0].str.strip()
