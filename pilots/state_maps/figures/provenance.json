@@ -1,0 +1,95 @@
+{
+  "states": "simulated",
+  "simulation_truth": {
+    "Default": {
+      "Default": 1.0,
+      "Dorsal Attention": -0.6,
+      "Somatomotor": -0.3
+    },
+    "Visual": {
+      "Visual": 1.0,
+      "Default": -0.4
+    },
+    "Sensorimotor": {
+      "Somatomotor": 1.0,
+      "Ventral Attention": 0.4,
+      "Frontoparietal": -0.4
+    },
+    "Task-positive": {
+      "Dorsal Attention": 0.8,
+      "Frontoparietal": 0.8,
+      "Default": -0.6
+    },
+    "Limbic": {
+      "Limbic": 1.0,
+      "Default": 0.3,
+      "Visual": -0.4
+    },
+    "Salience": {
+      "Ventral Attention": 1.0,
+      "Somatomotor": 0.3,
+      "Default": -0.5
+    }
+  },
+  "families": {
+    "molecular": {
+      "source": "Hansen et al. 2022 PET atlas (neuromaps MNI152 annotations)",
+      "maps": [
+        "5-HT1A",
+        "5-HT1B",
+        "5-HT2A",
+        "5-HT4",
+        "5-HT6",
+        "5-HTT",
+        "D1",
+        "D2",
+        "DAT",
+        "NET",
+        "α4β2",
+        "M1",
+        "VAChT",
+        "GABA-A",
+        "NMDA",
+        "mGluR5",
+        "CB1",
+        "MOR",
+        "H3"
+      ],
+      "simulated": false
+    },
+    "behavioural": {
+      "source": "SIMULATED stand-in on the real Brainnetome parcellation",
+      "maps": [
+        "Action.Execution",
+        "Action.Observation",
+        "Cognition.Attention",
+        "Cognition.Language",
+        "Cognition.Memory",
+        "Cognition.Reasoning",
+        "Cognition.Social",
+        "Emotion",
+        "Interoception",
+        "Perception.Audition",
+        "Perception.Somesthesis",
+        "Perception.Vision"
+      ],
+      "simulated": true
+    },
+    "canonical": {
+      "source": "Yeo et al. 2011, 7 networks (TemplateFlow fsaverage)",
+      "maps": [
+        "Visual",
+        "Somatomotor",
+        "Dorsal Attention",
+        "Ventral Attention",
+        "Limbic",
+        "Frontoparietal",
+        "Default"
+      ],
+      "simulated": false
+    }
+  },
+  "atlas": "Harvard-Oxford cortical lateralised thr25 (96), fsaverage5",
+  "n_spins": 1000,
+  "seed": 7
+}
