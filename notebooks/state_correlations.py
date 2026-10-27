@@ -65,9 +65,15 @@ SIM_STATES = {
 
 # ------------------------------------------------------------------ states ---
 def simulate_state_means(parc: rm.Parcellator, components: dict, seed: int,
-                         n_frames: int = 6000, frame_noise: float = 2.0,
-                         pattern_noise: float = 0.45) -> pd.DataFrame:
-    """Frames -> labels -> per-state mean, in `state-means`' CSV layout."""
+                         n_subjects: int = 30, n_frames: int = 400, frame_noise: float = 2.0,
+                         subject_noise: float = 0.6) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Subjects -> frames -> labels -> per-subject and group state means.
+
+    Each subject expresses each state as the group pattern plus its own
+    spatially smooth deviation; frames are drawn from a sticky Markov chain
+    and averaged back per label. Returns (group table in `state-means`' CSV
+    layout, per-subject table indexed by (subject, state)).
+    """
     rng = np.random.default_rng(seed)
     P = parc.n
     cen = parc.centroids
@@ -75,31 +81,31 @@ def simulate_state_means(parc: rm.Parcellator, components: dict, seed: int,
     smooth = np.exp(-(d / 25.0) ** 2)                 # 25 mm Gaussian kernel
     smooth /= smooth.sum(1, keepdims=True)
 
-    patterns = []
-    for mix in SIM_STATES.values():
-        x = sum(w * components[c] for c, w in mix.items())
-        x = (x - x.mean()) / (x.std() or 1.0)
-        noise = smooth @ rng.normal(size=P)
-        x = x + pattern_noise * noise / (noise.std() or 1.0)
-        patterns.append((x - x.mean()) / x.std())
-    patterns = np.array(patterns)
-    K = len(patterns)
+    def z(x):
+        return (x - x.mean()) / (x.std() or 1.0)
 
+    group = np.array([z(sum(w * components[c] for c, w in mix.items()))
+                      for mix in SIM_STATES.values()])
+    K = len(group)
     land = rng.dirichlet(np.full(K, 3.0))
-    labels = np.empty(n_frames, dtype=int)
-    labels[0] = rng.choice(K, p=land)
-    for t in range(1, n_frames):
-        labels[t] = labels[t - 1] if rng.random() < 0.9 else rng.choice(K, p=land)
-    frames = patterns[labels] + frame_noise * rng.normal(size=(n_frames, P))
-
-    df = pd.DataFrame(frames, columns=parc.columns)
-    df["state"] = labels
-    g = df.groupby("state")
-    out = g[parc.columns].mean()
-    out.insert(0, "n_rows", g.size())
-    out.insert(1, "share", out["n_rows"] / n_frames)
+    rows, counts = [], np.zeros(K)
+    for s_ in range(n_subjects):
+        pat = np.array([z(g + subject_noise * z(smooth @ rng.normal(size=P))) for g in group])
+        lab = np.empty(n_frames, dtype=int)
+        lab[0] = rng.choice(K, p=land)
+        for t in range(1, n_frames):
+            lab[t] = lab[t - 1] if rng.random() < 0.9 else rng.choice(K, p=land)
+        fr = pat[lab] + frame_noise * rng.normal(size=(n_frames, P))
+        for k in range(K):
+            if (lab == k).any():
+                rows.append([f"sim{s_ + 1:02d}", k] + list(fr[lab == k].mean(0)))
+        counts += np.bincount(lab, minlength=K)
+    subj = pd.DataFrame(rows, columns=["subject", "state"] + parc.columns).set_index(["subject", "state"])
+    out = subj.groupby(level="state").mean()
+    out.insert(0, "n_rows", counts.astype(int))
+    out.insert(1, "share", counts / counts.sum())
     out.insert(2, "name", list(SIM_STATES))
-    return out
+    return out, subj
 
 
 def node_strength(t: pd.DataFrame, parc: rm.Parcellator) -> pd.DataFrame | None:
@@ -149,16 +155,30 @@ def checked(t: pd.DataFrame, parc: rm.Parcellator, what: str) -> pd.DataFrame:
 
 
 def load_states(states: str, atlas: str, parc, components, seed: int,
-                output_root=None, window_s=None, cohorts=None) -> pd.DataFrame:
+                output_root=None, window_s=None, cohorts=None):
+    """-> (group table, per-subject table or None). The per-subject table is
+    indexed by (subject, state), one column per parcel -- what the error bars
+    (SD over subjects) are computed from."""
     if states == "simulate":
         return simulate_state_means(parc, components, seed)
     if Path(states).suffix == ".csv":
-        return checked(pd.read_csv(states, index_col="state"), parc, states)
+        return checked(pd.read_csv(states, index_col="state"), parc, states), None
     root = Path(output_root) if output_root else default_output_root()
     if window_s is None:
         window_s = find_window(root, atlas, states)
-    t = state_means_any_layout(root, atlas, window_s, states, cohorts)
-    return checked(t, parc, f"{states} at atlas={atlas} window_s={window_s}")
+    grp, subj = state_means_any_layout(root, atlas, window_s, states, cohorts)
+    what = f"{states} at atlas={atlas} window_s={window_s}"
+    return checked(grp, parc, what), subject_maps(subj, parc, what)
+
+
+def subject_maps(subj: pd.DataFrame, parc: rm.Parcellator, what: str) -> pd.DataFrame:
+    """Per-subject state means in parcel units: edges -> node strength, as for the group."""
+    strength = node_strength(subj, parc)
+    t = strength if strength is not None else subj
+    missing = [c for c in parc.columns if c not in t.columns]
+    if missing:
+        raise SystemExit(f"{what} (per subject): {len(missing)} columns missing, e.g. {missing[:3]}")
+    return t[parc.columns]
 
 
 def _has_column(path: Path, col: str) -> bool:
@@ -216,30 +236,45 @@ def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
     if not is_raw and not all(c.startswith("pca") for c in cols):
         raise SystemExit(f"{state_col!r} was fitted on {emb!r} (not invertible): use a pca<N> "
                          f"or raw<N> state set for maps in parcel units")
-    df = pd.concat([read_file(p, columns=cols + [state_col]).to_pandas() for p in files],
-                   ignore_index=True)
-    g = df.groupby(state_col, sort=True)
-    arr = g[cols].mean().to_numpy(float)
-    counts = g.size()
+    import pyarrow.parquet as pq
+
+    frames = []
+    for p in files:
+        have = set(pq.ParquetFile(p).schema_arrow.names)
+        keys = [k for k in ("cohort", "sub") if k in have]
+        t = read_file(p, columns=cols + [state_col] + keys).to_pandas()
+        cohort = next((x.split("=", 1)[1] for x in p.parts if x.startswith("cohort=")), "")
+        sub = t["sub"].astype(str) if "sub" in t else pd.Series("all", index=t.index)
+        coh = t["cohort"].astype(str) if "cohort" in t else pd.Series(cohort, index=t.index)
+        t["subject"] = coh + ":" + sub
+        frames.append(t[cols + [state_col, "subject"]])
+    df = pd.concat(frames, ignore_index=True)
     models = load_models(root, atlas, window_s)
     features = list(models["edges"])
-    if is_raw:
-        names = [c[len(RAW_PREFIX):] for c in cols]
-        idx = [features.index(n) for n in names]
-        full = np.zeros((len(arr), len(features)))
-        full[:, idx] = arr
-        out = pd.DataFrame(models["scaler"].inverse_transform(full)[:, idx],
-                           index=counts.index, columns=names)
-    else:
+
+    def to_features(arr: np.ndarray, index) -> pd.DataFrame:
+        if is_raw:
+            names = [c[len(RAW_PREFIX):] for c in cols]
+            idx = [features.index(n) for n in names]
+            full = np.zeros((len(arr), len(features)))
+            full[:, idx] = arr
+            return pd.DataFrame(models["scaler"].inverse_transform(full)[:, idx],
+                                index=index, columns=names)
         n = int(cols[0].partition("/")[2])
         back = models["scaler"].inverse_transform(models["pca"][n].inverse_transform(arr))
-        out = pd.DataFrame(back, index=counts.index, columns=features)
+        return pd.DataFrame(back, index=index, columns=features)
+
+    g = df.groupby(state_col, sort=True)
+    counts = g.size()
+    out = to_features(g[cols].mean().to_numpy(float), counts.index)
     out.insert(0, "n_rows", counts.to_numpy())
     out.insert(1, "share", counts.to_numpy() / counts.sum())
     out.index.name = "state"
+    gs = df.groupby(["subject", state_col], sort=True)[cols].mean()
+    subj = to_features(gs.to_numpy(float), gs.index.set_names(["subject", "state"]))
     print(f"[{atlas}] {state_col}: {len(out)} states from {len(files)} file(s), "
-          f"{int(counts.sum())} rows")
-    return out
+          f"{int(counts.sum())} rows, {subj.index.get_level_values(0).nunique()} subjects")
+    return out, subj
 
 
 def default_output_root() -> Path:
@@ -308,7 +343,7 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
         parcel = {f: parc.parcellate(m.voxels) for f, m in refs.items()}
         comps = {n: parcel["yeo7"][k] for k, n in enumerate(rm.YEO7)}
         comps.update({g: parc.parcellate(v) for g, v in subcort.items()})
-        sm = load_states(states, atlas, parc, comps, seed, output_root, window_s, cohorts)
+        sm, subj = load_states(states, atlas, parc, comps, seed, output_root, window_s, cohorts)
         measure = sm.attrs.get("measure", "mean activation")
         sm.to_csv(d / "state_means.csv")
         X = sm[parc.columns].to_numpy(float)
@@ -327,6 +362,9 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
                 sig = int(np.nansum(q < 0.05)) if np.isfinite(q).any() else "-"
                 print(f"[{atlas}] {fam}: {len(refs[fam].names)} maps, q<.05: {sig}")
         pd.DataFrame(rows).to_csv(d / "correlations.csv", index=False)
+        if subj is not None:
+            subject_correlations(subj, sm, parcel, refs, families).to_parquet(
+                d / "subject_correlations.parquet", index=False)
         (d / "provenance.json").write_text(json.dumps({
             "atlas": atlas, "atlas_source": src, "n_parcels": parc.n,
             "states": states, "window_s": window_s, "cohorts": cohorts,
@@ -342,6 +380,26 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
             print(f"[{atlas}] {parc.n} parcels ({src}) -> {d}")
         dirs[atlas] = d
     return dirs
+
+
+def subject_correlations(subj: pd.DataFrame, sm: pd.DataFrame, parcel: dict, refs: dict,
+                         families) -> pd.DataFrame:
+    """r of every subject's state map with every reference map: the spread the
+    figures draw as mean +- SD. A subject who never visited a state has no row."""
+    X = subj.to_numpy(float)
+    names = dict(zip(sm.index, sm["name"]))
+    out = []
+    for fam in families:
+        R = rm.correlate(X, parcel[fam])                  # rows x maps
+        t = pd.DataFrame(R, columns=refs[fam].names)
+        t["subject"] = subj.index.get_level_values(0)
+        t["state"] = subj.index.get_level_values(1)
+        t = t.melt(id_vars=["subject", "state"], var_name="map", value_name="r")
+        t["family"] = fam
+        out.append(t)
+    out = pd.concat(out, ignore_index=True)
+    out["state_name"] = out["state"].map(names)
+    return out[["subject", "state", "state_name", "family", "map", "r"]]
 
 
 def main(argv=None) -> int:
