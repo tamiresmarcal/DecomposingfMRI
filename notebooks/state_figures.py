@@ -168,7 +168,7 @@ def heat_panel(ax, res, header_colors=None):
 
 
 def overview_figure(atlas, src, state_df, names, results, brains, out: Path, simulated_states,
-                    null="moran"):
+                    null="moran", measure="mean activation"):
     import matplotlib.pyplot as plt
     from matplotlib.cm import ScalarMappable
     from matplotlib.colors import Normalize
@@ -222,7 +222,7 @@ def overview_figure(atlas, src, state_df, names, results, brains, out: Path, sim
     bax = fig.add_axes([0.08, 0.42 / H, 0.12, 0.10 / H])
     cb2 = fig.colorbar(ScalarMappable(Normalize(-2.5, 2.5), diverging_cmap()), cax=bax,
                        orientation="horizontal", ticks=[-2, 0, 2])
-    cb2.set_label("state mean activation (z across parcels)", fontsize=7, color=INK2)
+    cb2.set_label(f"state {measure} (z across parcels)", fontsize=7, color=INK2)
     for c in (cb, cb2):
         c.ax.tick_params(labelsize=7, length=2, colors=INK2)
         c.outline.set_visible(False)
@@ -244,7 +244,8 @@ def overview_figure(atlas, src, state_df, names, results, brains, out: Path, sim
     plt.close(fig)
 
 
-def state_card(i, state_df, names, results, brains, out: Path, null="moran"):
+def state_card(i, state_df, names, results, brains, out: Path, null="moran",
+               measure="mean activation"):
     """One state at reading size: brain + ranked bars per family."""
     import matplotlib.pyplot as plt
     from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
@@ -300,7 +301,7 @@ def state_card(i, state_df, names, results, brains, out: Path, null="moran"):
     has_p = any(np.isfinite(r["p"]).any() for r in results.values())
     fig.text(0.008, 0.975, f"S{i + 1} · {names[i]}   ({brains.parc.spec.name}, {P} parcels)",
              fontsize=14, fontweight="bold", color=INK, va="top")
-    fig.text(0.008, 0.91, f"{state_df['share'].iloc[i]:.0%} of frames · mean activation, z "
+    fig.text(0.008, 0.91, f"{state_df['share'].iloc[i]:.0%} of frames · {measure}, z "
              f"across parcels · " + (f"{NULL_LABEL[null]}: • p<.05 uncorrected, ✱ q<.05, ★ q<.01 "
                                      "(BH within family)" if has_p else
                                      f"no p-values ({P} parcels)"),
@@ -356,12 +357,14 @@ def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
         null = prov.get("null_method", "moran")
         out = d / "state_maps_overview.png"
         overview_figure(atlas, prov["atlas_source"], sm, names, results, brains, out,
-                        simulated_states=prov["states"] == "simulate", null=null)
+                        simulated_states=prov["states"] == "simulate", null=null,
+                        measure=prov.get("state_measure", "mean activation"))
         paths.append(out)
         if cards:
             for i in range(len(sm)):
                 p = d / f"state_card_S{i + 1}.png"
-                state_card(i, sm, names, results, brains, p, null=null)
+                state_card(i, sm, names, results, brains, p, null=null,
+                           measure=prov.get("state_measure", "mean activation"))
                 paths.append(p)
         print(f"[{atlas}] figures -> {d}")
     return paths

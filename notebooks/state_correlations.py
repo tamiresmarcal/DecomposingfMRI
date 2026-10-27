@@ -102,14 +102,47 @@ def simulate_state_means(parc: rm.Parcellator, components: dict, seed: int,
     return out
 
 
+def node_strength(t: pd.DataFrame, parc: rm.Parcellator) -> pd.DataFrame | None:
+    """DFC states -> one value per parcel: its nodal strength.
+
+    A state fitted on windowed connectivity has, as its mean, an edge vector
+    (`A__B` columns, the atlas's upper triangle), not an activation map. The
+    map that can be set beside receptor densities or networks is each parcel's
+    mean connectivity with every other parcel in that state. Returns None when
+    the table is not edges.
+    """
+    edges = parc.spec.edge_names()
+    if not set(edges) <= set(t.columns):
+        return None
+    P = parc.n
+    iu, ju = np.triu_indices(P, k=1)
+    E = t[edges].to_numpy(float)
+    M = np.zeros((len(t), P, P))
+    M[:, iu, ju] = E
+    M[:, ju, iu] = E
+    out = pd.DataFrame(M.sum(2) / (P - 1), index=t.index, columns=parc.columns)
+    for c in ("n_rows", "share", "name"):
+        if c in t:
+            out.insert(len([x for x in ("n_rows", "share", "name") if x in out]), c, t[c])
+    out.attrs["measure"] = "node strength (mean connectivity with every other parcel)"
+    return out
+
+
 def checked(t: pd.DataFrame, parc: rm.Parcellator, what: str) -> pd.DataFrame:
     """Keep the atlas's columns. One the atlas has and the table lacks means
-    the states came from another atlas: hard error, not a silent subset."""
+    the states came from another atlas: hard error, not a silent subset.
+    Edge tables (DFC states) are first reduced to node strength."""
+    strength = node_strength(t, parc)
+    if strength is not None:
+        print(f"[{parc.spec.name}] {what}: connectivity states -> node strength per parcel")
+        t = strength
     missing = [c for c in parc.columns if c not in t.columns]
     if missing:
         raise SystemExit(f"{what}: {len(missing)} of {parc.n} `{parc.spec.name}` columns "
                          f"missing, e.g. {missing[:3]} -- states from another atlas?")
+    measure = t.attrs.get("measure", "mean activation")
     t = t.copy()
+    t.attrs["measure"] = measure
     if "name" not in t:
         t.insert(0, "name", [f"state {s}" for s in t.index])
     return t[["n_rows", "share", "name"] + parc.columns]
@@ -188,6 +221,7 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
         comps = {n: parcel["yeo7"][k] for k, n in enumerate(rm.YEO7)}
         comps.update({g: parc.parcellate(v) for g, v in subcort.items()})
         sm = load_states(states, atlas, parc, comps, seed, output_root, window_s, cohorts)
+        measure = sm.attrs.get("measure", "mean activation")
         sm.to_csv(d / "state_means.csv")
         X = sm[parc.columns].to_numpy(float)
 
@@ -208,6 +242,7 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
         (d / "provenance.json").write_text(json.dumps({
             "atlas": atlas, "atlas_source": src, "n_parcels": parc.n,
             "states": states, "window_s": window_s, "cohorts": cohorts,
+            "state_measure": measure,
             "simulation_truth": SIM_STATES if states == "simulate" else None,
             "families": {f: {"source": refs[f].source, "maps": refs[f].names,
                              "simulated": refs[f].simulated} for f in families},
