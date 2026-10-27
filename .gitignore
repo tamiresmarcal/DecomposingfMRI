@@ -255,3 +255,4 @@ config/phenotype/*.csv
 
 # notebooks/09 and hads_tables.py (notebook 10) cache their slow tables here (regenerated on demand)
 notebooks/cache/
+notebooks/state_maps_data/
