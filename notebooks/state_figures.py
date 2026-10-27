@@ -34,13 +34,13 @@ SIMULATED_INK = "#b4560f"
 
 TITLES = {
     "molecular": "Molecular · PET receptors (neuromaps)",
-    "behavioural_domain": "Behavioural · BrainMap domains",
-    "behavioural": "Behavioural · BrainMap taxonomy × Brainnetome (246)",
+    "behavioural_domain": "Behavioural · {tax} domains",
+    "behavioural": "Behavioural · {tax} subcategories × Brainnetome (246)",
     "yeo7": "Canonical · Yeo 7",
     "networks14": "Canonical · our 14 networks",
 }
-CARD_TITLES = {"molecular": "Molecular (PET)", "behavioural_domain": "BrainMap domains",
-               "behavioural": "BrainMap subcategories", "yeo7": "Yeo 7 networks",
+CARD_TITLES = {"molecular": "Molecular (PET)", "behavioural_domain": "{tax} domains",
+               "behavioural": "{tax} subcategories", "yeo7": "Yeo 7 networks",
                "networks14": "Our 14 networks"}
 CARD_TOP = {"molecular": 8, "behavioural_domain": 5, "behavioural": 10, "yeo7": 7,
             "networks14": 14}
@@ -49,6 +49,10 @@ CELL_W = {"molecular": 0.25, "behavioural_domain": 0.3, "behavioural": 0.2, "yeo
 NULL_LABEL = {"moran": "Moran spectral null", "burt": "variogram null (brainsmash)"}
 
 SLICES = [("z", 2), ("y", -10)]          # basal ganglia + thalamus; amygdala/hippocampus
+
+
+def taxonomy_label(res: dict) -> str:
+    return "Beam 2021" if "Beam" in res.get("source", "") else "BrainMap"
 
 
 def diverging_cmap():
@@ -208,7 +212,7 @@ def overview_figure(atlas, src, state_df, names, results, brains, out: Path, sim
         im = heat_panel(ax, res, header_colors=rm.YEO7_COLORS if fam == "yeo7" else None)
         sim = res["simulated"]
         fig.text(ax.get_position().x0, 1 - 0.78 / H,
-                 TITLES[fam] + ("\nSIMULATED table" if sim else
+                 TITLES[fam].format(tax=taxonomy_label(res)) + ("\nSIMULATED table" if sim else
                                 ("\nNeurosynth data" if "Neurosynth" in res.get("source", "") else "")),
                  ha="left", va="top",
                  fontsize=9.5, fontweight="bold", color=SIMULATED_INK if sim else INK)
@@ -297,7 +301,8 @@ def state_card(i, state_df, names, results, brains, out: Path, null="moran",
         ax.set_xlabel("r (parcels)", fontsize=7.5, color=INK2)
         sim = res["simulated"]
         sub = "" if top >= len(nm) else f"\ntop {top} by |r|"
-        ax.set_title(CARD_TITLES[fam] + ("  SIMULATED" if sim else "") + sub,
+        ax.set_title(CARD_TITLES[fam].format(tax=taxonomy_label(res))
+                     + ("  SIMULATED" if sim else "") + sub,
                      fontsize=9, color=SIMULATED_INK if sim else INK, loc="left")
     P = brains.parc.n
     has_p = any(np.isfinite(r["p"]).any() for r in results.values())

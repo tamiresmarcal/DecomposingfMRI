@@ -255,7 +255,8 @@ def default_output_root() -> Path:
 
 
 # ------------------------------------------------------------- reference ---
-def reference_families(data: Path, ref, families, behavioural_csv=None, seed: int = 7) -> dict:
+def reference_families(data: Path, ref, families, behavioural_csv=None, seed: int = 7,
+                       taxonomy: str = "brainmap") -> dict:
     """Voxel-level reference maps for the families asked for, built once and
     shared across atlases (the PET resampling is the slow part)."""
     out = {}
@@ -263,9 +264,7 @@ def reference_families(data: Path, ref, families, behavioural_csv=None, seed: in
         out["molecular"] = rm.receptor_maps(data, ref)
     if {"behavioural", "behavioural_domain"} & set(families):
         if behavioural_csv == "neurosynth":
-            table = rm.neurosynth_behavioural_table(data, ref)
-            table.attrs["source"] = ("Neurosynth v7 forward inference (z) on Brainnetome 246, "
-                                     "in BrainMap's taxonomy")
+            table = rm.neurosynth_behavioural_table(data, ref, taxonomy)
         elif behavioural_csv:
             table = rm.load_behavioural_table(behavioural_csv)
         else:
@@ -286,15 +285,19 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
             out: Path = HERE / "state_maps_results", data: Path = HERE / "state_maps_data",
             output_root=None, window_s=None, cohorts=None, behavioural_csv="neurosynth",
             n_nulls: int = 10000, null: str = "moran", seed: int = 7,
+            taxonomy: str = "brainmap",
             verbose: bool = True) -> dict:
     """Write the tables for every atlas; return {atlas: its directory}."""
     families = [f for f in FAMILIES if f in families]
     ref = rm.reference_grid(data)
-    refs = reference_families(data, ref, families, behavioural_csv, seed)
+    refs = reference_families(data, ref, families, behavioural_csv, seed, taxonomy)
     subcort = rm.subcortical_structures(data, ref)
     label = "simulated" if states == "simulate" else Path(states).stem
     if window_s is not None and states != "simulate" and Path(states).suffix != ".csv":
         label = f"{states}_window-{window_s}"
+    if behavioural_csv == "neurosynth" and taxonomy != "brainmap" and \
+            {"behavioural", "behavioural_domain"} & set(families):
+        label += f"_{taxonomy}"
     dirs = {}
     for atlas in atlases:
         spec, src = rm.state_atlas(atlas, data)
@@ -354,6 +357,8 @@ def main(argv=None) -> int:
     p.add_argument("--behavioural", default="neurosynth",
                    help="`neurosynth` (default): profiles computed from Neurosynth; a CSV: "
                         "the real BrainMap table (README); `none`: the simulated stand-in")
+    p.add_argument("--taxonomy", choices=sorted(rm.TAXONOMIES), default="brainmap",
+                   help="behavioural categories for the Neurosynth profiles")
     p.add_argument("--n-nulls", type=int, default=10000,
                    help="surrogates per map; the smallest p is 1/(n+1), and BH over 114 "
                         "molecular tests needs it well under .05/114")
@@ -364,7 +369,8 @@ def main(argv=None) -> int:
     a = p.parse_args(argv)
     compute(a.states, a.atlases, a.families, out=a.out, data=a.data,
             output_root=a.output_root, window_s=a.window_s, cohorts=a.cohorts,
-            behavioural_csv=None if a.behavioural == "none" else a.behavioural, n_nulls=a.n_nulls, null=a.null, seed=a.seed)
+            behavioural_csv=None if a.behavioural == "none" else a.behavioural, n_nulls=a.n_nulls, null=a.null, seed=a.seed,
+            taxonomy=a.taxonomy)
     return 0
 
 

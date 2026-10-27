@@ -489,6 +489,47 @@ NEUROSYNTH_TERMS = {
     "Perception.Vision.Other": ["visual", "primary visual"],
 }
 
+# Beam, Potts, Poldrack & Etkin 2021 (Nat Neurosci 24:1733), data-driven
+# ontology, 6 domains: each domain's term list as published with the paper
+# (ehbeam/neuro-knowledge-engine, ontology/lists/lists_data-driven_lr.csv).
+# Each term is its own Neurosynth category, so the taxonomy has two depths
+# like BrainMap's -- domain, and the terms under it. Terms absent from the
+# Neurosynth vocabulary (mostly multi-word phrases) drop out at run time.
+BEAM2021_TERMS = {
+    "Memory": ["memory", "episodic memory", "declarative memory", "recognition memory",
+               "remembering", "emotion", "fear", "recognition", "emotional memory", "encoding",
+               "retrieval", "valence", "facial expression", "picture", "recall",
+               "autobiographical memory", "face", "memory process", "source memory",
+               "encoding task", "arousal", "episodic simulation"],
+    "Reward": ["reward", "reward processing", "reward anticipation", "anticipation",
+               "monetary incentive delay task", "reward learning"],
+    "Cognition": ["monitoring", "cognitive control", "arousal", "cognitive process",
+                  "reaction time", "retrieval", "decision making", "strategy", "error detection",
+                  "context", "valence", "cognitive", "manipulation", "working memory",
+                  "response selection", "goal", "word", "judgment", "anticipation", "memory",
+                  "remembering", "decision", "autobiographical memory", "salience", "emotion"],
+    "Vision": ["recognition", "face perception", "familiarity", "vision", "object recognition",
+               "retrieval", "visual perception", "memory", "remembering", "word",
+               "visual attention", "picture", "visual object", "visual angle",
+               "recognition memory", "reading", "semantic processing", "encoding",
+               "visual imagery", "naming"],
+    "Manipulation": ["execution", "hand", "movement", "working memory", "manipulation",
+                     "rehearsal", "attention", "spatial attention", "action", "covert",
+                     "motor control", "strategy", "reaction time", "grasping"],
+    "Language": ["speech", "hearing", "listening", "speech perception", "speech processing",
+                 "tone", "language", "music", "passive listening", "syllable", "melody",
+                 "speech production", "auditory perception", "language processing", "prosody",
+                 "intonation", "audition", "pitch discrimination", "language comprehension",
+                 "articulation", "phonetics", "word", "semantic processing", "syntax",
+                 "voice perception"],
+}
+TAXONOMIES = {
+    "brainmap": ("BrainMap (Fox et al. 2005)", NEUROSYNTH_TERMS),
+    "beam2021": ("Beam et al. 2021",
+                 {f"{d}.{t}": [t] for d, terms in BEAM2021_TERMS.items() for t in terms}),
+}
+
+
 # Lancaster et al. 2007, icbm_spm2tal; its inverse takes Talairach peaks to MNI.
 _ICBM_SPM2TAL = np.array([[0.9254, 0.0024, -0.0118, -1.0207],
                           [-0.0048, 0.9316, -0.0871, -1.7667],
@@ -496,7 +537,8 @@ _ICBM_SPM2TAL = np.array([[0.9254, 0.0024, -0.0118, -1.0207],
                           [0.0, 0.0, 0.0, 1.0]])
 
 
-def neurosynth_behavioural_table(data: Path, ref, radius_mm: float = 6.0,
+def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
+                                 radius_mm: float = 6.0,
                                  threshold: float = 0.001) -> pd.DataFrame:
     """Brainnetome x BrainMap categories, from Neurosynth instead of BrainMap.
 
@@ -508,15 +550,22 @@ def neurosynth_behavioural_table(data: Path, ref, radius_mm: float = 6.0,
     studies activating r: z = (k - n p0) / sqrt(n p0 (1 - p0)), the normal
     approximation of the binomial test BrainMap's behavioural analysis uses.
 
-    Cached as neurosynth/brainnetome_neurosynth.csv; delete it to recompute.
+    `taxonomy` picks the categories: "brainmap" (BrainMap's, as Brainnetome
+    reports them) or "beam2021" (Beam et al. 2021's data-driven domains).
+    Cached as neurosynth/brainnetome_neurosynth_<taxonomy>.csv; delete to recompute.
     """
     import scipy.sparse as sp
     from scipy.ndimage import distance_transform_edt
 
     nsd = Path(data) / "neurosynth"
-    cache = nsd / "brainnetome_neurosynth.csv"
+    if taxonomy not in TAXONOMIES:
+        raise SystemExit(f"taxonomy must be one of {sorted(TAXONOMIES)}, got {taxonomy!r}")
+    label, categories = TAXONOMIES[taxonomy]
+    cache = nsd / f"brainnetome_neurosynth_{taxonomy}.csv"
     if cache.exists():
-        return pd.read_csv(cache)
+        out = pd.read_csv(cache)
+        out.attrs["source"] = f"Neurosynth v7 forward inference (z), {label} taxonomy"
+        return out
     pre = nsd / "data-neurosynth_version-7_"
     if not (nsd / "data-neurosynth_version-7_coordinates.tsv.gz").exists():
         raise SystemExit(f"no Neurosynth data in {nsd}: run fetch_reference_maps.sh")
@@ -550,7 +599,7 @@ def neurosynth_behavioural_table(data: Path, ref, radius_mm: float = 6.0,
 
     out = pd.DataFrame({"bn_index": np.arange(1, 247)})
     n_studies = {}
-    for cat, terms in NEUROSYNTH_TERMS.items():
+    for cat, terms in categories.items():
         cols = [vocab.index(t) for t in terms if t in vocab]
         if not cols:
             continue
@@ -562,7 +611,9 @@ def neurosynth_behavioural_table(data: Path, ref, radius_mm: float = 6.0,
         out[cat] = np.nan_to_num(z)
         n_studies[cat] = n
     out.to_csv(cache, index=False)
-    pd.Series(n_studies, name="n_studies").to_csv(nsd / "brainnetome_neurosynth_n_studies.csv")
+    pd.Series(n_studies, name="n_studies").to_csv(
+        nsd / f"brainnetome_neurosynth_{taxonomy}_n_studies.csv")
+    out.attrs["source"] = f"Neurosynth v7 forward inference (z), {label} taxonomy"
     return out
 
 
