@@ -206,6 +206,31 @@ def latent_files(root: Path, atlas: str, window_s, cohorts=None) -> list:
     return out
 
 
+def where_is(root: Path, state_col: str, atlas: str, window_s, cohorts=None) -> str:
+    """Where a state column DOES exist, and what this cell has instead."""
+    import pyarrow.parquet as pq
+
+    found, here = set(), set()
+    for p in sorted((Path(root) / "latents").glob("atlas=*/window_s=*/cohort=*/**/data.parquet")):
+        kv = dict(x.split("=", 1) for x in p.parts if "=" in x)
+        names = pq.ParquetFile(p).schema_arrow.names
+        if state_col in names:
+            found.add((kv["atlas"], kv["window_s"], kv["cohort"]))
+        if kv["atlas"] == atlas and kv["window_s"] == str(window_s) and \
+                (cohorts is None or kv["cohort"] in cohorts):
+            here |= {n for n in names if n[:3] in ("HMM", "Mea", "thr", "Thr", "KMe")}
+    lines = []
+    if found:
+        lines.append(f"  {state_col!r} exists at:")
+        lines += [f"    ATLASES=[{a!r}]  WINDOW_S={w}  cohort={c}" for a, w, c in sorted(found)]
+    else:
+        lines.append(f"  {state_col!r} exists in no latents file under {root}/latents")
+    if here:
+        lines.append(f"  state columns at atlas={atlas} window_s={window_s}: "
+                     + ", ".join(sorted(here)[:30]) + (" ..." if len(here) > 30 else ""))
+    return "\n".join(lines)
+
+
 def find_window(root: Path, atlas: str, state_col: str):
     """The aperture whose latents carry `state_col`, when WINDOW_S is not given."""
     from fmri_decomposition.io import latents_root
@@ -253,7 +278,8 @@ def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
     files = [p for p in latent_files(root, atlas, window_s, cohorts) if _has_column(p, state_col)]
     if not files:
         raise SystemExit(f"no latents with {state_col!r} at atlas={atlas} window_s={window_s}"
-                         f"{'' if cohorts is None else f' for cohorts {cohorts}'} under {root}")
+                         f"{'' if cohorts is None else f' for cohorts {cohorts}'} under {root}\n"
+                         + where_is(root, state_col, atlas, window_s, cohorts))
     per_tr = str(window_s) == "-1"
     if per_tr:
         from fmri_decomposition.state_means import load_models
