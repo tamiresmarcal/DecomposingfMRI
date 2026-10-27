@@ -489,6 +489,100 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
     plt.close(fig)
 
 
+# --------------------------------------------- reference x reference matrix ---
+def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str = "behavioural",
+                     *, out: Path = HERE / "state_maps_results" / "reference_matrix",
+                     data: Path = HERE / "state_maps_data", taxonomy: str = "brainmap",
+                     behavioural_csv="neurosynth", n_nulls: int = 10000, null: str = "moran",
+                     seed: int = 7, drop_other: bool = True) -> Path:
+    """How two reference families relate to each other, in one atlas.
+
+    Each cell is the spatial correlation, across the atlas's parcels, between
+    one map of `rows` (e.g. a Yeo network) and one of `cols` (e.g. a BrainMap
+    subcategory's Neurosynth activation profile on Brainnetome). Stars: the
+    same spatial null as the state figures -- surrogates of the column map
+    that keep its spatial autocorrelation -- BH over the whole matrix.
+    Writes reference_matrix_<atlas>_<rows>_x_<cols>.{png,csv}.
+    """
+    import matplotlib.pyplot as plt
+
+    from state_correlations import reference_families
+
+    ref = rm.reference_grid(data)
+    refs = reference_families(data, ref, [rows, cols], behavioural_csv, seed, taxonomy)
+    spec, src = rm.state_atlas(atlas, data)
+    parc = rm.Parcellator.build(spec, ref)
+    R, C = refs[rows], refs[cols]
+    keep_c = [j for j, n in enumerate(C.names) if not (drop_other and n.endswith(".Other"))]
+    A = parc.parcellate(R.voxels)
+    B = parc.parcellate(C.voxels)[keep_c]
+    cn = [C.names[j] for j in keep_c]
+    res = rm.null_test(A, B, parc.centroids, n_nulls, seed=seed, method=null)
+    r, q = res["r"], res["q"]
+
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    stem = out / f"reference_matrix_{atlas}_{rows}_x_{cols}"
+    tab = pd.DataFrame(r, index=R.names, columns=cn)
+    pd.concat({"r": tab, "p_null": pd.DataFrame(res["p"], index=R.names, columns=cn),
+               "q_fdr": pd.DataFrame(q, index=R.names, columns=cn)}, axis=0).to_csv(f"{stem}.csv")
+
+    nr, nc = r.shape
+    fig, ax = plt.subplots(figsize=(4 + 0.42 * nc, 2.6 + 0.55 * nr), facecolor="white")
+    im = ax.imshow(r, cmap=diverging_cmap(), vmin=-1, vmax=1, aspect="auto")
+    for x in np.arange(-0.5, nc, 1.0):
+        ax.axvline(x, color="white", lw=1.2)
+    for y in np.arange(-0.5, nr, 1.0):
+        ax.axhline(y, color="white", lw=1.2)
+    for i in range(nr):
+        for j in range(nc):
+            if np.isfinite(q[i, j]) and q[i, j] < 0.05:
+                ax.text(j, i, "**" if q[i, j] < 0.01 else "*", ha="center", va="center",
+                        fontsize=13, fontweight="bold",
+                        color="white" if abs(r[i, j]) > 0.55 else INK)
+    ax.set_yticks(range(nr))
+    ax.set_yticklabels(R.names, fontsize=12, color=INK)
+    if rows == "yeo7":
+        for i, c in enumerate(rm.YEO7_COLORS):
+            ax.add_patch(plt.Rectangle((-0.013, i - 0.4), 0.008, 0.8, color=c, clip_on=False,
+                                       transform=ax.get_yaxis_transform(), lw=0))
+        ax.tick_params(axis="y", pad=12)
+    ax.set_xticks(range(nc))
+    ax.set_xticklabels([_label(n, cols) for n in cn], rotation=60, ha="left", fontsize=11,
+                       color=INK2)
+    ax.xaxis.tick_top()
+    ax.tick_params(length=0)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+    doms = [n.split(".")[0] for n in cn]
+    if any("." in n for n in cn):                      # domain brackets under the matrix
+        tr = ax.get_xaxis_transform()
+        start = 0
+        for j in range(1, nc + 1):
+            if j == nc or doms[j] != doms[start]:
+                ax.plot([start - 0.35, j - 0.65], [-0.03, -0.03], transform=tr, color=INK2,
+                        lw=1, clip_on=False)
+                ax.text((start + j - 1) / 2, -0.07, doms[start], transform=tr, ha="center",
+                        va="top", fontsize=12, color=INK, clip_on=False)
+                start = j
+    cb = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.01, ticks=[-1, -0.5, 0, 0.5, 1])
+    cb.set_label("r across parcels", fontsize=11, color=INK2)
+    cb.outline.set_visible(False)
+    tax = taxonomy_label({"source": C.source})
+    title = (f"{PANEL_TITLES[rows].format(tax=tax)} × {PANEL_TITLES[cols].format(tax=tax)}"
+             f" — {atlas} ({parc.n} parcels)")
+    note = ("* q<.05, ** q<.01 (spatial null, FDR over the matrix)"
+            if np.isfinite(q).any() else f"no p-values: {parc.n} parcels")
+    if C.simulated or R.simulated:
+        note += " · SIMULATED table"
+    ax.set_title(f"{title}\n{note}", loc="left", fontsize=14, fontweight="bold", color=INK,
+                 pad=150)
+    fig.savefig(f"{stem}.png", dpi=170, facecolor="white", bbox_inches="tight")
+    plt.close(fig)
+    print(f"[{atlas}] {rows} x {cols}: {int(np.nansum(q < 0.05))} of {q.size} cells q<.05 -> {stem}.png")
+    return Path(f"{stem}.png")
+
+
 # ------------------------------------------------------------------- main ---
 def load_results(atlas_dir: Path, families) -> tuple[pd.DataFrame, dict, dict]:
     """state_means.csv + correlations.csv -> (states, {family: r/p/q/names}, provenance)."""
