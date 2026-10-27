@@ -452,6 +452,17 @@ def behavioural_maps(data: Path, ref, table: pd.DataFrame | None = None,
     return ReferenceMaps("behavioural", cats, vox, simulated=simulated, source=src)
 
 
+def behavioural_domains(leaves: ReferenceMaps) -> ReferenceMaps:
+    """The same profiles one level up the taxonomy: each BrainMap domain
+    (Action, Cognition, ...) is the mean of its subcategories, voxel by voxel.
+    One table, two depths -- the panels differ in grain, never in data."""
+    domains = list(dict.fromkeys(n.split(".")[0] for n in leaves.names))
+    vox = np.stack([np.nanmean(leaves.voxels[[n.split(".")[0] == d for n in leaves.names]], 0)
+                    for d in domains])
+    return ReferenceMaps("behavioural_domain", domains, vox, simulated=leaves.simulated,
+                         source=leaves.source + ", domain level")
+
+
 def subcortical_structures(data: Path, ref) -> dict:
     """Brainnetome's four deep gyri as indicator volumes -- for the
     simulation's ground truth, so simulated states have subcortex too."""

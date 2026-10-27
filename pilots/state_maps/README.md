@@ -4,7 +4,7 @@ Como ler um brain state em termos neuroanatômicos: a ativação média do estad
 no córtex e no subcórtex, e ao lado a correlação desse padrão com quatro
 famílias de mapas. Há uma figura para cada atlas do pipeline.
 
-![harvardoxford](figures/harvardoxford/state_maps_overview.png)
+![harvardoxford](results/simulated/harvardoxford/state_maps_overview.png)
 
 | família | o que é | fonte | status |
 |---|---|---|---|
@@ -14,25 +14,39 @@ famílias de mapas. Há uma figura para cada atlas do pipeline.
 | **Canônico: nossas 14 redes** | o atlas `networks` deste repo (254 esferas de 5 mm) | `fmri_decomposition.get_atlas("networks")` | **real** |
 | **Estados** | médias por estado no atlas em que foram ajustados | simulados, ou `fmri-decomp state-means --csv` | **simulados** neste piloto |
 
+**Pelo notebook:** `notebooks/08_state_maps.ipynb`. Os parâmetros ficam numa
+célula só: a definição de cluster (`STATES`, `WINDOW_S`, `COHORTS`), os atlas
+mostrados (`ATLASES`), as famílias (`FAMILIES`), a profundidade da taxonomia
+comportamental (`BN_LEVELS`: `"domain"`, `"subcategory"` ou os dois) e os
+nulos (`N_NULLS`, `NULL`).
+
+O notebook chama dois scripts, que também rodam pela linha de comando:
+
 ```bash
 pip install -e ".[atlases]" matplotlib openpyxl      # + brainsmash para --null burt
-pilots/state_maps/fetch_reference_maps.sh             # ~285 MB em pilots/state_maps/data/
-python pilots/state_maps/pilot.py                     # 4 atlases, estados simulados, ~10 min
+pilots/state_maps/fetch_reference_maps.sh             # uma vez, ~285 MB em data/
 
-# com dados reais (um atlas por vez):
-fmri-decomp state-means --atlas harvardoxford --window-s -1 \
-    --states HMM2_pca14_10 --csv sm.csv
-python pilots/state_maps/pilot.py --atlases harvardoxford --state-means sm.csv \
-    [--behavioural bna_brainmap.csv] [--null burt]
+# 1. tabelas -> results/<estados>/<atlas>/{state_means,correlations}.csv + provenance.json
+python pilots/state_maps/state_correlations.py --states simulate
+python pilots/state_maps/state_correlations.py --states HMM2_pca14_10 --window-s -1 \
+    --atlases harvardoxford --output-root /caminho/outputs
+
+# 2. figuras, a partir das tabelas (nenhum número é recalculado aqui)
+python pilots/state_maps/state_figures.py pilots/state_maps/results/simulated \
+    --atlases harvardoxford --bn-levels domain subcategory
 ```
 
-Saídas em `figures/<atlas>/`:
+`--states` aceita `simulate`, uma coluna de estados (lida por
+`fmri_decomposition.state_means`, a mesma tabela que o `fmri-decomp state-means`
+imprime) ou um CSV do `state-means --csv`.
 
-- `state_maps_overview.png`: uma linha por estado. Mostra o córtex (lateral e medial, esquerda e depois direita), dois cortes subcorticais (axial z=2 e coronal y=−10) e as quatro faixas de correlação.
-- `state_card_S<k>.png`: um estado em tamanho de leitura, com barras ordenadas por família.
-- `state_map_correlations.csv`: r, p e q (FDR) para cada estado × mapa.
-- `simulated_state_means.csv`: os estados simulados, no formato do `state-means --csv`.
-- `provenance.json`: de onde veio o atlas e cada família, o que é simulado e a verdade da simulação.
+Saídas em `results/<estados>/<atlas>/`:
+
+- `state_maps_overview.png`: uma linha por estado. Mostra o córtex (lateral e medial, esquerda e depois direita), dois cortes subcorticais (axial z=2 e coronal y=−10) e uma faixa de correlação por família.
+- `state_card_S<k>.png`: um estado em tamanho de leitura, com barras ordenadas.
+- `correlations.csv`: r, p e q (FDR) para cada estado × mapa.
+- `state_means.csv`: os estados, no formato do `state-means --csv`.
+- `provenance.json`: de onde vieram o atlas, os estados e cada família, e a verdade da simulação.
 
 ## Os nossos atlas
 
@@ -101,8 +115,9 @@ redes, não um achado.
 ## A parte comportamental: taxonomia completa, perfis simulados
 
 O Brainnetome caracteriza cada sub-região pelos rótulos do BrainMap (Fan et al.
-2016), que são hierárquicos: domínio → subdomínio → sub-subdomínio. O painel
-mostra **todas as folhas**, por exemplo `Vision · Motion`, `Language ·
+2016), que são hierárquicos: domínio → subdomínio → sub-subdomínio. Com `BN_LEVELS` o painel mostra os **5 domínios** (média das subcategorias de
+cada um), **todas as folhas**, ou os dois lado a lado. O painel de folhas
+mostra, por exemplo `Vision · Motion`, `Language ·
 Semantics`, `Somesthesis · Pain`, `Memory · Working`, agrupadas sob os cinco
 domínios (Action, Cognition, Emotion, Interoception e Perception).
 

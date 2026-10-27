@@ -1,32 +1,15 @@
 #!/usr/bin/env python3
-"""Pilot: what each brain state looks like, and what it lines up with.
+"""Brain states x reference maps: the FIGURES, drawn from the tables
+`state_correlations.py` wrote. Nothing here recomputes a number.
 
-    python pilots/state_maps/pilot.py                     # all four atlases, simulated
-    python pilots/state_maps/pilot.py --atlases harvardoxford --state-means sm.csv
+    python pilots/state_maps/state_figures.py pilots/state_maps/results/simulated
+    python pilots/state_maps/state_figures.py RUN_DIR --atlases harvardoxford \
+        --bn-levels domain subcategory
 
-One figure per state atlas -- harvardoxford, networks_nodes, networks, yeo7,
-the ones this pipeline extracts on. One row per state: its mean activation on
-the cortex (lateral and medial, left then right) and on two subcortical
-slices, then its correlation across parcels with four families of maps:
-
-    molecular    19 PET receptor/transporter maps (neuromaps / Hansen 2022)
-    behavioural  BrainMap categories over Brainnetome's 246 subregions, every
-                 leaf of the taxonomy, grouped by domain
-    Yeo 7        Yeo 2011's canonical networks
-    networks 14  this repo's own coordinate networks
-
-Plus a card per state at reading size, and every number in a CSV.
-
-THE STATES ARE SIMULATED unless `--state-means` is the CSV `fmri-decomp
-state-means --csv` writes. The simulation has a known answer: each state is a
-signed mix of Yeo networks and Brainnetome's deep structures (amygdala,
-hippocampus, basal ganglia, thalamus), plus spatially smooth noise, sampled as
-a sticky Markov chain of noisy frames and averaged back per label -- the
-groupby `state-means` does. If the Yeo panel does not recover the mix, the
-pipeline is wrong, not the states.
-
-The behavioural panel is SIMULATED until `--behavioural` gives the real
-Brainnetome table (README.md: why, and the format).
+Per atlas: one overview -- a row per state: cortex (lateral and medial, left
+then right, fsaverage5) and two subcortical slices, then one heat strip per
+reference family -- and one card per state with ranked bars. The families and
+the BrainMap depth shown are chosen here; any subset of what the run computed.
 """
 
 from __future__ import annotations
@@ -42,38 +25,27 @@ import pandas as pd
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import refmaps as rm  # noqa: E402
-
-ATLASES = ["harvardoxford", "networks_nodes", "networks", "yeo7"]
+from state_correlations import BN_LEVELS, FAMILIES  # noqa: E402
 
 # Diverging blue <-> red with a neutral grey midpoint.
 DIVERGING = ["#104281", "#3987e5", "#cde2fb", "#f0efec", "#f8d3d2", "#e34948", "#8f1d1c"]
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#8a8984"
 SIMULATED_INK = "#b4560f"
 
-FAMILIES = ["molecular", "behavioural", "yeo7", "networks14"]
 TITLES = {
     "molecular": "Molecular · PET receptors (neuromaps)",
-    "behavioural": "Behavioural · BrainMap taxonomy × Brainnetome (246)",
+    "behavioural_domain": "Behavioural · BrainMap domains",
+    "behavioural": "Behavioural · BrainMap subcategories × Brainnetome (246)",
     "yeo7": "Canonical · Yeo 7",
     "networks14": "Canonical · our 14 networks",
 }
-CARD_TITLES = {"molecular": "Molecular (PET)", "behavioural": "Behavioural (BrainMap)",
-               "yeo7": "Yeo 7 networks", "networks14": "Our 14 networks"}
-CARD_TOP = {"molecular": 8, "behavioural": 10, "yeo7": 7, "networks14": 14}
-
-# Ground truth of the simulation: state -> {component: weight}. Components are
-# Yeo networks and Brainnetome's deep gyri.
-SIM_STATES = {
-    "Default": {"Default": 1.0, "Dorsal Attention": -0.6, "Somatomotor": -0.3, "Hipp": 0.5},
-    "Visual": {"Visual": 1.0, "Default": -0.4, "Tha": 0.3},
-    "Sensorimotor": {"Somatomotor": 1.0, "Ventral Attention": 0.4, "Frontoparietal": -0.4,
-                     "BG": 0.6, "Tha": 0.4},
-    "Task-positive": {"Dorsal Attention": 0.8, "Frontoparietal": 0.8, "Default": -0.6, "BG": 0.3},
-    "Limbic": {"Limbic": 1.0, "Default": 0.3, "Visual": -0.4, "Amyg": 0.9, "Hipp": 0.6},
-    "Salience": {"Ventral Attention": 1.0, "Somatomotor": 0.3, "Default": -0.5,
-                 "Tha": 0.5, "Amyg": 0.3},
-}
-
+CARD_TITLES = {"molecular": "Molecular (PET)", "behavioural_domain": "BrainMap domains",
+               "behavioural": "BrainMap subcategories", "yeo7": "Yeo 7 networks",
+               "networks14": "Our 14 networks"}
+CARD_TOP = {"molecular": 8, "behavioural_domain": 5, "behavioural": 10, "yeo7": 7,
+            "networks14": 14}
+CELL_W = {"molecular": 0.25, "behavioural_domain": 0.3, "behavioural": 0.2, "yeo7": 0.26,
+          "networks14": 0.26}
 NULL_LABEL = {"moran": "Moran spectral null", "burt": "variogram null (brainsmash)"}
 
 SLICES = [("z", 2), ("y", -10)]          # basal ganglia + thalamus; amygdala/hippocampus
@@ -83,55 +55,6 @@ def diverging_cmap():
     from matplotlib.colors import LinearSegmentedColormap
 
     return LinearSegmentedColormap.from_list("div", DIVERGING)
-
-
-# ------------------------------------------------------------ simulation ---
-def simulate_state_means(parc: rm.Parcellator, components: dict, seed: int,
-                         n_frames: int = 6000, frame_noise: float = 2.0,
-                         pattern_noise: float = 0.45) -> pd.DataFrame:
-    """Frames -> labels -> per-state mean, in `state-means`' CSV layout."""
-    rng = np.random.default_rng(seed)
-    P = parc.n
-    cen = parc.centroids
-    d = np.linalg.norm(cen[:, None] - cen[None], axis=-1)
-    smooth = np.exp(-(d / 25.0) ** 2)                 # 25 mm Gaussian kernel
-    smooth /= smooth.sum(1, keepdims=True)
-
-    patterns = []
-    for mix in SIM_STATES.values():
-        x = sum(w * components[c] for c, w in mix.items())
-        x = (x - x.mean()) / (x.std() or 1.0)
-        noise = smooth @ rng.normal(size=P)
-        x = x + pattern_noise * noise / (noise.std() or 1.0)
-        patterns.append((x - x.mean()) / x.std())
-    patterns = np.array(patterns)
-    K = len(patterns)
-
-    land = rng.dirichlet(np.full(K, 3.0))
-    labels = np.empty(n_frames, dtype=int)
-    labels[0] = rng.choice(K, p=land)
-    for t in range(1, n_frames):
-        labels[t] = labels[t - 1] if rng.random() < 0.9 else rng.choice(K, p=land)
-    frames = patterns[labels] + frame_noise * rng.normal(size=(n_frames, P))
-
-    df = pd.DataFrame(frames, columns=parc.columns)
-    df["state"] = labels
-    g = df.groupby("state")
-    out = g[parc.columns].mean()
-    out.insert(0, "n_rows", g.size())
-    out.insert(1, "share", out["n_rows"] / n_frames)
-    return out
-
-
-def read_state_means(path: Path, parc: rm.Parcellator) -> pd.DataFrame:
-    """`state-means --csv` -> its parcel columns. A column the atlas has and
-    the CSV lacks means the states came from another atlas: hard error."""
-    t = pd.read_csv(path, index_col="state")
-    missing = [c for c in parc.columns if c not in t.columns]
-    if missing:
-        raise SystemExit(f"{path}: {len(missing)} of {parc.n} `{parc.spec.name}` columns "
-                         f"missing, e.g. {missing[:3]}")
-    return t[["n_rows", "share"] + parc.columns]
 
 
 # ---------------------------------------------------------------- drawing ---
@@ -246,12 +169,12 @@ def overview_figure(atlas, src, state_df, names, results, brains, out: Path, sim
     Z = (X - X.mean(1, keepdims=True)) / X.std(1, keepdims=True)
     K = len(Z)
 
-    cell_w = {"molecular": 0.25, "behavioural": 0.2, "yeo7": 0.26, "networks14": 0.26}
+    fams = list(results)
     widths, cols = [0.95, 5.0, 1.9], {}
-    for f in FAMILIES:
+    for f in fams:
         widths.append(0.35)
         cols[f] = len(widths)
-        widths.append(len(results[f]["names"]) * cell_w[f])
+        widths.append(len(results[f]["names"]) * CELL_W[f])
     H = 1.3 * K + 3.4
     fig = plt.figure(figsize=(sum(widths) + 0.4, H), facecolor="white")
     gs = GridSpec(K, len(widths), figure=fig, width_ratios=widths, left=0.008,
@@ -270,7 +193,7 @@ def overview_figure(atlas, src, state_df, names, results, brains, out: Path, sim
         ss = GridSpecFromSubplotSpec(1, 2, subplot_spec=gs[i, 2], wspace=0.04)
         brains.slices(fig, [ss[0, j] for j in range(2)], Z[i], vlim=2.5)
 
-    for fam in FAMILIES:
+    for fam in fams:
         res = results[fam]
         ax = fig.add_subplot(gs[:, cols[fam]])
         im = heat_panel(ax, res, header_colors=rm.YEO7_COLORS if fam == "yeo7" else None)
@@ -280,7 +203,7 @@ def overview_figure(atlas, src, state_df, names, results, brains, out: Path, sim
                  fontsize=9.5, fontweight="bold", color=SIMULATED_INK if sim else INK)
 
     P = brains.parc.n
-    no_null = not np.isfinite(results["molecular"]["p"]).any()
+    no_null = not any(np.isfinite(r["p"]).any() for r in results.values())
     cax = fig.add_axes([0.60, 0.42 / H, 0.12, 0.10 / H])
     cb = fig.colorbar(im, cax=cax, orientation="horizontal", ticks=[-1, -0.5, 0, 0.5, 1])
     cb.set_label(f"Pearson r across {P} parcels" + (
@@ -304,7 +227,7 @@ def overview_figure(atlas, src, state_df, names, results, brains, out: Path, sim
              f"subcortex (Brainnetome amygdala, hippocampus, basal ganglia, thalamus): "
              f"MNI slices {', '.join(f'{m}={c}' for m, c in SLICES)}",
              ha="left", va="top", fontsize=8, color=INK2)
-    if results["behavioural"]["simulated"]:
+    if any(r["simulated"] for r in results.values()):
         fig.text(0.995, 0.06 / H, "Behavioural panel: SIMULATED stand-in table on the "
                  "real Brainnetome atlas (BrainMap profiles not loaded yet).",
                  ha="right", va="bottom", fontsize=7, color=SIMULATED_INK)
@@ -320,15 +243,16 @@ def state_card(i, state_df, names, results, brains, out: Path, null="moran"):
     X = state_df[brains.parc.columns].to_numpy(float)
     z = (X[i] - X[i].mean()) / X[i].std()
 
-    fig = plt.figure(figsize=(17, 5.2), facecolor="white")
-    gs = GridSpec(1, 5, figure=fig, width_ratios=[4.6, 2.1, 2.5, 2.0, 2.1], left=0.005,
-                  right=0.99, top=0.80, bottom=0.1, wspace=0.62)
+    fams = list(results)
+    fig = plt.figure(figsize=(5.2 + 2.6 * len(fams), 5.2), facecolor="white")
+    gs = GridSpec(1, 1 + len(fams), figure=fig, width_ratios=[4.6] + [2.2] * len(fams),
+                  left=0.005, right=0.99, top=0.80, bottom=0.1, wspace=0.62)
     left = GridSpecFromSubplotSpec(3, 2, subplot_spec=gs[0, 0], wspace=-0.05,
                                    hspace=-0.05, height_ratios=[1, 1, 0.9])
     brains.surface(fig, [left[0, 0], left[1, 0], left[0, 1], left[1, 1]], z, vlim=2.5)
     brains.slices(fig, [left[2, 0], left[2, 1]], z, vlim=2.5)
 
-    for c, fam in enumerate(FAMILIES, start=1):
+    for c, fam in enumerate(fams, start=1):
         res = results[fam]
         r, p, q, nm = res["r"][i], res["p"][i], res["q"][i], np.array(res["names"])
         top = CARD_TOP[fam]
@@ -364,7 +288,7 @@ def state_card(i, state_df, names, results, brains, out: Path, null="moran"):
         ax.set_title(CARD_TITLES[fam] + ("  SIMULATED" if sim else "") + sub,
                      fontsize=9, color=SIMULATED_INK if sim else INK, loc="left")
     P = brains.parc.n
-    has_p = np.isfinite(results["molecular"]["p"]).any()
+    has_p = any(np.isfinite(r["p"]).any() for r in results.values())
     fig.text(0.008, 0.975, f"S{i + 1} · {names[i]}   ({brains.parc.spec.name}, {P} parcels)",
              fontsize=14, fontweight="bold", color=INK, va="top")
     fig.text(0.008, 0.91, f"{state_df['share'].iloc[i]:.0%} of frames · mean activation, z "
@@ -377,97 +301,75 @@ def state_card(i, state_df, names, results, brains, out: Path, null="moran"):
 
 
 # ------------------------------------------------------------------- main ---
-def run_atlas(atlas, args, ref, surf, refs_vox, subcort):
-    spec, src = rm.state_atlas(atlas, args.data)
-    parc = rm.Parcellator.build(spec, ref)
-    out = args.out / atlas
-    out.mkdir(parents=True, exist_ok=True)
-    print(f"[{atlas}] {parc.n} parcels ({src})")
+def load_results(atlas_dir: Path, families) -> tuple[pd.DataFrame, dict, dict]:
+    """state_means.csv + correlations.csv -> (states, {family: r/p/q/names}, provenance)."""
+    sm = pd.read_csv(atlas_dir / "state_means.csv", index_col="state")
+    cor = pd.read_csv(atlas_dir / "correlations.csv")
+    prov = json.loads((atlas_dir / "provenance.json").read_text())
+    states = list(sm.index)
+    results = {}
+    for fam in families:
+        c = cor[cor["family"] == fam]
+        if c.empty:
+            raise SystemExit(f"{atlas_dir}: no `{fam}` rows -- run state_correlations "
+                             f"with that family first")
+        names = list(dict.fromkeys(c["map"]))
+        piv = {k: c.pivot(index="state", columns="map", values=v).loc[states, names].to_numpy(float)
+               for k, v in (("r", "r"), ("p", "p_null"), ("q", "q_fdr"))}
+        results[fam] = dict(piv, names=names, simulated=bool(c["map_simulated"].iloc[0]))
+    return sm, results, prov
 
-    parcel_maps = {f: parc.parcellate(refs_vox[f].voxels) for f in FAMILIES}
-    comps = {n: parcel_maps["yeo7"][k] for k, n in enumerate(rm.YEO7)}
-    comps.update({g: parc.parcellate(v) for g, v in subcort.items()})
 
-    if args.state_means:
-        state_df = read_state_means(args.state_means, parc)
-        names = [f"state {s}" for s in state_df.index]
-    else:
-        state_df = simulate_state_means(parc, comps, seed=args.seed)
-        names = list(SIM_STATES)
-        state_df.to_csv(out / "simulated_state_means.csv")
-    X = state_df[parc.columns].to_numpy(float)
+def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
+         data: Path = HERE / "data", cards: bool = True) -> list:
+    """Draw every atlas under `run_dir`; return the figure paths.
 
-    results, rows = {}, []
-    for k, fam in enumerate(FAMILIES):
-        res = rm.null_test(X, parcel_maps[fam], parc.centroids, args.n_nulls,
-                           seed=args.seed + 1000 * k, method=args.null)
-        res.update(names=refs_vox[fam].names, simulated=refs_vox[fam].simulated)
-        results[fam] = res
-        for i in range(len(X)):
-            for j, n in enumerate(res["names"]):
-                rows.append({"atlas": atlas, "state": i + 1, "state_name": names[i],
-                             "family": fam, "map": n, "r": res["r"][i, j],
-                             "p_null": res["p"][i, j], "q_fdr": res["q"][i, j],
-                             "map_simulated": res["simulated"]})
-        sig = int(np.nansum(res["q"] < 0.05)) if np.isfinite(res["q"]).any() else "-"
-        print(f"[{atlas}] {fam}: {len(res['names'])} maps, q<.05: {sig}")
-    pd.DataFrame(rows).to_csv(out / "state_map_correlations.csv", index=False)
-
-    brains = Brains(parc, surf, deep=sum(subcort.values()))
-    overview_figure(atlas, src, state_df, names, results, brains,
-                    out / "state_maps_overview.png", simulated_states=not args.state_means,
-                    null=args.null)
-    for i in range(len(X)):
-        state_card(i, state_df, names, results, brains, out / f"state_card_S{i + 1}.png",
-                   null=args.null)
-    (out / "provenance.json").write_text(json.dumps({
-        "atlas": atlas, "atlas_source": src, "n_parcels": parc.n,
-        "states": str(args.state_means) if args.state_means else "simulated",
-        "simulation_truth": None if args.state_means else SIM_STATES,
-        "families": {f: {"source": refs_vox[f].source, "maps": refs_vox[f].names,
-                         "simulated": refs_vox[f].simulated} for f in FAMILIES},
-        "null": (f"{args.null}, {args.n_nulls} surrogates" if parc.n >= rm.MIN_PARCELS_FOR_NULL
-                 else f"none ({parc.n} parcels)"),
-        "seed": args.seed,
-    }, indent=2, ensure_ascii=False))
+    `families` picks the non-behavioural panels; `bn_levels` ("domain",
+    "subcategory", or both) picks the BrainMap depth(s) shown.
+    """
+    run_dir = Path(run_dir)
+    atlases = atlases or sorted(p.name for p in run_dir.iterdir() if (p / "correlations.csv").exists())
+    families = [f for f in (families or ["molecular", "yeo7", "networks14"])
+                if not f.startswith("behavioural")]
+    chosen = families + [BN_LEVELS[b] for b in bn_levels]
+    chosen = [f for f in FAMILIES if f in chosen]
+    ref = rm.reference_grid(data)
+    surf = rm.load_surface(data)
+    deep = sum(rm.subcortical_structures(data, ref).values())
+    paths = []
+    for atlas in atlases:
+        d = run_dir / atlas
+        sm, results, prov = load_results(d, chosen)
+        spec, _ = rm.state_atlas(atlas, data)
+        parc = rm.Parcellator.build(spec, ref)
+        brains = Brains(parc, surf, deep=deep)
+        names = list(sm["name"]) if "name" in sm else [f"state {s}" for s in sm.index]
+        null = prov.get("null_method", "moran")
+        out = d / "state_maps_overview.png"
+        overview_figure(atlas, prov["atlas_source"], sm, names, results, brains, out,
+                        simulated_states=prov["states"] == "simulate", null=null)
+        paths.append(out)
+        if cards:
+            for i in range(len(sm)):
+                p = d / f"state_card_S{i + 1}.png"
+                state_card(i, sm, names, results, brains, p, null=null)
+                paths.append(p)
+        print(f"[{atlas}] figures -> {d}")
+    return paths
 
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--data", type=Path, default=HERE / "data",
-                   help="where fetch_reference_maps.sh put the maps")
-    p.add_argument("--atlases", nargs="+", default=ATLASES, choices=ATLASES)
-    p.add_argument("--state-means", type=Path,
-                   help="CSV from `fmri-decomp state-means --csv` (one atlas only)")
-    p.add_argument("--behavioural", type=Path,
-                   help="real Brainnetome behavioural table (bn_index + one column per category)")
-    p.add_argument("--n-nulls", type=int, default=10000,
-                   help="surrogates per map. The smallest p is 1/(n+1), and BH over a "
-                        "family of 114 (6 states x 19 PET maps) needs it well under "
-                        "0.05/114: 1000 cannot reach q<.05 at all")
-    p.add_argument("--null", choices=rm.NULLS, default="moran",
-                   help="moran: Moran spectral randomisation (seconds); burt: brainsmash "
-                        "variogram matching (hours for every family -- a cluster job)")
-    p.add_argument("--out", type=Path, default=HERE / "figures")
-    p.add_argument("--seed", type=int, default=7)
-    args = p.parse_args(argv)
-    if args.state_means and len(args.atlases) != 1:
-        p.error("--state-means is one atlas's states: pass exactly one --atlases")
-
-    ref = rm.reference_grid(args.data)
-    surf = rm.load_surface(args.data)
-    bt = rm.load_behavioural_table(args.behavioural) if args.behavioural else None
-    refs_vox = {
-        "molecular": rm.receptor_maps(args.data, ref),
-        "behavioural": rm.behavioural_maps(args.data, ref, bt, seed=args.seed),
-        "yeo7": rm.yeo7_maps(args.data, ref),
-        "networks14": rm.network14_maps(ref),
-    }
-    subcort = rm.subcortical_structures(args.data, ref)
-    for atlas in args.atlases:
-        run_atlas(atlas, args, ref, surf, refs_vox, subcort)
-    print(f"-> {args.out}")
+    p.add_argument("run_dir", type=Path, help="<out>/<states>/ from state_correlations.py")
+    p.add_argument("--atlases", nargs="+", default=None)
+    p.add_argument("--families", nargs="+", default=["molecular", "yeo7", "networks14"],
+                   choices=["molecular", "yeo7", "networks14"])
+    p.add_argument("--bn-levels", nargs="+", default=["subcategory"], choices=list(BN_LEVELS))
+    p.add_argument("--no-cards", action="store_true")
+    p.add_argument("--data", type=Path, default=HERE / "data")
+    a = p.parse_args(argv)
+    draw(a.run_dir, a.atlases, a.families, a.bn_levels, data=a.data, cards=not a.no_cards)
     return 0
 
 
