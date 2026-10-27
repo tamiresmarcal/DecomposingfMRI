@@ -4,7 +4,7 @@ Como ler um brain state em termos neuroanatômicos: a ativação média do estad
 no córtex e no subcórtex, e ao lado a correlação desse padrão com quatro
 famílias de mapas. Há uma figura para cada atlas do pipeline.
 
-![harvardoxford](state_maps_results/simulated/harvardoxford/state_maps_overview.png)
+![harvardoxford](state_maps_results/simulated/harvardoxford/states_figure.png)
 
 | família | o que é | fonte | status |
 |---|---|---|---|
@@ -181,3 +181,14 @@ No Beam, 81 dos 112 termos existem no vocabulário do Neurosynth, por domínio: 
 Alguns termos aparecem em mais de um domínio, como "emotion" em Memory e em Cognition. Isso segue a lista original, e cada domínio recebe a sua cópia. No Beam, emoção e medo ficam dentro de Memory, porque não existe domínio de emoção.
 
 Os resultados do Beam vão para `state_maps_results/<estados>_beam2021/`, para não sobrescrever os do BrainMap.
+
+
+## A figura principal (`states_figure.png`)
+
+Cada estado ocupa uma linha:
+
+- **Cérebro em 2 × 3.** Em cima: lateral esquerda, lateral direita e o corte axial z=2 (núcleos da base e tálamo). Embaixo: medial esquerda, medial direita e o corte coronal y=−10 (amígdala e hipocampo). Cada vista é desenhada sozinha e recortada, para nada ser cortado nas bordas.
+- **Um gráfico de barras por família em `PANELS`.** O padrão é Yeo 7 e as subcategorias do BrainMap. Cada gráfico mostra as `TOP` maiores |r|; Yeo 7 mostra sempre as 7 redes. As categorias "… · Other" do BrainMap ficam de fora, porque são restos e não funções.
+- **Barras = média de r entre sujeitos ± desvio padrão entre sujeitos.** Isso vale quando os estados vêm de uma coluna de estados (cada sujeito tem o seu mapa por estado; o arquivo é `subject_correlations.parquet`) ou da simulação (30 sujeitos). Com um CSV do `state-means` só existe o mapa do grupo, e as barras saem sem erro.
+
+O painel antigo de faixas de calor e os cards por estado continuam disponíveis com `draw(..., overview=True, cards=True)`, ou `--overview --cards` na linha de comando.

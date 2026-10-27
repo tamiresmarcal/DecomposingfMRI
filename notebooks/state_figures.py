@@ -317,6 +317,160 @@ def state_card(i, state_df, names, results, brains, out: Path, null="moran",
     plt.close(fig)
 
 
+# ------------------------------------------------- the states figure (main) ---
+PANEL_TITLES = {"molecular": "Molecular (PET)", "behavioural": "{tax}",
+                "behavioural_domain": "{tax} domains", "yeo7": "Yeo 7 networks",
+                "networks14": "Our 14 networks"}
+
+
+def _cropped(fig) -> np.ndarray:
+    """Render a scratch figure, return it as RGB with the white margin cut away."""
+    import io
+
+    import matplotlib.pyplot as plt
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=200, facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+    img = plt.imread(buf)[..., :3]
+    ink = np.where((img < 0.985).any(-1))
+    return img[ink[0].min():ink[0].max() + 1, ink[1].min():ink[1].max() + 1]
+
+
+def surface_image(brains: "Brains", hemi: str, view: str, values, vlim: float) -> np.ndarray:
+    """One view drawn alone at zoom 1 -- nothing clipped -- then cropped. Zooming
+    a 3D axes to fill its cell is what cut the hemispheres' edges off."""
+    import matplotlib.pyplot as plt
+    from nilearn import plotting
+
+    vals = np.concatenate([[np.nan], np.asarray(values, float)])
+    f = plt.figure(figsize=(4, 3.2), facecolor="white")
+    ax = f.add_subplot(111, projection="3d")
+    plotting.plot_surf(brains.infl[hemi], surf_map=vals[brains.vlab["L" if hemi == "left" else "R"]],
+                       bg_map=brains.sulc[hemi], hemi=hemi, view=view, axes=ax, figure=f,
+                       cmap=diverging_cmap(), vmin=-vlim, vmax=vlim, colorbar=False,
+                       avg_method="median")
+    ax.set_axis_off()
+    return _cropped(f)
+
+
+def slice_image(brains: "Brains", mode: str, cut: int, values, vlim: float) -> np.ndarray:
+    import matplotlib.pyplot as plt
+
+    global SLICES
+    keep, SLICES = SLICES, [(mode, cut)]
+    try:
+        f = plt.figure(figsize=(3, 3.4), facecolor="white")
+        brains.slices(f, [f.add_gridspec(1, 1)[0, 0]], values, vlim)
+        for t in f.axes[0].texts:
+            t.set_visible(False)            # the cut is named in the figure header
+    finally:
+        SLICES = keep
+    return _cropped(f)
+
+
+def _label(name: str, fam: str) -> str:
+    if not fam.startswith("behavioural") or "." not in name:
+        return name
+    return name.split(".")[0][:3] + " · " + rm.short(name)
+
+
+def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7", "behavioural"),
+                  top=7, subjects: pd.DataFrame | None = None, measure="mean activation",
+                  title_note=""):
+    """One row per state: brain in 2 x 3 (L lat · R lat · axial / L med · R med ·
+    coronal), then one ranked bar chart per panel family. Bars are the mean r
+    over subjects with +-SD when per-subject correlations exist, else the
+    group r. BrainMap's "... Other" bins are left out: leftovers, not functions.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
+
+    X = sm[brains.parc.columns].to_numpy(float)
+    K = len(X)
+    H = 5.6 * K + 1.6
+    fig = plt.figure(figsize=(16 + 8.5 * len(panels), H), facecolor="white")
+    gs = GridSpec(K, 2 + len(panels), figure=fig,
+                  width_ratios=[2.2, 9.0] + [7.5 if p != "yeo7" else 6.5 for p in panels],
+                  left=0.01, right=0.985, top=1 - 1.5 / H, bottom=0.5 / H, wspace=0.55, hspace=0.32)
+    n_sub = None if subjects is None else subjects["subject"].nunique()
+    for i in range(K):
+        a = fig.add_subplot(gs[i, 0])
+        a.set_axis_off()
+        a.text(.95, .6, f"S{i + 1}", ha="right", va="center", fontsize=32, fontweight="bold",
+               color=INK, transform=a.transAxes)
+        a.text(.95, .42, names[i], ha="right", va="center", fontsize=22, color=INK2,
+               transform=a.transAxes)
+        a.text(.95, .28, f"{sm['share'].iloc[i]:.0%} of frames", ha="right", va="center",
+               fontsize=18, color=MUTED, transform=a.transAxes)
+        z = (X[i] - X[i].mean()) / X[i].std()
+        g = GridSpecFromSubplotSpec(2, 3, subplot_spec=gs[i, 1], wspace=0.03, hspace=0.04,
+                                    width_ratios=[1, 1, 0.81])
+        for cell, (hemi, view) in zip([g[0, 0], g[0, 1], g[1, 0], g[1, 1]],
+                                      [("left", "lateral"), ("right", "lateral"),
+                                       ("left", "medial"), ("right", "medial")]):
+            ax = fig.add_subplot(cell)
+            ax.imshow(surface_image(brains, hemi, view, z, 2.5))
+            ax.set_axis_off()
+        for cell, (mode, cut) in zip([g[0, 2], g[1, 2]], SLICES):
+            ax = fig.add_subplot(cell)
+            ax.imshow(slice_image(brains, mode, cut, z, 2.5))
+            ax.set_axis_off()
+
+        state = sm.index[i]
+        for c, fam in enumerate(panels, start=2):
+            res = results[fam]
+            nm = np.array(res["names"])
+            if subjects is not None:
+                t = subjects[(subjects["family"] == fam) & (subjects["state"] == state)]
+                agg = t.groupby("map")["r"].agg(["mean", "std"]).reindex(nm)
+                m, sd = agg["mean"].to_numpy(float), agg["std"].to_numpy(float)
+            else:
+                m, sd = res["r"][i].astype(float), None
+            m = np.where([n.endswith(".Other") for n in nm], np.nan, m)
+            k = min(top, int(np.isfinite(m).sum())) if fam != "yeo7" else len(nm)
+            order = np.argsort(-np.nan_to_num(np.abs(m), nan=-1))[:k]
+            order = order[np.argsort(-m[order])]
+            y = np.arange(len(order))[::-1]
+            colors = ([rm.YEO7_COLORS[j] for j in order] if fam == "yeo7" else
+                      [DIVERGING[5] if v >= 0 else DIVERGING[1] for v in m[order]])
+            ax = fig.add_subplot(gs[i, c])
+            ax.barh(y, m[order], xerr=None if sd is None else sd[order], color=colors,
+                    height=.7, edgecolor="white", lw=1.5,
+                    error_kw=dict(ecolor=INK2, elinewidth=2, capsize=4))
+            ax.axvline(0, color=MUTED, lw=.8)
+            ax.set_xlim(-1, 1)
+            ax.set_xticks([-1, 0, 1])
+            ax.set_yticks(y)
+            ax.set_yticklabels([_label(n, fam) for n in nm[order]], fontsize=22, color=INK)
+            ax.tick_params(labelsize=20, colors=INK2, length=5, width=1.2)
+            for sp in ("top", "right", "left"):
+                ax.spines[sp].set_visible(False)
+            ax.spines["bottom"].set_color(MUTED)
+            if i == 0:
+                title = PANEL_TITLES[fam].format(tax=taxonomy_label(res))
+                if fam != "yeo7":
+                    title += f" · top {top} by |r|"
+                if res["simulated"]:
+                    title += " · SIMULATED"
+                ax.set_title(title, loc="left", fontsize=26, fontweight="bold",
+                             color=SIMULATED_INK if res["simulated"] else INK, pad=14)
+            if i == K - 1:
+                ax.set_xlabel("r across parcels" + (f" · mean ± SD over {n_sub} subjects"
+                                                    if n_sub else " · group"),
+                              fontsize=20, color=INK2)
+    P = brains.parc.n
+    fig.text(0.01, 1 - 0.15 / H, f"Brain states — {atlas} ({P} parcels){title_note}",
+             fontsize=28, fontweight="bold", color=INK, va="top")
+    fig.text(0.01, 1 - 0.75 / H,
+             f"brain: {measure}, z across parcels · top = L lateral · R lateral · axial "
+             f"z={SLICES[0][1]}    bottom = L medial · R medial · coronal y={SLICES[1][1]}",
+             fontsize=20, color=INK2, va="top")
+    fig.savefig(out, dpi=150, facecolor="white")
+    plt.close(fig)
+
+
 # ------------------------------------------------------------------- main ---
 def load_results(atlas_dir: Path, families) -> tuple[pd.DataFrame, dict, dict]:
     """state_means.csv + correlations.csv -> (states, {family: r/p/q/names}, provenance)."""
@@ -339,7 +493,8 @@ def load_results(atlas_dir: Path, families) -> tuple[pd.DataFrame, dict, dict]:
 
 
 def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
-         data: Path = HERE / "state_maps_data", cards: bool = True) -> list:
+         data: Path = HERE / "state_maps_data", cards: bool = False, overview: bool = False,
+         panels=("yeo7", "behavioural"), top: int = 7) -> list:
     """Draw every atlas under `run_dir`; return the figure paths.
 
     `families` picks the non-behavioural panels; `bn_levels` ("domain",
@@ -350,7 +505,9 @@ def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
     families = [f for f in (families or ["molecular", "yeo7", "networks14"])
                 if not f.startswith("behavioural")]
     chosen = families + [BN_LEVELS[b] for b in bn_levels]
-    chosen = [f for f in FAMILIES if f in chosen]
+    if not (cards or overview):          # the states figure needs its panels only
+        chosen = list(panels)
+    chosen = [f for f in FAMILIES if f in chosen or f in panels]
     ref = rm.reference_grid(data)
     surf = rm.load_surface(data)
     deep = sum(rm.subcortical_structures(data, ref).values())
@@ -363,6 +520,22 @@ def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
         brains = Brains(parc, surf, deep=deep)
         names = list(sm["name"]) if "name" in sm else [f"state {s}" for s in sm.index]
         null = prov.get("null_method", "moran")
+        measure = prov.get("state_measure", "mean activation")
+        subj_path = d / "subject_correlations.parquet"
+        subjects = pd.read_parquet(subj_path) if subj_path.exists() else None
+        out = d / "states_figure.png"
+        states_figure(atlas, sm, names, results, brains, out, panels=panels, top=top,
+                      subjects=subjects, measure=measure,
+                      title_note="  (simulated states)" if prov["states"] == "simulate" else "")
+        paths.append(out)
+        if not overview:
+            if cards:
+                for i in range(len(sm)):
+                    p = d / f"state_card_S{i + 1}.png"
+                    state_card(i, sm, names, results, brains, p, null=null, measure=measure)
+                    paths.append(p)
+            print(f"[{atlas}] figures -> {d}")
+            continue
         out = d / "state_maps_overview.png"
         overview_figure(atlas, prov["atlas_source"], sm, names, results, brains, out,
                         simulated_states=prov["states"] == "simulate", null=null,
@@ -386,10 +559,15 @@ def main(argv=None) -> int:
     p.add_argument("--families", nargs="+", default=["molecular", "yeo7", "networks14"],
                    choices=["molecular", "yeo7", "networks14"])
     p.add_argument("--bn-levels", nargs="+", default=["subcategory"], choices=list(BN_LEVELS))
-    p.add_argument("--no-cards", action="store_true")
+    p.add_argument("--panels", nargs="+", default=["yeo7", "behavioural"], choices=FAMILIES,
+                   help="bar charts beside each state's brain, in order")
+    p.add_argument("--top", type=int, default=7, help="bars per panel (Yeo 7 always shows 7)")
+    p.add_argument("--cards", action="store_true", help="also one card per state")
+    p.add_argument("--overview", action="store_true", help="also the heat-strip overview")
     p.add_argument("--data", type=Path, default=HERE / "state_maps_data")
     a = p.parse_args(argv)
-    draw(a.run_dir, a.atlases, a.families, a.bn_levels, data=a.data, cards=not a.no_cards)
+    draw(a.run_dir, a.atlases, a.families, a.bn_levels, data=a.data, cards=a.cards,
+         overview=a.overview, panels=a.panels, top=a.top)
     return 0
 
 

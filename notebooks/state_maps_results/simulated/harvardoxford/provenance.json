@@ -5,6 +5,7 @@
   "states": "simulate",
   "window_s": null,
   "cohorts": null,
+  "state_measure": "mean activation",
   "simulation_truth": {
     "Default": {
       "Default": 1.0,
@@ -72,7 +73,7 @@
       "simulated": false
     },
     "behavioural_domain": {
-      "source": "SIMULATED stand-in on the real Brainnetome atlas (246 incl. subcortex), domain level",
+      "source": "Neurosynth v7 forward inference (z), BrainMap (Fox et al. 2005) taxonomy, domain level",
       "maps": [
         "Action",
         "Cognition",
@@ -80,10 +81,10 @@
         "Interoception",
         "Perception"
       ],
-      "simulated": true
+      "simulated": false
     },
     "behavioural": {
-      "source": "SIMULATED stand-in on the real Brainnetome atlas (246 incl. subcortex)",
+      "source": "Neurosynth v7 forward inference (z), BrainMap (Fox et al. 2005) taxonomy",
       "maps": [
         "Action.Execution.Speech",
         "Action.Execution.Other",
@@ -113,14 +114,10 @@
         "Emotion.Fear",
         "Emotion.Happiness",
         "Emotion.Sadness",
-        "Interoception.Air Hunger",
         "Interoception.Baroregulation",
-        "Interoception.Bladder",
         "Interoception.Hunger",
         "Interoception.Sexuality",
         "Interoception.Sleep",
-        "Interoception.Thermoregulation",
-        "Interoception.Thirst",
         "Perception.Audition",
         "Perception.Gustation",
         "Perception.Olfaction",
@@ -131,7 +128,7 @@
         "Perception.Vision.Shape",
         "Perception.Vision.Other"
       ],
-      "simulated": true
+      "simulated": false
     },
     "yeo7": {
       "source": "Yeo et al. 2011, 7 networks, liberal mask (neuroparc, MNI152NLin6)",
