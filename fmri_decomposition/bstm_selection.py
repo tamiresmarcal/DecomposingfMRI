@@ -1,18 +1,60 @@
 #!/usr/bin/env python3
 """Stage 5b -- which state set predicts a phenotype column best.
 
-    fmri-decomp select --target additional_HADS_anx_category
-    fmri-decomp select --target additional_HADS_anx_category \\
+    fmri-decomp select-bstm --target additional_HADS_anx_category \\
+        --cohort camcan --task movie --pheno <table>:,
+    fmri-decomp select-bstm --target additional_HADS_anx_category \\
+        --cohort camcan --task movie --pheno <table>:, \\
         --models ridge hgb lgbm --n-jobs 16
 
-writes, per target,
+    # the resting-state ranking -- same code, same grid, another cohort under
+    # another --task label
+    fmri-decomp select-bstm --target additional_HADS_anx_category \\
+        --cohort camcan_rest --task rest --pheno <table>:,
 
-    outputs/bstm_selection/target=<t>/DESIGN.md       what was compared and fixed
-    outputs/bstm_selection/target=<t>/scores.parquet  every (state set, arm, model, seed)
-    outputs/bstm_selection/target=<t>/summary.csv     the ranking, readable
-    outputs/bstm_selection/target=<t>/figures/*.png   the comparison plots
-    outputs/bstm_selection/target=<t>/models/*.joblib refit artifacts for the top N
-    outputs/meta/bstm_selection/target=<t>.json       manifest
+writes, per (task, target), under `--output-name` (default `bstm_selection`),
+
+    outputs/<name>/task=<k>/target=<t>/DESIGN.md       what was compared
+    outputs/<name>/task=<k>/target=<t>/scores.csv      (state set, arm, model, seed)
+    outputs/<name>/task=<k>/target=<t>/summary.csv     the ranking, readable
+    outputs/<name>/task=<k>/target=<t>/figures/*.png   the comparison plots
+    outputs/<name>/task=<k>/target=<t>/models/*.joblib refits for the top N
+    outputs/meta/<name>/task=<k>/target=<t>.json       manifest
+
+TWO TREES, PARTITIONED BY CONDITION
+-----------------------------------
+`bstm_selection` (state sets) and `fcm_selection` (static connectivity), each
+split by `task=`:
+
+    outputs/bstm_selection/task=movie/target=<t>/summary.csv
+    outputs/bstm_selection/task=rest/ target=<t>/summary.csv
+    outputs/fcm_selection/ task=movie/target=<t>/summary.csv
+    outputs/fcm_selection/ task=rest/ target=<t>/summary.csv
+
+Four tables, one shape, read against each other. `task=` is a partition rather
+than a second tree with a different NAME for the same ranking on different
+data, which is what `resting_bstm_selection` was.
+
+TASK= AND TARGET= ARE THE ONLY DIRECTORIES HERE. Unlike the stage 2-5a trees,
+which nest atlas=/window_s=/cohort=/states= because each level changes the
+SCHEMA of the parquet under it, this tree holds one table per ranking and
+everything that varies inside a ranking -- atlas, window_s, K, states, cohort,
+arm, model -- is a COLUMN. That is the whole point: the comparison is rows of
+one csv you can sort, not a join across directories. The two keys that ARE
+directories are the two that identify which ranking it is, and the two a run
+is given on the command line.
+
+Those two are ALSO the first two columns of every table, as `run` ("bstm
+movie") and `target`. A path is not in a table, so without them a
+concatenation of the four -- which is the only way to read them against each
+other -- has no column saying where a row came from.
+
+This script produces both bstm rows; only `select-fcm` is separate code,
+because its features come from another stage.
+
+They are separate RUNS, so each uses whichever subjects it has.
+`--restrict-subjects`, passed the same file everywhere, is what puts them on
+one sample when a gap between their tables is going to be read as a result.
 
 THE TARGET FOLDER IS WIPED BEFORE EACH RUN. Everything in it is regenerated, so
 a leftover from a previous grid is never a leftover you can trust -- a smaller
@@ -98,7 +140,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .io import meta_dir, read_file
+from .io import hive_key, meta_dir, read_file, transitions_root
 
 # The per-subject features that are NOT transition cells. `occ_*` is added to
 # this per state set, since its width is K.
@@ -147,10 +189,14 @@ CELL_BEARING = ("cells", "all")                 # the sets p_norm applies to
 # would run the identical arm twice.
 P_NORMS = ["joint", "cond"]
 
-CAMCAN = Path("/project/6008063/tamires/cohorts/camcan/dataman/useraccess/"
-              "opendata/paule_toussaint_camcan01870")
-DEFAULT_PHENO = [f"{CAMCAN / 'approved_data.tsv'}:\t",
-                 f"{CAMCAN / 'standard_data.csv'}:,"]
+# NO DEFAULT PHENOTYPE PATH, and no default cohort. There used to be both: two
+# absolute paths into one person's scratch space on one cluster, and
+# `--cohort camcan`. That is how `select` appeared to need neither -- it was
+# carrying a fact about one dataset in its source.
+#
+# The same reasoning that took `camcan` out of `decompose --project`: a stage
+# that spans cohorts must not name one. Both are required arguments now, so the
+# command says which data it ran on and the source says nothing about it.
 # Cam-CAN's HADS category labels, in order. A cohort that codes the same
 # severity differently -- low/mid/high, 0-3, absent/borderline/case -- passes
 # its own with --ordinal-levels; the ORDER is what is being declared, since the
@@ -357,6 +403,28 @@ def read_phenotype(specs: list[str], id_col: str, target: str,
     return pheno
 
 
+def read_subject_list(path: str) -> set[str]:
+    """One subject id per line, or a CSV with a `sub` column.
+
+    Shared by every selection tree, because its whole purpose is that the
+    trees agree on who was scored -- two implementations of "read a list of
+    ids" is exactly the kind of thing that drifts on whitespace or case.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise SystemExit(f"--restrict-subjects {path}: no such file")
+    lines = p.read_text().splitlines()
+    if lines and "sub" in [c.strip().lower() for c in lines[0].split(",")]:
+        d = pd.read_csv(p)
+        vals = d[[c for c in d.columns if c.strip().lower() == "sub"][0]]
+    else:
+        vals = pd.Series([ln.strip() for ln in lines if ln.strip()])
+    out = set(vals.astype(str).str.strip().str.upper())
+    if not out:
+        raise SystemExit(f"--restrict-subjects {path}: no ids in it")
+    return out
+
+
 def _label_axes(d: pd.DataFrame) -> pd.DataFrame:
     """Add the axis columns the figures read, for scored rows and baselines alike.
 
@@ -429,11 +497,17 @@ def _held_fixed_rows(sets: pd.DataFrame, args) -> list[str]:
 
 
 def discover(root: Path) -> pd.DataFrame:
-    rows = [{"atlas": p.parts[-5].split("=")[1],
-             "window_s": p.parts[-4].split("=")[1],
-             "states": p.parts[-3].split("=")[1],
-             "cohort": p.parts[-2].split("=")[1], "path": p}
-            for p in (root / "transitions").rglob("subjects.parquet")]
+    # BY KEY NAME, not by position. This was `p.parts[-5]`, `[-4]`, `[-3]`,
+    # `[-2]`, and `rglob` is depth-agnostic -- so the day `task=` was inserted
+    # below `cohort=` every index shifted by one, each `.split("=")[1]` still
+    # succeeded, and the atlas silently became the window while the cohort
+    # became the task. It died three lines down on `parts[2].astype(int)`,
+    # complaining about state-set names. `hive_key` searches the parts for the
+    # prefix, so it is immune to this level and to the next one anybody adds.
+    rows = [{"atlas": hive_key(p, "atlas"), "window_s": hive_key(p, "window_s"),
+             "states": hive_key(p, "states"), "cohort": hive_key(p, "cohort"),
+             "task": hive_key(p, "task"), "path": p}
+            for p in transitions_root(root).rglob("subjects.parquet")]
     if not rows:
         raise SystemExit(f"no transition tables under {root / 'transitions'} -- "
                          f"run `fmri-decomp transitions` first")
@@ -455,6 +529,41 @@ def discover(root: Path) -> pd.DataFrame:
     return d
 
 
+def select_tables(sets: pd.DataFrame, cohort: str, atlas=None,
+                  window_s=None, tasks=None) -> pd.DataFrame:
+    """Which transition tables this run reads, in the order it reads them.
+
+    `tasks` (`--keep-tasks`) selects FILES here, not only rows inside them.
+    Since the task split there is one table per (cohort, task), so a
+    `--keep-tasks Movie` run walks past `task=Rest/subjects.parquet` -- and
+    filtering that one row-wise raised "matches no row ... it has ['Rest']",
+    which is true and is not a problem. Before the split one file held both
+    conditions and the row filter was the only filter there could be.
+
+    The task is a key in the path, so this costs a comparison rather than a
+    read, and `one_row_per_subject` stays as the backstop for a file that
+    really does mix conditions.
+    """
+    sets = sets[sets["cohort"] == cohort]
+    if atlas:
+        sets = sets[sets["atlas"].isin(atlas)]
+    if window_s:
+        sets = sets[sets["window_s"].isin([str(w) for w in window_s])]
+    if tasks:
+        have = sorted(sets["task"].dropna().unique())
+        sets = sets[sets["task"].isin(tasks)]
+        if sets.empty:
+            raise SystemExit(
+                f"--keep-tasks {list(tasks)} matches no transition table for "
+                f"cohort={cohort}.\n"
+                f"  tasks present: {have}\n"
+                f"  These are the BIDS labels as the data spells them, so "
+                f"they are case sensitive -- `Movie`, not `movie`.")
+    if sets.empty:
+        raise SystemExit("no state set matches --atlas / --window-s / --cohort")
+    return sets.sort_values(["atlas", "K", "window_s_num"]).reset_index(drop=True)
+
+
 def design(cov: pd.DataFrame) -> np.ndarray:
     X = pd.get_dummies(cov, drop_first=True, dummy_na=False).astype(float)
     return X.fillna(X.mean()).to_numpy()
@@ -468,8 +577,45 @@ def to_cond(block: np.ndarray, n_transitions: np.ndarray, K: int) -> np.ndarray:
                      where=rs > 0).reshape(len(block), K * K)
 
 
+def one_row_per_subject(d: pd.DataFrame, what: str,
+                        tasks: list[str] | None = None, *,
+                        remedy: tuple[str, ...] = ()) -> pd.DataFrame:
+    """Refuse a table with several rows for one subject rather than guess.
+
+    A subject scanned at more than one task -- Cam-CAN watching a film AND
+    lying at rest, CNeuroMod watching ~300 runs -- has one row per (task, sub).
+    Both selection stages score ONE row per subject, so without this the same
+    person lands in the train and the test fold of the same split: leakage,
+    an `n` that is a multiple of the real sample, and a ranking of whichever
+    task happened to sort first. Nothing downstream could tell.
+
+    It lives here rather than in fcm_selection because both stages need it and
+    fcm already imports from this module. `remedy` is the caller's stage-
+    specific advice, appended to the shared part of the message.
+    """
+    if tasks:
+        before = sorted(d["task"].unique())
+        d = d[d["task"].isin(tasks)]
+        if d.empty:
+            raise SystemExit(f"--keep-tasks {tasks} matches no row of {what}; "
+                             f"it has {before}")
+    dup = d["sub"].duplicated(keep=False)
+    if not dup.any():
+        return d
+    lines = [
+        f"{what} has {int(dup.sum())} row(s) for the same subject across "
+        f"task(s) {sorted(d.loc[dup, 'task'].unique())[:6]}.",
+        "  This stage scores one row per subject and will not pick one or "
+        "average them.",
+        "  * --keep-tasks <one task> to choose, or",
+    ]
+    lines += [f"  * {r}" for r in remedy]
+    raise SystemExit("\n".join(lines).rstrip(", or"))
+
+
 def build(table: Path, pheno: pd.DataFrame, covariates: list[str],
-          feature_sets: list[str], p_norms: list[str]):
+          feature_sets: list[str], p_norms: list[str],
+          tasks: list[str] | None = None):
     """One state set -> ({feature set: matrix}, covariates-only matrix, y, sizes).
 
     Covariates are prepended to every feature set, so each one has to beat the
@@ -488,6 +634,12 @@ def build(table: Path, pheno: pd.DataFrame, covariates: list[str],
     # have not been seen to fail, so this is precaution, not a repair.
     t = read_file(table).to_pandas()
     t["sub"] = t["sub"].astype(str).str.strip().str.upper()
+    # BEFORE the join, so a cohort holding two conditions is refused rather
+    # than quietly doubling every subject. The merge below is on `sub` alone.
+    t = one_row_per_subject(
+        t, str(table), tasks,
+        remedy=("re-run `transitions` for one task, if the cohort really "
+                "should be split",))
     d = t.merge(pheno, on="sub", how="inner", suffixes=("", "_pheno"))
     if d.empty:
         raise SystemExit(
@@ -531,20 +683,28 @@ def run(args) -> int:
     from joblib import Parallel, delayed
 
     root = Path(args.output_root) if args.output_root else _default_root()
-    sets = discover(root)
-    sets = sets[sets["cohort"] == args.cohort]
-    if args.atlas:
-        sets = sets[sets["atlas"].isin(args.atlas)]
-    if args.window_s:
-        sets = sets[sets["window_s"].isin([str(w) for w in args.window_s])]
-    if sets.empty:
-        raise SystemExit("no state set matches --atlas / --window-s / --cohort")
-    sets = sets.sort_values(["atlas", "K", "window_s_num"]).reset_index(drop=True)
+    sets = select_tables(discover(root), args.cohort, args.atlas,
+                         args.window_s, args.tasks)
 
     log(f"phenotype for target={args.target!r}")
     pheno = read_phenotype(args.pheno, args.id_col, args.target,
                            args.covariates, args.categorical,
                            levels=args.ordinal_levels)
+    # Applied to the PHENOTYPE rather than to each transition table: every
+    # state set reaches the model through an inner join on this frame, so
+    # restricting it once restricts every arm identically and there is no
+    # path that can miss it.
+    if getattr(args, "restrict_subjects", None):
+        keep = read_subject_list(args.restrict_subjects)
+        before = len(pheno)
+        pheno = pheno[pheno["sub"].isin(keep)]
+        if pheno.empty:
+            raise SystemExit(
+                f"--restrict-subjects {args.restrict_subjects}: none of its "
+                f"{len(keep):,} id(s) has a usable {args.target}.\n"
+                f"  list e.g.      {sorted(keep)[:3]}\n"
+                f"  phenotype e.g. {sorted(set(pheno['sub']))[:3] or '(none)'}")
+        log(f"  --restrict-subjects: {before:,} -> {len(pheno):,} subject(s)")
 
     log(f"{len(sets)} state set(s) x {len(args.models)} model(s) x "
         f"{len(args.seeds)} seed(s)")
@@ -555,7 +715,8 @@ def run(args) -> int:
     for t in sets.itertuples():
         key = (t.atlas, t.window_s, t.states)
         mats, C, y, widths, n = build(t.path, pheno, args.covariates,
-                                      args.features, args.p_norm)
+                                      args.features, args.p_norm,
+                                      getattr(args, "tasks", None))
         data[key] = (mats, C, y)
         for (fs, nm), w in widths.items():
             meta.append({"atlas": t.atlas, "window_s": t.window_s_num,
@@ -606,25 +767,59 @@ def run(args) -> int:
     scores_df = pd.DataFrame(rows).merge(
         meta, on=["atlas", "window_s", "states", "K", "features", "p_norm"],
         how="left")
+    # A baseline row carries atlas="(baseline)", so it matches no meta row and
+    # its `n` arrives NaN. It is not unknown: the baseline is fitted on exactly
+    # the subjects of the state set at its aperture, and `n` now sits in the
+    # summary precisely so a reader can check two tables were scored on the
+    # same sample. NaN there would defeat the column it was added for.
+    n_at = meta.groupby("window_s")["n"].max()
+    base = scores_df["kind"] == "base"
+    scores_df.loc[base, "n"] = scores_df.loc[base, "window_s"].map(n_at)
+    scores_df.loc[base, "n_features"] = 0
+    scores_df["n"] = scores_df["n"].astype("Int64")
+    scores_df["n_features"] = scores_df["n_features"].astype("Int64")
     # one readable label per arm, used by every figure and the ranking
     scores_df["arm"] = (scores_df["features"]
                         + np.where(scores_df["p_norm"] == "-", "",
                                    " [" + scores_df["p_norm"] + "]"))
     scores_df = _label_axes(scores_df)
 
-    out = root / "bstm_selection" / f"target={args.target}"
-    _wipe(out)
+    # The CONDITION is a flag, so the same code serves movie and rest without a
+    # second copy of it. `select-bstm --cohort camcan_rest --task rest` is the
+    # whole of the resting-state arm: the grid, the covariates, the CV and the
+    # figures are identical, and only the cohort whose transition tables are
+    # read differs. `--output-name` stays a flag too, but it names the TREE --
+    # the model family being ranked -- and switching conditions must not move
+    # between trees, or the four tables stop being one comparison.
+    out = (root / args.output_name / f"task={args.task}"
+           / f"target={args.target}")
+    _wipe(out, parent=f"task={args.task}")
     (out / "figures").mkdir(parents=True, exist_ok=True)
     (out / "models").mkdir(parents=True, exist_ok=True)
-    scores_df.to_parquet(out / "scores.parquet", index=False)
+    # CSV, not parquet. The whole point of this file is that a person can look
+    # at it -- `column -s, -t`, a spreadsheet, pandas without pyarrow -- and at
+    # 2,400 rows for the full grid (state sets x arms x models x seeds x folds)
+    # it is ~200 KB either way. parquet bought 180 KB and cost the ability to
+    # open it. Nothing reads it programmatically; `summary.csv` beside it is
+    # the aggregate, and this is the per-fold long form behind it.
+    label_the_run(scores_df, args.output_name, args.task,
+                  args.target).to_csv(out / "scores.csv", index=False)
 
+    # `n` and `n_features` are GROUPING keys rather than dropped columns: a
+    # row's score is not comparable with another's without them, and these
+    # tables are now read beside the other task's and fcm_selection's.
+    # Both are constant within a group, so grouping on them changes no number.
     summary = (scores_df.groupby(["model", "arm", "atlas", "window_s", "K",
-                                  "states"], dropna=False)["score"]
+                                  "states", "n", "n_features"],
+                                 dropna=False)["score"]
                .agg(["mean", "std", "min", "max", "count"]).reset_index()
                .sort_values(["model", "mean"], ascending=[True, False]))
+    summary = label_the_run(summary, args.output_name, args.task, args.target)
     summary.to_csv(out / "summary.csv", index=False)
     print()
-    for model, g in summary.groupby("model"):
+    for w in warn_if_a_model_never_split(summary):
+        log(w)
+    for model, g in summary.drop(columns=CONSTANT_COLUMNS).groupby("model"):
         print(f"=== {model}  ({metric_name(model)}) ===")
         print(g.drop(columns=["model", "states"])
                .head(args.show).to_string(index=False))
@@ -638,10 +833,14 @@ def run(args) -> int:
     saved = _save_models(scores_df, data, out / "models", args.save_top,
                          args.covariates)
 
-    mf = meta_dir(root) / "bstm_selection" / f"target={args.target}.json"
+    mf = (meta_dir(root) / args.output_name / f"task={args.task}"
+          / f"target={args.target}.json")
     mf.parent.mkdir(parents=True, exist_ok=True)
     mf.write_text(json.dumps(
-        {"target": args.target, "cohort": args.cohort, "models": args.models,
+        {"target": args.target, "task": args.task,
+         "keep_tasks": getattr(args, "tasks", None),
+         "cohort": args.cohort, "models": args.models,
+         "restrict_subjects": getattr(args, "restrict_subjects", None),
          "seeds": args.seeds, "features": args.features,
          "p_norm": args.p_norm, "covariates": args.covariates,
          # Read off the state sets that ran, for the same reason DESIGN.md's
@@ -706,24 +905,90 @@ def describe_blocks(sample_table: Path, args) -> list[str]:
     return out
 
 
-def _wipe(out: Path) -> None:
+def run_label(output_name: str, task: str) -> str:
+    """"bstm movie", "fcm rest" -- which of the four rankings a row is from.
+
+    The tree and the task are in the PATH, and a path is not in the table. So
+    the moment the four summary.csv files are concatenated -- which is the only
+    way to read them against each other -- every row has to say which run
+    produced it or the stack is unreadable. Written as one column rather than
+    two because that is how it is read: "bstm movie beat fcm movie".
+
+    Derived from the same two values that build the path, so it can never
+    disagree with where the file sits.
+    """
+    return f"{output_name.replace('_selection', '')} {task}"
+
+
+def label_the_run(df: pd.DataFrame, output_name: str, task: str,
+                  target: str) -> pd.DataFrame:
+    """Put `run` and `target` first, so `head` on the csv shows them.
+
+    Constant down the file, deliberately. They cost a few bytes a row and they
+    are what makes a row self-describing once it is out of its directory --
+    pasted into a notebook, concatenated with the other three, or mailed to
+    someone who does not have the tree.
+    """
+    df = df.copy()
+    df.insert(0, "run", run_label(output_name, task))
+    df.insert(1, "target", target)
+    return df
+
+
+#: `run` and `target` are constant within a file, so printing them in every
+#: console row is noise -- the run already logs its own output path.
+CONSTANT_COLUMNS = ["run", "target"]
+
+
+def warn_if_a_model_never_split(summary: pd.DataFrame) -> list[str]:
+    """A boosting model that predicted a constant scores every arm the same.
+
+    This is the failure that looks exactly like a result: a full table, every
+    arm present, and one model's mean/std/min/max byte-identical down its
+    whole block. It happens when no split is admissible -- `min_samples_leaf`
+    / `min_child_samples` is 30, so a training fold under ~40 subjects cannot
+    produce one -- and the model then predicts the training mean for everyone.
+    The score of a constant prediction carries no information about the
+    features, so ranking arms by it is ranking noise.
+
+    A warning rather than a refusal: the run is cheap to read once it says
+    this, and the fix (more subjects, or a smaller leaf minimum) is the
+    caller's call, not this function's.
+    """
+    out = []
+    for model, g in summary.groupby("model"):
+        if len(g) > 1 and g["mean"].nunique(dropna=False) == 1:
+            out.append(
+                f"WARNING: every arm scores identically under {model!r} "
+                f"({g['mean'].iloc[0]:+.4f}). That model predicted a CONSTANT "
+                f"-- at n={int(g['n'].max())} a training fold is too small "
+                f"for its leaf minimum to allow any split -- so its ranking "
+                f"of the arms is noise. Read the other model(s), or raise n.")
+    return out
+
+
+def _wipe(out: Path, parent: str) -> None:
     """Empty the target folder before writing a new run into it.
 
     Everything here is regenerated, so a leftover is never a leftover you can
     trust: a run with a shorter `--features` would otherwise leave figures and
     joblib artifacts describing arms it never scored, with nothing saying so.
 
-    `out` is always <root>/bstm_selection/target=<target>, and the target comes
-    from the command line, so the name is checked before anything is removed --
-    a `/` or `..` in it would make this delete something else entirely.
+    `out` is always <root>/<tree>/task=<task>/target=<target>, and both the
+    task and the target come from the command line, so the names are checked
+    before anything is removed -- a `/` or `..` in either would make this
+    delete something else entirely. `parent` is named by the caller (it is the
+    `task=` component) rather than inferred, so a stage that gets the path
+    wrong is refused instead of clearing a tree it does not own.
     """
     import shutil
 
     name = out.name
     if not name.startswith("target=") or "/" in name or ".." in name:
         raise SystemExit(f"refusing to clear {out} -- unexpected folder name")
-    if out.parent.name != "bstm_selection":
-        raise SystemExit(f"refusing to clear {out} -- unexpected parent")
+    if out.parent.name != parent:
+        raise SystemExit(f"refusing to clear {out} -- expected a {parent}/ "
+                         f"parent, found {out.parent.name!r}")
     if not out.exists():
         return
     n = sum(1 for _ in out.rglob("*") if _.is_file())
@@ -985,12 +1250,11 @@ def _save_models(scores, data, model_dir: Path, top_n: int,
 
 
 def _default_root() -> Path:
-    if os.environ.get("FMRIDECOMP_OUTPUTS"):
-        return Path(os.environ["FMRIDECOMP_OUTPUTS"])
-    import yaml
-    repo = Path(__file__).resolve().parent.parent
-    return Path(yaml.safe_load(
-        (repo / "config" / "camcan_movie.yaml").read_text())["output_root"])
+    """Delegates to io.default_output_root -- see it for why this is not
+    eight copies of a cohort filename any more."""
+    from .io import default_output_root
+
+    return default_output_root()
 
 
 def add_arguments(p) -> None:
@@ -1015,9 +1279,12 @@ def add_arguments(p) -> None:
                         "occupancy and dynamics are the controls: if either "
                         "predicts as well as cells, the signal is not in the "
                         "transition structure")
-    p.add_argument("--pheno", nargs="+", default=DEFAULT_PHENO,
-                   metavar="PATH:SEP",
-                   help="phenotype tables as path:separator, merged on --id-col")
+    p.add_argument("--pheno", nargs="+", required=True, metavar="PATH:SEP",
+                   help="phenotype table(s) as path:separator, merged on "
+                        "--id-col. Required: the path is a fact about your "
+                        "filesystem, not about this pipeline. Cam-CAN splits "
+                        "what is needed across two files, hence the list -- "
+                        "e.g. approved_data.tsv:$'\\t' standard_data.csv:,")
     p.add_argument("--id-col", default="CCID")
     p.add_argument("--ordinal-levels", nargs="+", default=list(ORDINAL_LEVELS),
                    metavar="LEVEL",
@@ -1029,7 +1296,45 @@ def add_arguments(p) -> None:
     p.add_argument("--covariates", nargs="+",
                    default=["Age", "Sex", "n_transitions"])
     p.add_argument("--categorical", nargs="+", default=["Sex"])
-    p.add_argument("--cohort", default="camcan")
+    p.add_argument("--cohort", required=True,
+                   help="whose transition tables to rank. Required: this stage "
+                        "spans cohorts, so it must not name one by default. "
+                        "The resting-state run is this flag plus --task.")
+    p.add_argument("--task", required=True, metavar="LABEL",
+                   help="which experimental CONDITION this ranking is about, "
+                        "as a hive partition: "
+                        "outputs/<tree>/task=<this>/target=<t>/. It is a LABEL "
+                        "for the output path, not a row filter -- "
+                        "`--cohort camcan --task movie` and "
+                        "`--cohort camcan_rest --task rest` put two rankings "
+                        "of the same shape side by side under one tree, which "
+                        "is what makes them readable against each other. "
+                        "Required, so the path always says which condition "
+                        "produced it.")
+    p.add_argument("--output-name", default="bstm_selection",
+                   metavar="FOLDER",
+                   help="the TREE under outputs/ to write into. The task "
+                        "split is --task, not this -- one tree partitioned by "
+                        "condition, rather than a second tree with a different "
+                        "name. Change it only for a run that is not one of "
+                        "these conditions at all.")
+    p.add_argument("--keep-tasks", nargs="*", default=None, dest="tasks",
+                   help="a ROW filter: keep only rows whose `task` column is "
+                        "one of these. Needed where a cohort holds more than "
+                        "one condition -- Cam-CAN's movie and rest are the "
+                        "same people in one cohort, so "
+                        "`--keep-tasks Movie --task movie` is the movie "
+                        "ranking. Same flag, same name and same meaning as "
+                        "`select-fcm`'s. Distinct from --task, which names "
+                        "the output partition: these take the BIDS task "
+                        "labels as the data spells them (Movie, Rest), while "
+                        "--task is yours to choose. Without it a cohort with "
+                        "two conditions is REFUSED, not silently doubled.")
+    p.add_argument("--restrict-subjects", default=None, metavar="FILE",
+                   help="one subject id per line, or a CSV with a `sub` "
+                        "column. Pass the SAME file to every tree so a gap "
+                        "between their tables cannot be a difference in who "
+                        "was scored.")
     p.add_argument("--atlas", nargs="*", default=None)
     p.add_argument("--window-s", nargs="*", default=None)
     p.add_argument("--n-jobs", type=int, default=-1,

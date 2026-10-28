@@ -208,3 +208,98 @@ class TestSchemaReads:
             (p.parent / name).write_bytes(p.read_bytes())
         found = frames.shard_paths(tmp_path, "toy", "c")
         assert len(found) == 3
+
+
+class TestOneCohortTwoTRs:
+    """The bug the `task=` level exists to make impossible.
+
+    `read_cohort` did `tr = shard_tr(paths[0])` -- one TR for the whole cohort,
+    applied to every shard's band-pass and time axis, and written as the one
+    `stride_s` a latents file can hold. Cam-CAN's movie (2.47s) and rest
+    (1.97s) are the same people in one cohort, so paths[0] sorted to a Movie
+    shard: every Rest frame would have been filtered at 2.47s -- a declared
+    0.01-0.1 Hz band that is really 0.0126-0.126 Hz -- and every rest dwell
+    time `transitions` reports would have been 25% wrong. Nothing errored.
+    """
+
+    FEATS = [f"P{i:02d}" for i in range(4)]
+
+    def two_tr_cohort(self, root):
+        from tests.test_static_fc import write_activation
+
+        for sub in ("S0", "S1"):
+            write_activation(root, "camcan", "Movie", sub, n_tr=120, tr=2.47)
+            write_activation(root, "camcan", "Rest", sub, n_tr=120, tr=1.97)
+        return root
+
+    def test_the_tasks_are_discovered_from_the_directories(self, tmp_path):
+        self.two_tr_cohort(tmp_path)
+        assert frames.shard_tasks(tmp_path, "mini", "camcan") == ["Movie",
+                                                                 "Rest"]
+
+    def test_each_task_resolves_to_its_own_tr(self, tmp_path):
+        self.two_tr_cohort(tmp_path)
+        assert frames.cohort_tr(tmp_path, "mini", "camcan", "Movie") == 2.47
+        assert frames.cohort_tr(tmp_path, "mini", "camcan", "Rest") == 1.97
+
+    def test_asking_for_the_whole_cohort_is_REFUSED_not_guessed(self, tmp_path):
+        """THE POINT. The old code returned 2.47 here -- the first shard's --
+        and applied it to the 1.97s frames."""
+        self.two_tr_cohort(tmp_path)
+        with pytest.raises(SystemExit) as e:
+            frames.cohort_tr(tmp_path, "mini", "camcan")
+        msg = str(e.value)
+        assert "more than one TR" in msg
+        assert "2.47" in msg and "1.97" in msg
+        assert "Movie" in msg and "Rest" in msg
+        assert "one task at a time" in msg
+
+    def test_read_cohort_refuses_the_same_way(self, tmp_path):
+        self.two_tr_cohort(tmp_path)
+        with pytest.raises(SystemExit, match="more than one TR"):
+            frames.read_cohort(tmp_path, "mini", "camcan", self.FEATS,
+                               log=lambda *a: None)
+
+    def test_read_cohort_per_task_returns_that_tasks_tr(self, tmp_path):
+        self.two_tr_cohort(tmp_path)
+        for task, want in (("Movie", 2.47), ("Rest", 1.97)):
+            ident, X, tr = frames.read_cohort(
+                tmp_path, "mini", "camcan", self.FEATS, task=task,
+                log=lambda *a: None)
+            assert tr == want, task
+            assert set(ident["task"]) == {task}
+
+    def test_a_single_tr_cohort_still_needs_no_task(self, tmp_path):
+        """The change must not make every existing config pass a task."""
+        from tests.test_static_fc import write_activation
+
+        for sub in ("S0", "S1"):
+            write_activation(tmp_path, "ds002837", "film", sub, tr=1.0)
+        assert frames.cohort_tr(tmp_path, "mini", "ds002837") == 1.0
+        _, _, tr = frames.read_cohort(tmp_path, "mini", "ds002837", self.FEATS,
+                                      log=lambda *a: None)
+        assert tr == 1.0
+
+    def test_two_tasks_at_the_SAME_tr_are_not_refused(self, tmp_path):
+        """ds002837 has ten films at one TR. Only a TR disagreement is a
+        problem; several tasks are not."""
+        from tests.test_static_fc import write_activation
+
+        for task in ("film_a", "film_b"):
+            write_activation(tmp_path, "ds002837", task, "S0", tr=1.0)
+        assert frames.cohort_tr(tmp_path, "mini", "ds002837") == 1.0
+
+    def test_the_band_pass_actually_differs_between_the_two_trs(self, tmp_path):
+        """Not just that the TR is reported right -- that it CHANGES the data.
+        Same frames, two TRs, so the 0.01-0.1 Hz band keeps different content;
+        if the filter ignored the TR these would be identical."""
+        from tests.test_static_fc import write_activation
+
+        write_activation(tmp_path, "a", "t", "S0", n_tr=200, tr=2.47, seed=3)
+        write_activation(tmp_path, "b", "t", "S0", n_tr=200, tr=1.97, seed=3)
+        _, slow, _ = frames.read_cohort(tmp_path, "mini", "a", self.FEATS,
+                                        band=(0.01, 0.1), log=lambda *a: None)
+        _, fast, _ = frames.read_cohort(tmp_path, "mini", "b", self.FEATS,
+                                        band=(0.01, 0.1), log=lambda *a: None)
+        assert slow.shape == fast.shape
+        assert not np.allclose(slow, fast)

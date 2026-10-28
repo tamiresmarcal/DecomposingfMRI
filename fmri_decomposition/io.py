@@ -120,19 +120,107 @@ def dfc_path(output_root: str | Path, cohort: str, atlas: str, window_s: float,
 
 
 def latents_root(output_root: str | Path, atlas: str, window_s=None,
-                 cohort: str | None = None) -> Path:
-    """Stage 4 output. Same key order as `dfc_root`, deliberately.
+                 cohort: str | None = None, task: str | None = None) -> Path:
+    """Stage 3 output. Same key order as `dfc_root`, deliberately.
 
-    Latents are written per (atlas, window_s, cohort) because each window size
-    is an independent fit -- so the keys that select one fit are the ones above
-    cohort, exactly as in stage 3. `window_s` is accepted as a number or as the
-    string already in the path, since callers have it both ways.
+    Latents are written per (atlas, window_s, cohort, task) because each window
+    size is an independent fit -- so the keys that select one fit are the ones
+    above cohort, exactly as in stage 2. `window_s` is accepted as a number or
+    as the string already in the path, since callers have it both ways.
+
+    `task` SITS BELOW COHORT, AND IT IS NOT OPTIONAL IN PRACTICE. A latents file
+    records ONE `stride_s` in its metadata, and stride_s is the TR of the rows
+    in it -- so a file holding two tasks at two TRs (Cam-CAN's movie at 2.47s
+    and rest at 1.97s, the same people) can only be right about one of them.
+    `transitions` reads stride_s for every dwell time in seconds, so the wrong
+    one is a 25% error in `mean_dwell_s` and `switches_per_min` with nothing
+    saying so. One file per task is what makes a single stride_s a true claim.
+
+    It also makes the per-file skip in `decompose` per (cohort, task): a cohort
+    that GAINS a condition writes a new file instead of rewriting the one it
+    has, so the state columns stage 4 wrote into the existing condition survive.
     """
     p = Path(output_root) / "latents" / f"atlas={_key(atlas)}"
     if window_s is not None:
         w = window_s if isinstance(window_s, str) else _fmt_window(window_s)
         p = p / f"window_s={_key(w)}"
-    return p if cohort is None else p / f"cohort={_key(cohort)}"
+    if cohort is None:
+        return p
+    p = p / f"cohort={_key(cohort)}"
+    return p if task is None else p / f"task={_key(task)}"
+
+
+def latents_cells(output_root: str | Path, atlas: str,
+                  window_s) -> dict[tuple[str, str], Path]:
+    """{(cohort, task): latents file} for one (atlas, aperture) cell.
+
+    The one enumerator for stage 3's output, because stage 4 and stage 5a both
+    walk it and a second copy is how the two drift. Keyed by the PAIR since
+    `decompose` writes one file per (cohort, task).
+    """
+    d = latents_root(output_root, atlas, window_s)
+    if not d.is_dir():
+        return {}
+    out = {}
+    for sub in sorted(d.glob("cohort=*/task=*")):
+        f = sub / "data.parquet"
+        if f.exists():
+            out[(hive_key(sub, "cohort"), hive_key(sub, "task"))] = f
+    return out
+
+
+def transitions_root(output_root: str | Path, atlas: str | None = None,
+                     window_s=None, states: str | None = None,
+                     cohort: str | None = None,
+                     task: str | None = None) -> Path:
+    """Stage 5a output, narrowed by as many keys as are given.
+
+    Built here rather than inline in transitions.py so that adding a key -- as
+    `task` was -- is one edit instead of one per stage. The keys above `cohort`
+    select a state SET; `cohort` and `task` select whose dynamics.
+    """
+    p = Path(output_root) / "transitions"
+    for name, v in (("atlas", atlas), ("window_s", window_s),
+                    ("states", states), ("cohort", cohort), ("task", task)):
+        if v is None:
+            return p
+        if name == "window_s" and not isinstance(v, str):
+            v = _fmt_window(v)
+        p = p / f"{name}={_key(v)}"
+    return p
+
+
+def static_fc_root(output_root: str | Path, atlas: str | None = None,
+                   cohort: str | None = None,
+                   task: str | None = None) -> Path:
+    """Stage 3b output, narrowed by as many keys as are given.
+
+    No `window_s`: one matrix per subject over every usable frame, which is the
+    whole point of the arm -- it is the `window_s=-1` aperture's static twin.
+    """
+    p = Path(output_root) / "static_fc"
+    for name, v in (("atlas", atlas), ("cohort", cohort), ("task", task)):
+        if v is None:
+            return p
+        p = p / f"{name}={_key(v)}"
+    return p
+
+
+def censor_root(output_root: str | Path, policy: str | None = None,
+                cohort: str | None = None, task: str | None = None) -> Path:
+    """Stage 2.5 output, narrowed by as many keys as are given.
+
+    `policy` is outermost because it names the DECISION: two policies over one
+    cohort are two answers to be compared, not two cohorts. The window-level
+    gate hangs off the same policy root under its own atlas=/window_s= keys and
+    is built by censor.py, which owns that shape.
+    """
+    p = Path(output_root) / "censor"
+    for name, v in (("policy", policy), ("cohort", cohort), ("task", task)):
+        if v is None:
+            return p
+        p = p / f"{name}={_key(v)}"
+    return p
 
 
 def _fmt_window(window_s: float) -> str:
@@ -209,6 +297,24 @@ def parse_hive_keys(path: str | Path) -> dict[str, str]:
     )
 
 
+def hive_key(path: str | Path, name: str) -> str | None:
+    """One partition key from a leaf path, BY NAME. None if it is not there.
+
+    Always this rather than `path.parts[-N]`. A positional read is correct only
+    for the tree depth it was written against, and it fails SILENTLY when a key
+    is inserted: adding `task=` below `cohort=` shifted every index by one in
+    `bstm_selection.discover`, and because `"cohort=camcan".split("=")[1]`
+    succeeds just as well as `"atlas=yeo7".split("=")[1]`, the atlas quietly
+    became the window size. Searching for the prefix cannot do that, and
+    survives the next key as well.
+    """
+    want = f"{name}="
+    for part in Path(path).parts:
+        if part.startswith(want):
+            return part.split("=", 1)[1]
+    return None
+
+
 def hive_partitioning(stage: str = "dfc"):
     """Explicit all-string partitioning, so no key is ever type-inferred."""
     import pyarrow.dataset as pads
@@ -267,6 +373,58 @@ def read_shard(path: str | Path):
         if k not in df.columns:
             df[k] = v
     return df
+
+
+def default_output_root() -> Path:
+    """Where outputs live when no --output-root was given.
+
+    `$FMRIDECOMP_OUTPUTS` wins. Otherwise it is read from the cohort configs in
+    `config/`, which all name the SAME tree on purpose -- `cohort=` separates
+    them inside it, which is what makes "one atlas, one window size, every
+    cohort" a single readable path.
+
+    This used to be three lines repeated in eight modules, each naming
+    `config/camcan_movie.yaml`. That put one project's cohort filename into the
+    library eight times: renaming the config broke every stage, and a new user
+    with no Cam-CAN got a FileNotFoundError naming a dataset they do not have.
+    Reading whatever configs exist is both shorter and less of a claim.
+
+    Disagreement is REFUSED rather than resolved by picking one. A stage that
+    silently wrote to a different root than the previous stage read from is the
+    worst outcome available here: every file is present, and the tree is two
+    half-built trees.
+    """
+    import os
+
+    if os.environ.get("FMRIDECOMP_OUTPUTS"):
+        return Path(os.environ["FMRIDECOMP_OUTPUTS"])
+
+    import yaml
+
+    cfg_dir = Path(__file__).resolve().parent.parent / "config"
+    roots: dict[str, list[str]] = {}
+    for f in sorted(cfg_dir.glob("*.yaml")):
+        try:
+            raw = yaml.safe_load(f.read_text()) or {}
+        except Exception:                                        # noqa: BLE001
+            continue
+        got = raw.get("output_root") if isinstance(raw, dict) else None
+        if got:
+            roots.setdefault(str(got), []).append(f.name)
+    if not roots:
+        raise SystemExit(
+            f"no output_root found. Either set FMRIDECOMP_OUTPUTS, pass "
+            f"--output-root, or give a cohort config in {cfg_dir} an "
+            f"`output_root:`.")
+    if len(roots) > 1:
+        detail = "\n".join(f"    {r}  <- {', '.join(f)}"
+                            for r, f in sorted(roots.items()))
+        raise SystemExit(
+            f"cohort configs disagree about output_root:\n{detail}\n"
+            f"  They are meant to name ONE tree, with `cohort=` separating "
+            f"them inside it. Fix the configs, or pass --output-root / set "
+            f"FMRIDECOMP_OUTPUTS to say which one this run means.")
+    return Path(next(iter(roots)))
 
 
 def meta_dir(output_root: str | Path) -> Path:

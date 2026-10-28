@@ -3,6 +3,13 @@
 
     python3 preprocessing/camcan/01_build_bids.py --limit 10
 
+    # the resting-state tree -- single-echo, its own func subdataset, its own
+    # output root, because it becomes its own cohort downstream (its TR differs
+    # from the movie's and a cohort config carries one `tr`)
+    python3 preprocessing/camcan/01_build_bids.py --task Rest --n-echoes 0 \
+        --func-subdir func_rest -o /.../camcan_rest_bids \
+        --dataset-name "Cam-CAN CC700 rest (BIDS view for fMRIPrep)"
+
 RUN ON A LOGIN NODE. Pure stdlib, no container needed -- it only makes
 symlinks, so it costs no disk and takes seconds.
 
@@ -48,7 +55,7 @@ DEFAULT_FUNC_SUBDIR = "func_movie"
 DEFAULT_DATASET_NAME = "Cam-CAN CC700 movie-watching (BIDS view for fMRIPrep)"
 
 N_ECHOES = 5
-TASK = "Movie"
+DEFAULT_TASK = "Movie"
 
 # T2w is optional: fMRIPrep will use one if present to refine the brain mask,
 # and 653 of 739 CC700 subjects have one. Its absence is not a reason to skip.
@@ -56,7 +63,8 @@ ANAT_REQUIRED = ["T1w"]
 ANAT_OPTIONAL = ["T2w"]
 
 
-def _func_names(sub: str, n_echoes: int) -> list[str]:
+def _func_names(sub: str, n_echoes: int,
+                task: str = DEFAULT_TASK) -> list[str]:
     """Expected func/ filenames for one subject's movie run.
 
     n_echoes == 0 means single-echo BIDS naming: the spec omits the echo-
@@ -68,15 +76,16 @@ def _func_names(sub: str, n_echoes: int) -> list[str]:
     find nothing; 0 is what selects this naming.
     """
     if n_echoes == 0:
-        return [f"sub-{sub}_task-{TASK}_bold{ext}" for ext in (".nii.gz", ".json")]
+        return [f"sub-{sub}_task-{task}_bold{ext}" for ext in (".nii.gz", ".json")]
     return [
-        f"sub-{sub}_task-{TASK}_echo-{i:02d}_bold{ext}"
+        f"sub-{sub}_task-{task}_echo-{i:02d}_bold{ext}"
         for i in range(1, n_echoes + 1)
         for ext in (".nii.gz", ".json")
     ]
 
 
-def survey(bidssep: Path, func_subdir: str, n_echoes: int) -> tuple[list[str], dict[str, str]]:
+def survey(bidssep: Path, func_subdir: str, n_echoes: int,
+           task: str = DEFAULT_TASK) -> tuple[list[str], dict[str, str]]:
     """Return (usable subjects, {subject: reason skipped}).
 
     func_subdir is NOT a constant across Cam-CAN releases -- confirmed on disk
@@ -114,27 +123,27 @@ def survey(bidssep: Path, func_subdir: str, n_echoes: int) -> tuple[list[str], d
         missing_anat = [
             s for s in ANAT_REQUIRED if not (adir / f"sub-{sub}_{s}.nii.gz").is_file()
         ]
-        expected_func = _func_names(sub, n_echoes)
+        expected_func = _func_names(sub, n_echoes, task)
         missing_func = [n for n in expected_func if not (fdir / n).is_file()]
 
-        # "no movie at all" and "movie missing a file" are different findings
+        # "no run at all" and "run missing a file" are different findings
         # and must not share a bucket. On CC700 ~90 subjects have a T1w but
         # never did the movie task -- that is normal, and reporting it as
         # "incomplete" would read as data corruption. A subject genuinely
         # missing part of its movie run is rare and worth looking at.
         # Compared against len(expected_func) rather than a recomputed
         # n_echoes*2, which breaks for the single-echo (n_echoes=0) case.
-        no_movie = len(missing_func) == len(expected_func)
-        if missing_anat and no_movie:
-            skipped[sub] = "no T1w and no movie"
+        no_func = len(missing_func) == len(expected_func)
+        if missing_anat and no_func:
+            skipped[sub] = f"no T1w and no {task} data"
         elif missing_anat:
             skipped[sub] = f"missing anat: {', '.join(missing_anat)}"
-        elif no_movie:
-            skipped[sub] = "no movie data (subject did not do the task)"
+        elif no_func:
+            skipped[sub] = f"no {task} data (subject did not do the task)"
         elif missing_func:
             n_nii = sum(1 for n in missing_func if n.endswith(".nii.gz"))
             skipped[sub] = (
-                f"incomplete movie: {len(missing_func)} file(s) absent "
+                f"incomplete {task}: {len(missing_func)} file(s) absent "
                 f"({n_nii} image(s)) of {len(expected_func)}"
             )
         else:
@@ -162,7 +171,8 @@ def link(src: Path, dst: Path, force: bool) -> None:
 
 
 def build(subs: list[str], bidssep: Path, func_subdir: str, n_echoes: int,
-          out: Path, force: bool, dataset_name: str) -> None:
+          out: Path, force: bool, dataset_name: str,
+          task: str = DEFAULT_TASK) -> None:
     anat_root, func_root = bidssep / "anat", bidssep / func_subdir
     for sub in subs:
         s = f"sub-{sub}"
@@ -171,7 +181,7 @@ def build(subs: list[str], bidssep: Path, func_subdir: str, n_echoes: int,
                 src = anat_root / s / "anat" / f"{s}_{suffix}{ext}"
                 if src.is_file():
                     link(src, out / s / "anat" / src.name, force)
-        for name in _func_names(sub, n_echoes):
+        for name in _func_names(sub, n_echoes, task):
             link(func_root / s / "func" / name, out / s / "func" / name, force)
 
     # subjects.txt and skipped_subjects.tsv are OUR bookkeeping, not BIDS. The
@@ -274,6 +284,17 @@ def main(argv=None) -> int:
              f"every subject as having no movie data.",
     )
     p.add_argument(
+        "--task", default=DEFAULT_TASK,
+        help=f"BIDS task label, matched against the filenames (default "
+             f"{DEFAULT_TASK!r}). `Rest` builds the resting-state tree, which "
+             f"is a SEPARATE cohort downstream because its TR differs from the "
+             f"movie's -- a cohort config carries one `tr`. Rest is "
+             f"single-echo, so it needs --n-echoes 0 and its own "
+             f"--func-subdir; confirm both from one subject's func/ listing "
+             f"before a full run, because a wrong value here reports every "
+             f"subject as never having done the task rather than erroring.",
+    )
+    p.add_argument(
         "--n-echoes", type=int, default=N_ECHOES,
         help=f"echoes per movie run (default {N_ECHOES}, confirmed for "
              "CC700/release004). Pass 0 for single-echo BIDS naming -- no "
@@ -312,10 +333,13 @@ def main(argv=None) -> int:
     args.camcan_bidssep = args.camcan_bidssep.resolve()
     args.out = args.out.resolve()
 
-    usable, skipped = survey(args.camcan_bidssep, args.func_subdir, args.n_echoes)
+    usable, skipped = survey(args.camcan_bidssep, args.func_subdir,
+                             args.n_echoes, args.task)
     print(f"BIDSsep root : {args.camcan_bidssep}")
     print(f"func subdir  : {args.func_subdir}")
-    func_desc = "single-echo movie" if args.n_echoes == 0 else f"all {args.n_echoes} echoes"
+    print(f"task         : {args.task}")
+    func_desc = (f"single-echo {args.task}" if args.n_echoes == 0
+                 else f"all {args.n_echoes} echoes")
     print(f"usable subjects (T1w + {func_desc}): {len(usable)}")
     print(f"skipped:                                      {len(skipped)}")
 
@@ -341,7 +365,10 @@ def main(argv=None) -> int:
             f"  --func-subdir {args.func_subdir!r}  "
             "(func_movie for CC700/release004, func_Movie for ccfrail/release002)\n"
             f"  --n-echoes {args.n_echoes}  "
-            "(5 for CC700/release004, 0 for single-echo like ccfrail/release002)\n"
+            "(5 for CC700/release004 Movie, 0 for single-echo like "
+            "ccfrail/release002 and Cam-CAN Rest)\n"
+            f"  --task {args.task!r}  "
+            "(the label in the filename, e.g. Movie or Rest)\n"
             "A wrong --n-echoes makes every subject look like it never did the "
             "task.\nList one subject's func/ directory and match the filenames "
             "against what\nthis script expects before re-running.",
@@ -366,17 +393,44 @@ def main(argv=None) -> int:
         print("first few:", ", ".join(selected[:5]))
         return 0
 
-    if args.out.exists() and not args.force and any(args.out.glob("sub-*")):
+    # EXPANDING an existing root is the documented workflow -- --limit exists
+    # for a pilot, and the pilot is meant to be scaled up. What is dangerous is
+    # a root holding subjects this selection does NOT want, because fMRIPrep
+    # globs sub-* and never reads subjects.txt, so a leftover from an earlier
+    # run against different data WILL be picked up. So the refusal is about
+    # EXTRA subjects, not about any subject at all.
+    #
+    # This also makes expansion safe while an array job is still running
+    # against the same root: the already-linked subjects are left completely
+    # alone, because `link()` returns early when the destination exists and
+    # --force was not passed. --force would unlink and re-create them instead,
+    # which is a (small) window in which a live job can fail to resolve a path.
+    existing = {d.name[4:] for d in args.out.glob("sub-*") if d.is_dir()}
+    extra = sorted(existing - set(selected))
+    if extra and not args.force:
         print(
-            f"\nrefusing: {args.out} already has sub-* directories.\n"
-            "Re-run with --force to relink, or pick a different --out.",
+            f"\nrefusing: {args.out} holds {len(extra)} subject dir(s) that "
+            f"this selection does not include:\n"
+            f"    {', '.join(extra[:8])}{' ...' if len(extra) > 8 else ''}\n"
+            "fMRIPrep globs sub-* and does not read subjects.txt, so those "
+            "WOULD be processed.\n"
+            "Remove them, re-run with --force to relink the whole root, or "
+            "pick a different --out.",
             file=sys.stderr,
         )
         return 1
+    if existing:
+        adding = len(set(selected) - existing)
+        print(f"expanding an existing root: {len(existing)} subject(s) already "
+              f"linked, adding {adding}")
+        if not args.force:
+            print("  the existing links are left untouched (pass --force to "
+                  "relink them), so this is safe to run while a job is still "
+                  "reading this root")
 
     args.out.mkdir(parents=True, exist_ok=True)
     build(selected, args.camcan_bidssep, args.func_subdir, args.n_echoes,
-          args.out, args.force, args.dataset_name)
+          args.out, args.force, args.dataset_name, args.task)
 
     dangling, stale = verify(selected, args.out)
     if stale:

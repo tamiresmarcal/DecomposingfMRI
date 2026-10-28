@@ -96,12 +96,64 @@ apptainer silently mounts your *current directory* as the container — you then
 get `python3: executable file not found`, which looks like a broken image and is
 not one. The `:?` form fails immediately and says so.
 
+`slurm/env.sh.example` now defines `RUN` and `RUN23` itself, so `source
+slurm/env.sh` is enough. **Your `slurm/env.sh` is gitignored and predates that**,
+so add the block from the example to your copy once -- otherwise `$RUN` stays
+empty and the commands below run the login node's bare `python3`:
+
+```bash
+diff <(grep -c . slurm/env.sh) /dev/null >/dev/null  # your copy exists?
+grep -q 'RUN=' slurm/env.sh || sed -n '/interactive shortcuts/,/^$/p' slurm/env.sh.example
+```
+
+Until then, by hand -- and note the `:?`, which is the whole point:
+
 ```bash
 RUN="apptainer exec --cleanenv --bind /project,/scratch,/home ${FMRIDECOMP_SIF45:?source slurm/env.sh}"
+RUN23="apptainer exec --cleanenv --bind /project,/scratch,/home --pwd $PWD ${FMRIDECOMP_SIF:?source slurm/env.sh}"
 ```
+
+An **empty** `$RUN` is the failure that does not announce itself: `$RUN python3
+-m fmri_decomposition.cli status` becomes plain `python3 ...` and dies on
+`ModuleNotFoundError: No module named 'numpy'`, which reads like a broken
+install rather than a missing variable.
+
+**`$RUN23` is the OTHER image**, and `tools/*.py` need it: a bare `python3` on a
+login node has no pandas, so `tools/make_participants.py` and
+`tools/check_cohort.py` die on `ModuleNotFoundError: No module named 'pandas'`
+before doing anything. They are stage 1-2 tools, so they take the stage 2-3
+image -- the same `fmri_decomp.sif` that `slurm/activation_and_dfc.sh` runs its
+own pre-flight check in.
 
 The sbatch scripts source `env.sh` themselves, so only your interactive commands
 need this.
+
+**The phenotype tables, once.** Every selection run takes `--pheno` and none of
+them has a default — the path is a fact about your filesystem, not about this
+pipeline, and a cohort's own release table is not in `outputs/`. Cam-CAN splits
+what is needed across two files, so it is a list:
+
+```bash
+CAMCAN=/project/6008063/tamires/cohorts/camcan/dataman/useraccess/opendata/paule_toussaint_camcan01870
+PHENO=("$CAMCAN/approved_data.tsv:"$'\t' "$CAMCAN/standard_data.csv:,")
+```
+
+Better: put those two lines in your gitignored `slurm/env.sh` (there is a
+commented template in `env.sh.example`), so sourcing sets them and no shell is
+ever one line short of a working selection run. `--pheno` is `required=True` in
+both stages, so an empty `PHENO` is an argparse error raised when the JOB
+starts -- behind a dependency chain, a day after you submitted it.
+
+An **array**, and every use below is `--pheno "${PHENO[@]}"`. Two reasons it
+cannot be a plain string: the entries are two separate arguments, and the first
+one's separator is a real tab, which `$'\t'` produces and `"...\t..."` does not.
+Both survive `sbatch ... -- --pheno "${PHENO[@]}"` — the `--` forwarding keeps
+each element whole.
+
+Each entry is `path:separator`. They are merged on `--id-col` (default `CCID`).
+Nothing in this repository reads them except the two selection stages, and
+nothing writes a copy of them into `outputs/` — the covariates go into the fit
+and the per-subject values do not come back out.
 
 ---
 
@@ -147,21 +199,21 @@ interfering. When the last job of one exits, that cohort is completely prepared.
 ```bash
 ./slurm/activation_and_dfc.sh config/ds002837.yaml
 ./slurm/activation_and_dfc.sh config/cneuromod_friends.yaml
-./slurm/activation_and_dfc.sh config/camcan_movie.yaml
+./slurm/activation_and_dfc.sh config/camcan.yaml
 ```
 
 The censor policy defaults to `config/censor/motion.yaml`. Override it without
 editing the script:
 
 ```bash
-FMRIDECOMP_CENSOR=config/censor/strict.yaml ./slurm/activation_and_dfc.sh config/camcan_movie.yaml
+FMRIDECOMP_CENSOR=config/censor/strict.yaml ./slurm/activation_and_dfc.sh config/camcan.yaml
 ```
 
 For a cohort you have never run, check it first — this is minutes against hours:
 
 ```bash
 $RUN python3 -m fmri_decomposition.cli validate config/<cohort>.yaml
-python3 tools/check_cohort.py config/<cohort>.yaml --all --limit 3
+$RUN23 python3 tools/check_cohort.py config/<cohort>.yaml --all --limit 3
 ```
 
 **Wait for all three to finish** before going on. Phase 2 fits across cohorts,
@@ -188,7 +240,7 @@ that consume it select by name:
 ```bash
 cp config/censor/motion.yaml config/censor/strict.yaml
 $EDITOR config/censor/strict.yaml                 # change `name:` too
-sbatch slurm/censor.sbatch config/camcan_movie.yaml config/censor/strict.yaml
+sbatch slurm/censor.sbatch config/camcan.yaml config/censor/strict.yaml
 ```
 
 Then rebuild phase 2 onward with `--censor-policy strict`. The old decision
@@ -205,41 +257,47 @@ A cohort carrying the phenotype you want to predict should be **projected**,
 never trained on.
 
 ```bash
-TRAIN="--train ds002837 cneuromod --project camcan"
+TRAIN="--train ds002837 cneuromod"
+PROJ="--project camcan"
 POL="--censor-policy motion"
 
 # dimensionality reduction: PCA + UMAP coordinates
 #   windowed apertures -- one array task per window size
 for A in harvardoxford yeo7 networks; do
-  sbatch --array=0-3 slurm/dimensionality_reduction.sbatch $A 30 60 120 300 \
-    -- $TRAIN $POL
+  sbatch --array=0-3 slurm/decomposition.sbatch $A 30 60 120 300 \
+    -- $TRAIN $PROJ $POL
 done
 #   the frame aperture -- one task, a frame has no window to vary.
 #   yeo7 and networks also get --passthrough-features, which writes the NAMED
 #   parcels beside the PCs so stage 4b can fit on them directly; and the extra
-#   --n-latents is the atlas's own width, which makes that PCA a lossless
+#   --pca-latents is the atlas's own width, which makes that PCA a lossless
 #   rotation. --umap-latents keeps UMAP at 3, where it belongs.
-sbatch --array=0-0 slurm/dimensionality_reduction.sbatch harvardoxford -1 \
-  -- --source activation $TRAIN $POL
-sbatch --array=0-0 slurm/dimensionality_reduction.sbatch yeo7 -1 \
-  -- --source activation $TRAIN $POL \
-     --n-latents 3 7 --umap-latents 3 --passthrough-features
-sbatch --array=0-0 slurm/dimensionality_reduction.sbatch networks -1 \
-  -- --source activation $TRAIN $POL \
-     --n-latents 3 14 --umap-latents 3 --passthrough-features
+sbatch --array=0-0 slurm/decomposition.sbatch harvardoxford -1 \
+  -- --source activation $TRAIN $PROJ $POL
+sbatch --array=0-0 slurm/decomposition.sbatch yeo7 -1 \
+  -- --source activation $TRAIN $PROJ $POL \
+     --pca-latents 3 7 --umap-latents 3 --passthrough-features
+sbatch --array=0-0 slurm/decomposition.sbatch networks -1 \
+  -- --source activation $TRAIN $PROJ $POL \
+     --pca-latents 3 14 --umap-latents 3 --passthrough-features
 ```
 
 Wait for those, then look before spending hours on the HMM:
 
 ```bash
 $RUN python3 -m fmri_decomposition.cli cluster --check \
-    --atlas harvardoxford yeo7 networks --window-s 30 60 120 300 -1 \
-    --embeddings pca3 umap3 raw7 raw14
+    --atlas harvardoxford yeo7 networks --window-s 30 60 120 300 -1
 ```
 
-`raw7` and `raw14` show as absent in most cells and that is correct — they exist
-only where passthrough ran. A missing raw embedding is skipped per cell, not an
-error.
+`--embeddings` defaults to the families `pca umap raw`, resolved per cell:
+`raw` becomes `raw7` on yeo7, `raw14` on networks and nothing on
+harvardoxford, read from the files rather than named in the command. A family
+that resolves to nothing is skipped and reported, never an error. Pass an exact
+name (`raw14`) only when one specific width is the point.
+
+A method that can run on **none** of the chosen embeddings is a hard error, not
+a skip — `--methods threshold --embeddings raw` would otherwise produce nothing
+anywhere and still report success.
 
 **hmm2 costs two orders of magnitude more than hmm1**, and it is worth knowing
 exactly where that goes. Measured on `harvardoxford -1`, 691,434 training rows:
@@ -270,7 +328,7 @@ five-fold against one job per atlas:
 for A in harvardoxford yeo7 networks; do
   for W in 30 60 120 300 -1; do
     sbatch --time=24:00:00 slurm/clustering.sbatch $A $W \
-      -- --train ds002837 cneuromod --embeddings pca3 umap3 raw7 raw14
+      -- --train ds002837 cneuromod
   done
 done
 ```
@@ -302,16 +360,24 @@ Then, once that finishes:
 
 ```bash
 for Y in additional_HADS_anx_category additional_HADS_dep_category; do
-  sbatch --time=06:00:00 slurm/model_selection.sbatch $Y
+  sbatch --time=06:00:00 slurm/model_selection.sbatch $Y -- \
+    --cohort camcan --task movie --pheno "${PHENO[@]}"
 done
 ```
 
-The phenotype table defaults to Cam-CAN's release. Everything after `--` goes
-straight to `select`, so another cohort's table needs no edit to the script:
+`--cohort`, `--task` and `--pheno` are all required and none has a default: a
+stage that spans cohorts must not name one, and a path into one person's
+scratch space only works for one project. `--task` is the hive partition the
+result lands under, so this writes
+`outputs/bstm_selection/task=movie/target=$Y/`.
+
+Everything after `--` goes straight to `select-bstm`, so another cohort needs no
+edit to the script:
 
 ```bash
 sbatch slurm/model_selection.sbatch severity -- \
-  --pheno /path/to/table.tsv:$'\t' --id-col SubjectID --cohort hcp
+  --pheno /path/to/table.tsv:$'\t' --id-col SubjectID \
+  --cohort hcp --task movie
 ```
 
 The `--target` column may be numeric, or labelled. Labels are matched against
@@ -323,17 +389,20 @@ order is the claim:
   --target severity --ordinal-levels low mid high
 ```
 
-Get that wrong and `select` stops and says so, naming the values it found; it
+Get that wrong and `select-bstm` stops and says so, naming the values it found; it
 does not quietly code them to NaN.
 
-`model_selection` **wipes its target directory before writing** — back up a
-result you care about first.
+`select-bstm` **wipes its own `task=`/`target=` directory before writing** — and
+only that one, so a `--task rest` run cannot empty the movie ranking beside it.
+Back up a result you care about first.
 
 ### Finally
 
 ```bash
 $RUN python3 -m fmri_decomposition.cli status | sed -n '/^======/,$p'
-column -s, -t outputs/bstm_selection/target=additional_HADS_anx_category/summary.csv | head -12
+column -s, -t \
+  outputs/bstm_selection/task=movie/target=additional_HADS_anx_category/summary.csv \
+  | head -12
 ```
 
 ### Looking at a state rather than ranking it
@@ -355,6 +424,759 @@ inverse that recovers its input.
 
 This is the table van der Meer et al.'s Fig. 1 plots.
 
+### PHASE 4 — THE OTHER TWO TREES (is any of it better than the alternatives?)
+
+Phase 3 answers *which movie state set* predicts best. It cannot answer whether
+the whole idea beats what it is supposed to improve on. Three more rankings do.
+They are not three new trees: there are **two trees, each partitioned by
+`task=`**, and phase 3 filled one of their four cells.
+
+| run | what it is | what it costs |
+|---|---|---|
+| `fcm_selection/task=movie` | one correlation matrix per subject, flattened | one pass over stage 2 |
+| `bstm_selection/task=rest` | the same pipeline on the rest scan | fMRIPrep + stage 2 |
+| `fcm_selection/task=rest` | the same matrix, from the rest scan | falls out of the two above |
+
+The FC arm on the movie alone needs nothing new preprocessed:
+
+```bash
+git pull
+sbatch slurm/static_fc.sbatch camcan \
+    -- --atlas harvardoxford yeo7 networks
+# once that finishes
+sbatch slurm/fcm_selection.sbatch additional_HADS_anx_category -- \
+    --cohorts camcan --task movie --pheno "${PHENO[@]}"
+```
+
+Everything below is the rest arm, which starts at fMRIPrep.
+
+#### 4.0 — pull, and set the environment once
+
+```bash
+cd /project/6008063/tamires/DecomposingfMRI
+git pull
+source slurm/env.sh                 # FMRIDECOMP_SIF, FMRIDECOMP_SIF45, binds, account
+```
+
+**Containers.** Two images, one boundary (`containers/README.md`):
+
+| stages | image | env var |
+|---|---|---|
+| 1 (fMRIPrep) | none — `module load StdEnv/2023 fmriprep/25.1.1` | — |
+| 2–3, 3b | `fmri_decomp.sif` | `FMRIDECOMP_SIF` |
+| 4–5 | `fmri_decomp_stage45.sif` | `FMRIDECOMP_SIF45` |
+
+Every `slurm/*.sbatch` picks the right one itself and refuses early, by name,
+if the image cannot import what it needs. Stage 1 uses no container at all —
+it is a cluster module.
+
+`$RUN` below means the stage 2–3 interpreter, for the few read-only commands
+that run on a login node:
+
+```bash
+RUN="apptainer exec --bind ${FMRIDECOMP_BINDS:-/project,/scratch,/home} --pwd $PWD $FMRIDECOMP_SIF python3"
+```
+
+#### 4.1 — confirm the rest acquisition (login node, seconds)
+
+Three of four values are already confirmed in `config/camcan.yaml`
+(TR 1.97 under `tr_by_task`, `func_rest`, single-echo). This re-checks them on
+one subject and costs nothing:
+
+```bash
+R=/project/6008063/tamires/cohorts/camcan/cc700/mri/pipeline/release004/BIDSsep
+ls $R/func_rest/sub-CC110033/func/
+python3 -c "import json;print(json.load(open('$R/func_rest/sub-CC110033/func/sub-CC110033_task-Rest_bold.json'))['RepetitionTime'])"
+```
+
+Expect one `_bold.nii.gz` with **no** `echo-` in the name, and `1.97`.
+
+#### 4.2 — build the rest BIDS tree (login node, seconds)
+
+Symlinks only, so it costs no disk. Pilot on 10 first:
+
+```bash
+python3 preprocessing/camcan/01_build_bids.py \
+    --task Rest --n-echoes 0 --func-subdir func_rest \
+    -o /project/6008063/tamires/cohorts/camcan_rest_bids \
+    --dataset-name "Cam-CAN CC700 rest (BIDS view for fMRIPrep)" \
+    --limit 10
+```
+
+It prints `usable subjects` and a breakdown of what it skipped. **0 usable is
+never a fact about the data** — it is a wrong `--func-subdir`, `--n-echoes` or
+`--task`, and the script refuses rather than exiting 0. When the count looks
+right, drop `--limit 10` and re-run to take all of them.
+
+#### 4.3 — fMRIPrep the rest scans (the one slow step)
+
+Prereqs are already satisfied from the movie run — same `TEMPLATEFLOW_HOME`,
+same FreeSurfer licence — and the script checks both before the module loads.
+
+```bash
+export REST_BIDS=/project/6008063/tamires/cohorts/camcan_rest_bids
+export REST_OUT=/project/6008063/tamires/cohorts/camcan_rest_fmriprep
+export REST_WORK=/project/6008063/tamires/work/camcan_rest_fmriprep
+
+# pilot: the first 10 lines of subjects.txt
+BIDS_ROOT=$REST_BIDS OUT_ROOT=$REST_OUT WORK_ROOT=$REST_WORK TASK_ID=Rest \
+  sbatch --array=0-9 preprocessing/camcan/02_fmriprep.sbatch
+```
+
+The allocation is in the script: **8 CPUs, 8G/CPU (64G), 8 h**, one array task
+per subject. That walltime was sized for the five-echo movie; single-echo rest
+has no echo combination to do, so expect well under it — check the pilot's
+`finished ... with status 0` lines before scaling up.
+
+```bash
+seff <jobid>_0            # what the pilot actually used
+
+# expand subjects.txt from the pilot's 10 to all of them
+python3 preprocessing/camcan/01_build_bids.py \
+    --task Rest --n-echoes 0 --func-subdir func_rest -o $REST_BIDS \
+    --dataset-name "Cam-CAN CC700 rest (BIDS view for fMRIPrep)"
+
+N=$(wc -l < $REST_BIDS/subjects.txt)
+BIDS_ROOT=$REST_BIDS OUT_ROOT=$REST_OUT WORK_ROOT=$REST_WORK TASK_ID=Rest \
+  sbatch --array=10-$((N-1))%60 preprocessing/camcan/02_fmriprep.sbatch
+```
+
+**This is safe to do while the pilot is still running**, and the reason is
+worth knowing rather than trusting. Each array task reads `subjects.txt` at
+startup (`sed -n "$((IDX+1))p"`), so rewriting the file mid-flight could in
+principle hand a pending task a different subject. It cannot here: `--limit`
+selects `usable[:limit]`, a sorted PREFIX, so lines 1-10 are byte-identical
+before and after. A pilot task that has not started yet still resolves to the
+subject it was queued for, and the `IDX >= N_SUBS` guard only loosens.
+
+Re-running the BIDS build leaves the 10 already linked completely alone:
+`link()` returns early when the destination exists and `--force` was not
+passed. Do NOT reach for `--force` here — it unlinks and re-creates every
+symlink, which is a window in which a live job can fail to resolve a path.
+
+What you give up by submitting early is sizing the big array from the pilot's
+real `seff`. That is a bounded risk -- the prereq checks already passed, so a
+systematic problem would have failed the pilot in seconds -- but if the pilot
+turns out to fail for a data reason, cancel and look before re-queueing:
+
+```bash
+scancel <big_jobid>
+```
+
+`%60` caps concurrent tasks. Raise it if the queue is empty; it is there
+because each subject's nipype work dir holds tens of thousands of files and the
+inode quota is the real limit, not CPU.
+
+Then the only value still unconfirmed — the volume count:
+
+```bash
+$RUN -c "import glob,nibabel as nib,collections; \
+print(collections.Counter(nib.load(f).shape for f in \
+glob.glob('$REST_OUT/sub-*/func/*task-Rest*desc-preproc_bold.nii.gz')))"
+```
+
+**One line of output means one shape**, which is also the corruption check. If
+it is 261 everywhere, add `Rest: 514.17` to `stimulus.durations_s` in
+`config/camcan.yaml` beside the movie's 476.71. If it varies, leave it out — an
+assumed fixed duration where runs differ makes the window grid claim windows
+some subjects never acquired.
+
+#### 4.4 — phase 1 for rest (extract, QC, censor)
+
+Movie and rest are **one cohort with two tasks**, `config/camcan.yaml`. The
+same people, so two cohort values would make the output tree claim they were
+two samples. fMRIPrep ran twice, into two trees, so the config reads a merged
+symlink view — build it once:
+
+```bash
+ALL=/project/6008063/tamires/cohorts/camcan_all_fmriprep
+mkdir -p $ALL
+for SRC in /project/6008063/tamires/cohorts/camcan_fmriprep \
+           /project/6008063/tamires/cohorts/camcan_rest_fmriprep; do
+  for d in $SRC/sub-*; do
+    mkdir -p $ALL/$(basename $d)/func
+    ln -sfn $d/func/* $ALL/$(basename $d)/func/ 2>/dev/null
+  done
+done
+ls $ALL/sub-CC110033/func/ | grep -c preproc_bold      # expect 2
+```
+
+Symlinks, not copies, and no code change was needed for it: `bold_glob` and
+`confounds_glob` are already `task-*` wildcarded, so one directory per subject
+holding both tasks satisfies them as written. This is the same trick
+`preprocessing/camcan/01_build_bids.py` uses on the input side.
+
+Then:
+
+```bash
+$RUN23 python3 tools/make_participants.py config/camcan.yaml \
+    -o config/camcan_participants.csv
+$RUN23 python3 tools/check_cohort.py config/camcan.yaml
+./slurm/activation_and_dfc.sh config/camcan.yaml
+```
+
+Already extracted one or both tasks as separate cohorts? **Do not re-extract**
+— go to 4.4b.
+
+Two prompts to expect, both from the chain script and both `y` here:
+
+* *"validate reported problem(s) … continue with --no-strict?"* — the missing
+  `stimulus.durations_s`, which is expected until 4.3 confirms it. `dfc` falls
+  back to each file's observed length.
+* a shard-sizing warning, if the default 8 array tasks over-provisions. It
+  prints the number to use; re-run with it.
+
+`config/camcan.yaml` sets **`isc_gate_tr_by_task: {Rest: null}`**, which is
+the pair of lines without which this chain cannot run for rest at all.
+`diagnose` exits 2 when ISC alignment fails and stage 3 is chained behind it
+with `--dependency=afterok`; at rest there is nothing shared to correlate, so
+the best lag is noise and the gate would FAIL on a fact about the design. The
+movie keeps the real `isc_gate_tr: 1.0`, because a misaligned film is exactly
+what ISC catches — the gate is applied per task, so one cohort gets both
+answers. ISC is still computed and written for rest — read it the other way
+round: rest ISC should be near **zero**, and subjects who correlate strongly at
+rest are a finding, not a pass.
+
+This also gives you the windowed apertures (`30 60 120 300`) at rest, since the
+chain runs `dfc`. For activation-only, skip `activation_and_dfc.sh` and submit
+its first two links by hand:
+
+```bash
+E=$(sbatch --parsable --array=0-7 slurm/extract_activations.sbatch \
+      config/camcan.yaml --no-strict)
+F=$(sbatch --parsable --dependency=afterok:$E slurm/finalize.sbatch \
+      config/camcan.yaml activation)
+sbatch --dependency=afterok:$F slurm/censor.sbatch \
+      config/camcan.yaml config/censor/motion.yaml
+```
+
+#### 4.4b — already extracted rest as its own cohort? migrate, don't re-run
+
+`cohort` is a **partition key, not a column** — `activation.py` says so, and
+`frames.read_cohort` assigns it from the path at read time. So for the
+immutable per-subject shards, renaming the directory *is* the migration. Stage
+1 is not re-run.
+
+```bash
+$RUN python3 tools/migrate_cohort.py --from camcan_rest --to camcan   # look
+$RUN python3 tools/migrate_cohort.py --from camcan_rest --to camcan --apply
+```
+
+**Then the second half, which is not optional.** `latents/`, `transitions/`,
+`static_fc/` and `censor/` key on `cohort=` with `task` as a *column*;
+`activation/` and `dfc/` have always had `task=` as a directory. One cohort
+holding two conditions makes that difference a correctness problem rather than
+an untidiness: a latents file records ONE `stride_s` — the TR of its rows — and
+`transitions` reads it for every dwell time in seconds, so a file holding a
+2.47 s movie and a 1.97 s rest can only be right about one of them.
+
+```bash
+$RUN python3 tools/migrate_cohort.py --split-tasks            # look
+$RUN python3 tools/migrate_cohort.py --split-tasks --apply
+```
+
+A rewrite rather than a rename: each file is partitioned by its own `task`
+column into `cohort=<c>/task=<t>/<leaf>`. The schema metadata copies verbatim
+to every part — `model_hash`, `censor_policy`, `stride_s`, and the per-column
+`clusterers` block holding each state set's `fit_hash`, `params` and
+`train_cohorts` — because all of it describes the fit and not the rows. Without
+that carry the HMM2 label columns would survive with their provenance stripped,
+which looks usable and is not.
+
+Read the dry run's NOTE lines. A file holding **several** tasks is reported,
+because every part inherits the one `stride_s` it records and that is only
+correct if those tasks share a TR. For your tree they do — `cohort=camcan`'s
+latents are Movie-only, and `cneuromod` and `ds002837` have one TR each — so
+there should be no such note.
+
+What this buys beyond correctness: the skip in `decompose` becomes per
+`(cohort, task)`, so adding a condition writes a **new** file and leaves the
+existing one alone. **`--overwrite` is no longer needed to project rest**, the
+movie's state columns survive, and the re-cluster that would have cost is not
+spent.
+
+Both halves dry-run by default and both **refuse** if a destination data file
+exists: a collision means two files claim one leaf, and whichever moved last
+would silently win. One exception, in the rename half only — the per-array-task
+`shards/manifest_<stage>_shard-NNNN-of-NNNN.json` files are named by array
+index, so two runs of the same stage always write the same names. That is a
+name clash and not a data collision, so those are **renamed** on arrival
+(`-from-<src>` before the `.json`) rather than refused.
+
+Back to the rename half, what it moves: `activation/`, `dfc/`, and the
+per-array-task `meta/cohorts/cohort=*/shards/` manifests. What it deliberately
+does **not** move, and why: the derived per-cohort tables — `manifest_*.json`,
+`participants_qc.csv`, `coverage.parquet`, `isc_alignment.csv` — and everything
+under `censor/` hold one row per `(sub, task)` for a whole cohort. Each cohort
+has a *complete* copy covering its own tasks, so moving one over the other
+would overwrite one task's table with the other's. They are cheap, and
+`finalize` and `censor` rewrite them from scratch — which is also why the split
+half has nothing to carry over for them:
+
+```bash
+F=$(sbatch --parsable slurm/finalize.sbatch config/camcan.yaml activation)
+G=$(sbatch --parsable --dependency=afterok:$F \
+      slurm/finalize.sbatch config/camcan.yaml dfc)
+sbatch --kill-on-invalid-dep=yes --dependency=afterok:$G \
+      slurm/censor.sbatch config/camcan.yaml config/censor/motion.yaml
+```
+
+Then check both tasks are there under one cohort:
+
+```bash
+$RUN python3 -m fmri_decomposition.cli status | sed -n '/^1  ACTIV/,/^3 /p'
+ls outputs/activation/atlas=yeo7/cohort=camcan/          # task=Movie  task=Rest
+```
+
+The shards' own schema metadata still records `cohort: camcan_rest` and the old
+`config_hash`. Nothing reads either — `cohort` comes from the path, and
+`check_cohort.py` compares only `tr`, which is per run and unchanged — so
+rewriting ~2,000 files to correct a string no consumer opens would be churn.
+
+**Delete `camcan_ccfrail` first if you are not using it**, and check it is not
+in the fit before you do:
+
+```bash
+ls -d outputs/latents/atlas=yeo7/window_s=-1/cohort=*      # expect no ccfrail
+find outputs -type d -name 'cohort=camcan_ccfrail' -prune -print
+find outputs -type d -name 'cohort=camcan_ccfrail' -prune -exec rm -rf {} +
+```
+
+#### 4.5 — the FC tree (both conditions)
+
+Independent of everything in 4.6, and the cheaper half. **One `static-fc` run**
+now — it writes `cohort=`/`task=` partitions and nothing about it is
+per-condition — then **one `select-fcm` run per condition**, split by
+`--keep-tasks`:
+
+```bash
+sbatch slurm/static_fc.sbatch camcan \
+    -- --atlas harvardoxford yeo7 networks
+# then, once it finishes -- one run per condition, because `task=` is the
+# partition the ranking lands under and a run writes exactly one of them
+for Y in additional_HADS_anx_category additional_HADS_dep_category; do
+  sbatch slurm/fcm_selection.sbatch $Y -- \
+    --cohorts camcan --task movie --keep-tasks Movie \
+    --atlas harvardoxford yeo7 networks --pheno "${PHENO[@]}"
+  sbatch slurm/fcm_selection.sbatch $Y -- \
+    --cohorts camcan --task rest  --keep-tasks Rest \
+    --atlas harvardoxford yeo7 networks --pheno "${PHENO[@]}"
+done
+```
+
+`static-fc` is one run over both cohorts — it writes `cohort=` partitions and
+nothing about it is per-condition. `select-fcm` is two, one per `task=`. That
+asymmetry is the point: a measurement spans cohorts, a ranking is about one
+condition.
+
+`static_fc.sbatch` asks for 4 CPUs / 32G / 3 h; `fcm_selection.sbatch` for
+16 CPUs / 32G / 3 h. Both are single jobs, not arrays — each (atlas, cohort)
+writes one `subjects.parquet`, so an array would race to write one file.
+
+#### 4.6 — the rest state tree
+
+Rest is **projected**, never trained on, so the states stay the movie's and
+only the dynamics differ. Now that both conditions are one cohort, `--project
+camcan` covers both in one pass — the cohort list does not change at all:
+
+```bash
+source slurm/env.sh
+# PHENO is NOT in env.sh. It is yours to set, once per shell -- the paths are a
+# fact about your filesystem and the tables are not redistributable, which is
+# why nothing in the repo can default them. See "The phenotype tables, once."
+# above and paste those two lines here. Eight selection jobs once died on exit
+# code 2 for want of them, a day into the dependency chain, because a new login
+# shell had `source slurm/env.sh` and no PHENO.
+CAMCAN=/project/6008063/tamires/cohorts/camcan/dataman/useraccess/opendata/paule_toussaint_camcan01870
+PHENO=("$CAMCAN/approved_data.tsv:"$'\t' "$CAMCAN/standard_data.csv:,")
+
+R=<the censor job id>           # the tail of the rebuild, or drop the
+                                # --dependency=afterok:$R below if the
+                                # derived tables are already current
+ATLASES="harvardoxford yeo7 networks"
+TRAIN="--train ds002837 cneuromod"
+PROJ="--project camcan"
+POL="--censor-policy motion"
+TARGETS="additional_HADS_anx_category additional_HADS_dep_category"
+# Only for a tree whose latents were written before 2026-10-08 -- see
+# "THE HASH BRIDGE" below. Empty on a tree written since.
+BRIDGE="--legacy-project-hash"
+
+# ---- state arm: latents -> clusterers -> transitions ----------------------
+# The -1 fit is PER ATLAS: yeo7 and networks carry --passthrough-features
+# and their own --pca-latents (the atlas's own width, which makes that PCA a
+# lossless rotation). One flag set over all three asks for a DIFFERENT model
+# on two of them, every existing cell reads as stale, and decompose refuses.
+# Keep these three lines separate -- a loop here is how that happens.
+D=$(
+  { sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
+      --array=0-0 slurm/decomposition.sbatch harvardoxford -1 \
+      -- --source activation $TRAIN $PROJ $POL $BRIDGE
+    sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
+      --array=0-0 slurm/decomposition.sbatch yeo7 -1 \
+      -- --source activation $TRAIN $PROJ $POL $BRIDGE \
+         --pca-latents 3 7 --umap-latents 3 --passthrough-features
+    sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
+      --array=0-0 slurm/decomposition.sbatch networks -1 \
+      -- --source activation $TRAIN $PROJ $POL $BRIDGE \
+         --pca-latents 3 14 --umap-latents 3 --passthrough-features
+  } | cut -d';' -f1 | paste -sd:)
+
+C=$(for A in $ATLASES; do
+      sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$D \
+        --time=24:00:00 slurm/clustering.sbatch $A -1 \
+        -- $TRAIN $PROJ | cut -d';' -f1
+    done | paste -sd:)
+
+T=$(sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$C \
+      slurm/brain_states_transitions.sbatch -- --window-s -1 | cut -d';' -f1)
+
+# ---- FC arm: parallel to it, off the same rebuild, SAME GATE -------------
+S=$(sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$R \
+      slurm/static_fc.sbatch camcan \
+      -- --atlas $ATLASES $POL | cut -d';' -f1)
+
+# ---- the four rankings, two per arm --------------------------------------
+# Guarded, because `--pheno` is required=True in both selections: an empty
+# PHENO is an argparse error, exit code 2, AFTER the job has waited out the
+# whole chain. Checking it here costs nothing and the queue costs a day.
+if [[ ${#PHENO[@]} -eq 0 ]]; then
+  echo "SKIPPING the selections: PHENO is empty -- set CAMCAN and PHENO (see" \
+       "\"The phenotype tables, once.\") and submit the rankings separately."
+else
+  for Y in $TARGETS; do
+    for ARM in "movie Movie" "rest Rest"; do
+      set -- $ARM
+      sbatch --kill-on-invalid-dep=yes --dependency=afterok:$T \
+        --time=12:00:00 --mem=32G slurm/model_selection.sbatch $Y -- \
+          --cohort camcan --task $1 --keep-tasks $2 --pheno "${PHENO[@]}"
+      sbatch --kill-on-invalid-dep=yes --dependency=afterok:$S \
+        slurm/fcm_selection.sbatch $Y -- \
+          --cohorts camcan --task $1 --keep-tasks $2 \
+          --atlas $ATLASES --pheno "${PHENO[@]}"
+    done
+  done
+fi
+
+squeue -u $USER -o "%.12i %.32j %.9T %.11M %R"
+```
+
+The two arms are independent after the rebuild and run side by side: the FC
+branch is one 3 h job and does not wait for the 24 h clustering. Only the
+rankings wait, each on its own arm.
+
+**`$POL` goes to `static-fc` as well, and that is not optional.** The property
+that makes the comparison fair is that these edges come from the same frames
+the `window_s = -1` state arm is fitted on -- same band-pass, same per-run
+z-score, same `good_frame` gate, **same censor table** (static_fc.py: "THE ONE
+PROPERTY THAT MAKES THE COMPARISON FAIR"). Leave `--censor-policy` off and the
+FC arm silently keeps subjects the state arm dropped, so a difference between
+`fc:edges` and `bstm:cells` is partly a difference in sample rather than a
+difference between the models -- which is the one thing this design exists to
+rule out. The written table carries a `censor_policy` column, so check it
+rather than trusting the command line:
+
+```bash
+$RUN python3 -c "
+from fmri_decomposition.static_fc import read_cohort_table
+from fmri_decomposition.io import default_output_root
+d = read_cohort_table(default_output_root(), 'harvardoxford', 'camcan',
+                      columns=['task', 'sub', 'censor_policy'])
+print(d.groupby(['task', 'censor_policy']).size())"
+```
+
+**There is deliberately no `--overwrite` on the decompose line. Do not add
+one.** It used to be required and is now the opposite of what you want.
+
+The skip is per `(cohort, task)` since the task split, and each cell is its own
+file. `cohort=camcan/task=Rest` has no file, so its hash reads as None, it lands
+in `todo`, and it is written. `cohort=camcan/task=Movie` already carries this
+`model_hash`, so it is kept — untouched, with the state columns stage 4b wrote
+still in it.
+
+`--overwrite` rewrites EVERY cell, the movie included, and a rewrite drops those
+state columns. Where the clusterers are not cached that is the ~24 h HMM2 fit
+paid again for nothing. Before the split it was unavoidable: one file per cohort
+meant adding rest rewrote the movie's rows too, and `decompose` refused unless
+`--overwrite` acknowledged the loss. Now the new condition lands beside the old
+one and there is nothing to acknowledge.
+
+Leaving `--overwrite` off also keeps the guard. `refuse_to_destroy_states` stops
+a cell that exists at a DIFFERENT hash from being rewritten silently, so if
+something really does need replacing you are told rather than charged for it.
+
+#### Removing a state set that only some cells carry
+
+A state set present in one condition and absent from another is a permanent
+nuisance rather than a one-off: `transitions --check` reports every cell that
+lacks it ("stage 4b ran unevenly"), and `select-bstm` ranks it for whichever
+condition has it, so one arm's summary.csv carries rows the other cannot.
+
+That is what the legacy `HMM_*` columns are -- the naming from before HMM1 and
+HMM2 became separate definitions, which the current code never writes again.
+
+```bash
+$RUN python3 tools/drop_state_columns.py --states HMM_pca3_8 HMM_pca3_27 \
+                                                  HMM_umap3_8 HMM_umap3_27
+$RUN python3 tools/drop_state_columns.py --states ... --apply
+```
+
+**`rm -rf outputs/transitions/.../states=X` on its own does not hold.**
+`transitions` builds its plan from the state COLUMNS inside the latents, so the
+next run regenerates exactly what was deleted. The columns are the source and
+the transitions tables are derived, so the tool removes the columns first and
+the derived tables second.
+
+It takes EXACT names, never a glob: `HMM_*` would also match `HMM1_*` and
+`HMM2_*` and delete the current definitions along with the legacy ones. A name
+matching nothing is reported, and all names matching nothing is a refusal --
+a typo that silently cleans up zero columns is the failure mode here.
+
+Everything else is carried verbatim: the rows, the embedding columns, every
+other state column, and the schema metadata -- `model_hash`, `stride_s`,
+`censor_policy`, and the remaining `clusterers` entries.
+
+#### A WINDOWED TREE NEEDS THE GENERAL BRIDGE -- `--legacy-hash-from`
+
+The windowed latents are older still than the `-1` ones, and their refusal
+names a second removed key:
+
+```
+  They are stale because this run describes a DIFFERENT fit:
+      bins: [2, 3, 5, 8] -> '(absent)'
+      n_latents: [3] -> [2, 3, 5]
+```
+
+`n_latents` is an ordinary forgotten flag -- those fits used `--pca-latents 3`.
+`bins` is not: it left the payload when quantile thresholding moved out of this
+stage into `cluster`, so there is no `--bins` to set any more. One `--legacy-*`
+option per removal does not scale and cannot cover the next one.
+
+`--legacy-hash-from` reads the description a cell was WRITTEN with and carries
+over whatever this version no longer emits, `bins` and `project_cohorts` alike:
+
+```bash
+for A in harvardoxford yeo7 networks; do
+  sbatch --array=0-3 slurm/decomposition.sbatch $A 30 60 120 300 \
+    -- $TRAIN $PROJ $POL --pca-latents 3 \
+       --legacy-hash-from outputs/latents/atlas=$A/window_s=300/cohort=camcan/task=Movie/data.parquet
+done
+```
+
+**One reference per ATLAS covers all four apertures.** `window_s` is in the
+payload, but unlike `--pca-latents` it is not a flag anybody can forget -- it
+is the aperture the array task is processing -- and one `--array=0-3` cannot
+carry four reference paths. So only that key is substituted, per task. Nothing
+else about the path is: point it at the wrong atlas and the clash check still
+refuses by name.
+
+Keys BOTH descriptions carry must AGREE. A flag you actually forgot is still
+refused, and named with both values, because the alternative is to stamp this
+run's output with a hash claiming a model it did not use -- the one confusion
+`model_hash` exists to prevent. So the sequence is: run it, read the refusal,
+add the flags it names, pass `--legacy-hash-from` for the keys that no longer
+exist.
+
+#### THE HASH BRIDGE -- `--legacy-project-hash`
+
+Only for latents written before 2026-10-08. `project_cohorts` was part of
+`model_hash` until then, and `9e1a9ac` removed it: a per-invocation quantity
+does not describe a fit, and while it was hashed no cohort could ever be
+skipped, so every addition rewrote and re-clustered the whole cell. That commit
+says the removal "DOES move every hash already on disk. It is accepted once."
+
+This is what paying that once looks like. A tree written earlier carries hashes
+computed WITH the key, so the current code reads every cell as a different fit
+and refuses to rewrite the ones holding state columns:
+
+```
+window_s=-1: refusing to rewrite 59 (cohort, task) cell(s) that carry
+brain-state columns.
+  ...
+  They are stale because this run describes a DIFFERENT fit:
+      project_cohorts: ['camcan'] -> '(absent)'
+```
+
+No flag of that run is missing -- which is why the refusal now says so and
+names this one. `--legacy-project-hash` puts the key back for the run, so the
+hash matches what is on disk. Then:
+
+* the existing cells are skipped, state columns and all -- nothing is rewritten;
+* `reuse_models` matches the saved manifest, so the fit is REUSED, not
+  re-derived. This matters more than the time: a refit gives the new cell its
+  own UMAP, and a dwell time measured in one embedding is not comparable to one
+  measured in another;
+* the cached clusterers accept the new cell, so rest is labelled by a forward
+  pass instead of a fresh HMM2.
+
+Pass the same `--project` the original run used, or the hash will not match
+either. Check it in the first minute of the job, before the six hours:
+
+```
+  already at this model_hash, left untouched: camcan/Movie, cneuromod/..., ...
+  to write: camcan/Rest
+```
+
+That is the run doing the right thing. If it refuses instead, the feature list
+moved too (the one part of the payload the refusal cannot see, since `n_edges`
+and `edges_digest` are not in the stored description) and nothing has been
+written yet -- the chain dies on `afterok` with nothing lost.
+
+The end state is still the tree on the current convention, reached by
+re-stamping the stored hashes rather than by rewriting the rows. Until then the
+bridge keeps the tree internally consistent, which is what comparability needs.
+
+`--keep-tasks` is what splits the ranking: `--task` names the output partition
+and is yours to choose, `--keep-tasks` filters rows and takes the BIDS labels
+as the data spells them. Without it, `select-bstm` **refuses** — one cohort
+holding two conditions means two rows per subject, and merging on `sub` alone
+would put the same person in the train and the test fold of one split.
+
+Allocations come from the scripts: decompose 4 CPUs / 64G / 6 h (raised here is
+rarely needed at `-1`), clustering 8 CPUs / 32G / 8 h — **override to 24 h as
+above**, because HMM2 at K=27 ran ~4 h on 8 cores and three atlases of
+`harvardoxford -1` are the long pole. Transitions 4 CPUs / 16G / 2 h.
+
+`--kill-on-invalid-dep=yes` cancels the dependents when something upstream
+fails, instead of leaving them pending for hours on a dependency that will
+never be satisfied.
+
+#### Adding rest to the shared state space
+
+Rest joins as a **projected** cohort, so it never defines states of its own —
+and since `decompose` and `cluster` both reuse what they already have, adding it
+costs minutes rather than repeating the fits.
+
+That was not true before this was built, and the two reasons are worth knowing
+because they are the shape of the whole stage:
+
+* `cluster` cannot append in place — parquet cannot — so it reads each latents
+  file, adds label columns, writes a temp and renames. `decompose` writes the
+  same path. A `decompose` run therefore **removes the state columns** from any
+  cohort it rewrites.
+* `decompose` used to skip only when *every* cohort in `train + project`
+  already had a file, and otherwise rewrote all of them. One missing cohort
+  rewrote the training cohorts too.
+
+Both now work per cohort:
+
+| | what it skips | what forces it |
+|---|---|---|
+| `decompose` | a cohort whose file already carries this `model_hash`; and the fit itself, when the saved one matches | `--overwrite` |
+| `cluster` | the fit, when one is cached for this `fit_hash`; and a cohort already carrying that `fit_hash` | `--refit` |
+
+Two guards on the caches, both refusing rather than approximating: a cached
+clusterer records the `model_hash` of the latents it was fitted on, and both
+caches record the library versions they were pickled under. A mismatch means
+refit, because a pickled sklearn or hmmlearn estimator is not guaranteed to
+behave across versions.
+
+So the sequence is just:
+
+```bash
+squeue -u $USER -n fmridecomp_cluster      # wait for any clustering to drain
+
+for A in harvardoxford yeo7 networks; do
+  sbatch --array=0-0 slurm/decomposition.sbatch $A -1 \
+    -- --source activation --train ds002837 cneuromod \
+       --project camcan <new_cohort> --censor-policy motion
+done
+# then clustering, which will reuse every fit and label only <new_cohort>
+```
+
+You should see `already at this model_hash, left untouched: ...` from
+`decompose` and `reusing the cached fit ... labelling only, no refit` from
+`cluster`. If you see `loading training cohorts` or a K= line taking hours,
+something did not match — check the `model_hash` line before letting it run.
+
+**One caveat that applies to the cohort you add next, not to rest.** The fit
+caches are written by the run that fits. A cell clustered *before* this change
+has no cached clusterer, so the first run after it still fits once. That is the
+re-run rest pays for; everything after it is cheap.
+
+#### 4.7 — read the four tables
+
+Two trees, two `task=` partitions each, one shape:
+
+```bash
+Y=additional_HADS_anx_category
+for T in bstm_selection fcm_selection; do
+  for K in movie rest; do
+    echo "== $T / task=$K"
+    column -s, -t outputs/$T/task=$K/target=$Y/summary.csv | head -6
+  done
+done
+```
+
+Every table starts with `run` and `target` — `fcm movie`, `bstm rest` — so the
+four can be concatenated and still say which is which:
+
+```bash
+Y=additional_HADS_anx_category
+head -1 outputs/bstm_selection/task=movie/target=$Y/summary.csv > all.csv
+for T in bstm_selection fcm_selection; do for K in movie rest; do
+  tail -n +2 outputs/$T/task=$K/target=$Y/summary.csv >> all.csv
+done; done
+column -s, -t all.csv | head -20
+```
+
+After those two, every table has `model arm atlas n n_features mean std min max
+count`, sorted best-first. What to read:
+
+* `mean` against the `(covariates only)` row **in its own table** — that is the
+  floor, and age and sex predict HADS on their own.
+* `std` next to every `mean`. A gap smaller than either arm's spread across
+  fold seeds is not a result.
+* **`n` first, always.** These are four separate runs on whoever each one has,
+  so two tables can differ in sample as well as in score. If they differ and
+  the gap matters, build one id list and pass it to all four:
+
+  ```bash
+  $RUN python3 tools/shared_subjects.py --cohorts camcan --tasks Movie Rest \
+      -o shared_subjects.txt
+  ```
+
+  **`--tasks` is not optional here.** Movie and rest are one cohort, so a
+  per-cohort intersection reads a table holding both conditions and returns
+  every subject with EITHER — a union dressed up as an intersection, which
+  would widen all four samples instead of narrowing them. Pass the same labels
+  you pass each run as `--keep-tasks`.
+
+  It intersects the **inputs** — `transitions/` and `static_fc/` — so the list
+  can be built before any ranking has run, and it prints a count per
+  (stage, cohort, task) so a source that contributed nothing is visible rather
+  than inferred. It refuses rather than silently skipping one. Then re-run all
+  four with it:
+
+  ```bash
+  for Y in additional_HADS_anx_category additional_HADS_dep_category; do
+    for K in Movie Rest; do
+      L=$(echo $K | tr "[:upper:]" "[:lower:]")
+      sbatch slurm/model_selection.sbatch $Y -- \
+          --cohort camcan --task $L --keep-tasks $K --pheno "${PHENO[@]}" \
+          --restrict-subjects shared_subjects.txt
+      sbatch slurm/fcm_selection.sbatch $Y -- \
+          --cohorts camcan --task $L --keep-tasks $K --pheno "${PHENO[@]}" \
+          --restrict-subjects shared_subjects.txt
+    done
+  done
+  ```
+* In `fcm_selection`, `edges` against `global`. `global` is a subject's mean and
+  SD over every edge — two numbers with no topology in them. If it matches
+  `edges`, the pattern is not what is being measured; the amount is.
+* **Identical `mean`, `std`, `min` and `max` down a whole model's block** means
+  that model predicted a constant and never split, so its ordering of the arms
+  is noise. Both selection stages now say so by name when it happens. It needs
+  a training fold under ~40 subjects to occur, so it is a small-`n` symptom.
+
+None of the four subtracts one row from another, on purpose. The arms share
+their folds, so a difference between two scores is dependent and has no
+standard error the usual tests supply. A real test belongs in the write-up.
+
+Each run **wipes its own `task=`/`target=` directory before writing** — and only
+that one, so a rest run cannot empty the movie ranking beside it. Back up a
+result you care about first.
+
 ### PHASES 2-3 as one chained submission
 
 Phase 1 stays separate: its cohorts are independent and `activation_and_dfc.sh` already
@@ -365,14 +1187,15 @@ dimensionality reduction rewrites the very file clustering appends to.
 ```bash
 source slurm/env.sh
 ATLASES="harvardoxford yeo7 networks"
-TRAIN="--train ds002837 cneuromod --project camcan"
+TRAIN="--train ds002837 cneuromod"
+PROJ="--project camcan"
 POL="--censor-policy motion"
 APERTURES="30 60 120 300 -1"
 
 D=$(for A in $ATLASES; do
-      sbatch --parsable --array=0-3 slurm/dimensionality_reduction.sbatch \
-        $A 30 60 120 300 -- $TRAIN $POL | cut -d';' -f1
-      sbatch --parsable --array=0-0 slurm/dimensionality_reduction.sbatch \
+      sbatch --parsable --array=0-3 slurm/decomposition.sbatch \
+        $A 30 60 120 300 -- $TRAIN $PROJ $POL | cut -d';' -f1
+      sbatch --parsable --array=0-0 slurm/decomposition.sbatch \
         $A -1 -- --source activation $TRAIN $POL | cut -d';' -f1
     done | paste -sd:)
 [[ -n "$D" ]] || { echo "nothing submitted"; exit 1; }
@@ -388,7 +1211,8 @@ T=$(sbatch --parsable --kill-on-invalid-dep=yes --dependency=afterok:$C \
 
 for Y in additional_HADS_anx_category additional_HADS_dep_category; do
   sbatch --kill-on-invalid-dep=yes --dependency=afterok:$T --time=06:00:00 \
-    slurm/model_selection.sbatch $Y
+    slurm/model_selection.sbatch $Y -- \
+      --cohort camcan --task movie --pheno "${PHENO[@]}"
 done
 
 squeue -u $USER -o "%.12i %.32j %.9T %.11M %R"
@@ -410,7 +1234,7 @@ Stages 1–2.5 are per cohort, so a new cohort means one new config and one
 the fit spans them.
 
 1. **Write `config/<cohort>.yaml`.** Copy the closest existing one.
-   `camcan_movie.yaml` for a single short stimulus, `cneuromod_friends.yaml` for
+   `camcan.yaml` for one cohort scanned at two TRs, `cneuromod_friends.yaml` for
    many episodes per subject, `ds002837.yaml` for one long film per subject with
    preprocessing already applied. The fields that always need attention are
    `tr`, the three absolute paths, `discovery.bold_glob`, `filtering`
@@ -424,7 +1248,7 @@ the fit spans them.
 
    ```bash
    $RUN python3 -m fmri_decomposition.cli validate config/<cohort>.yaml
-   python3 tools/check_cohort.py config/<cohort>.yaml --all --limit 3
+   $RUN23 python3 tools/check_cohort.py config/<cohort>.yaml --all --limit 3
    ```
 
 4. **Stages 1–2.5** for the new cohort only.

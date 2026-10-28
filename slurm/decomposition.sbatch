@@ -1,7 +1,7 @@
 #!/bin/bash
 # Stage 4 -- latent decomposition. Fit on some cohorts, project onto others.
 #
-#   sbatch --array=0-3 slurm/dimensionality_reduction.sbatch harvardoxford 30 60 120 300 \
+#   sbatch --array=0-3 slurm/decomposition.sbatch harvardoxford 30 60 120 300 \
 #            -- --censor-policy motion
 #
 # --censor-policy IS REQUIRED and has no default. Pass `none` to fit on every
@@ -12,7 +12,7 @@
 # THE ACTIVATION APERTURE. Per-TR frames instead of windowed edges, written to
 # window_s=-1. One array task, because a frame has no window to vary:
 #
-#   sbatch --array=0-0 slurm/dimensionality_reduction.sbatch yeo7 -1 \
+#   sbatch --array=0-0 slurm/decomposition.sbatch yeo7 -1 \
 #            -- --source activation --censor-policy motion
 #
 # -1 is not a duration: it is one TR, which differs per cohort. Two transforms
@@ -37,7 +37,7 @@
 #
 # UMAP is the slow part, not PCA: it fits a neighbour graph on
 # --umap-fit-rows (30,000 by default) rows of full edge dimensionality, once
-# per entry in --n-latents. Pass --no-umap for a PCA-only run, which finishes
+# per entry in --pca-latents. Pass --no-umap for a PCA-only run, which finishes
 # in minutes.
 
 #SBATCH --job-name=fmridecomp_decompose
@@ -50,18 +50,32 @@
 
 set -euo pipefail
 
-ATLAS="${1:?usage: sbatch dimensionality_reduction.sbatch <atlas> <window_s> [...] [-- extra args]}"
+ATLAS="${1:?usage: sbatch decomposition.sbatch <atlas> <window_s> [...] [-- extra args]}"
 shift
 
 # Window sizes up to a bare `--`; anything after it is forwarded to
 # tools/decompose.py verbatim, e.g.
-#   sbatch --array=0-1 slurm/dimensionality_reduction.sbatch yeo7 15 30 -- --no-umap
+#   sbatch --array=0-1 slurm/decomposition.sbatch yeo7 15 30 -- --no-umap
 WINDOWS=(); EXTRA=(); seen_sep=0
 for a in "$@"; do
   if [[ ${seen_sep} -eq 1 ]]; then EXTRA+=("$a")
   elif [[ "$a" == "--" ]]; then seen_sep=1
   else WINDOWS+=("$a"); fi
 done
+# A WINDOW NEVER STARTS WITH `--`. Forgetting the bare `--` separator does not
+# fail loudly: the forwarded flags land in WINDOWS, argparse's nargs="+" stops
+# at the first one anyway, and the run proceeds with a WINDOWS array that is
+# wrong -- which makes the array-range check and the task log wrong with it.
+# `-1` is a real window and does not start with `--`, so this is exact.
+for w in ${WINDOWS[@]+"${WINDOWS[@]}"}; do
+  if [[ "$w" == --* ]]; then
+    echo "ERROR: '$w' is not a window size." >&2
+    echo "       Extra arguments go after a bare --, e.g." >&2
+    echo "         sbatch $(basename "$0") <atlas> <window>... -- $w ..." >&2
+    exit 1
+  fi
+done
+
 if [[ ${#WINDOWS[@]} -eq 0 ]]; then
   echo "give at least one window size" >&2
   exit 1

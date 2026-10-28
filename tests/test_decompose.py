@@ -7,6 +7,7 @@ command that produced them -- and nothing would report that, it would just look
 like two incomparable fits.
 """
 import argparse
+import json
 
 import pytest
 
@@ -40,10 +41,20 @@ class TestFitMetaIsHashStable:
     # here has to be deliberate: update the constant in the same commit, and say
     # in the message what moved.
     #
-    # Changed once, knowingly: `bins` left the payload when the quantile
-    # thresholding moved out of this stage into `cluster`. It had been
-    # 433fca34406aafde while `bins` was still part of the fit description.
-    DFC_HASH = "8c7c88dca4e6b719"
+    # Changed TWICE, knowingly:
+    #
+    #   433fca34406aafde  the original, while `bins` was part of the payload
+    #   8c7c88dca4e6b719  `bins` left, when quantile thresholding moved out of
+    #                     this stage into `cluster`
+    #   eacc79844d0ec658  `project_cohorts` left. It is a per-INVOCATION
+    #                     quantity, not a property of the fit -- only --train
+    #                     feeds the scaler, the PCA and the UMAP -- so two runs
+    #                     differing only in who else was projected produce the
+    #                     same model, and the hash claimed otherwise. While it
+    #                     was hashed, adding a cohort to a cell ALWAYS changed
+    #                     the hash, so no cohort could be skipped and every
+    #                     addition rewrote and re-clustered the whole cell.
+    DFC_HASH = "eacc79844d0ec658"
 
     def test_the_default_payload_is_unchanged(self):
         a = parse("--atlas", "yeo7", "--window-s", "30")
@@ -54,6 +65,32 @@ class TestFitMetaIsHashStable:
         meta = D.fit_meta(a, "30", EDGES)
         for k in ("source", "match_bandpass", "zscore_runs"):
             assert k not in meta
+
+    def test_the_project_list_is_not_part_of_the_fit_description(self):
+        """The fit sees only --train. A hash that moved with --project made two
+        identical fits look incomparable, and made every cohort addition a
+        cell-wide rewrite."""
+        a = parse("--atlas", "yeo7", "--window-s", "30")
+        assert "project_cohorts" not in D.fit_meta(a, "30", EDGES)
+
+    def test_two_project_lists_give_one_hash(self):
+        one = parse("--atlas", "yeo7", "--window-s", "30",
+                    "--project", "camcan")
+        two = parse("--atlas", "yeo7", "--window-s", "30",
+                    "--project", "camcan", "camcan_rest")
+        assert (D.model_hash(D.fit_meta(one, "30", EDGES), EDGES)
+                == D.model_hash(D.fit_meta(two, "30", EDGES), EDGES))
+
+    def test_the_train_list_still_does_move_it(self):
+        """The other half of the claim: --train IS the fit, so it must move the
+        hash. Dropping project_cohorts must not have made the payload
+        indifferent to who was fitted on."""
+        one = parse("--atlas", "yeo7", "--window-s", "30",
+                    "--train", "ds002837")
+        two = parse("--atlas", "yeo7", "--window-s", "30",
+                    "--train", "ds002837", "cneuromod")
+        assert (D.model_hash(D.fit_meta(one, "30", EDGES), EDGES)
+                != D.model_hash(D.fit_meta(two, "30", EDGES), EDGES))
 
     def test_the_payload_no_longer_describes_a_clustering(self):
         # `bins` configured the thresholding this stage used to do. It belongs to
@@ -78,7 +115,7 @@ class TestNoStatesHere:
         # come at the fit, not later when `cluster` finds no pca3 columns.
         import numpy as np
 
-        a = parse("--atlas", "yeo7", "--window-s", "30", "--n-latents", "2",
+        a = parse("--atlas", "yeo7", "--window-s", "30", "--pca-latents", "2",
                   "--no-umap")
         X = np.random.default_rng(0).normal(size=(60, 6)).astype(np.float32)
         feats = [f"A__{i}" for i in range(6)]
@@ -89,7 +126,7 @@ class TestNoStatesHere:
         import numpy as np
         import pandas as pd
 
-        a = parse("--atlas", "yeo7", "--window-s", "30", "--n-latents", "3",
+        a = parse("--atlas", "yeo7", "--window-s", "30", "--pca-latents", "3",
                   "--no-umap")
         X = np.random.default_rng(0).normal(size=(60, 6)).astype(np.float32)
         feats = [f"A__{i}" for i in range(6)]
@@ -232,7 +269,7 @@ class TestPassthroughFeatures:
         import numpy as np
 
         a = parse("--atlas", "networks", "--source", "activation",
-                  "--n-latents", *n_latents, "--no-umap", *extra)
+                  "--pca-latents", *n_latents, "--no-umap", *extra)
         X = np.random.default_rng(0).normal(size=(80, n_feat)).astype("float32")
         feats = [f"net{i}" for i in range(n_feat)]
         pristine = X.copy()
@@ -320,7 +357,7 @@ class TestNewFlagsDoNotMoveExistingHashes:
 
     def test_umap_latents_matching_n_latents_is_absent_from_the_payload(self):
         a = parse("--atlas", "yeo7", "--window-s", "30",
-                  "--n-latents", "2", "3", "--umap-latents", "2", "3")
+                  "--pca-latents", "2", "3", "--umap-latents", "2", "3")
         assert "umap_latents" not in D.fit_meta(a, "30", EDGES)
 
     def test_but_each_one_changes_the_hash_when_it_differs(self):
@@ -328,7 +365,7 @@ class TestNewFlagsDoNotMoveExistingHashes:
         pt = parse("--atlas", "yeo7", "--window-s", "30",
                    "--passthrough-features")
         ul = parse("--atlas", "yeo7", "--window-s", "30",
-                   "--n-latents", "2", "3", "--umap-latents", "3")
+                   "--pca-latents", "2", "3", "--umap-latents", "3")
         h = D.model_hash(D.fit_meta(base, "30", EDGES), EDGES)
         assert D.model_hash(D.fit_meta(pt, "30", EDGES), EDGES) != h
         assert D.model_hash(D.fit_meta(ul, "30", EDGES), EDGES) != h
@@ -337,8 +374,316 @@ class TestNewFlagsDoNotMoveExistingHashes:
         import numpy as np
 
         a = parse("--atlas", "yeo7", "--window-s", "30",
-                  "--n-latents", "3", "5", "--umap-latents", "3")
+                  "--pca-latents", "3", "5", "--umap-latents", "3")
         assert D._umap_latents(a) == [3]
-        b = parse("--atlas", "yeo7", "--window-s", "30", "--n-latents", "3", "5")
+        b = parse("--atlas", "yeo7", "--window-s", "30", "--pca-latents", "3", "5")
         assert D._umap_latents(b) == [3, 5]
         assert isinstance(np.float32(1), np.floating)   # imports used above
+
+
+class TestTheLegacyProjectHashBridge:
+    """`--legacy-project-hash` puts `project_cohorts` back in the payload.
+
+    A tree written before that key left `fit_meta` carries hashes computed WITH
+    it, so the current code reads every one of its cells as a different fit --
+    the break the removal accepted up front. On a tree holding brain-state
+    columns the only other way forward is `--overwrite`, which drops them and
+    costs the re-cluster. These tests pin that the bridge reconstructs the old
+    payload and changes nothing else.
+    """
+
+    def test_it_is_off_by_default(self):
+        a = parse("--atlas", "yeo7", "--window-s", "30", "--project", "camcan")
+        assert "project_cohorts" not in D.fit_meta(a, "30", EDGES)
+        assert D.model_hash(D.fit_meta(a, "30", EDGES), EDGES) == \
+            TestFitMetaIsHashStable.DFC_HASH
+
+    def test_it_adds_exactly_the_project_key_and_nothing_else(self):
+        """The whole claim. `model_hash` sorts the payload's keys, so a payload
+        equal to the default plus this one key IS the pre-removal payload --
+        which is why no other difference may creep in."""
+        off = parse("--atlas", "yeo7", "--window-s", "30",
+                    "--project", "camcan")
+        on = parse("--atlas", "yeo7", "--window-s", "30",
+                   "--project", "camcan", "--legacy-project-hash")
+        mo, mn = D.fit_meta(off, "30", EDGES), D.fit_meta(on, "30", EDGES)
+        assert mn == {**mo, "project_cohorts": ["camcan"]}
+
+    def test_it_carries_the_project_list_verbatim(self):
+        on = parse("--atlas", "yeo7", "--window-s", "30",
+                   "--project", "camcan", "camcan_ccfrail",
+                   "--legacy-project-hash")
+        assert D.fit_meta(on, "30", EDGES)["project_cohorts"] == \
+            ["camcan", "camcan_ccfrail"]
+
+    def test_under_the_bridge_the_project_list_moves_the_hash_again(self):
+        """The property the removal got rid of, back on purpose: it is what
+        makes the hash match a tree written while it held."""
+        one = parse("--atlas", "yeo7", "--window-s", "30",
+                    "--project", "camcan", "--legacy-project-hash")
+        two = parse("--atlas", "yeo7", "--window-s", "30",
+                    "--project", "camcan", "camcan_rest",
+                    "--legacy-project-hash")
+        assert (D.model_hash(D.fit_meta(one, "30", EDGES), EDGES)
+                != D.model_hash(D.fit_meta(two, "30", EDGES), EDGES))
+
+    def test_an_empty_project_list_is_still_a_different_hash(self):
+        """`--legacy-project-hash` with no `--project` is not the same as not
+        passing it: the key is present and empty, which is what a train-only
+        run wrote back then."""
+        off = parse("--atlas", "yeo7", "--window-s", "30")
+        on = parse("--atlas", "yeo7", "--window-s", "30",
+                   "--legacy-project-hash")
+        assert D.fit_meta(on, "30", EDGES)["project_cohorts"] == []
+        assert (D.model_hash(D.fit_meta(on, "30", EDGES), EDGES)
+                != D.model_hash(D.fit_meta(off, "30", EDGES), EDGES))
+
+    def test_the_refusal_names_the_bridge_when_that_is_the_difference(
+            self, tmp_path):
+        """What the harvardoxford job printed, plus the way out. Without this
+        the message advises hunting for a forgotten flag that was never
+        forgotten, and the only other suggestion costs the re-cluster."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        a = parse("--atlas", "yeo7", "--window-s", "30", "--project", "camcan")
+        stored = {**D.fit_meta(a, "30", EDGES), "project_cohorts": ["camcan"]}
+        cell = tmp_path / "cohort=camcan" / "task=Movie"
+        cell.mkdir(parents=True)
+        md = {k.encode(): json.dumps(v).encode() for k, v in stored.items()}
+        md[b"clusterers"] = json.dumps({"HMM2_pca3_8": {"k": 8}}).encode()
+        pq.write_table(
+            pa.table({"sub": ["S1"], "HMM2_pca3_8": [0]})
+              .replace_schema_metadata(md),
+            cell / "data.parquet")
+
+        with pytest.raises(SystemExit) as e:
+            D.refuse_to_destroy_states(
+                tmp_path, [("camcan", "Movie")], D.fit_meta(a, "30", EDGES),
+                "30")
+        msg = str(e.value)
+        assert "project_cohorts" in msg
+        assert "--legacy-project-hash" in msg
+        assert "LEFT this payload deliberately" in msg
+
+    def test_it_stays_quiet_when_the_difference_is_a_real_forgotten_flag(
+            self, tmp_path):
+        """The hint must not fire on every refusal, or it becomes the advice
+        for a genuinely forgotten `--passthrough-features`."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        a = parse("--atlas", "yeo7", "--window-s", "30")
+        stored = {**D.fit_meta(a, "30", EDGES), "passthrough_features": True}
+        cell = tmp_path / "cohort=camcan" / "task=Movie"
+        cell.mkdir(parents=True)
+        md = {k.encode(): json.dumps(v).encode() for k, v in stored.items()}
+        md[b"clusterers"] = json.dumps({"HMM2_pca3_8": {"k": 8}}).encode()
+        pq.write_table(
+            pa.table({"sub": ["S1"], "HMM2_pca3_8": [0]})
+              .replace_schema_metadata(md),
+            cell / "data.parquet")
+
+        with pytest.raises(SystemExit) as e:
+            D.refuse_to_destroy_states(
+                tmp_path, [("camcan", "Movie")], D.fit_meta(a, "30", EDGES),
+                "30")
+        msg = str(e.value)
+        assert "passthrough_features" in msg
+        assert "--legacy-project-hash" not in msg
+
+
+class TestTheGeneralLegacyHashBridge:
+    """`--legacy-hash-from`: match a tree written before a key was REMOVED.
+
+    `project_cohorts` was not the only key to leave this payload. `bins` left
+    when quantile thresholding moved out of stage 4 into `cluster`, and a
+    windowed tree written before that carries a hash no command line can
+    reproduce -- there is no `--bins` flag any more to set. One --legacy-*
+    option per removal does not scale and cannot cover the next one, so this
+    reads the description a cell was written with and carries over whatever
+    the current code no longer emits.
+
+    The safety is that keys BOTH descriptions carry must agree. Otherwise this
+    would let a forgotten `--pca-latents 3` be papered over, stamping output
+    with a hash that claims a model the run did not use -- the exact confusion
+    model_hash exists to prevent.
+    """
+
+    def stored(self, tmp_path, **extra):
+        """A latents file written with an older payload."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        a = parse("--atlas", "yeo7", "--window-s", "30")
+        desc = {**D.fit_meta(a, "30", EDGES), **extra}
+        f = tmp_path / "data.parquet"
+        pq.write_table(
+            pa.table({"sub": ["S1"]}).replace_schema_metadata(
+                {k.encode(): json.dumps(v).encode()
+                 for k, v in desc.items()}), f)
+        return f
+
+    def test_it_carries_a_key_the_current_code_no_longer_writes(self, tmp_path):
+        ref = self.stored(tmp_path, bins=[2, 3, 5, 8])
+        a = parse("--atlas", "yeo7", "--window-s", "30",
+                  "--legacy-hash-from", str(ref))
+        assert D.fit_meta(a, "30", EDGES)["bins"] == [2, 3, 5, 8]
+
+    def test_the_hash_then_matches_what_that_file_was_written_with(self,
+                                                                  tmp_path):
+        """The whole point: the run stops reading the cell as stale."""
+        ref = self.stored(tmp_path, bins=[2, 3, 5, 8],
+                          project_cohorts=["camcan"])
+        a = parse("--atlas", "yeo7", "--window-s", "30", "--project", "camcan",
+                  "--legacy-hash-from", str(ref))
+        legacy = {**D.fit_meta(parse("--atlas", "yeo7", "--window-s", "30"),
+                               "30", EDGES),
+                  "bins": [2, 3, 5, 8], "project_cohorts": ["camcan"]}
+        assert (D.model_hash(D.fit_meta(a, "30", EDGES), EDGES)
+                == D.model_hash(legacy, EDGES))
+
+    def test_it_subsumes_the_project_only_bridge(self, tmp_path):
+        ref = self.stored(tmp_path, project_cohorts=["camcan"])
+        a = parse("--atlas", "yeo7", "--window-s", "30", "--project", "camcan",
+                  "--legacy-hash-from", str(ref))
+        b = parse("--atlas", "yeo7", "--window-s", "30", "--project", "camcan",
+                  "--legacy-project-hash")
+        assert (D.model_hash(D.fit_meta(a, "30", EDGES), EDGES)
+                == D.model_hash(D.fit_meta(b, "30", EDGES), EDGES))
+
+    def test_a_forgotten_flag_is_refused_and_named(self, tmp_path):
+        """What this must NOT do. The stored fit used --pca-latents 3; this run
+        takes the default. Carrying the hash over would claim a 3-component fit
+        for a 5-component one."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        old = parse("--atlas", "yeo7", "--window-s", "30",
+                    "--pca-latents", "3")
+        desc = {**D.fit_meta(old, "30", EDGES), "bins": [2, 3, 5, 8]}
+        f = tmp_path / "data.parquet"
+        pq.write_table(
+            pa.table({"sub": ["S1"]}).replace_schema_metadata(
+                {k.encode(): json.dumps(v).encode()
+                 for k, v in desc.items()}), f)
+
+        a = parse("--atlas", "yeo7", "--window-s", "30",
+                  "--legacy-hash-from", str(f))
+        with pytest.raises(SystemExit) as e:
+            D.fit_meta(a, "30", EDGES)
+        msg = str(e.value)
+        assert "DIFFERENT fit" in msg
+        assert "n_latents" in msg
+        assert "[3]" in msg and "[2, 3, 5]" in msg
+        assert "will not paper over" in msg
+
+    def test_passing_that_flag_makes_it_agree(self, tmp_path):
+        """The refusal above is actionable, not a dead end."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        old = parse("--atlas", "yeo7", "--window-s", "30",
+                    "--pca-latents", "3")
+        desc = {**D.fit_meta(old, "30", EDGES), "bins": [2, 3, 5, 8]}
+        f = tmp_path / "data.parquet"
+        pq.write_table(
+            pa.table({"sub": ["S1"]}).replace_schema_metadata(
+                {k.encode(): json.dumps(v).encode()
+                 for k, v in desc.items()}), f)
+
+        a = parse("--atlas", "yeo7", "--window-s", "30", "--pca-latents", "3",
+                  "--legacy-hash-from", str(f))
+        assert D.model_hash(D.fit_meta(a, "30", EDGES), EDGES) == \
+            D.model_hash(desc, EDGES)
+
+    def test_tasks_is_never_carried(self, tmp_path):
+        """`tasks` is which conditions one CELL covers -- per file by
+        construction. Carrying it would make the hash depend on which
+        conditions happened to exist when the reference cell was written."""
+        ref = self.stored(tmp_path, tasks=["Movie"])
+        a = parse("--atlas", "yeo7", "--window-s", "30",
+                  "--legacy-hash-from", str(ref))
+        assert "tasks" not in D.fit_meta(a, "30", EDGES)
+
+    def test_a_file_with_no_description_says_so(self, tmp_path):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        f = tmp_path / "data.parquet"
+        pq.write_table(pa.table({"sub": ["S1"]}), f)
+        a = parse("--atlas", "yeo7", "--window-s", "30",
+                  "--legacy-hash-from", str(f))
+        with pytest.raises(SystemExit, match="no fit description"):
+            D.fit_meta(a, "30", EDGES)
+
+    def test_it_is_off_by_default(self):
+        a = parse("--atlas", "yeo7", "--window-s", "30")
+        assert D.model_hash(D.fit_meta(a, "30", EDGES), EDGES) == \
+            TestFitMetaIsHashStable.DFC_HASH
+
+
+class TestTheLegacyReferenceResolvesPerAperture:
+    """`window_s` is in the payload but is not a flag.
+
+    An `--array=0-3 ... 30 60 120 300` submission runs one aperture per task
+    and cannot carry four `--legacy-hash-from` paths, so the one it is given is
+    resolved per task. Pointing at window_s=300 for every aperture is what the
+    first attempt did, and it refused three of four with
+    `window_s: '300' (stored) vs '30' (this run)` -- a true clash about a key
+    nobody could have passed differently.
+    """
+
+    def cell(self, root, atlas, window_s, **extra):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        d = (root / "latents" / f"atlas={atlas}" / f"window_s={window_s}"
+             / "cohort=camcan" / "task=Movie")
+        d.mkdir(parents=True, exist_ok=True)
+        a = parse("--atlas", atlas, "--window-s", str(window_s))
+        desc = {**D.fit_meta(a, str(window_s), EDGES), **extra}
+        pq.write_table(
+            pa.table({"sub": ["S1"]}).replace_schema_metadata(
+                {k.encode(): json.dumps(v).encode()
+                 for k, v in desc.items()}), d / "data.parquet")
+        return d / "data.parquet"
+
+    def test_it_swaps_the_aperture_key(self, tmp_path):
+        self.cell(tmp_path, "yeo7", 30, bins=[2, 3, 5, 8])
+        ref300 = self.cell(tmp_path, "yeo7", 300, bins=[2, 3, 5, 8])
+        got = D._reference_for_aperture(ref300, "30")
+        assert "window_s=30/" in str(got).replace("\\\\", "/")
+        assert got.exists()
+
+    def test_the_hash_then_matches_this_apertures_cell(self, tmp_path):
+        ref30 = self.cell(tmp_path, "yeo7", 30, bins=[2, 3, 5, 8])
+        ref300 = self.cell(tmp_path, "yeo7", 300, bins=[2, 3, 5, 8])
+        a = parse("--atlas", "yeo7", "--window-s", "30",
+                  "--legacy-hash-from", str(ref300))
+        stored, _ = D.latents_fit_description(ref30)
+        assert (D.model_hash(D.fit_meta(a, "30", EDGES), EDGES)
+                == D.model_hash(stored, EDGES))
+
+    def test_a_path_without_the_key_is_left_alone(self, tmp_path):
+        f = tmp_path / "data.parquet"
+        assert D._reference_for_aperture(f, "30") == f
+
+    def test_a_missing_aperture_says_what_it_looked_for(self, tmp_path):
+        ref300 = self.cell(tmp_path, "yeo7", 300)
+        with pytest.raises(SystemExit) as e:
+            D._reference_for_aperture(ref300, "60")
+        msg = str(e.value)
+        assert "another aperture" in msg
+        assert "window_s=60" in msg
+
+    def test_the_wrong_atlas_is_still_refused_by_the_clash_check(self,
+                                                                tmp_path):
+        """Only window_s is substituted, so the rest of the path stays the
+        caller's claim and a mismatched atlas is still caught."""
+        ref = self.cell(tmp_path, "networks", 30, bins=[2, 3, 5, 8])
+        a = parse("--atlas", "yeo7", "--window-s", "30",
+                  "--legacy-hash-from", str(ref))
+        with pytest.raises(SystemExit) as e:
+            D.fit_meta(a, "30", EDGES)
+        assert "atlas" in str(e.value) and "DIFFERENT fit" in str(e.value)

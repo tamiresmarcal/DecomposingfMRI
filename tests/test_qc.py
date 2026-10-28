@@ -1,5 +1,7 @@
 """Per-subject QC metrics and the ISC grouping they depend on."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -344,3 +346,58 @@ class TestAbsentData:
         note = _note("", "no activation shard on disk -- this run was "
                          "discovered but never extracted")
         assert "never extracted" in note
+
+
+class TestIscGateNotApplicable:
+    """A cohort with no shared stimulus has no alignment for ISC to check.
+
+    `diagnose` exits 2 on a FAIL and `activation_and_dfc.sh` chains stage 3
+    behind it with --dependency=afterok, so leaving the gate at its default
+    for a resting-state cohort cancels the rest of phase 1 over a fact about
+    the DESIGN rather than about the data.
+    """
+
+    def test_the_shipped_camcan_config_gates_movie_and_not_rest(self):
+        """One cohort, two conditions, one gate decision each -- read off the
+        config this project actually runs, not a fixture. Movie keeps the real
+        1.0 TR gate because a misaligned film is exactly what ISC catches;
+        rest is measured and not gated because nothing is shared to align to.
+        """
+        from fmri_decomposition.config import load_config
+
+        cfg = load_config(Path(__file__).resolve().parent.parent
+                          / "config" / "camcan.yaml")
+        assert cfg.stimulus.isc_gate_for("Movie") == 1.0
+        assert cfg.stimulus.isc_gate_for("Rest") is None
+
+    def test_a_null_override_disables_the_gate_and_an_absent_key_does_not(
+            self, tmp_path):
+        """The two are deliberately different: a key present with a null value
+        turns the gate off, an absent key falls back to isc_gate_tr. Without
+        that distinction there would be no way to say "gate everything except
+        this one task"."""
+        from fmri_decomposition.config import config_from_dict
+
+        c = config_from_dict({
+            "cohort": "c", "tr": 2.0, "derivatives_root": str(tmp_path),
+            "output_root": str(tmp_path),
+            "stimulus": {"isc_gate_tr": 1.0,
+                         "isc_gate_tr_by_task": {"Rest": None}}})
+        assert c.stimulus.isc_gate_for("Rest") is None
+        assert c.stimulus.isc_gate_for("Movie") == 1.0
+        assert c.stimulus.isc_gate_for(None) == 1.0
+
+    def test_rest_like_lags_would_fail_a_default_gate(self):
+        """Why the null is needed and not just a larger threshold: with nothing
+        shared to correlate, the best lag is noise over the search range."""
+        rng = np.random.default_rng(0)
+        isc = pd.DataFrame({"best_lag_tr": rng.integers(-30, 31, size=200)})
+        ok, _ = isc_gate(isc, 1.0)
+        assert not ok
+
+    def test_an_infinite_threshold_passes_anything_finite(self):
+        """How `diagnose` reports the measurement without gating on it."""
+        isc = pd.DataFrame({"best_lag_tr": [-29.0, 0.0, 30.0]})
+        ok, msg = isc_gate(isc, float("inf"))
+        assert ok
+        assert "median |best_lag|" in msg

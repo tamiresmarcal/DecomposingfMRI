@@ -6,6 +6,7 @@ tests pin the derivation, including the case that caused the rewrite: an axis
 that became varied while the document still called it fixed.
 """
 import argparse
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -224,7 +225,8 @@ class TestOrdinalLevelCoding:
         import argparse
         p = argparse.ArgumentParser()
         B.add_arguments(p)
-        got = p.parse_args(["--target", "x"])
+        got = p.parse_args(["--target", "x", "--cohort", "camcan",
+                            "--pheno", "p.csv:,", "--task", "movie"])
         assert got.ordinal_levels == B.ORDINAL_LEVELS
 
     def test_an_empty_covariate_is_named_rather_than_blamed_on_the_join(
@@ -236,3 +238,395 @@ class TestOrdinalLevelCoding:
         msg = str(e.value)
         assert "entirely empty" in msg and "Age" in msg
         assert "join matched nothing" not in msg
+
+
+class TestTheRunAndTargetColumns:
+    """The path says which ranking a table is; a path is not in the table."""
+
+    def test_the_label_pairs_the_tree_with_the_task(self):
+        assert B.run_label("bstm_selection", "movie") == "bstm movie"
+        assert B.run_label("bstm_selection", "rest") == "bstm rest"
+        assert B.run_label("fcm_selection", "movie") == "fcm movie"
+        assert B.run_label("fcm_selection", "rest") == "fcm rest"
+
+    def test_an_unusual_tree_name_still_gets_a_label(self):
+        """`--output-name` is a flag, so the label cannot assume the two
+        names this project ships."""
+        assert B.run_label("pilot", "movie") == "pilot movie"
+
+    def test_run_and_target_go_first_and_the_rest_keeps_its_order(self):
+        d = pd.DataFrame({"model": ["ridge"], "mean": [0.1]})
+        got = B.label_the_run(d, "bstm_selection", "rest", "hads")
+        assert list(got.columns) == ["run", "target", "model", "mean"]
+        assert got["run"].iloc[0] == "bstm rest"
+        assert got["target"].iloc[0] == "hads"
+
+    def test_it_does_not_mutate_what_it_was_given(self):
+        """`scores_df` is labelled on the way to csv and then handed to
+        _figures and _save_models, which key on their own columns."""
+        d = pd.DataFrame({"model": ["ridge"], "mean": [0.1]})
+        B.label_the_run(d, "bstm_selection", "rest", "hads")
+        assert list(d.columns) == ["model", "mean"]
+
+
+class TestOneRowPerSubject:
+    """The silent-leakage guard, shared with select-fcm.
+
+    A subject scanned at two tasks has one row per (task, sub). This stage
+    scores ONE row per subject and merges on `sub` alone, so without the guard
+    the same person lands in the train and the test fold of the same split:
+    leakage, `n` doubled, and a ranking of whichever task sorted first. Nothing
+    downstream could see it. fcm has had this check; bstm had not.
+    """
+
+    def frame(self):
+        return pd.DataFrame({"sub": ["A", "A", "B"],
+                             "task": ["Movie", "Rest", "Movie"]})
+
+    def test_two_tasks_for_one_subject_is_refused(self):
+        with pytest.raises(SystemExit) as e:
+            B.one_row_per_subject(self.frame(), "t")
+        msg = str(e.value)
+        assert "same subject" in msg
+        assert "Movie" in msg and "Rest" in msg
+        assert "--keep-tasks" in msg
+
+    def test_one_task_per_subject_passes_through_untouched(self):
+        d = pd.DataFrame({"sub": ["A", "B"], "task": ["Movie", "Movie"]})
+        assert len(B.one_row_per_subject(d, "t")) == 2
+
+    def test_a_task_filter_resolves_it(self):
+        got = B.one_row_per_subject(self.frame(), "t", ["Movie"])
+        assert got["sub"].tolist() == ["A", "B"]
+
+    def test_a_filter_matching_nothing_is_refused_with_what_exists(self):
+        with pytest.raises(SystemExit) as e:
+            B.one_row_per_subject(self.frame(), "t", ["Nope"])
+        assert "Nope" in str(e.value) and "Movie" in str(e.value)
+
+    def test_the_caller_supplies_its_own_remedy(self):
+        """One guard, two stages: the shared part of the message is here and
+        the stage-specific advice comes from the caller, so neither has to
+        mention the other's flags."""
+        with pytest.raises(SystemExit) as e:
+            B.one_row_per_subject(self.frame(), "t",
+                                  remedy=("re-run `static-fc --pool subject`",))
+        assert "--pool subject" in str(e.value)
+        with pytest.raises(SystemExit) as e:
+            B.one_row_per_subject(self.frame(), "t")
+        assert "--pool subject" not in str(e.value)
+
+    def test_both_stages_spell_the_flag_the_same_way(self):
+        """The symmetry: --task names the output partition in both, and
+        --keep-tasks filters rows in both, with the same dest."""
+        import argparse
+
+        from fmri_decomposition import fcm_selection as F
+
+        dests = []
+        for mod in (B, F):
+            p = argparse.ArgumentParser()
+            mod.add_arguments(p)
+            dests.append({a.option_strings[0]: a.dest
+                          for a in p._actions if a.option_strings})
+        for got in dests:
+            assert got["--task"] == "task"
+            assert got["--keep-tasks"] == "tasks"
+
+    def test_keep_tasks_defaults_to_no_filter(self):
+        """So a single-condition cohort needs no new flag -- the guard only
+        fires when there is genuinely something to disambiguate."""
+        import argparse
+
+        p = argparse.ArgumentParser()
+        B.add_arguments(p)
+        a = p.parse_args(["--target", "t", "--cohort", "c",
+                          "--pheno", "p.csv:,", "--task", "movie"])
+        assert a.tasks is None
+
+
+class TestConstantPredictionWarning:
+    """A model that predicted a constant scores every arm identically.
+
+    The full table, every arm present, and one model's block byte-identical
+    down its length -- which reads as "no arm beats any other" and is really
+    "this model never split".
+    """
+
+    def test_identical_scores_across_arms_are_called_out(self):
+        d = pd.DataFrame({"model": ["lgbm"] * 3,
+                          "arm": ["a", "b", "c"],
+                          "n": [40, 40, 40],
+                          "mean": [-0.37, -0.37, -0.37]})
+        w = B.warn_if_a_model_never_split(d)
+        assert len(w) == 1
+        assert "lgbm" in w[0] and "CONSTANT" in w[0] and "n=40" in w[0]
+
+    def test_a_model_that_differentiates_is_silent(self):
+        d = pd.DataFrame({"model": ["ridge"] * 3,
+                          "arm": ["a", "b", "c"],
+                          "n": [600, 600, 600],
+                          "mean": [0.11, 0.09, 0.02]})
+        assert B.warn_if_a_model_never_split(d) == []
+
+    def test_one_arm_is_not_evidence_of_anything(self):
+        """A single row is trivially constant, which is not this failure."""
+        d = pd.DataFrame({"model": ["lgbm"], "arm": ["a"], "n": [600],
+                          "mean": [0.1]})
+        assert B.warn_if_a_model_never_split(d) == []
+
+    def test_each_model_is_judged_on_its_own_block(self):
+        d = pd.DataFrame({"model": ["lgbm"] * 2 + ["ridge"] * 2,
+                          "arm": ["a", "b"] * 2,
+                          "n": [600] * 4,
+                          "mean": [-0.37, -0.37, 0.11, 0.02]})
+        w = B.warn_if_a_model_never_split(d)
+        assert len(w) == 1 and "lgbm" in w[0]
+
+
+class TestRestrictSubjects:
+    def test_one_id_per_line(self, tmp_path):
+        p = tmp_path / "k.txt"
+        p.write_text("CC110033\n cc110045 \n\n")
+        assert B.read_subject_list(str(p)) == {"CC110033", "CC110045"}
+
+    def test_a_csv_with_a_sub_column(self, tmp_path):
+        p = tmp_path / "k.csv"
+        p.write_text("sub,excluded\nCC110033,False\nCC110045,False\n")
+        assert B.read_subject_list(str(p)) == {"CC110033", "CC110045"}
+
+    def test_ids_are_upper_cased_and_stripped_like_every_other_join(self,
+                                                                   tmp_path):
+        """`build` upper-cases the transition tables' `sub`, so a list that was
+        not normalised the same way would match nothing and read as an id
+        mismatch in the data."""
+        p = tmp_path / "k.txt"
+        p.write_text("cc110033\n")
+        assert B.read_subject_list(str(p)) == {"CC110033"}
+
+    def test_a_missing_file_is_refused_by_name(self, tmp_path):
+        with pytest.raises(SystemExit) as e:
+            B.read_subject_list(str(tmp_path / "nope.txt"))
+        assert "no such file" in str(e.value)
+
+    def test_an_empty_list_is_refused_rather_than_emptying_the_run(self,
+                                                                  tmp_path):
+        p = tmp_path / "k.txt"
+        p.write_text("\n  \n")
+        with pytest.raises(SystemExit) as e:
+            B.read_subject_list(str(p))
+        assert "no ids" in str(e.value)
+
+
+class TestNoDatasetSpecificDefaults:
+    """The source must not carry a fact about one dataset on one filesystem.
+
+    `--pheno` used to default to two absolute paths into one person's scratch
+    space, and `--cohort` to "camcan". That is how `select` appeared to need
+    neither -- the same thing `decompose --project camcan` was doing.
+    """
+
+    def parser(self):
+        import argparse
+
+        p = argparse.ArgumentParser()
+        B.add_arguments(p)
+        return p
+
+    def test_a_phenotype_path_must_be_given(self):
+        with pytest.raises(SystemExit):
+            self.parser().parse_args(["--target", "t", "--cohort", "c"])
+
+    def test_a_cohort_must_be_given(self):
+        with pytest.raises(SystemExit):
+            self.parser().parse_args(["--target", "t", "--pheno", "p.csv:,"])
+
+    def test_no_absolute_path_survives_in_the_source(self):
+        src = Path(B.__file__).read_text()
+        assert "/project/" not in src
+        assert "DEFAULT_PHENO" not in src
+
+    def test_the_fcm_tree_has_no_dataset_defaults_either(self):
+        import argparse
+
+        from fmri_decomposition import fcm_selection as F
+
+        p = argparse.ArgumentParser()
+        F.add_arguments(p)
+        with pytest.raises(SystemExit):           # --cohorts and --pheno
+            p.parse_args(["--target", "t"])
+        a = p.parse_args(["--target", "t", "--cohorts", "camcan",
+                          "--pheno", "p.csv:,", "--task", "movie"])
+        assert a.cohorts == ["camcan"]
+        assert "/project/" not in Path(F.__file__).read_text()
+
+    def test_no_job_script_names_a_cohort_or_an_atlas(self):
+        """A job script that names a cohort only works for one project."""
+        for name in ("static_fc.sbatch", "fcm_selection.sbatch",
+                     "model_selection.sbatch"):
+            src = (Path(B.__file__).parent.parent / "slurm" / name).read_text()
+            run = [ln for ln in src.splitlines()
+                   if "fmri_decomposition.cli" in ln or ln.startswith("    --")]
+            joined = " ".join(run)
+            assert "--cohorts camcan" not in joined, name
+            assert "--atlas harvardoxford" not in joined, name
+
+
+class TestTaskIsAPartitionNotASecondTree:
+    """One tree per model family, partitioned by condition.
+
+    It used to be `--output-name resting_bstm_selection`: a second tree with a
+    different NAME for the same ranking on different data. `task=` is a
+    partition instead, so the four summary.csv files (bstm/fcm x movie/rest)
+    share one shape and one layout.
+
+    `task=` and `target=` are the ONLY directory keys in these trees. atlas,
+    window_s, K, states and cohort are columns of the one csv, because the
+    comparison is rows you can sort rather than a join across folders.
+    """
+
+    def test_the_path_is_tree_then_task_then_target(self, tmp_path):
+        import argparse
+
+        p = argparse.ArgumentParser()
+        B.add_arguments(p)
+        a = p.parse_args(["--target", "hads", "--cohort", "camcan",
+                          "--pheno", "p.csv:,", "--task", "movie"])
+        out = (tmp_path / a.output_name / f"task={a.task}"
+               / f"target={a.target}")
+        assert out.relative_to(tmp_path).as_posix() == (
+            "bstm_selection/task=movie/target=hads")
+
+    def test_a_task_must_be_given(self):
+        import argparse
+
+        p = argparse.ArgumentParser()
+        B.add_arguments(p)
+        with pytest.raises(SystemExit):
+            p.parse_args(["--target", "t", "--cohort", "c",
+                          "--pheno", "p.csv:,"])
+
+    def test_wipe_owns_the_task_partition_not_the_tree(self, tmp_path):
+        """The folder cleared before a run is one task's, so a rest run can
+        never empty the movie ranking beside it."""
+        movie = tmp_path / "bstm_selection" / "task=movie" / "target=hads"
+        rest = tmp_path / "bstm_selection" / "task=rest" / "target=hads"
+        for d in (movie, rest):
+            d.mkdir(parents=True)
+            (d / "summary.csv").write_text("x")
+        B._wipe(rest, parent="task=rest")
+        assert not rest.exists()
+        assert (movie / "summary.csv").exists()
+
+    def test_wipe_refuses_a_task_it_was_not_told_to_own(self, tmp_path):
+        out = tmp_path / "bstm_selection" / "task=movie" / "target=hads"
+        out.mkdir(parents=True)
+        (out / "summary.csv").write_text("x")
+        with pytest.raises(SystemExit):
+            B._wipe(out, parent="task=rest")
+        assert (out / "summary.csv").exists()
+
+    def test_the_fcm_tree_takes_the_same_label(self):
+        import argparse
+
+        from fmri_decomposition import fcm_selection as F
+
+        p = argparse.ArgumentParser()
+        F.add_arguments(p)
+        a = p.parse_args(["--target", "t", "--cohorts", "camcan_rest",
+                          "--pheno", "p.csv:,", "--task", "rest"])
+        assert a.task == "rest"
+        assert a.output_name == "fcm_selection"
+
+    def test_the_row_filter_is_a_different_flag_from_the_label(self):
+        """`--task` names the output partition and is yours to choose;
+        `--keep-tasks` filters rows and takes the BIDS labels as the data
+        spells them. `--task` beside `--tasks` was a collision nobody should
+        have to notice."""
+        import argparse
+
+        from fmri_decomposition import fcm_selection as F
+
+        p = argparse.ArgumentParser()
+        F.add_arguments(p)
+        a = p.parse_args(["--target", "t", "--cohorts", "c",
+                          "--pheno", "p.csv:,", "--task", "movie",
+                          "--keep-tasks", "Movie"])
+        assert a.task == "movie" and a.tasks == ["Movie"]
+
+
+class TestKeepTasksSelectsFilesNotJustRows:
+    """The failure a `--keep-tasks Movie` run hit on a split tree.
+
+    `discover` walks `cohort=camcan/task=*/subjects.parquet`, so since the task
+    split it yields one table per condition. A movie run therefore reaches
+    `task=Rest/subjects.parquet`, and filtering THAT row-wise raised
+
+        --keep-tasks ['Movie'] matches no row of .../task=Rest/subjects.parquet;
+        it has ['Rest']
+
+    -- a true statement about a file the run was never meant to read. Before
+    the split one file held both conditions and a row filter was the only
+    filter there could be; now the task is a key in the path, so the right
+    place to apply it is table selection.
+    """
+
+    def tree(self):
+        d = sets([
+            {"atlas": "yeo7", "window_s": "-1", "states": "HMM2_pca3_8",
+             "cohort": "camcan", "task": "Movie", "path": "m1"},
+            {"atlas": "yeo7", "window_s": "-1", "states": "HMM2_pca3_8",
+             "cohort": "camcan", "task": "Rest", "path": "r1"},
+            {"atlas": "networks", "window_s": "30", "states": "HMM1_pca3_10",
+             "cohort": "camcan", "task": "Movie", "path": "m2"},
+            {"atlas": "networks", "window_s": "30", "states": "HMM1_pca3_10",
+             "cohort": "camcan", "task": "Rest", "path": "r2"},
+            {"atlas": "yeo7", "window_s": "-1", "states": "HMM2_pca3_8",
+             "cohort": "ds002837", "task": "pulpfiction", "path": "x1"},
+        ])
+        return d
+
+    def test_a_movie_run_reads_only_the_movie_tables(self):
+        got = B.select_tables(self.tree(), "camcan", tasks=["Movie"])
+        assert sorted(got["path"]) == ["m1", "m2"]
+        assert set(got["task"]) == {"Movie"}
+
+    def test_a_rest_run_reads_only_the_rest_tables(self):
+        got = B.select_tables(self.tree(), "camcan", tasks=["Rest"])
+        assert sorted(got["path"]) == ["r1", "r2"]
+
+    def test_without_keep_tasks_both_are_offered(self):
+        """Unchanged: `one_row_per_subject` is then what refuses, which is the
+        guard that stops a subject landing in two folds of one split."""
+        got = B.select_tables(self.tree(), "camcan")
+        assert sorted(got["path"]) == ["m1", "m2", "r1", "r2"]
+
+    def test_another_cohort_is_never_included(self):
+        got = B.select_tables(self.tree(), "camcan")
+        assert "x1" not in set(got["path"])
+
+    def test_a_misspelled_label_names_what_is_present(self):
+        with pytest.raises(SystemExit) as e:
+            B.select_tables(self.tree(), "camcan", tasks=["movie"])
+        msg = str(e.value)
+        assert "matches no transition table" in msg
+        assert "Movie" in msg and "Rest" in msg
+        assert "case sensitive" in msg
+
+    def test_it_composes_with_the_atlas_and_aperture_filters(self):
+        got = B.select_tables(self.tree(), "camcan", atlas=["yeo7"],
+                              window_s=["-1"], tasks=["Movie"])
+        assert got["path"].tolist() == ["m1"]
+
+    def test_an_empty_intersection_still_refuses(self):
+        with pytest.raises(SystemExit, match="no state set matches"):
+            B.select_tables(self.tree(), "camcan", atlas=["harvardoxford"])
+
+    def test_the_order_is_still_atlas_then_K_then_aperture(self):
+        """Not a global aperture order -- atlas leads, so `networks/30s` comes
+        before `yeo7/frame`. Pinned because the selection reads in this order
+        and DESIGN.md reports the axes in it."""
+        got = B.select_tables(self.tree(), "camcan", tasks=["Movie"])
+        assert list(zip(got["atlas"], got["K"], got["window_s_num"])) == \
+            sorted(zip(got["atlas"], got["K"], got["window_s_num"]))
+        assert got["path"].tolist() == ["m2", "m1"]

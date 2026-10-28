@@ -95,11 +95,64 @@ _META_COLS = ("t", "time_s", "stimulus_time_s", "good_frame", "run_idx", "run_ke
 DEFAULT_BANDPASS = (0.01, 0.1)
 
 
-def shard_paths(root: Path, atlas: str, cohort: str) -> list[Path]:
-    """Every activation leaf for one cohort. Unlike dfc there can be SEVERAL
-    per (task, sub): a leaf is one acquisition, named by ses/run/acq."""
-    return sorted(activation_root(root, atlas, cohort).glob(
-        "task=*/sub=*/*.parquet"))
+def shard_paths(root: Path, atlas: str, cohort: str,
+                task: str | None = None) -> list[Path]:
+    """Every activation leaf for one cohort, or for one of its tasks.
+
+    Unlike dfc there can be SEVERAL per (task, sub): a leaf is one acquisition,
+    named by ses/run/acq.
+    """
+    pat = f"task={task}/sub=*/*.parquet" if task else "task=*/sub=*/*.parquet"
+    return sorted(activation_root(root, atlas, cohort).glob(pat))
+
+
+def shard_tasks(root: Path, atlas: str, cohort: str) -> list[str]:
+    """The tasks this cohort has shards for, from the directory names."""
+    base = activation_root(root, atlas, cohort)
+    if not base.is_dir():
+        return []
+    return sorted(d.name.split("=", 1)[1] for d in base.iterdir()
+                  if d.is_dir() and d.name.startswith("task="))
+
+
+def cohort_tr(root: Path, atlas: str, cohort: str,
+              task: str | None = None) -> float:
+    """The one TR these shards were acquired at. REFUSES if there are two.
+
+    This was `shard_tr(paths[0])`, which answered the question for whichever
+    leaf sorted first and applied it to every other. That is correct exactly
+    while a cohort has one TR, and Cam-CAN's movie (2.47s) and rest (1.97s) are
+    the same people in one cohort -- so `paths[0]` was a Movie shard and every
+    Rest frame would have been band-passed at 2.47s, making a declared
+    0.01-0.1 Hz band really 0.0126-0.126 Hz, and `stride_s` wrong by 25% for
+    every rest dwell time `transitions` reports.
+
+    One TR per read is what makes a single `stride_s` per latents file a true
+    claim, so disagreement is refused rather than resolved: naming a task is
+    the answer, and the caller always has one to name.
+    """
+    trs = {}
+    for t in ([task] if task else shard_tasks(root, atlas, cohort)):
+        ps = shard_paths(root, atlas, cohort, t)
+        if ps:
+            trs.setdefault(shard_tr(ps[0]), []).append(t)
+    if not trs:
+        raise SystemExit(
+            f"no activation shards for cohort={cohort}"
+            + (f" task={task}" if task else "")
+            + f" at atlas={atlas} -- run `fmri-decomp extract` first")
+    if len(trs) > 1:
+        detail = "  ".join(f"{tr:g}s: {sorted(ts)}" for tr, ts in
+                           sorted(trs.items()))
+        raise SystemExit(
+            f"cohort={cohort} at atlas={atlas} holds more than one TR -- "
+            f"{detail}.\n"
+            f"  Read it one task at a time. A single read applies ONE TR to "
+            f"every frame in it (the band-pass and the time axis), and writes "
+            f"ONE stride_s, so pooling two TRs would silently mis-scale the "
+            f"frequency band and every dwell time of whichever task is not "
+            f"the first.")
+    return next(iter(trs))
 
 
 def feature_columns(path: Path) -> list[str]:
@@ -294,21 +347,28 @@ def _finalise_subject(df: pd.DataFrame, tr: float, stats: dict) -> pd.DataFrame:
 # --------------------------------------------------------------- read path ---
 def read_cohort(root: Path, atlas: str, cohort: str, features: list[str],
                 censor: dict | None = None, band=DEFAULT_BANDPASS,
-                zscore: bool = True, want_features: bool = True, log=print):
-    """One cohort -> (identity frame, float32 frame matrix or None).
+                zscore: bool = True, want_features: bool = True, log=print,
+                task: str | None = None):
+    """One cohort, or one of its tasks -> (identity frame, matrix or None, tr).
 
     Same contract as decompose.read_cohort, including that a censored subject is
     skipped before its file is opened. Grouped by (task, sub) rather than by
     leaf, because window_id and the run-boundary flag are only well defined once
     every acquisition for that subject is in hand.
+
+    `task` narrows the read to one condition. It is how a cohort scanned at two
+    TRs is read correctly: see `cohort_tr`, which refuses rather than picking
+    one when it is omitted and the shards disagree.
     """
     from .decompose import IDENT, _DERIVED
 
-    paths = shard_paths(root, atlas, cohort)
+    paths = shard_paths(root, atlas, cohort, task)
     if not paths:
-        raise SystemExit(f"no activation shards for cohort={cohort} at "
-                         f"atlas={atlas} -- run `fmri-decomp extract` first")
-    tr = shard_tr(paths[0])
+        raise SystemExit(f"no activation shards for cohort={cohort}"
+                         + (f" task={task}" if task else "")
+                         + f" at atlas={atlas} -- run `fmri-decomp extract` "
+                         f"first")
+    tr = cohort_tr(root, atlas, cohort, task)
 
     by_sub: dict[tuple[str, str], list] = {}
     n_dropped_subs = 0

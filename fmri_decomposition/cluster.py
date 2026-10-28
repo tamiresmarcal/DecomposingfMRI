@@ -107,13 +107,31 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .io import (RAW_PREFIX, STATE_COLUMN_RE, STATE_K_BAND,
+from .io import (RAW_PREFIX, STATE_COLUMN_RE, STATE_K_BAND, hive_key,
                  latents_root, meta_dir)
 
 EMBEDDINGS = {
     "pca3": ["pca0/3", "pca1/3", "pca2/3"],
     "umap3": ["umap0/3", "umap1/3", "umap2/3"],
 }
+
+# FAMILY names, which is what a command should normally say.
+#
+# `pca` and `umap` resolve to exactly one member each: only pca3 and umap3 are
+# clustering embeddings. `decompose --n-latents 3 14` also writes a
+# 14-component PCA, but that exists so `raw14` is a rotation of a FULL-RANK one
+# -- which is what lets `state-means` invert it -- and `pca14` is not a valid
+# embedding name. So there is no ambiguity to resolve for those two.
+#
+# `raw` is the one that needs resolving, and the only reason this exists. Its
+# width is a property of the atlas, not of the command -- raw7 on yeo7, raw14
+# on networks, absent on harvardoxford -- so a command naming `raw14` is
+# carrying a fact about the data that the cell can simply be asked. Forgetting
+# to name it was a silent omission: the run succeeded and the named-network arm
+# was just missing from the grid.
+EMBEDDING_FAMILIES = {"pca": ["pca3"], "umap": ["umap3"], "raw": None}
+
+DEFAULT_EMBEDDINGS = ["pca", "umap", "raw"]
 
 # Which cohorts a clusterer may be fitted on. Kept here rather than read from
 # the latents' own `role` column so that a mistake is visible in the command.
@@ -601,13 +619,27 @@ def column_name(method: str, embedding: str, k: int) -> str:
 
 
 # ----------------------------------------------------------------- data ---
-def cohort_paths(root: Path, atlas: str, window_s) -> dict[str, Path]:
-    d = latents_root(root, atlas, window_s)
-    if not d.is_dir():
-        return {}
-    return {p.name.split("=", 1)[1]: p / "data.parquet"
-            for p in sorted(d.glob("cohort=*"))
-            if (p / "data.parquet").exists()}
+def cell_paths(root: Path, atlas: str,
+               window_s) -> dict[tuple[str, str], Path]:
+    """{(cohort, task): latents file} for one (atlas, aperture) cell.
+
+    Keyed by the PAIR because `decompose` writes one file per (cohort, task) --
+    one file records one `stride_s`, and one cohort can hold two TRs. `--train`
+    and `--project` still name COHORTS: you train on a cohort and all of its
+    conditions come with it, which keeps the vocabulary the same as
+    `decompose`'s. Only the file enumeration is per cell.
+    """
+    from .io import latents_cells
+
+    return latents_cells(root, atlas, window_s)
+
+
+def _cell(k: tuple[str, str]) -> str:
+    return f"{k[0]}/{k[1]}"
+
+
+def _cells(ks) -> str:
+    return ", ".join(_cell(k) for k in sorted(ks))
 
 
 def _seq_lengths(df: pd.DataFrame) -> list[int]:
@@ -671,6 +703,42 @@ def _training_block(frames: dict, train: list[str], cols: list[str], args):
 RAW_EMB_RE = re.compile(r"^raw(\d+)$")
 
 
+def resolve_families(requested: list[str], paths: dict) -> list[str]:
+    """Family names -> the concrete embeddings present in THIS cell.
+
+    `raw` becomes whichever `raw<N>` the cohorts actually carry, read from the
+    files rather than assumed, and becomes nothing where passthrough never ran.
+    Exact names pass through untouched, so an existing command keeps working
+    and a request for one specific width is still a request for that width.
+
+    Order is preserved and duplicates dropped, so `--embeddings pca raw pca3`
+    is `pca3, raw<N>` and not `pca3, raw<N>, pca3`.
+    """
+    out: list[str] = []
+    for item in requested:
+        if item not in EMBEDDING_FAMILIES:
+            embedding_spec(item)                       # validate or raise
+            out.append(item)
+            continue
+        members = EMBEDDING_FAMILIES[item]
+        if members is not None:
+            out += members
+            continue
+        # `raw`: ask the cell. Every cohort must agree -- a fit on one cohort's
+        # matrix projected onto another's would silently relabel the axes if
+        # the widths differed.
+        widths = {len(raw_columns(pth)) for pth in paths.values()}
+        widths.discard(0)
+        if len(widths) > 1:
+            raise SystemExit(
+                f"the cohorts in this cell carry different numbers of raw "
+                f"features ({sorted(widths)}), so `--embeddings raw` cannot "
+                f"name one. Re-run `decompose --passthrough-features` for the "
+                f"whole cell, or ask for an exact raw<N>.")
+        out += [f"raw{w}" for w in widths]
+    return list(dict.fromkeys(out))
+
+
 def embedding_spec(emb: str) -> int | None:
     """`None` for a fixed embedding; the expected feature count for `raw<N>`.
 
@@ -684,10 +752,11 @@ def embedding_spec(emb: str) -> int | None:
     m = RAW_EMB_RE.match(emb)
     if not m:
         raise SystemExit(
-            f"unknown embedding {emb!r}. Choose from {sorted(EMBEDDINGS)}, or "
-            f"raw<N> -- the N named, scaled input features written by "
-            f"`decompose --passthrough-features`, e.g. raw7 for yeo7 or raw14 "
-            f"for the networks atlas.")
+            f"unknown embedding {emb!r}. Choose a FAMILY -- "
+            f"{sorted(EMBEDDING_FAMILIES)} -- which is resolved against each "
+            f"cell, or an exact name: {sorted(EMBEDDINGS)}, or raw<N>, the N "
+            f"named scaled features written by `decompose "
+            f"--passthrough-features` (raw7 for yeo7, raw14 for networks).")
     n = int(m.group(1))
     if n < 2:
         raise SystemExit(f"{emb!r}: a clusterer needs at least 2 dimensions.")
@@ -765,6 +834,129 @@ def fit_hash(method: str, embedding: str, k, params: dict, train: list[str],
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+# Constructor options that change how long a fit takes and nothing about its
+# result, so they must not enter the cache key -- the same reasoning that keeps
+# `n_jobs` out of `fit_hash` (see HMM2Cluster.params).
+_OPTS_NOT_IN_RECIPE = frozenset({"n_jobs"})
+
+
+def recipe_hash(method: str, embedding: str, k, opts: dict, train: list[str],
+                n_rows: int, balanced: bool = False) -> str:
+    """What was ASKED FOR, as opposed to what came out. The cache key.
+
+    `fit_hash` describes the FITTED model: it carries `cl.params()`, which for
+    MeanShift reports the discovered bandwidth and the quantile the search
+    settled on, and for Threshold reports bins_per_axis. Those do not exist
+    until the fit has run, so `fit_hash` cannot be used to look a fit UP --
+    only to describe one afterwards.
+    This is the other half: the method, the embedding, the K asked for, the
+    constructor options, and the training rows. All known in advance, for every
+    method. Same recipe over the same rows -> the same fit, so this is what the
+    saved clusterer is filed under.
+    """
+    payload = json.dumps(
+        {"method": method, "embedding": embedding, "k": k,
+         "opts": {k2: v for k2, v in sorted(opts.items())
+                  if k2 not in _OPTS_NOT_IN_RECIPE},
+         "train": sorted(train), "n_train_rows": n_rows,
+         "balanced": balanced},
+        sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _cluster_libs() -> dict[str, str]:
+    """What a pickled clusterer was produced by, for the staleness guard."""
+    import numpy
+
+    libs = {"numpy": numpy.__version__}
+    for mod in ("sklearn", "hmmlearn"):
+        try:
+            libs[mod] = __import__(mod).__version__
+        except ImportError:
+            pass
+    return libs
+
+
+def clusterer_cache_path(root: Path, atlas: str, window_s, h: str) -> Path:
+    return (Path(root) / "meta" / "clusterers"
+            / f"atlas-{atlas}_window-{window_s}_{h}.joblib")
+
+
+def save_clusterer(path: Path, cl, meta: dict, log=print) -> None:
+    """Persist a fitted clusterer so a later cohort can be labelled, not refit.
+
+    Best effort: a cell that cannot write the cache has still done the work and
+    must not fail for being unable to save a shortcut.
+    """
+    try:
+        import joblib
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+        joblib.dump({"clusterer": cl, "libs": _cluster_libs(), **meta}, tmp)
+        os.replace(tmp, path)
+    except Exception as e:                                       # noqa: BLE001
+        log(f"      (could not cache the fit: {type(e).__name__}: {e})")
+
+
+def load_clusterer(path: Path, model_hash: str | None, log=print):
+    """A saved clusterer, if it is safe to apply here. Else None.
+
+    Two guards, both refusing rather than approximating:
+
+    * `model_hash` of the latents it was fitted on. `fit_hash` does not carry
+      it -- it describes the CLUSTERING, not the embedding underneath -- so
+      without this check a saved fit could be applied to latents from a
+      different `decompose` run that happened to have the same row count.
+    * the libraries it was pickled under. A pickled hmmlearn or sklearn
+      estimator is not guaranteed to behave across versions, and silently
+      applying one that does not is worse than spending the fit again.
+    """
+    if not path.exists():
+        return None
+    try:
+        import joblib
+
+        blob = joblib.load(path)
+    except Exception as e:                                       # noqa: BLE001
+        log(f"      (ignoring unreadable cache {path.name}: {type(e).__name__})")
+        return None
+    if model_hash is not None and blob.get("model_hash") != model_hash:
+        log(f"      (cached fit was made on model_hash "
+            f"{blob.get('model_hash')}, these latents are {model_hash} -- "
+            f"refitting)")
+        return None
+    want, have = _cluster_libs(), blob.get("libs") or {}
+    drift = {k: (have.get(k), v) for k, v in want.items() if have.get(k) != v}
+    if drift:
+        log(f"      (cached fit was pickled under different libraries {drift} "
+            f"-- refitting rather than trusting it)")
+        return None
+    return blob.get("clusterer")
+
+
+def blob_fit_hash(path: Path) -> str | None:
+    """The `fit_hash` recorded beside a cached clusterer, for the reload check."""
+    if not path.exists():
+        return None
+    try:
+        import joblib
+
+        return joblib.load(path).get("fit_hash")
+    except Exception:                                            # noqa: BLE001
+        return None
+
+
+def column_fit_hash(path: Path, col: str) -> str | None:
+    """The `fit_hash` a latents file already records for one state column."""
+    import pyarrow.parquet as pq
+
+    md = pq.ParquetFile(path).schema_arrow.metadata or {}
+    block = json.loads((md.get(b"clusterers") or b"{}").decode())
+    entry = block.get(col) or {}
+    return entry.get("fit_hash")
+
+
 def append_columns(path: Path, new: dict[str, np.ndarray],
                    provenance: dict) -> None:
     """Add label columns to a latents file, carrying per-column provenance.
@@ -807,7 +999,8 @@ def append_columns(path: Path, new: dict[str, np.ndarray],
 
 
 # ------------------------------------------------------------------ run ---
-def _require_embeddings(paths: dict, args, atlas: str, window_s) -> None:
+def _require_embeddings(paths: dict, embeddings: list[str], atlas: str,
+                        window_s) -> None:
     """Every requested embedding present in every cohort, or stop.
 
     A hard failure rather than a skip, and the same reasoning as stage 4's UMAP
@@ -816,7 +1009,7 @@ def _require_embeddings(paths: dict, args, atlas: str, window_s) -> None:
     at the point someone is reading results.
     """
     gaps = {}
-    for emb in args.embeddings:
+    for emb in embeddings:
         # `raw<N>` is exempt, and deliberately so: it exists only where
         # `decompose --passthrough-features` ran, which is the activation
         # aperture on the small atlases. The grid is RAGGED for it by design, so
@@ -844,7 +1037,7 @@ def _require_embeddings(paths: dict, args, atlas: str, window_s) -> None:
     raw = md.get(b"source")
     src = _json.loads(raw.decode()) if raw else "dfc"
     extra = " --source activation" if src == "activation" else ""
-    have = [e for e in args.embeddings if e not in gaps]
+    have = [e for e in embeddings if e not in gaps]
 
     lines = [f"  {emb}: {', '.join(cols)} not in cohort(s) {absent}"
              for emb, (cols, absent) in gaps.items()]
@@ -864,24 +1057,87 @@ def _require_embeddings(paths: dict, args, atlas: str, window_s) -> None:
 
 def run_one(root: Path, atlas: str, window_s, args):
     """-> (state columns written, state sets refused for a degenerate K)."""
-    paths = cohort_paths(root, atlas, window_s)
+    paths = cell_paths(root, atlas, window_s)
     if not paths:
         log(f"  atlas={atlas} window_s={window_s}: no latents, skipped")
         return [], []
-    train = [c for c in args.train if c in paths]
-    if not train:
+    # Cells to fit on, but the HASHES below keep naming cohorts: a fit is
+    # defined by which cohorts it pooled, and spelling that as cells would move
+    # every fit_hash the day a training cohort gained a condition even though
+    # the rows were unchanged. `n_train_rows` is what records an actual change.
+    train_cells = [k for k in paths if k[0] in set(args.train)]
+    train = sorted({k[0] for k in train_cells})
+    if not train_cells:
         raise SystemExit(f"none of --train {args.train} has latents at "
                          f"atlas={atlas} window_s={window_s}; found "
-                         f"{sorted(paths)}")
+                         f"{_cells(paths)}")
 
     # Every requested embedding is checked BEFORE anything is fitted. Checking
     # inside the loop would still have failed, but only after the earlier
     # embedding's columns had been written -- leaving the file with half the state
     # sets it was asked for, which is the state this stage exists to avoid.
-    _require_embeddings(paths, args, atlas, window_s)
+    _require_embeddings(paths, resolve_families(args.embeddings, paths),
+                        atlas, window_s)
+
+    # Which `decompose` fit produced these embeddings. Carried into the fit
+    # cache and checked on the way back out: `fit_hash` describes the
+    # CLUSTERING, not the embedding underneath, so without this a cached fit
+    # could be applied to latents from a different decompose run that happened
+    # to have the same row count.
+    from .decompose import latents_model_hash
+
+    cell_model_hash = latents_model_hash(paths[train_cells[0]])
+
+    # WHICH COHORTS GET LABELLED, said rather than inferred. `train + project`,
+    # exactly as `decompose` says it -- two stages with the same train/project
+    # semantics should use the same vocabulary, and a stage that silently acts
+    # on whatever is in the directory cannot be asked for less.
+    # `None` (flag absent) and `[]` (flag given with no values) are different
+    # answers and must not share a branch: absent means "every cohort here",
+    # empty means "none beyond --train". Testing truthiness collapsed them, so
+    # `--project` with no values labelled EVERYTHING -- the exact opposite of
+    # what it reads as.
+    project = list(getattr(args, "project", None) or [])
+    if project == ["all"]:
+        # The old implicit default, now something you ask for. "Label whatever
+        # is in the directory" is convenient and was the wrong DEFAULT: a
+        # cohort that appeared in the cell got labelled without being named.
+        project = sorted({k[0] for k in paths} - set(train))
+    have = {k[0] for k in paths}
+    unknown = [c for c in project if c not in have]
+    if unknown:
+        raise SystemExit(
+            f"--project names cohort(s) with no latents at atlas={atlas} "
+            f"window_s={window_s}: {unknown}\n"
+            f"  this cell has {_cells(paths)}\n"
+            f"  run `decompose --project {' '.join(unknown)}` first, or fix "
+            f"the spelling.")
+    # Every CONDITION of a named cohort is labelled. Asking for a cohort and
+    # getting one of its two conditions would be a trap, and the condition
+    # split belongs to the ANALYSIS stages (--keep-tasks), not here: a state
+    # label has to mean the same thing in both before they can be compared.
+    wanted = set(train) | set(project)
+    label = [k for k in paths if k[0] in wanted]
+    if len(label) < len(paths):
+        log(f"  labelling {_cells(label)}; not asked for: "
+            f"{_cells(k for k in paths if k not in label)}")
+
+    # Families resolved against THIS cell, because `raw`'s width is a property
+    # of the atlas and not of the command.
+    embeddings = resolve_families(args.embeddings, paths)
+    if embeddings != list(args.embeddings):
+        log(f"  embeddings {list(args.embeddings)} -> {embeddings}")
+    if not embeddings:
+        log(f"  atlas={atlas} window_s={window_s}: none of "
+            f"{list(args.embeddings)} resolves to anything here, skipped")
+        return [], [{"atlas": atlas, "window_s": str(window_s), "kind": "n/a",
+                     "method": "-", "embedding": ",".join(args.embeddings),
+                     "k": 0, "reason": "no requested embedding exists in this "
+                                       "cell", "search": None}]
+    require_methods_are_reachable(args.methods, embeddings, atlas, window_s)
 
     entries, skipped = [], []
-    for emb in args.embeddings:
+    for emb in embeddings:
         cols = embedding_columns(emb, paths)
         if cols is None:
             # Only reachable for a raw embedding: _require_embeddings above has
@@ -900,13 +1156,13 @@ def run_one(root: Path, atlas: str, window_s, args):
             continue
         frames = {c: read_embedding(p, cols) for c, p in paths.items()}
 
-        Xtr, len_tr, share = _training_block(frames, train, cols, args)
+        Xtr, len_tr, share = _training_block(frames, train_cells, cols, args)
         how = "balanced" if args.balance_train else "pooled as-is"
         log(f"  {emb}: {len(cols)}-D, one fit on {len(Xtr):,} row(s) from "
             f"{train} ({how}); "
-            + "  ".join(f"{c} {share[c]:.0%}" for c in train)
+            + "  ".join(f"{_cell(k)} {share[k]:.0%}" for k in train_cells)
             + " of the merged rows, then projected onto "
-            + f"{sorted(set(paths) - set(train))}")
+            + f"{_cells(set(paths) - set(train_cells))}")
 
         methods = _methods_for(emb, args, atlas, window_s, skipped)
         for method in methods:
@@ -915,7 +1171,24 @@ def run_one(root: Path, atlas: str, window_s, args):
             for k in ks:
                 cl = CLUSTERERS[method](**_opts(method, args))
                 t0 = time.time()
-                if method in SEQUENTIAL:
+                # Look the fit up BEFORE doing it. For the HMMs every component
+                # of `fit_hash` is known in advance -- k is given and `params()`
+                # is settings-only -- so a cell that has already been fitted on
+                # these exact training rows can be labelled rather than refitted.
+                # That is the difference between adding a cohort in minutes and
+                # adding it in a day.
+                recipe = recipe_hash(method, emb, k, _opts(method, args),
+                                     train, len(Xtr),
+                                     balanced=bool(args.balance_train))
+                cache = clusterer_cache_path(root, atlas, window_s, recipe)
+                reused = (None if args.refit
+                          else load_clusterer(cache, cell_model_hash, log=log))
+                if reused is not None:
+                    cl = reused
+                    log(f"  {column_name(method, emb, cl.k_found)}"
+                        f"{'':<12} reusing the cached fit {recipe} "
+                        f"-- labelling only, no refit")
+                elif method in SEQUENTIAL:
                     cl.fit(Xtr, k, lengths=len_tr)
                 else:
                     cl.fit(Xtr, k)
@@ -952,13 +1225,46 @@ def run_one(root: Path, atlas: str, window_s, args):
                 col = column_name(method, emb, cl.k_found)
                 h = fit_hash(method, emb, cl.k_found, cl.params(), train,
                              len(Xtr), balanced=bool(args.balance_train))
+                if reused is None:
+                    # Filed under the RECIPE, so the next run can find it, and
+                    # carrying the fit_hash so a reload can be checked against
+                    # what the fit actually produced.
+                    save_clusterer(
+                        cache, cl,
+                        {"model_hash": cell_model_hash, "fit_hash": h,
+                         "recipe_hash": recipe, "method": method,
+                         "embedding": emb, "k": int(cl.k_found),
+                         "train": sorted(train), "n_train_rows": len(Xtr),
+                         "column": col}, log=log)
+                elif blob_fit_hash(cache) not in (None, h):
+                    # The reloaded object produced a different fit_hash from
+                    # the one saved beside it. That should be impossible --
+                    # params() and k_found come out of the pickle -- so it means
+                    # the pickle no longer behaves as it did, which is exactly
+                    # what must not pass silently.
+                    raise SystemExit(
+                        f"{col}: the cached fit {recipe} reloaded to a "
+                        f"DIFFERENT model.\n"
+                        f"  saved fit_hash {blob_fit_hash(cache)}\n"
+                        f"  reloaded as    {h}\n"
+                        f"  Delete {cache} and re-run with --refit.")
 
-                written = {}
-                for cohort, f in frames.items():
+                written, kept = {}, []
+                for cell, f in frames.items():
+                    if cell not in label:
+                        continue
+                    # A cohort already carrying THIS fit is left alone. Not an
+                    # optimisation: append_columns rewrites the whole file, so
+                    # relabelling a cohort that needs nothing would churn every
+                    # file in the cell on every run.
+                    if (not args.refit
+                            and column_fit_hash(paths[cell], col) == h):
+                        kept.append(_cell(cell))
+                        continue
                     X = f[cols].to_numpy(float)
                     lab = (cl.labels(X, lengths=_seq_lengths(f))
                            if method in SEQUENTIAL else cl.labels(X))
-                    append_columns(paths[cohort], {col: lab},
+                    append_columns(paths[cell], {col: lab},
                                    {col: {"method": method, "embedding": emb,
                                           "embedding_columns": cols,
                                           "k": int(cl.k_found), "fit_hash": h,
@@ -972,7 +1278,7 @@ def run_one(root: Path, atlas: str, window_s, args):
                                           "n_train_rows": int(len(Xtr)),
                                           "written_utc": time.strftime(
                                               "%Y-%m-%dT%H:%M:%SZ", time.gmtime())}})
-                    written[cohort] = int(len(np.unique(lab)))
+                    written[_cell(cell)] = int(len(np.unique(lab)))
                 d = getattr(cl, "diagnostics", {}) or {}
                 extra = ""
                 if "n_valid_restarts" in d:
@@ -981,6 +1287,8 @@ def run_one(root: Path, atlas: str, window_s, args):
                              f"  loglik spread {d['loglik_spread_across_restarts']:.1f}")
                 if d.get("stopped_early") is False:
                     extra += f"  HIT THE {d['n_iter_cap']}-ITER CAP"
+                if kept:
+                    extra += f"  kept {kept} (already at this fit_hash)"
                 log(f"  {col:<28} K={cl.k_found:<4} {time.time()-t0:>5.1f}s  "
                     f"states used per cohort {written}{extra}")
                 entries.append({"atlas": atlas, "window_s": str(window_s),
@@ -988,10 +1296,56 @@ def run_one(root: Path, atlas: str, window_s, args):
                                 "embedding": emb, "n_dim": len(cols),
                                 "k": int(cl.k_found),
                                 "fit_hash": h, "train_cohorts": train,
-                                "states_used": written,
+                                "states_used": written, "cohorts_kept": kept,
+                                "fit_reused": bool(reused is not None),
                                 "fit_diagnostics":
                                     getattr(cl, "diagnostics", None) or None})
     return entries, skipped
+
+
+def _carries(method: str, emb: str) -> bool:
+    """Can this embedding carry this method at all? Pure compatibility."""
+    is_raw = embedding_spec(emb) is not None
+    n_dim = None if is_raw else len(EMBEDDINGS[emb])
+    if method in THREE_D_ONLY and (is_raw or n_dim != 3):
+        return False
+    return not (is_raw and method not in RAW_CAPABLE)
+
+
+def require_methods_are_reachable(methods: list[str], embeddings: list[str],
+                                  atlas: str, window_s) -> None:
+    """Stop when a requested METHOD has no embedding here that can carry it.
+
+    Per embedding this is already a recorded `n/a` skip, which is right: the
+    grid is deliberately ragged. But a method that applies to NONE of the
+    chosen embeddings is a different thing -- it produces nothing anywhere, the
+    run reports success, and the state set you asked for is simply missing from
+    the results. That is the failure worth being loud about, and it is knowable
+    before any fit.
+    """
+    unreachable = {m: [e for e in embeddings if not _carries(m, e)]
+                   for m in methods if not any(_carries(m, e)
+                                               for e in embeddings)}
+    if not unreachable:
+        return
+    lines = [f"atlas={atlas} window_s={window_s}: "
+             f"{len(unreachable)} requested method(s) cannot run on ANY of "
+             f"the chosen embeddings, so they would produce nothing:", ""]
+    for m, _ in unreachable.items():
+        why = ("defined on a 3-D embedding only" if m in THREE_D_ONLY
+               else "not comparable on raw features (Euclidean distance over "
+                    "correlated, unequally-scaled axes)")
+        lines.append(f"    {m}: {why}")
+    lines += [
+        "",
+        f"  chosen embeddings resolved to: {embeddings}",
+        f"  3-D embeddings here: "
+        f"{[e for e in embeddings if embedding_spec(e) is None] or '(none)'}",
+        "",
+        "  Add an embedding those methods can use -- `--embeddings pca umap "
+        "raw` covers everything this cell has -- or drop them from --methods.",
+    ]
+    raise SystemExit("\n".join(lines))
 
 
 def _methods_for(emb: str, args, atlas: str, window_s, skipped: list) -> list[str]:
@@ -1074,23 +1428,27 @@ def check_grid(root: Path, args) -> pd.DataFrame:
     rows = []
     for atlas in args.atlas:
         for w in args.window_s:
-            paths = cohort_paths(root, atlas, w)
+            paths = cell_paths(root, atlas, w)
             if not paths:
                 rows.append({"atlas": atlas, "window_s": w, "ok": False,
                              "reason": "no latents (run stage 4)",
                              "cohorts": "-", "embeddings": "-", "existing": "-",
                              "rows": 0})
                 continue
-            train = [c for c in args.train if c in paths]
-            have = [e for e in args.embeddings
+            train = [k for k in paths if k[0] in set(args.train)]
+            # Resolved per cell, exactly as run_one does -- otherwise --check
+            # reports the FAMILY names as absent and the dry run disagrees with
+            # the real one, which is the one thing a dry run must not do.
+            wanted = resolve_families(args.embeddings, paths)
+            have = [e for e in wanted
                     if embedding_columns(e, paths) is not None]
             # A missing raw<N> does NOT make the cell un-ready: it exists only
             # where `decompose --passthrough-features` ran, so the grid is
             # ragged for it by design and stage 4b skips it per cell. Only an
             # absent pca3/umap3 means stage 4 is incomplete here.
-            missing = [e for e in args.embeddings
+            missing = [e for e in wanted
                        if e not in have and embedding_spec(e) is None]
-            missing_raw = [e for e in args.embeddings
+            missing_raw = [e for e in wanted
                            if e not in have and embedding_spec(e) is not None]
             existing = sorted({c for p in paths.values()
                                for c in _state_columns(p)})
@@ -1118,7 +1476,7 @@ def check_grid(root: Path, args) -> pd.DataFrame:
                 reason = ""
             rows.append({"atlas": atlas, "window_s": w, "ok": not reason,
                          "reason": reason or "ready",
-                         "cohorts": ",".join(sorted(paths)),
+                         "cohorts": _cells(paths),
                          "embeddings": ",".join(have) or "-",
                          "raw_absent": ",".join(missing_raw) or "-",
                          "censor": pol_s, "existing": len(existing), "rows": n})
@@ -1155,8 +1513,13 @@ def report_check(df: pd.DataFrame, args) -> int:
     print(f"\ngrid: {int(df['ok'].sum())}/{len(df)} (atlas, aperture) cell(s) "
           f"ready\n")
     print(df.to_string(index=False))
+    # The union over cells of what each cell resolved to, so a family name
+    # never reaches column_name() -- `MeanShift_raw_0` is not a column anyone
+    # will see.
+    resolved = sorted({e for v in df["embeddings"] if isinstance(v, str)
+                       for e in v.split(",") if e and e != "-"})
     planned = [column_name(m, e, k)
-               for e in args.embeddings
+               for e in resolved
                for m in args.methods
                if not (m in THREE_D_ONLY and embedding_spec(e) is not None)
                and not (embedding_spec(e) is not None and m not in RAW_CAPABLE)
@@ -1191,7 +1554,8 @@ def run(args) -> int:
     # `--embeddings` lost its argparse `choices` when raw<N> arrived, since the
     # valid set depends on the atlas, so this is where a typo is caught.
     for emb in args.embeddings:
-        embedding_spec(emb)
+        if emb not in EMBEDDING_FAMILIES:
+            embedding_spec(emb)
     root = Path(args.output_root) if args.output_root else _default_root()
     if not root.is_dir():
         raise SystemExit(f"output_root does not exist: {root}")
@@ -1264,12 +1628,11 @@ def run(args) -> int:
 
 
 def _default_root() -> Path:
-    if os.environ.get("FMRIDECOMP_OUTPUTS"):
-        return Path(os.environ["FMRIDECOMP_OUTPUTS"])
-    import yaml
-    repo = Path(__file__).resolve().parent.parent
-    return Path(yaml.safe_load(
-        (repo / "config" / "camcan_movie.yaml").read_text())["output_root"])
+    """Delegates to io.default_output_root -- see it for why this is not
+    eight copies of a cohort filename any more."""
+    from .io import default_output_root
+
+    return default_output_root()
 
 
 def add_arguments(p) -> None:
@@ -1281,22 +1644,42 @@ def add_arguments(p) -> None:
                         "cell with no latents is reported and skipped.")
     p.add_argument("--methods", nargs="+", default=list(CLUSTERERS),
                    choices=list(CLUSTERERS))
-    p.add_argument("--embeddings", nargs="+", default=list(EMBEDDINGS),
+    p.add_argument("--embeddings", nargs="+", default=list(DEFAULT_EMBEDDINGS),
                    metavar="EMB",
-                   help=f"{' '.join(sorted(EMBEDDINGS))}, or raw<N> -- the N "
-                        f"named, scaled input features from `decompose "
-                        f"--passthrough-features` (raw7 for yeo7, raw14 for "
-                        f"networks). A raw embedding is SKIPPED where it is "
-                        f"absent rather than fatal: it exists only at the "
-                        f"activation aperture on the small atlases, so the grid "
-                        f"is ragged for it by design. "
-                        f"Default: {' '.join(EMBEDDINGS)}")
+                   help=f"FAMILIES -- {' '.join(sorted(EMBEDDING_FAMILIES))} -- "
+                        f"resolved against each cell, which is what a command "
+                        f"should normally say. `raw` becomes whichever raw<N> "
+                        f"the cohorts carry (raw7 on yeo7, raw14 on networks, "
+                        f"nothing on harvardoxford), read from the files rather "
+                        f"than named in the command, since the width is a fact "
+                        f"about the atlas. An exact name still works "
+                        f"({' '.join(sorted(EMBEDDINGS))}, raw<N>) when one "
+                        f"specific width is the point. A family that resolves "
+                        f"to nothing in a cell is skipped and reported, never "
+                        f"fatal. "
+                        f"Default: {' '.join(DEFAULT_EMBEDDINGS)}")
     p.add_argument("--k", nargs="+", type=int, default=[8, 10, 27],
                    help="for methods that need one; meanshift discovers it. "
                         "10 is in the default grid because it is the K van der "
                         "Meer et al. 2020 selected, so hmm1 and hmm2 can be "
                         "compared at it; 8 and 27 are perfect cubes, which "
                         "`threshold` requires.")
+    p.add_argument("--project", nargs="*", default=[],
+                   help="cohorts to LABEL, beside --train which is always "
+                        "labelled. Omit it and only --train is labelled -- the "
+                        "same meaning it has in `decompose`, so one mental "
+                        "model covers both stages. Adding one cohort months "
+                        "later is `--project <it>`, and the rest keep the "
+                        "columns they have. A name with no latents in the cell "
+                        "is refused rather than ignored, and `--project all` "
+                        "labels every cohort the cell holds.")
+    p.add_argument("--refit", action="store_true",
+                   help="ignore the saved fits under outputs/meta/clusterers/ "
+                        "and fit again, relabelling every cohort. The cache is "
+                        "keyed by fit_hash AND by the latents' model_hash, and "
+                        "refuses itself when the libraries it was pickled "
+                        "under have moved, so this is for forcing the issue "
+                        "rather than for correctness.")
     p.add_argument("--train", nargs="+", default=DEFAULT_TRAIN,
                    help="cohorts a clusterer may be FITTED on, MERGED into one "
                         "fit; every cohort present is then labelled from it")

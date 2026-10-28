@@ -32,7 +32,7 @@ def latents(root, atlas="yeo7", w="30", cohorts=("a", "b"), states=(),
         for st in states:
             d[st] = 0
         p = (root / "latents" / f"atlas={atlas}" / f"window_s={w}"
-             / f"cohort={c}" / "data.parquet")
+             / f"cohort={c}" / "task=m" / "data.parquet")
         p.parent.mkdir(parents=True, exist_ok=True)
         md = {b"censor_policy": json.dumps(censor).encode(),
               b"model_hash": json.dumps(model_hash).encode(),
@@ -47,7 +47,8 @@ def trans(root, atlas="yeo7", w="30", state="HMM_pca3_8", cohorts=("a", "b")):
         d = pd.DataFrame({"task": "m", "sub": ["01", "02"],
                           "0->0": 1.0, "0->1": 0.0, "n_states": 8})
         p = (root / "transitions" / f"atlas={atlas}" / f"window_s={w}"
-             / f"states={state}" / f"cohort={c}" / "subjects.parquet")
+             / f"states={state}" / f"cohort={c}" / "task=m"
+             / "subjects.parquet")
         p.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(pa.Table.from_pandas(d, preserve_index=False), p)
 
@@ -71,13 +72,124 @@ class TestInventory:
         assert d["n_states"].unique().tolist() == [1]
 
     def test_censor_says_subjects_only_when_there_is_no_window_gate(self, tmp_path):
-        p = tmp_path / "censor" / "policy=motion" / "cohort=a" / "subjects.parquet"
+        p = (tmp_path / "censor" / "policy=motion" / "cohort=a" / "task=m"
+             / "subjects.parquet")
         p.parent.mkdir(parents=True)
         pq.write_table(pa.Table.from_pandas(
             pd.DataFrame({"keep": [True, True, False]}), preserve_index=False), p)
         d = S.censor(tmp_path)
         assert d["subjects_kept"].iloc[0] == 2 and d["of"].iloc[0] == 3
         assert d["window_gate"].iloc[0] == "subjects only"
+
+
+class TestStaticFcInventory:
+    """Stage 3b was the one stage this command did not report, which made it
+    unable to answer "where am I on the four selection tables" -- two of them
+    are fcm_selection runs and this is their only input."""
+
+    @staticmethod
+    def _cell(root, atlas, cohort, subs, task, n_edges=3, per_sub=1):
+        """One file, one task -- the layout stage 3b writes now.
+
+        `per_sub` gives a subject several rows within the SAME condition, which
+        is what ses/run multiplicity looks like and the one thing that still
+        makes rows exceed subs in a single file.
+        """
+        rows = [(sub, task) for sub in subs for _ in range(per_sub)]
+        d = pd.DataFrame({"sub": [r[0] for r in rows],
+                          "task": [r[1] for r in rows]})
+        for i in range(n_edges):
+            d[f"P{i}__P{i + 1}"] = 0.5
+        p = (root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
+             / f"task={task}" / "subjects.parquet")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.Table.from_pandas(d, preserve_index=False), p)
+
+    def test_it_reports_one_row_per_atlas_cohort_and_task(self, tmp_path):
+        self._cell(tmp_path, "yeo7", "camcan", ["A", "B", "C"], "Movie")
+        self._cell(tmp_path, "yeo7", "camcan", ["A", "B"], "Rest")
+        self._cell(tmp_path, "networks", "camcan", ["A", "B"], "Movie")
+        d = S.static_fc(tmp_path).set_index(["atlas", "cohort", "task"])
+        assert d.loc[("yeo7", "camcan", "Movie"), "subs"] == 3
+        assert d.loc[("yeo7", "camcan", "Rest"), "subs"] == 2
+        assert d.loc[("networks", "camcan", "Movie"), "subs"] == 2
+        assert (d["edges"] == 3).all()
+
+    def test_both_conditions_of_one_cohort_are_separate_rows(self, tmp_path):
+        """What the task level buys the inventory: the two conditions of one
+        cohort are no longer one line whose `n` you cannot attribute."""
+        self._cell(tmp_path, "yeo7", "camcan", ["A", "B", "C"], "Movie")
+        self._cell(tmp_path, "yeo7", "camcan", ["A", "B"], "Rest")
+        d = S.static_fc(tmp_path)
+        assert len(d) == 2
+        assert sorted(d["task"]) == ["Movie", "Rest"]
+        assert sorted(d["subs"]) == [2, 3]
+
+    def test_one_row_per_subject_is_the_normal_state(self, tmp_path):
+        self._cell(tmp_path, "yeo7", "camcan", ["A", "B"], "Movie")
+        row = S.static_fc(tmp_path).iloc[0]
+        assert row["rows"] == row["subs"] == 2
+
+    def test_more_rows_than_subjects_is_now_ses_run_multiplicity(self,
+                                                                 tmp_path):
+        """It used to mean "this file holds two conditions". One file is one
+        condition now, so the remaining way to exceed subs is several
+        acquisitions of the same one -- which is still what makes select-fcm
+        refuse until it is told which to score."""
+        self._cell(tmp_path, "yeo7", "camcan", ["A", "B"], "Movie", per_sub=2)
+        row = S.static_fc(tmp_path).iloc[0]
+        assert row["rows"] == 4 and row["subs"] == 2
+
+    def test_an_unbuilt_stage_is_empty_not_an_error(self, tmp_path):
+        assert S.static_fc(tmp_path).empty
+
+
+class TestSelectionInventory:
+    """One row per RUN, which is (tree, task, target) and not just target.
+
+    This globbed `bstm_selection/target=*` from before `task=` existed. Once
+    the rankings moved under a task partition that matched nothing, so a fully
+    built tree reported `(nothing)` -- the failure mode an inventory command
+    exists to prevent.
+    """
+
+    @staticmethod
+    def _run(root, tree, task, target, figures=2, scores=True):
+        d = root / tree / f"task={task}" / f"target={target}"
+        (d / "figures").mkdir(parents=True)
+        (d / "DESIGN.md").write_text("x")
+        for i in range(figures):
+            (d / "figures" / f"f{i}.png").write_bytes(b"")
+        if scores:
+            pd.DataFrame({"score": [0.1, 0.2, 0.3]}).to_csv(
+                d / "scores.csv", index=False)
+
+    def test_both_trees_and_both_tasks_are_listed(self, tmp_path):
+        for tree in ("bstm_selection", "fcm_selection"):
+            for task in ("movie", "rest"):
+                self._run(tmp_path, tree, task, "hads")
+        d = S.selection(tmp_path)
+        assert set(zip(d["tree"], d["task"])) == {
+            ("bstm", "movie"), ("bstm", "rest"),
+            ("fcm", "movie"), ("fcm", "rest")}
+        assert d["target"].unique().tolist() == ["hads"]
+        assert d["n_rows"].tolist() == [3, 3, 3, 3]
+        assert d["figures"].tolist() == [2, 2, 2, 2]
+        assert d["design"].all()
+
+    def test_a_target_directly_under_the_tree_is_not_a_run(self, tmp_path):
+        """The pre-`task=` layout. It is not migrated silently: a path with no
+        condition in it cannot say which ranking it is, so the inventory must
+        not claim it as one."""
+        d = tmp_path / "bstm_selection" / "target=hads"
+        (d / "figures").mkdir(parents=True)
+        assert S.selection(tmp_path).empty
+
+    def test_a_run_with_no_scores_yet_is_listed_as_incomplete(self, tmp_path):
+        self._run(tmp_path, "bstm_selection", "rest", "hads", scores=False)
+        d = S.selection(tmp_path)
+        assert len(d) == 1
+        assert not d["scores"].iloc[0] and d["n_rows"].iloc[0] == 0
 
 
 class TestProblems:
@@ -202,7 +314,8 @@ class TestTransitionPeopleCount:
                           "sub": ["s1"] * 3 + ["s2"] * 3,
                           "0->0": 1.0, "n_states": 8})
         p = (tmp_path / "transitions" / "atlas=yeo7" / "window_s=30"
-             / "states=HMM_pca3_8" / "cohort=cneuromod" / "subjects.parquet")
+             / "states=HMM_pca3_8" / "cohort=cneuromod" / "task=m"
+             / "subjects.parquet")
         p.parent.mkdir(parents=True)
         pq.write_table(pa.Table.from_pandas(d, preserve_index=False), p)
         got = S.transitions(tmp_path).iloc[0]

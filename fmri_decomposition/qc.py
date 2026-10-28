@@ -122,14 +122,21 @@ def _note(existing: str, addition: str) -> str:
 
 
 # ------------------------------------------------------------ activation ---
-def activation_qc(files, atlas, tr: float) -> dict[tuple[str, str], dict]:
+def activation_qc(files, atlas, tr) -> dict[tuple[str, str], dict]:
     """Walk one atlas's activation shards -> per (sub, task) QC.
 
     A (sub, task) with several ses/run shards is aggregated: frames sum, the
     duration is the longest shard's, and the empty-parcel count is the WORST
     shard's. A single badly-registered session is a finding, not something to
     average away.
+
+    `tr` is a number, or a callable taking the task -- pass `cfg.tr_for` for a
+    cohort scanned at more than one TR. A duration in SECONDS is what this
+    computes, so one TR applied to a task acquired at another would misreport
+    every scan length in the cohort, and `frac_stimulus_covered` is derived
+    from it.
     """
+    tr_of = tr if callable(tr) else (lambda _task: float(tr))
     cols = list(atlas.columns)
     acc: dict[tuple[str, str], dict] = {}
     for path in files:
@@ -138,8 +145,10 @@ def activation_qc(files, atlas, tr: float) -> dict[tuple[str, str], dict]:
         present = [c for c in cols if c in df.columns]
         good = (df["good_frame"].to_numpy(bool) if "good_frame" in df
                 else np.ones(len(df), bool))
-        duration = (float(df["stimulus_time_s"].max()) + float(tr)
-                    if "stimulus_time_s" in df and len(df) else len(df) * float(tr))
+        shard_tr = float(tr_of(key[1]))
+        duration = (float(df["stimulus_time_s"].max()) + shard_tr
+                    if "stimulus_time_s" in df and len(df)
+                    else len(df) * shard_tr)
         # A parcel is empty exactly when extract_parcels wrote it as all-NaN,
         # which it does for `counts == 0` -- no voxel of this brain inside it.
         empty = int(sum(1 for c in present
@@ -315,7 +324,7 @@ def collect_qc(cfg, atlases, isc_parcels=None, max_lag_tr: int = 30,
                    .rglob("*.parquet"))
     messages.append(f"QC atlas: {atlas.name} ({atlas.n_nodes} nodes), {len(files)} shard(s)")
 
-    qc = activation_qc(files, atlas, cfg.tr)
+    qc = activation_qc(files, atlas, cfg.tr_for)
     add_stimulus_coverage(qc)
 
     isc, isc_msg, isc_frame = isc_qc(files, atlas, isc_parcels, max_lag_tr)

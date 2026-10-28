@@ -65,11 +65,32 @@ def _footer(path: Path):
     return f.metadata.num_rows, list(f.schema_arrow.names)
 
 
-def _key(p: Path, name: str):
-    for part in p.parts:
-        if part.startswith(f"{name}="):
-            return part.split("=", 1)[1]
-    return None
+def _csv_rows(path: Path) -> int:
+    """Data rows in a CSV, without parsing it.
+
+    `_footer` reads a row count out of parquet metadata for free; a CSV has no
+    footer, so this counts newlines and subtracts the header. It is the one
+    thing lost by writing `scores.csv` instead of `scores.parquet`, and on a
+    file of a few hundred KB it costs nothing.
+
+    Newlines, not a CSV parse, so a value containing one would be counted
+    twice. Nothing written here can: the columns are model, arm, atlas,
+    window_s, K, states, n, n_features, seed, fold and score. This is a
+    progress indicator, not a number any result depends on.
+    """
+    n, last = 0, b"\n"
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            n += chunk.count(b"\n")
+            last = chunk[-1:]
+    if last not in (b"\n", b""):
+        n += 1          # a final line with no newline after it is still a row
+    return max(n - 1, 0)
+
+
+#: One implementation of "read a partition key by name", in io. This module had
+#: its own copy; two copies of a path convention is how the convention drifts.
+from .io import hive_key as _key          # noqa: E402  (re-export, used below)
 
 
 # ------------------------------------------------------------------ stages ---
@@ -90,6 +111,45 @@ def dfc(root: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def static_fc(root: Path) -> pd.DataFrame:
+    """Stage 3b: one FC matrix per subject, per (atlas, cohort).
+
+    The one stage this command did not report, which made it unable to answer
+    "where am I on the four selection tables" -- two of the four are the
+    `fcm_selection` runs and this is their only input. Subjects AND tasks,
+    because one cohort can hold both conditions and `select-fcm` scores one row
+    per subject: a cohort showing more rows than subjects is the state where
+    that stage will refuse until it is given --keep-tasks.
+    """
+    rows = []
+    for sp in sorted((root / "static_fc")
+                     .glob("atlas=*/cohort=*/task=*/subjects.parquet")):
+        n = subs = -1
+        tasks = ""
+        try:
+            import pyarrow.parquet as pq
+
+            f = pq.ParquetFile(sp)
+            n = f.metadata.num_rows
+            if "sub" in f.schema_arrow.names:
+                t = f.read(columns=["sub"]).to_pandas()
+                subs = int(t["sub"].nunique())
+                # One file is one task now, so rows > subs here means a SUBJECT
+                # appears twice within one condition -- several ses/run of it --
+                # which is still the state that makes select-fcm refuse.
+                tasks = _key(sp, "task") or ""
+            # Edge columns are the payload; counting them says which atlas this
+            # really is without trusting the path.
+            edges = sum(1 for c in f.schema_arrow.names if "__" in c)
+        except Exception as exc:                                 # noqa: BLE001
+            edges = -1
+            print(f"  (could not read {sp}: {type(exc).__name__})")
+        rows.append({"atlas": _key(sp, "atlas"), "cohort": _key(sp, "cohort"),
+                     "task": _key(sp, "task"), "rows": n, "subs": subs,
+                     "edges": edges})
+    return pd.DataFrame(rows)
+
+
 def censor(root: Path) -> pd.DataFrame:
     rows = []
     for d in sorted((root / "censor").glob("policy=*")):
@@ -97,9 +157,9 @@ def censor(root: Path) -> pd.DataFrame:
         # given --stage dfc for. Subjects-only is the normal first-pass state, so
         # this reports which it is rather than treating absence as a fault.
         gates = sorted({f"{_key(q, 'atlas')}/{_key(q, 'window_s')}s"
-                        for q in d.glob(
-                            "atlas=*/window_s=*/cohort=*/windows.parquet")})
-        for sp in sorted(d.glob("cohort=*/subjects.parquet")):
+                        for q in d.glob("atlas=*/window_s=*/cohort=*/task=*/"
+                                        "windows.parquet")})
+        for sp in sorted(d.glob("cohort=*/task=*/subjects.parquet")):
             try:
                 t = pd.read_parquet(sp, columns=["keep"])
                 kept, total = int(t["keep"].sum()), len(t)
@@ -108,6 +168,7 @@ def censor(root: Path) -> pd.DataFrame:
                 print(f"  (could not read {sp}: {type(exc).__name__})")
             rows.append({"policy": _key(d, "policy"),
                          "cohort": _key(sp, "cohort"),
+                         "task": _key(sp, "task"),
                          "subjects_kept": kept, "of": total,
                          "window_gate": ",".join(gates) or "subjects only"})
     return pd.DataFrame(rows)
@@ -115,12 +176,14 @@ def censor(root: Path) -> pd.DataFrame:
 
 def latents(root: Path) -> pd.DataFrame:
     rows = []
-    for p in sorted((root / "latents").glob("atlas=*/window_s=*/cohort=*/data.parquet")):
+    for p in sorted((root / "latents")
+                    .glob("atlas=*/window_s=*/cohort=*/task=*/data.parquet")):
         n, cols = _footer(p)
         states = sorted(c for c in cols if STATE_RE.match(c))
         rows.append({
             "atlas": _key(p, "atlas"), "window_s": _key(p, "window_s"),
-            "cohort": _key(p, "cohort"), "rows": n,
+            "cohort": _key(p, "cohort"), "task": _key(p, "task"),
+            "rows": n, "stride_s": _meta(p, "stride_s"),
             "emb": ",".join(_embeddings_present(cols)) or "-",
             "censor": str(_meta(p, "censor_policy")),
             "source": str(_meta(p, "source") or "dfc"),
@@ -152,20 +215,36 @@ def transitions(root: Path, deep: bool = True) -> pd.DataFrame:
                 subs = None
         rows.append({"atlas": _key(p, "atlas"), "window_s": _key(p, "window_s"),
                      "states": _key(p, "states"), "cohort": _key(p, "cohort"),
-                     "rows": n, "subs": subs,
+                     "task": _key(p, "task"), "rows": n, "subs": subs,
                      "cells": sum(1 for c in cols if "->" in c)})
     return pd.DataFrame(rows)
 
 
+SELECTION_TREES = ("bstm_selection", "fcm_selection")
+
+
 def selection(root: Path) -> pd.DataFrame:
+    """One row per selection RUN: (tree, task, target).
+
+    Both trees, because `select-fcm` is the control `select-bstm` has to beat
+    and a report that shows only one of them cannot say whether the comparison
+    is even runnable yet. And `task=` under each, because that partition is how
+    the movie and rest rankings sit side by side -- globbing `target=*` directly
+    under the tree, as this did when there was no task level, found nothing at
+    all and printed `(nothing)` for a tree that was fully built.
+    """
     rows = []
-    for d in sorted((root / "bstm_selection").glob("target=*")):
-        sc = d / "scores.parquet"
-        rows.append({"target": _key(d, "target"),
-                     "scores": sc.exists(),
-                     "n_rows": _footer(sc)[0] if sc.exists() else 0,
-                     "design": (d / "DESIGN.md").exists(),
-                     "figures": sum(1 for _ in (d / "figures").glob("*.png"))})
+    for tree in SELECTION_TREES:
+        for d in sorted((root / tree).glob("task=*/target=*")):
+            sc = d / "scores.csv"
+            rows.append({"tree": tree.replace("_selection", ""),
+                         "task": _key(d, "task"),
+                         "target": _key(d, "target"),
+                         "scores": sc.exists(),
+                         "n_rows": _csv_rows(sc) if sc.exists() else 0,
+                         "design": (d / "DESIGN.md").exists(),
+                         "figures": sum(1 for _
+                                        in (d / "figures").glob("*.png"))})
     return pd.DataFrame(rows)
 
 
@@ -343,8 +422,14 @@ def run(args) -> int:
           if not dfcs.empty else dfcs)
     _show("2.5 CENSOR      subjects kept per policy", cen)
     _show("3  LATENTS      embeddings per aperture", lat,
-          ["atlas", "window_s", "cohort", "rows", "emb", "source", "censor",
-           "role", "model_hash", "n_states"])
+          ["atlas", "window_s", "cohort", "task", "rows", "stride_s", "emb",
+           "source", "censor", "role", "model_hash", "n_states"])
+    # After 3 so the numbering reads in order, though it is a BRANCH off
+    # stage 2 rather than a step after stage 3: static-fc reads the same
+    # frames the window_s=-1 state arm does, and needs neither latents nor
+    # clusters. That is why the fcm tables are reachable without stage 4.
+    _show("3b STATIC FC    one matrix per subject  (input to fcm_selection)",
+          narrow(static_fc(root)))
 
     print("\n4  STATE SETS   per aperture (K in the name)")
     if lat.empty:
@@ -363,7 +448,7 @@ def run(args) -> int:
 
     _show("5  TRANSITIONS  tables written  (rows = task x sub; subs = people)",
           tr)
-    _show("6  SELECTION    targets", sel)
+    _show("6  SELECTION    runs (tree x task x target)", sel)
 
     probs = (problems(lat, args) + stale(lat, tr)
              + behind(lat, tr, args.min_k, args.max_k)
@@ -379,12 +464,11 @@ def run(args) -> int:
 
 
 def _default_root() -> Path:
-    if os.environ.get("FMRIDECOMP_OUTPUTS"):
-        return Path(os.environ["FMRIDECOMP_OUTPUTS"])
-    import yaml
-    repo = Path(__file__).resolve().parent.parent
-    return Path(yaml.safe_load(
-        (repo / "config" / "camcan_movie.yaml").read_text())["output_root"])
+    """Delegates to io.default_output_root -- see it for why this is not
+    eight copies of a cohort filename any more."""
+    from .io import default_output_root
+
+    return default_output_root()
 
 
 def add_arguments(p) -> None:

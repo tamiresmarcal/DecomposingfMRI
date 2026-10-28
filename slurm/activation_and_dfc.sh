@@ -175,7 +175,7 @@ a policy that is named and hashed:
 
 to re-gate later, copy the policy and run ONLY the censor step -- nothing
 upstream is touched and the old decision stays on disk beside the new one:
-  cp config/censor/motion.yaml config/censor/strict.yaml   # edit `name:` too
+  cp config/censor/motion.yaml config/censor/strict.yaml   # edit its 'name:' too
   sbatch slurm/censor.sbatch $CONFIG config/censor/strict.yaml
 
 stage 3's atlas x window plan -- rows, edge counts, estimated size, and any

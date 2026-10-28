@@ -122,7 +122,9 @@ def attach_participants(refs: list[RunRef], participants: pd.DataFrame,
         if cfg.trim.column and cfg.trim.column in row.index and pd.notna(row[cfg.trim.column]):
             ref.trim_end_s = float(row[cfg.trim.column])
             if cfg.trim.unit == "tr":
-                ref.trim_end_s *= cfg.tr
+                # This run's TR. A cohort scanned at two TRs would otherwise
+                # trim the shorter-TR task to the wrong number of seconds.
+                ref.trim_end_s *= cfg.tr_for(ref.task)
         ref.extra.update(row.to_dict())
         out.append(ref)
     return out
@@ -141,7 +143,7 @@ def segments_for_run(ref: RunRef, scans_table: pd.DataFrame | None, cfg: CohortC
     return segments_from_scans(
         rows["acq_time_s"].astype(float).tolist(),
         rows["n_vols"].astype(int).tolist(),
-        cfg.tr,
+        cfg.tr_for(ref.task),
         drop_after_restart=int(rows.get("drop_after_restart", pd.Series([0])).iloc[0]),
     )
 
@@ -201,11 +203,17 @@ def validate_cohort(cfg: CohortConfig, refs: list[RunRef],
     if cfg.trim.column and cfg.trim.column in participants.columns:
         vals = participants[cfg.trim.column].dropna()
         if cfg.trim.unit == "seconds":
-            n_tr = vals / cfg.tr
-            bad = vals[(n_tr - n_tr.round()).abs() > 1e-6]
-            if len(bad):
-                problems.append(f"{cfg.trim.column} does not convert to whole TRs "
-                                f"at TR={cfg.tr} for {len(bad)} row(s)")
+            # Once per TR the cohort acquires. A trim in seconds has to land on
+            # a whole TR, and with two TRs it can do so for one task and not
+            # the other -- reporting only the default would hide exactly that.
+            for task, tr in cfg.trs().items():
+                n_tr = vals / tr
+                bad = vals[(n_tr - n_tr.round()).abs() > 1e-6]
+                if len(bad):
+                    where = "" if task is None else f" (task {task})"
+                    problems.append(
+                        f"{cfg.trim.column} does not convert to whole TRs "
+                        f"at TR={tr}{where} for {len(bad)} row(s)")
 
     for task in sorted({r.task for r in refs}):
         if task not in cfg.stimulus.durations_s and not cfg.trim.column:

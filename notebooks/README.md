@@ -49,7 +49,7 @@ findings.
 
 The decomposition that feeds `06` is **not a notebook** — it is
 `fmri_decomposition/decompose.py`, exposed as `fmri-decomp decompose` and run
-through `slurm/dimensionality_reduction.sbatch`. It was a
+through `slurm/decomposition.sbatch`. It was a
 notebook (`05_decompose.ipynb`) and outgrew one: 124k training windows x 6,105
 edges is 3 GB in float32, and a notebook keeps every intermediate alive. The
 script is float32 end to end, scales in place, and re-reads one cohort at a
@@ -61,10 +61,10 @@ of several copies of it.
 fmri-decomp decompose --atlas harvardoxford --window-s 30 60 120 300 --dry-run
 
 # one array task per window size
-sbatch --array=0-3 slurm/dimensionality_reduction.sbatch harvardoxford 30 60 120 300
+sbatch --array=0-3 slurm/decomposition.sbatch harvardoxford 30 60 120 300
 
 # PCA only, no UMAP -- minutes instead of hours
-sbatch --array=0-3 slurm/dimensionality_reduction.sbatch harvardoxford 30 60 120 300 -- --no-umap
+sbatch --array=0-3 slurm/decomposition.sbatch harvardoxford 30 60 120 300 -- --no-umap
 ```
 
 Which cohorts are fit and which are projected is `--train` / `--project`,

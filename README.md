@@ -30,8 +30,13 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
 3.5  censor.sbatch                  participants_qc.csv + window flags
                                      -> keep/drop, under a named policy.
                                      Last link of the per-cohort chain.
-4    dimensionality_reduction.sbatch             -> latents: PCA + UMAP coordinates, fit on
+4    decomposition.sbatch             -> latents: PCA + UMAP coordinates, fit on
                                      the train cohorts, projected onto the rest.
+                                     PER COHORT: one whose file already carries
+                                     this model_hash is left untouched, and the
+                                     saved fit is reused rather than redone, so
+                                     adding a cohort does not disturb the others
+                                     or the state columns 4b put in them.
                                      --source dfc      windowed edges, one fit
                                                        per --window-s
                                      --source activation   per-TR frames, written
@@ -39,6 +44,9 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
 4b   clustering.sbatch              latents -> brain-state LABELS, appended to
                                      the same files. threshold / MeanShift /
                                      HMM1 / HMM2 x pca3 / umap3 / raw<N>.
+                                     The HMM fits are CACHED by fit_hash, so a
+                                     cohort added later is labelled from the
+                                     saved fit instead of refitting it.
                                      Every state definition lives here;
                                      stage 4 defines none.
 5a   brain_states_transitions.sbatch          labels -> per-subject transition matrices,
@@ -46,8 +54,19 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      discovered per (atlas, aperture).
 5b   model_selection.sbatch                rank state sets by how well their
                                      transitions predict a phenotype column,
-                                     against non-transition controls
-                                     -> outputs/bstm_selection/target=<t>/
+                                     against non-transition controls. One run
+                                     per condition, named by --task
+                                     -> outputs/bstm_selection/task=<k>/target=<t>/
+
+3b   static_fc.sbatch                parcel timeseries -> ONE correlation
+                                     matrix per subject. Reads stage 2 through
+                                     the same function the window_s=-1 state
+                                     arm reads, so the two differ only in the
+                                     MODEL. -> outputs/static_fc/
+5b'  fcm_selection.sbatch            rank STATIC connectivity models the way
+                                     5b ranks state sets, a condition's cohorts
+                                     in one `cohort` column
+                                     -> outputs/fcm_selection/task=<k>/target=<t>/
 
 any  fmri-decomp status              read-only: what every stage holds, and the
                                      disagreements that span two of them
@@ -75,7 +94,13 @@ outputs/
 │   └── atlas=harvardoxford/
 │       ├── cohort=ds002837/task=500daysofsummer/sub=1/data.parquet
 │       ├── cohort=cneuromod/task=s01e01a/sub=01/data.parquet
-│       └── cohort=hcp7t/task=MOVIE2/sub=100610/data.parquet
+│       ├── cohort=camcan/task=Movie/sub=CC110033/data.parquet
+│       └── cohort=camcan/task=Rest/ sub=CC110033/data.parquet
+│       One cohort can hold several CONDITIONS, because `cohort` means one
+│       acquisition programme and not one group of people. Cam-CAN's movie and
+│       rest are the same subjects, so two cohort values would make the tree
+│       claim they were two samples. Their TRs differ (2.47s, 1.97s) and that
+│       is fine: TR travels in each shard's own metadata.
 │
 ├── dfc/                                          STAGE 3 — window_s between atlas and cohort
 │   └── atlas=harvardoxford/
@@ -84,19 +109,68 @@ outputs/
 │       └── window_s=120/cohort=cneuromod/task=s01e01a/sub=01/data.parquet
 │
 ├── censor/                                       STAGE 3.5 — the keep/drop decision
-│   └── policy=motion/cohort=camcan/subjects.parquet
+│   └── policy=motion/cohort=camcan/task=Movie/subjects.parquet
+│       `task=` because a subject can pass the motion threshold watching the
+│       movie and fail it lying still, and one `keep` per subject per cohort
+│       would have to pick one of those answers for both.
 │
 ├── latents/                                      STAGE 4 — coordinates, + STAGE 4b labels
-│   └── atlas=yeo7/window_s=30/cohort=camcan/data.parquet
+│   └── atlas=yeo7/window_s=30/cohort=camcan/task=Movie/data.parquet
 │       window_s=-1 is the per-TR aperture. The state-label columns stage 4b
 │       adds live INSIDE these files, with per-column provenance in the schema.
+│       One file per (cohort, task), not per cohort, because each file carries
+│       ONE `stride_s` -- the TR its rows were sampled at -- and stage 5a reads
+│       that for every dwell-second. Cam-CAN's movie and rest are 2.47s and
+│       1.97s, so a merged file would have to lie about one of them.
 │
 ├── transitions/                                  STAGE 5a — one table per state set
-│   └── atlas=yeo7/window_s=30/states=HMM1_pca3_8/cohort=camcan/subjects.parquet
+│   └── atlas=yeo7/window_s=30/states=HMM1_pca3_8/cohort=camcan/task=Movie/
+│       subjects.parquet
 │
-├── bstm_selection/                               STAGE 5b — the ranking
-│   └── target=additional_HADS_anx_category/
-│       ├── summary.csv  scores.parquet  DESIGN.md  figures/  models/
+├── meta/
+│   ├── models/        STAGE 4 — the fitted scaler/PCA/UMAP per (atlas, aperture),
+│   │                  plus a manifest recording its model_hash and the library
+│   │                  versions it was pickled under. A later run projecting a
+│   │                  NEW cohort loads this instead of refitting.
+│   └── clusterers/    STAGE 4b — the fitted clusterer per RECIPE, so labelling a
+│                      cohort added later costs a forward pass instead of the
+│                      ~24 h HMM2 fit. Keyed by `recipe_hash` (method, embedding,
+│                      K asked for, constructor options, training rows) because
+│                      that is computable BEFORE a fit; `fit_hash` describes what
+│                      came out and cannot look anything up. Checked against the
+│                      latents' model_hash, the pickling libraries, and its own
+│                      fit_hash on reload; any mismatch means refit, never
+│                      silent reuse. This is also what fixes MeanShift's K: the
+│                      object is reused, so the discovered K cannot drift
+│                      between runs.
+│
+├── static_fc/                                    STAGE 3b — one FC per subject
+│   └── atlas=harvardoxford/cohort=camcan/task=Movie/subjects.parquet
+│       `task=pooled` instead under `--pool cohort`, which averages a
+│       subject's conditions into one FC: the key always says which it is.
+│       Edge columns named <parcel_i>__<parcel_j>, stage 3's convention, plus
+│       n_tr_used / frac_good_frames: the reliability of the row AND the
+│       data-quantity covariate stage 5c controls on.
+│
+├── bstm_selection/                               STAGE 5b — the state ranking
+│   ├── task=movie/target=additional_HADS_anx_category/
+│   └── task=rest/ target=additional_HADS_anx_category/
+│       ├── summary.csv  scores.csv  DESIGN.md  figures/  models/
+│       First two columns: `run` ("bstm movie") and `target`, so the four
+│       tables can be concatenated and still say which is which.
+│       task= and target= are the ONLY directory keys in the two selection
+│       trees. atlas, window_s, K, states and cohort are COLUMNS of
+│       summary.csv -- the comparison is rows you can sort, not a join
+│       across folders -- and the two keys that are directories are the two
+│       that say which ranking this is. Each run wipes only its own folder.
+│
+├── fcm_selection/                                STAGE 5b' — static FC
+│   ├── task=movie/target=additional_HADS_anx_category/
+│   └── task=rest/ target=additional_HADS_anx_category/
+│       ├── summary.csv  same columns, with `cohort` in place of `window_s`
+│       │                and `K`. No delta column anywhere: the arms share
+│       │                folds, so a difference between rows is not a test.
+│       └── scores.csv  DESIGN.md  figures/
 │
 └── meta/
     ├── atlas-harvardoxford_labels.csv            atlas-level: cohort-independent
@@ -127,6 +201,11 @@ where a cohort has one stimulus. It costs CNeuroMod roughly 300 thin directories
 per atlas per window size; the alternative would make the path shape
 cohort-dependent, which is the same class of problem as a per-cohort `run=`
 level.
+
+It is also what lets one cohort hold two CONDITIONS. Everything downstream
+keeps `task` as a column, so a stage that scores one row per subject —
+`select-bstm`, `select-fcm` — needs `--keep-tasks` to say which condition it
+means, and **refuses** rather than silently averaging or picking one.
 
 **Directory depth is constant, and so is the leaf name.** Every leaf is
 `data.parquet`, in every cohort — a reader never has to know which cohort it is
@@ -372,8 +451,8 @@ and consumers select by `--censor-policy <name>`, so re-gating never re-extracts
 anything. It writes:
 
 ```
-outputs/censor/policy=<name>/cohort=<c>/subjects.parquet
-outputs/censor/policy=<name>/atlas=<a>/window_s=<w>/cohort=<c>/windows.parquet
+outputs/censor/policy=<name>/cohort=<c>/task=<k>/subjects.parquet
+outputs/censor/policy=<name>/atlas=<a>/window_s=<w>/cohort=<c>/task=<k>/windows.parquet
 outputs/meta/censor/policy=<name>.json          # counts + what was skipped
 ```
 

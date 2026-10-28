@@ -145,7 +145,10 @@ def _path_collisions(cfg, refs) -> list[str]:
 def cmd_validate(args) -> int:
     cfg = _load(args.config)
     refs, problems = _refs(cfg, strict=False)
-    print(f"cohort={cfg.cohort} tr={cfg.tr} runs_discovered={len(refs)}")
+    trs = cfg.trs()
+    tr_s = (f"{cfg.tr}" if list(trs) == [None]
+            else " ".join(f"{t}={v:g}" for t, v in trs.items()))
+    print(f"cohort={cfg.cohort} tr={tr_s} runs_discovered={len(refs)}")
     print(f"atlases={cfg.atlases} config_hash={cfg.hash()}")
     if refs and cfg.atlases:
         problems = list(problems) + _path_collisions(cfg, refs)
@@ -226,13 +229,34 @@ def _dfc_plan(cfg, atlases, sizes):
         for w in sizes:
             if atlas.name not in cfg.windows.atlases_for(w, [a.name for a in atlases]):
                 continue
-            if (cfg.windows.rank_policy == "skip"
-                    and is_rank_deficient(window_tr_from_seconds(w, cfg.tr), atlas.n_nodes)):
+            # Rank deficiency is per TR, not per cohort: the floor is
+            # (n_nodes + 0.5) x tr, so harvardoxford needs 275s at Cam-CAN's
+            # 2.47s movie and 220s at its 1.97s rest. A cohort scanned at both
+            # is therefore skipped only when the window is deficient at EVERY
+            # one of its TRs -- dropping the pair because the slower task
+            # cannot support it would throw away rest windows that are
+            # perfectly estimable. Where it is deficient at some TRs and not
+            # others, the pair RUNS and this says which, because dfc flags
+            # `rank_deficient` per window anyway (dfc.py:158) and a silent
+            # mixture is the thing worth naming.
+            trs = cfg.trs()
+            deficient = {t: tr for t, tr in trs.items()
+                         if is_rank_deficient(window_tr_from_seconds(w, tr),
+                                              atlas.n_nodes)}
+            if cfg.windows.rank_policy == "skip" and len(deficient) == len(trs):
+                at = "  ".join(
+                    f"{min_window_s_for_nodes(atlas.n_nodes, tr):g}s at TR={tr:g}"
+                    + ("" if t is None else f" ({t})")
+                    for t, tr in sorted(trs.items(), key=lambda kv: str(kv[0])))
                 print(f"  skipping atlas={atlas.name} window_s={w:g}: "
-                      f"{atlas.n_nodes} nodes need >= "
-                      f"{min_window_s_for_nodes(atlas.n_nodes, cfg.tr):g}s at TR="
-                      f"{cfg.tr:g}  (windows.rank_policy: skip)")
+                      f"{atlas.n_nodes} nodes need >= {at}"
+                      f"  (windows.rank_policy: skip)")
                 continue
+            if deficient:
+                print(f"  NOTE atlas={atlas.name} window_s={w:g}: rank-deficient "
+                      f"for task(s) {sorted(str(t) for t in deficient)} only, so "
+                      f"the pair still runs -- those windows carry "
+                      f"rank_deficient=True and the others do not.")
             plan.append((atlas, w, cfg.windows.overlaps_for(w), files))
     return plan
 
@@ -248,6 +272,7 @@ def _preview_plan(cfg, plan) -> None:
     """
     import pyarrow.parquet as pq
 
+    from .io import parse_hive_keys
     from .windows import (is_rank_deficient, min_window_s_for_nodes, n_windows,
                           stride_seconds, window_tr_from_seconds)
 
@@ -262,24 +287,34 @@ def _preview_plan(cfg, plan) -> None:
                 n_tr = pq.ParquetFile(f).metadata.num_rows
             except Exception:                                    # noqa: BLE001
                 continue
-            rows += n_windows(n_tr * cfg.tr, w, n_ov, cfg.windows.drop_incomplete)
+            # This shard's TR, from the task in its path. n_tr x tr is a
+            # DURATION, and a cohort with two TRs would have every rest shard's
+            # length overstated by 25% at the movie's TR.
+            tr = cfg.tr_for(parse_hive_keys(f).get("task"))
+            rows += n_windows(n_tr * tr, w, n_ov, cfg.windows.drop_incomplete)
         n_cols = atlas.n_edges + _DFC_FIXED_COLUMNS
         approx = rows * n_cols * 4          # float32 before compression
         total_rows += rows
         total_bytes += approx
-        n_tr_nominal = window_tr_from_seconds(w, cfg.tr)
         print(f"  atlas={atlas.name:<16} window_s={w:<6g} n_overlaps={n_ov} "
               f"stride={stride_seconds(w, n_ov):g}s")
         print(f"    {len(files):>4} shard(s)  ~{rows:,} row(s) x {atlas.n_edges:,} edge(s) "
               f"  ~{_human_bytes(approx)} uncompressed")
-        if is_rank_deficient(n_tr_nominal, atlas.n_nodes):
-            floor_s = min_window_s_for_nodes(atlas.n_nodes, cfg.tr)
-            print(f"    WARNING: {n_tr_nominal} sample(s) for {atlas.n_nodes} node(s) -- "
+        # Once per TR: the same window size holds a different number of samples
+        # at each, so it can be singular for one task and estimable for another.
+        for task, tr in sorted(cfg.trs().items(), key=lambda kv: str(kv[0])):
+            n_tr_nominal = window_tr_from_seconds(w, tr)
+            if not is_rank_deficient(n_tr_nominal, atlas.n_nodes):
+                continue
+            floor_s = min_window_s_for_nodes(atlas.n_nodes, tr)
+            where = "" if task is None else f" for task {task}"
+            print(f"    WARNING{where}: {n_tr_nominal} sample(s) for "
+                  f"{atlas.n_nodes} node(s) -- "
                   f"every window flagged rank_deficient.")
             print(f"             Edges are still finite (each is a 2-variable r over "
                   f"{n_tr_nominal} samples, SE ~ {1 / max(n_tr_nominal - 3, 1) ** 0.5:.2f}); "
                   f"the MATRIX is singular.")
-            print(f"             This atlas needs >= {floor_s:g}s at TR={cfg.tr:g}. "
+            print(f"             This atlas needs >= {floor_s:g}s at TR={tr:g}. "
                   f"To not run the pair, either:")
             print(f"               windows.by_size: {{{w:g}: {{atlases: [...]}}}}   "
                   f"# this size only")
@@ -430,9 +465,37 @@ def cmd_diagnose(args) -> int:
         return 0
     print("ISC alignment ->", write_diagnostic(
         isc, cfg.output_root, "isc_alignment.csv", cohort=cfg.cohort))
-    ok, msg = isc_gate(isc, cfg.stimulus.isc_gate_tr)
-    print(("PASS " if ok else "FAIL ") + msg)
-    return 0 if ok else 2
+    # PER TASK. One cohort can hold a task with a shared stimulus and one
+    # without -- Cam-CAN's movie and its rest are the same people -- and the
+    # gate is only meaningful for the former. Gating the whole cohort on one
+    # threshold would either FAIL on the rest runs (cancelling stage 3 and the
+    # censor step through --dependency=afterok, for a fact about the design) or
+    # drop the check for the movie runs, where it is the only thing that
+    # catches a misaligned film.
+    #
+    # The ISC frame's task column is `movie`, which is what isc_qc keys on.
+    tasks = (sorted(isc["movie"].astype(str).unique())
+             if "movie" in isc.columns else [None])
+    failed = []
+    for task in tasks:
+        sub = isc if task is None else isc[isc["movie"].astype(str) == task]
+        where = "" if task is None else f"task {task}: "
+        gate = cfg.stimulus.isc_gate_for(task)
+        if gate is None:
+            # Measured and written, deliberately NOT gated -- see
+            # StimulusConfig.isc_gate_tr. Nothing is shared for ISC to check.
+            _, msg = isc_gate(sub, float("inf"))
+            print(f"  {where}ISC gate NOT APPLIED (no shared stimulus): {msg}")
+            print(f"  {where}ISC should be near zero; a strongly correlated "
+                  f"resting cohort is a finding, not a pass.")
+            continue
+        ok, msg = isc_gate(sub, gate)
+        print(f"  {where}" + ("PASS " if ok else "FAIL ") + msg)
+        if not ok:
+            failed.append(task)
+    if failed:
+        print(f"FAIL ISC gate for task(s) {[str(t) for t in failed]}")
+    return 2 if failed else 0
 
 
 # (column, worse direction, what it is about). One line per failure mode.
@@ -512,12 +575,43 @@ def cmd_cluster(args) -> int:
     return cluster.run(args)
 
 
-def cmd_select(args) -> int:
+def cmd_select_bstm(args) -> int:
     """Stage 5b: rank state sets by how well their transitions predict a
     phenotype column. Parallel over (state set x model x fold seed)."""
     from . import bstm_selection
 
     return bstm_selection.run(args)
+
+
+def cmd_static_fc(args) -> int:
+    """Stage 3b: the upper triangle of one correlation matrix per subject.
+
+    Reads stage 2 through `frames.read_cohort`, so the edges come from exactly
+    the frames the `window_s = -1` state arm is fitted on. That identity is the
+    point: it makes the gap between fcm_selection and bstm_selection a gap
+    between models rather than between preprocessing.
+    """
+    from . import static_fc
+
+    return static_fc.run(args)
+
+
+def cmd_fcm_select(args) -> int:
+    """Stage 5b': rank static connectivity models the way `select-bstm` ranks
+    state sets, into the other tree of the same shape.
+
+    Two trees, each partitioned by condition -- four tables, one shape, read
+    side by side:
+      bstm_selection/task=movie/  select-bstm --cohort camcan      --task movie
+      bstm_selection/task=rest/   select-bstm --cohort camcan_rest --task rest
+      fcm_selection/ task=movie/  this,       --cohorts camcan      --task movie
+      fcm_selection/ task=rest/   this,       --cohorts camcan_rest --task rest
+    Only this one is separate code; its features come from stage 3b rather
+    than stage 5a.
+    """
+    from . import fcm_selection
+
+    return fcm_selection.run(args)
 
 
 def cmd_transitions(args) -> int:
@@ -682,11 +776,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     from . import bstm_selection as _bstm_selection
 
+    # `select-bstm` and `select-fcm`, a matched pair naming the two models
+    # being ranked. `select` alone did not say select WHAT, and `select-model`
+    # said it no better, since BOTH of these select a model. The output trees
+    # are `bstm_selection` and `fcm_selection`, so the commands now spell the
+    # folders they write.
     sel = sub.add_parser(
-        "select",
+        "select-bstm",
         help="stage 5b: which state set predicts a phenotype column best")
     _bstm_selection.add_arguments(sel)
-    sel.set_defaults(func=cmd_select)
+    sel.set_defaults(func=cmd_select_bstm)
 
     from . import transitions as _transitions
 
@@ -695,6 +794,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="stage 5a: latents -> per-subject brain-state transition matrices")
     _transitions.add_arguments(t)
     t.set_defaults(func=cmd_transitions)
+
+    from . import static_fc as _static_fc
+
+    sf = sub.add_parser(
+        "static-fc",
+        help="stage 3b: one connectivity matrix per subject -- what "
+             "select-fcm ranks")
+    _static_fc.add_arguments(sf)
+    sf.set_defaults(func=cmd_static_fc)
+
+    from . import fcm_selection as _fcm_selection
+
+    fs = sub.add_parser(
+        "select-fcm",
+        help="stage 5b': how well STATIC connectivity predicts a phenotype "
+             "-- the other tree beside bstm_selection, same --task split")
+    _fcm_selection.add_arguments(fs)
+    fs.set_defaults(func=cmd_fcm_select)
 
     sm = sub.add_parser(
         "state-means",

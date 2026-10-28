@@ -77,7 +77,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .io import STATE_COLUMN_RE, STATE_K_BAND, latents_root, meta_dir
+from .io import (STATE_COLUMN_RE, STATE_K_BAND, latents_cells,
+                 latents_root, meta_dir, transitions_root)
 
 # The state-label columns this stage reads. K = 8 and 27 only: at 125 and 512
 # cells a subject's 74 transitions leave >99% of the matrix at exactly zero, so
@@ -100,8 +101,9 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def latents_path(root: Path, atlas: str, window_s, cohort: str) -> Path:
-    return latents_root(root, atlas, window_s, cohort) / "data.parquet"
+def latents_path(root: Path, atlas: str, window_s, cohort: str,
+                 task: str) -> Path:
+    return latents_root(root, atlas, window_s, cohort, task) / "data.parquet"
 
 
 # ------------------------------------------------------------- pre-flight ---
@@ -142,16 +144,15 @@ def cell_states(root: Path, atlas: str, w, cohorts, min_k: int, max_k: int):
       skipped  shared but outside the K band.
     """
     per, first = {}, None
-    for c in cohorts:
-        p = latents_path(root, atlas, w, c)
-        if p.exists():
-            per[c] = set(discover_state_columns(p))
+    for k, p in latents_cells(root, atlas, w).items():
+        if k[0] in set(cohorts):
+            per[k] = set(discover_state_columns(p))
             first = first or p
     if not per:
         return [], {}, []
 
     shared = set.intersection(*per.values())
-    partial = {c: sorted(v - shared) for c, v in per.items() if v - shared}
+    partial = {k: sorted(v - shared) for k, v in per.items() if v - shared}
     k_of = {st: _k_quietly(st, first) for st in shared}
     usable, skipped = _within_k_band(sorted(shared), k_of, min_k, max_k)
     return usable, partial, skipped
@@ -187,9 +188,20 @@ def check_grid(root: Path, atlases, windows, cohorts, states, min_k: int,
             base = {"atlas": atlas, "window_s": w}
 
             present = {}
+            cells = {k: v for k, v in latents_cells(root, atlas, w).items()
+                     if k[0] in set(cohorts)}
+            # A cohort with no latents at all still gets a row, so "stage 3
+            # never ran here" reads as a gap rather than as silence.
             for cohort in cohorts:
-                p = latents_path(root, atlas, w, cohort)
-                rec = {**base, "cohort": cohort, "path": str(p)}
+                if not any(k[0] == cohort for k in cells):
+                    rows.append({**base, "cohort": cohort, "task": None,
+                                 "path": str(latents_root(root, atlas, w,
+                                                          cohort)),
+                                 "states": "(no latents)", "ok": False,
+                                 "reason": "no latents file", "n_rows": 0,
+                                 "fatal": False})
+            for (cohort, task), p in cells.items():
+                rec = {**base, "cohort": cohort, "task": task, "path": str(p)}
                 if not p.exists():
                     # Reported, not fatal: an aperture stage 3 never ran is a
                     # gap in the plan, not a corruption of what exists. The
@@ -200,14 +212,14 @@ def check_grid(root: Path, atlases, windows, cohorts, states, min_k: int,
                                  "fatal": False})
                     continue
                 names = set(_schema(p).names)
-                present[cohort] = _meta_value(p, "model_hash")
+                present[(cohort, task)] = _meta_value(p, "model_hash")
                 n_rows = pq.ParquetFile(p).metadata.num_rows
                 for st in here:
                     reason = ("" if st in names else
                               f"column {st} absent (run `fmri-decomp cluster` "
                               f"for this atlas and aperture)")
                     rows.append({**rec, "states": st, "n_rows": n_rows,
-                                 "model_hash": present[cohort],
+                                 "model_hash": present[(cohort, task)],
                                  "censor_policy": _meta_value(p, "censor_policy"),
                                  "ok": not reason, "reason": reason,
                                  # Only when NAMED does an absent column stop the
@@ -215,14 +227,14 @@ def check_grid(root: Path, atlases, windows, cohorts, states, min_k: int,
                                  # discovery simply did not find in this cell is
                                  # not a fault of the cell.
                                  "fatal": bool(reason) and bool(states)})
-                for st in partial.get(cohort, []):
+                for st in partial.get((cohort, task), []):
                     rows.append({**rec, "states": st, "n_rows": n_rows,
-                                 "model_hash": present[cohort],
+                                 "model_hash": present[(cohort, task)],
                                  "ok": False,
                                  "fatal": False,
-                                 "reason": f"{st} is in {cohort} but not in "
-                                           f"every cohort of this cell -- stage "
-                                           f"4b ran unevenly here"})
+                                 "reason": f"{st} is in {cohort}/{task} but "
+                                           f"not in every cell here -- stage "
+                                           f"4b ran unevenly"})
                 for st in skipped:
                     rows.append({**rec, "states": st, "n_rows": n_rows,
                                  "ok": False, "fatal": False,
@@ -235,10 +247,11 @@ def check_grid(root: Path, atlases, windows, cohorts, states, min_k: int,
                         # THIS one stops everything. Two cohorts from different
                         # fits cannot be pooled and nothing downstream notices.
                         r["fatal"] = True
-                        r["reason"] = (f"model_hash differs across cohorts "
-                                       f"{present} -- state labels are not "
-                                       f"comparable; re-run decompose for all "
-                                       f"cohorts together")
+                        r["reason"] = (
+                            f"model_hash differs across "
+                            f"{ {f'{c}/{t}': h for (c, t), h in present.items()} }"
+                            f" -- state labels are not comparable; re-run "
+                            f"decompose for all cohorts together")
     return pd.DataFrame(rows)
 
 
@@ -551,16 +564,14 @@ def _within_k_band(states: list[str], k_of: dict, min_k: int, max_k: int):
     return keep, skip
 
 
-def process(root: Path, atlas: str, window_s, cohort: str, state_col: str,
-            n_overlaps: int, overwrite: bool) -> dict:
-    out_dir = (root / "transitions" / f"atlas={atlas}"
-               / f"window_s={window_s}" / f"states={state_col}"
-               / f"cohort={cohort}")
+def process(root: Path, atlas: str, window_s, cohort: str, task: str,
+            state_col: str, n_overlaps: int, overwrite: bool) -> dict:
+    out_dir = transitions_root(root, atlas, window_s, state_col, cohort, task)
     out_path = out_dir / "subjects.parquet"
     if not overwrite and out_path.exists():
-        return {"status": "skipped", "cohort": cohort}
+        return {"status": "skipped", "cohort": cohort, "task": task}
 
-    src = latents_path(root, atlas, window_s, cohort)
+    src = latents_path(root, atlas, window_s, cohort, task)
     cols = IDENT + [state_col] + [c for c in COORDS] + ["crosses_run_boundary"]
     # `cols` includes `cohort`, which is ALSO the name of a directory key on this
     # path, so pd.read_parquet's dataset layer would try to merge a string column
@@ -581,7 +592,8 @@ def process(root: Path, atlas: str, window_s, cohort: str, state_col: str,
             for (task, sub), g in df.sort_values("window_id")
                                     .groupby(["task", "sub"], sort=True)]
 
-    prov = {"cohort": cohort, "atlas": atlas, "window_s": str(window_s),
+    prov = {"cohort": cohort, "task": task,
+            "atlas": atlas, "window_s": str(window_s),
             "states": state_col, "n_states": K, "model_hash": model_hash,
             "censor_policy": policy, "n_overlaps": n_overlaps,
             # What was actually used, which is not n_overlaps at every aperture.
@@ -596,7 +608,8 @@ def process(root: Path, atlas: str, window_s, cohort: str, state_col: str,
 
     out_dir.mkdir(parents=True, exist_ok=True)
     _write(out, out_path)
-    return {"status": "ok", "cohort": cohort, "subjects": len(out),
+    return {"status": "ok", "cohort": cohort, "task": task,
+            "subjects": len(out),
             "n_cells": len(cells), "n_columns": out.shape[1],
             "median_transitions": float(out["n_transitions"].median())
             if len(out) else np.nan,
@@ -615,22 +628,18 @@ def _write(df: pd.DataFrame, path: Path) -> None:
 
 # ------------------------------------------------------------------- run ---
 def _default_root() -> Path:
-    if os.environ.get("FMRIDECOMP_OUTPUTS"):
-        return Path(os.environ["FMRIDECOMP_OUTPUTS"])
-    import yaml
+    """Delegates to io.default_output_root -- see it for why this is not
+    eight copies of a cohort filename any more."""
+    from .io import default_output_root
 
-    repo = Path(__file__).resolve().parent.parent
-    return Path(yaml.safe_load(
-        (repo / "config" / "camcan_movie.yaml").read_text())["output_root"])
+    return default_output_root()
 
 
 def _discover_cohorts(root: Path, atlases, windows) -> list[str]:
     found = set()
     for atlas in atlases:
         for w in windows:
-            d = latents_root(root, atlas, w)
-            if d.is_dir():
-                found |= {p.name.split("=", 1)[1] for p in d.glob("cohort=*")}
+            found |= {c for c, _ in latents_cells(root, atlas, w)}
     return sorted(found)
 
 
@@ -686,14 +695,15 @@ def run(args) -> int:
     for (atlas, w, st), grp in ready.groupby(["atlas", "window_s", "states"],
                                              sort=True):
         log(f"atlas={atlas} window_s={w} states={st}")
-        for cohort in sorted(grp["cohort"].unique()):
-            e = process(root, atlas, w, cohort, st, args.n_overlaps,
+        for cohort, task in sorted(set(zip(grp["cohort"], grp["task"]))):
+            e = process(root, atlas, w, cohort, task, st, args.n_overlaps,
                         args.overwrite)
             entries.append(e)
+            cell = f"{cohort}/{task}"
             if e["status"] == "skipped":
-                log(f"    {cohort:<14} already written, skipped")
+                log(f"    {cell:<20} already written, skipped")
             else:
-                log(f"    {cohort:<14} {e['subjects']:>4} subject(s) x "
+                log(f"    {cell:<20} {e['subjects']:>4} subject(s) x "
                     f"{e['n_columns']:>4} column(s) "
                     f"({e['n_cells']} cell(s)), median "
                     f"{e['median_transitions']:.0f} transitions each")
