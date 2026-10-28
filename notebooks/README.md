@@ -16,6 +16,7 @@ Exploration of what the pipeline wrote. Nothing here writes to `outputs/`.
 | `11_normal_brain_cohorts.ipynb` | the normal brain across cohorts (what they share): rest and movie per cohort and their mean, movie vs rest in blue with the dynamics beside; each cohort's equivalence to the others (TOST); train vs projected cohorts; the transition matrices with a TOST per cell |
 | `cohort_tables.py` / `cohort_plots.py` | 11's tables and figures (the state diagram is `hads_plots`'s) |
 | `hads_tables.py` / `hads_plots.py` | 10's tables (cached in `cache/`; `python hads_tables.py` builds the slow ones on the cluster) and its figures |
+| `08_state_maps.ipynb` | brain states × reference maps: pick a state set, atlases, families and BrainMap depth; tables then figures, via `state_correlations.py` + `state_figures.py` (here; see `state_maps.md`) |
 | `nbtools.py` | the loaders they use: inventory, pruned reads, the participants join |
 
 **QC lives in one place.** `03_qc.ipynb` owns subject-level quality control —

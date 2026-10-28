@@ -255,4 +255,5 @@ config/phenotype/*.csv
 
 # notebooks/09 and hads_tables.py (notebook 10) cache their slow tables here (regenerated on demand)
 notebooks/cache/
+# reference maps for 08_state_maps (fetch_reference_maps.sh), ~285 MB
 notebooks/state_maps_data/
