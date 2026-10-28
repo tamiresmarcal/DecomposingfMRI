@@ -252,3 +252,7 @@ slurm/env.sh
 # `config/*_participants.csv` stays tracked on purpose -- ids, task and
 # exclusion reasons are facts about files, not about people.
 config/phenotype/*.csv
+
+# notebooks/09 and hads_tables.py (notebook 10) cache their slow tables here (regenerated on demand)
+notebooks/cache/
+notebooks/state_maps_data/

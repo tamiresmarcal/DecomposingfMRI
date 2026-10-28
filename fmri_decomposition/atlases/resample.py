@@ -25,10 +25,14 @@ def resample_labels_to(labels_img, reference_img):
     from nilearn.image import resample_to_img
 
     ref3d = _first_volume(reference_img)
-    return resample_to_img(
-        labels_img, ref3d, interpolation="nearest",
-        force_resample=True, copy_header=True,
-    )
+    try:
+        return resample_to_img(
+            labels_img, ref3d, interpolation="nearest",
+            force_resample=True, copy_header=True,
+        )
+    except TypeError:
+        # nilearn < 0.11 has neither keyword; its behaviour is what they select.
+        return resample_to_img(labels_img, ref3d, interpolation="nearest")
 
 
 def _first_volume(img):
