@@ -11,6 +11,8 @@ Directory depth is constant across cohorts by construction: leftover entities
 
 from __future__ import annotations
 
+import csv
+import hashlib
 import json
 import os
 import re
@@ -549,3 +551,50 @@ def edge_storage_mode(n_edges: int, threshold: int = 20_000) -> str:
     Schaefer-1000 gives 499,500 (one fixed_size_list column).
     """
     return "columns" if n_edges <= threshold else "list"
+
+
+# ------------------------------------------------------- subject lists ---
+def read_subject_list(path: str, flag: str = "--restrict-subjects") -> set[str]:
+    """One subject id per line, or a CSV with a `sub` column.
+
+    Shared by every stage that is handed a list of ids -- the selection trees,
+    which use it to pin who was SCORED, and `decompose`, which uses it to pin
+    who the fit was fitted ON. Its whole purpose is that those stages agree
+    about a set of subjects, and two implementations of "read a list of ids" is
+    exactly the kind of thing that drifts on whitespace or case. `flag` only
+    names the option in the error, so each caller's message points at its own.
+
+    Ids are upper-cased and stripped, because every join downstream does the
+    same -- a list normalised differently would match nothing and read as an id
+    mismatch in the data rather than in this file.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise SystemExit(f"{flag} {path}: no such file")
+    lines = p.read_text().splitlines()
+    if lines and "sub" in [c.strip().lower() for c in lines[0].split(",")]:
+        with p.open(newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        col = next((c for c in (rows[0] if rows else {})
+                    if c and c.strip().lower() == "sub"), None)
+        vals = [r.get(col) or "" for r in rows] if col else []
+    else:
+        vals = lines
+    out = {v.strip().upper() for v in vals if v and v.strip()}
+    if not out:
+        raise SystemExit(f"{flag} {path}: no ids in it")
+    return out
+
+
+def subject_list_digest(subs: Iterable[str]) -> str:
+    """A stable short digest of a SET of subject ids.
+
+    What goes into `model_hash` when a fit was restricted to some subjects. The
+    list itself must not go in: it is hundreds of ids, it would dwarf the rest
+    of the payload in any diff, and -- the reason that matters -- a camcan
+    split stratified on HADS encodes phenotype in its membership, which is not
+    something to write into every output file's metadata. The digest says
+    "these subjects and no others" without saying who they are.
+    """
+    joined = "\n".join(sorted(str(s).strip().upper() for s in subs))
+    return hashlib.sha256(joined.encode()).hexdigest()[:16]

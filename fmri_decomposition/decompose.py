@@ -92,7 +92,7 @@ import pandas as pd
 # Identity and QC carried into the latents. Everything else in a dfc file is
 # either an edge (dropped -- it is already in dfc/) or a partition key.
 from .io import (PASSTHROUGH_MAX_FEATURES, RAW_PREFIX, latents_root,
-                 read_file)
+                 read_file, read_subject_list, subject_list_digest)
 
 #: Stored beside the fit description but describing the FILE, not the fit, so
 #: never carried into a hash by --legacy-hash-from. `tasks` is the conditions
@@ -387,6 +387,109 @@ def _umap_latents(args) -> list[int]:
     return list(want) if want else list(args.n_latents)
 
 
+def keep_train_tasks(train_cells, train_tasks, window_s, atlas,
+                    source: str = "dfc"):
+    """Narrow the training cells to `--train-tasks`, or refuse.
+
+    `--train` names COHORTS and takes every task they have, so without this
+    "fit on movie only" and "fit on movie and rest" are not two commands --
+    they are the same command before and after the rest shards appear on disk.
+
+    Both refusals exist because `train_tasks` goes into `model_hash`. A pinned
+    task with no shards must not be dropped quietly: the run would look like it
+    worked, and every output would carry a fit description naming a condition
+    the fit never saw. That is a worse failure than not running.
+    """
+    if not train_tasks:
+        return train_cells
+    want = {str(t) for t in train_tasks}
+    have = sorted({str(t) for _, t in train_cells})
+    kept = [(c, t) for c, t in train_cells if str(t) in want]
+    if not kept:
+        raise SystemExit(
+            f"window_s={window_s}: --train-tasks {' '.join(sorted(want))} "
+            f"matches none of the tasks the training cohorts have at "
+            f"atlas={atlas}.\n"
+            f"  on disk: {', '.join(have) or '(none)'}\n"
+            f"  Task labels are the BIDS labels as the data spells them, so "
+            f"they are case-sensitive here exactly as in --keep-tasks.")
+    missing = sorted(want - {str(t) for _, t in kept})
+    if missing:
+        raise SystemExit(
+            f"window_s={window_s}: --train-tasks names {', '.join(missing)}, "
+            f"which has no {source} shards for any training cohort at "
+            f"atlas={atlas}.\n"
+            f"  on disk: {', '.join(have)}\n"
+            f"  Refusing rather than fitting on the rest: `train_tasks` is in "
+            f"model_hash, so going ahead would stamp every output with a fit "
+            f"description naming a condition the fit never saw.\n"
+            f"  Run the stage that writes them, or drop it from "
+            f"--train-tasks.")
+    return kept
+
+
+def check_train_composition(saved, now, mhash: str, window_s) -> None:
+    """Refuse a saved fit whose training composition is no longer what is here.
+
+    THE SILENT CASE. `train_cohorts` names cohorts and the training cells take
+    all of their tasks, so a training cohort that GAINED a condition changes
+    the training rows without changing any key in the fit description -- the
+    saved fit would be reused under a hash that now means something else.
+    `--train-tasks` pins the answer and lands in the hash; this catches the
+    case where nobody pinned it.
+
+    A fit saved before `train_cells` was recorded has nothing to compare, so
+    the old behaviour stands rather than refusing every tree written earlier.
+    """
+    if saved is None or sorted(saved) == sorted(now):
+        return
+    saved, now = sorted(saved), sorted(now)
+    gained = sorted(set(now) - set(saved))
+    lost = sorted(set(saved) - set(now))
+
+    def tasks_of(cells) -> str:
+        """The `--train-tasks` pin that reproduces a set of cells. The pin is
+        about CONDITIONS, so the same condition in two cohorts is one name."""
+        return " ".join(sorted({c.split("/", 1)[-1] for c in cells}))
+    raise SystemExit(
+        f"window_s={window_s}: the saved fit for model_hash {mhash} was "
+        f"fitted on\n"
+        f"    {', '.join(saved)}\n"
+        f"  but the training cohorts now have\n"
+        f"    {', '.join(now)}\n"
+        + (f"  gained: {', '.join(gained)}\n" if gained else "")
+        + (f"  lost:   {', '.join(lost)}\n" if lost else "")
+        + f"  Those are different training rows under one model_hash, which "
+        f"is the one thing the hash must not allow. Say which you mean:\n"
+        f"    --train-tasks {tasks_of(saved)}\n"
+        f"        keep the fit that is on disk -- a new hash, but the same "
+        f"rows it was fitted on.\n"
+        f"    --train-tasks {tasks_of(now)}\n"
+        f"        fit on everything now present -- a new hash and a new fit, "
+        f"beside the old one.\n"
+        f"    --overwrite\n"
+        f"        refit in place under the SAME hash, destroying the old fit "
+        f"and every state column derived from it.")
+
+
+def train_subjects(args) -> set[str] | None:
+    """The `--train-subjects` set, or None when the fit is not restricted.
+
+    Read once and memoised on `args`. `fit_meta` runs per aperture inside one
+    invocation and the answer cannot change between apertures -- re-reading
+    would let a file edited while the command runs produce two different
+    `model_hash` values in the same run, which is the one thing a hash is for.
+    """
+    path = getattr(args, "train_subjects", None)
+    if not path:
+        return None
+    cached = getattr(args, "_train_subjects_set", None)
+    if cached is None:
+        cached = read_subject_list(path, flag="--train-subjects")
+        args._train_subjects_set = cached
+    return cached
+
+
 def fit_meta(args, window_s, features: list[str]) -> dict:
     """The fit description carried into every output of this run.
 
@@ -430,6 +533,26 @@ def fit_meta(args, window_s, features: list[str]) -> dict:
         meta["passthrough_features"] = True
     if _umap_latents(args) != list(args.n_latents):
         meta["umap_latents"] = _umap_latents(args)
+    # WHICH CONDITIONS AND WHICH SUBJECTS THE FIT SAW.
+    #
+    # `train_cohorts` is too coarse on its own. `train_cells` takes EVERY task
+    # of every training cohort (see run), so the day a training cohort gains a
+    # condition the fit changes and `train_cohorts` does not -- two genuinely
+    # different models under one model_hash, with nothing saying so. A fit
+    # restricted to some of a cohort's subjects is a different model again, and
+    # nothing recorded it at all.
+    #
+    # Present only when the flag is given, the same rule the keys above follow:
+    # an absent key means "every task" / "every subject", so adding these moves
+    # no hash already on disk. Pinning the tasks explicitly is what makes
+    # "movie only" and "movie + rest" two hashes instead of one; `run` refuses
+    # the remaining case, where neither is pinned and the rows changed anyway.
+    if getattr(args, "train_tasks", None):
+        meta["train_tasks"] = sorted(str(t) for t in args.train_tasks)
+    subs = train_subjects(args)
+    if subs is not None:
+        # The DIGEST, never the list -- see io.subject_list_digest.
+        meta["train_subjects"] = subject_list_digest(subs)
     if getattr(args, "source", "dfc") != "dfc":
         meta.update({
             "source": args.source,
@@ -666,7 +789,14 @@ def write_latents(lat: pd.DataFrame, path: Path, models: dict, cohort: str) -> N
             if v is not None}
     meta = {k.encode(): json.dumps(v, default=str).encode()
             for k, v in {**models["fit_meta"], **axis, "cohort": cohort,
-                         "role": models["role_of"][cohort],
+                         # From the FRAME, not from a per-cohort map: the
+                         # `role` column was set per cell by `role_for`, and a
+                         # footer that disagreed with the column it sits beside
+                         # would be worse than either alone. Same reason
+                         # `tasks` below is read off the rows.
+                         "role": (sorted(lat["role"].astype(str).unique())[0]
+                                  if "role" in lat.columns and len(lat)
+                                  else models["role_of"][cohort]),
                          "model_hash": models["model_hash"],
                          # Which CONDITIONS this file covers. One cohort can
                          # hold several -- Cam-CAN's Movie and Rest are the
@@ -681,6 +811,14 @@ def write_latents(lat: pd.DataFrame, path: Path, models: dict, cohort: str) -> N
                          "umap_fitted": bool(models.get("umap_fitted")),
                          "n_umap_components": sorted(models["umap"]),
                          "n_train_rows": models["n_train_rows"],
+                         # The resolved training composition, so a latents file
+                         # opened on its own says which conditions and how many
+                         # subjects its fit was fitted on -- the two things
+                         # `train_cohorts` cannot say. Beside fit_meta, so
+                         # neither is in model_hash; listed in _NOT_FIT_KEYS so
+                         # neither shows up in a staleness diff.
+                         "train_cells": models.get("train_cells"),
+                         "n_train_subjects": models.get("n_train_subjects"),
                          "package_version": __version__,
                          "written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                       time.gmtime())}.items()}
@@ -754,7 +892,7 @@ def latents_fit_description(path: Path) -> tuple[dict, list[str]]:
 _NOT_FIT_KEYS = frozenset({
     "cohort", "role", "model_hash", "umap_fitted", "n_umap_components",
     "n_train_rows", "package_version", "written_utc", "stride_s",
-    "indep_factor",
+    "indep_factor", "train_cells", "n_train_subjects",
 })
 
 
@@ -1012,6 +1150,9 @@ def run_one(root: Path, window_s, args) -> None:
             f"window_s={window_s}: no {source} shards for any TRAINING cohort "
             f"({', '.join(args.train)}) at atlas={atlas}. The fit has nothing "
             f"to be fitted on.")
+    train_cells = keep_train_tasks(train_cells, getattr(args, "train_tasks",
+                                                        None),
+                                   window_s, atlas, source)
 
     first = source_shard_paths(root, atlas, window_s, *train_cells[0][:1],
                                source, train_cells[0][1])
@@ -1099,9 +1240,38 @@ def run_one(root: Path, window_s, args) -> None:
         log("WARNING: no --censor-policy. Every window in every shard enters "
             "the fit, including subjects `censor` would have dropped.")
 
+    # PER CELL, not per cohort, and that is the whole point of --train-tasks:
+    # once a cohort can be in --train for only some of its conditions, "is this
+    # cohort training data" has no single answer, and the old per-cohort map
+    # would have labelled a projected rest file `train`. `role` is reported by
+    # `status` and nothing branches on it, so a third value is safe -- and
+    # `train_subset` is the honest label for a cell whose cohort fed the fit
+    # through --train-subjects, where the file holds both the subjects that
+    # were fitted on and the ones deliberately held out of it.
+    train_cell_set = set(train_cells)
+    _restricted = train_subjects(args) is not None
+
+    def role_for(cohort: str, task) -> str:
+        if (cohort, task) not in train_cell_set:
+            return "projected"
+        return "train_subset" if _restricted else "train"
+
     role_of = {c: ("train" if c in args.train else "projected") for c in cohorts}
 
+    train_composition = sorted(f"{c}/{t}" for c, t in train_cells)
+
     if models is not None:
+        # THE SILENT CASE, refused. `train_cohorts` names cohorts and
+        # `train_cells` takes all of their tasks, so a training cohort that
+        # GAINED a condition changes the training rows without changing any key
+        # in the fit description -- the saved fit would be reused under a hash
+        # that now means something else. `--train-tasks` pins the answer and
+        # lands in the hash; this catches the case where nobody pinned it.
+        #
+        # A fit saved before this key existed has no composition recorded, so
+        # there is nothing to compare and the old behaviour stands.
+        check_train_composition(models.get("train_cells"), train_composition,
+                                mhash, window_s)
         log(f"reusing the saved fit for model_hash {mhash} -- no refit, and "
             f"the training cohorts are not re-read")
         # role_of is per-invocation and the saved copy was written by the run
@@ -1112,17 +1282,49 @@ def run_one(root: Path, window_s, args) -> None:
         n_train = int(models.get("n_train_rows") or 0)
     else:
         log("loading training cohorts")
-        idents, blocks = [], []
+        keep_subs = train_subjects(args)
+        if keep_subs is not None:
+            log(f"  --train-subjects: {len(keep_subs):,} id(s), digest "
+                f"{subject_list_digest(keep_subs)}")
+        idents, blocks, fitted_subs = [], [], set()
         stride_s = indep_factor = None
         for cohort, task in train_cells:
             ident, X, stride_s, indep_factor = source_read_cohort(
                 root, atlas, window_s, cohort, features, args,
                 censors[cohort], task)
             ident, X = drop_nan_rows(ident, X)
+            if keep_subs is not None:
+                # Filtered HERE and not inside read_cohort on purpose: the
+                # projection pass below reads the same cohorts unfiltered, so a
+                # cohort can be in --train for some of its subjects and still
+                # get latents for all of them. That is the whole point of a
+                # subject-level split -- the embedding never sees the half the
+                # supervised stage will score.
+                m = (ident["sub"].astype(str).str.strip().str.upper()
+                     .isin(keep_subs).to_numpy())
+                dropped = int(len(m) - m.sum())
+                ident, X = ident.loc[m], X[m]
+                if dropped:
+                    log(f"  {cohort}/{task}: --train-subjects dropped "
+                        f"{dropped:,} of {len(m):,} row(s)")
+            if not len(X):
+                log(f"  {cohort}/{task}: no rows left, not in the fit")
+                continue
+            fitted_subs.update(ident["sub"].astype(str).str.upper())
             log(f"  {cohort}/{task}: {len(X):,} rows, "
                 f"{ident['sub'].nunique()} subs, {X.nbytes / 1e9:.2f} GB")
             idents.append(ident)
             blocks.append(X)
+        if not blocks:
+            raise SystemExit(
+                f"window_s={window_s}: no training row survived. "
+                + (f"--train-subjects {args.train_subjects} matched none of "
+                   f"the subjects in {_cells(train_cells)} -- check that its "
+                   f"ids are spelled as the shards spell them."
+                   if keep_subs is not None else
+                   f"Every training cell came back empty after dropping NaN "
+                   f"rows, which means the shards exist and hold nothing "
+                   f"usable."))
         X_train = np.vstack(blocks) if len(blocks) > 1 else blocks[0]
         n_train = len(X_train)
         del idents, blocks
@@ -1133,6 +1335,12 @@ def run_one(root: Path, window_s, args) -> None:
         models = fit_models(X_train, features, args, meta={
             **meta, "n_train_rows": int(n_train), "model_hash": mhash,
             "fit_meta": meta, "role_of": role_of,
+            # BESIDE fit_meta, not in it, so they do not enter model_hash: the
+            # resolved composition is what the fit actually saw, and the guard
+            # above compares it against the next run's. Recording it is what
+            # turns "the hash cannot see this" into "the hash does not have to".
+            "train_cells": train_composition,
+            "n_train_subjects": len(fitted_subs),
             "stride_s": stride_s, "indep_factor": indep_factor})
         del X_train
         gc.collect()
@@ -1161,6 +1369,9 @@ def run_one(root: Path, window_s, args) -> None:
             "umap_fitted": bool(models.get("umap_fitted")),
             "n_umap_components": sorted(models["umap"]),
             "n_features": len(features), "role_of": role_of,
+            "train_cells": train_composition,
+            "n_train_subjects": len(fitted_subs),
+            "train_subjects_file": getattr(args, "train_subjects", None),
             "shards": counts, "models_file": model_path.name,
             "package_version": __version__, "library_versions": libs,
             "written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1178,12 +1389,12 @@ def run_one(root: Path, window_s, args) -> None:
         # write_latents on why this sits outside fit_meta and therefore outside
         # model_hash.
         models["stride_s"], models["indep_factor"] = stride_s, indep_factor
-        lat = latents_for(ident, X, models, role_of[cohort])
+        lat = latents_for(ident, X, models, role_for(cohort, task))
         del ident, X
         gc.collect()
         path = cell_path(out_dir, cohort, task)
         write_latents(lat, path, models, cohort)
-        log(f"  {cohort}/{task:<12} {role_of[cohort]:<10} {len(lat):>9,} rows "
+        log(f"  {cohort}/{task:<12} {role_for(cohort, task):<14} {len(lat):>9,} rows "
             f"x {lat.shape[1]} cols "
             f"-> {path.relative_to(root)}")
         del lat
@@ -1263,6 +1474,26 @@ def add_arguments(p) -> None:
     p.add_argument("--project", nargs="*", default=[],
                    help="cohorts the fit is APPLIED to. Omit it and only "
                         "--train is written.")
+    p.add_argument("--train-tasks", nargs="+", default=None, metavar="LABEL",
+                   help="restrict the fit to these CONDITIONS of the training "
+                        "cohorts. --train names cohorts and takes every task "
+                        "they have, so this is the only way to say 'fit on "
+                        "movie only' once a cohort also has rest on disk. "
+                        "Case-sensitive, like --keep-tasks: the BIDS labels as "
+                        "the data spells them. Goes into model_hash, so a "
+                        "pinned task with no shards is refused rather than "
+                        "quietly dropped. Omitted: every task of every "
+                        "training cohort, and the run refuses if that set has "
+                        "changed under an existing hash.")
+    p.add_argument("--train-subjects", default=None, metavar="FILE",
+                   help="restrict the fit to these subjects -- one id per "
+                        "line, or a CSV with a `sub` column, the same format "
+                        "--restrict-subjects takes. The cohort is still "
+                        "PROJECTED in full, so this is how a cohort "
+                        "contributes its scanner and its age range to the "
+                        "state space while the half that will be scored stays "
+                        "out of the fit. A digest of the ids goes into "
+                        "model_hash; the ids themselves never do.")
     p.add_argument("--legacy-hash-from", metavar="LATENTS", default=None,
                    help="reproduce the model_hash of an existing cell by "
                         "carrying over the payload keys this version no longer "

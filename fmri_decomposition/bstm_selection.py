@@ -140,7 +140,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .io import hive_key, meta_dir, read_file, transitions_root
+from .io import (hive_key, meta_dir, read_file, read_subject_list,
+                 transitions_root)
 
 # The per-subject features that are NOT transition cells. `occ_*` is added to
 # this per state set, since its width is K.
@@ -401,28 +402,6 @@ def read_phenotype(specs: list[str], id_col: str, target: str,
         + "  ".join(f"{levels[int(k)] if int(k) < len(levels) else int(k)}={v}"
                     for k, v in vc.items()))
     return pheno
-
-
-def read_subject_list(path: str) -> set[str]:
-    """One subject id per line, or a CSV with a `sub` column.
-
-    Shared by every selection tree, because its whole purpose is that the
-    trees agree on who was scored -- two implementations of "read a list of
-    ids" is exactly the kind of thing that drifts on whitespace or case.
-    """
-    p = Path(path)
-    if not p.exists():
-        raise SystemExit(f"--restrict-subjects {path}: no such file")
-    lines = p.read_text().splitlines()
-    if lines and "sub" in [c.strip().lower() for c in lines[0].split(",")]:
-        d = pd.read_csv(p)
-        vals = d[[c for c in d.columns if c.strip().lower() == "sub"][0]]
-    else:
-        vals = pd.Series([ln.strip() for ln in lines if ln.strip()])
-    out = set(vals.astype(str).str.strip().str.upper())
-    if not out:
-        raise SystemExit(f"--restrict-subjects {path}: no ids in it")
-    return out
 
 
 def _label_axes(d: pd.DataFrame) -> pd.DataFrame:
