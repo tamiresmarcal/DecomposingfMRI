@@ -647,6 +647,76 @@ def _seq_lengths(df: pd.DataFrame) -> list[int]:
     return (df.groupby(["task", "sub"], sort=False).size().tolist())
 
 
+def check_against_embedding(stored_cells, stored_digest, now_cells,
+                            now_digest, path) -> list[str]:
+    """Does the clusterer's training scope agree with the embedding's?
+
+    A state definition is `decompose` plus this stage, so the two have to be
+    asked the same question. The latents footer records what the EMBEDDING was
+    fitted on (`train_cells`, `train_subjects`); this compares it against what
+    the CLUSTERER is about to be fitted on. Returns warnings; raises for the
+    one case that is not a judgement call.
+
+    Tasks differing is a WARNING, not a refusal. Pooling the embedding widely
+    and fitting the clusterer narrowly is unusual but coherent, and someone may
+    mean it -- it just must not happen by accident, so it is said out loud with
+    both sides named.
+
+    The SUBJECT scope differing is REFUSED. The whole purpose of holding
+    subjects out of the embedding is that the state space is defined without
+    the people the supervised stage will score. A clusterer fitted on those
+    same subjects puts them back into the definition, and the split is gone
+    while every file still claims to have one. That is not a trade-off anyone
+    chooses on purpose.
+    """
+    warnings = []
+    if stored_cells and sorted(stored_cells) != sorted(now_cells):
+        warnings.append(
+            f"WARNING: the embedding was fitted on "
+            f"{', '.join(sorted(stored_cells))} and this clusterer will be "
+            f"fitted on {', '.join(sorted(now_cells))}. Coherent only if you "
+            f"mean it -- pass the same --train-tasks `decompose` was given to "
+            f"make the two agree.")
+    if stored_digest != now_digest and (stored_digest or now_digest):
+        which = ("the embedding held subjects out and this clusterer would be "
+                 "fitted on all of them" if stored_digest and not now_digest
+                 else "this clusterer would be fitted on a subject set the "
+                      "embedding was not" if now_digest and not stored_digest
+                 else "the two were given DIFFERENT subject lists")
+        raise SystemExit(
+            f"the embedding and the clusterer disagree about which subjects "
+            f"define the states: {which}.\n"
+            f"  embedding ({path}): train_subjects "
+            f"{stored_digest or '(every subject)'}\n"
+            f"  clusterer (this run):           train_subjects "
+            f"{now_digest or '(every subject)'}\n"
+            f"  A state definition is `decompose` plus this stage. Fitting the "
+            f"clusterer on subjects the embedding was held out from puts them "
+            f"back into the definition, and the held-out half stops being "
+            f"held out while every file still claims it is.\n"
+            f"  Pass --train-subjects the SAME file `decompose` was given.")
+    return warnings
+
+
+def train_subjects_of(args) -> set[str] | None:
+    """The `--train-subjects` set for THIS stage, or None.
+
+    The same reader `decompose --train-subjects` and the selections'
+    `--restrict-subjects` use, memoised on `args` so one invocation cannot read
+    two different answers out of a file edited while it runs.
+    """
+    path = getattr(args, "train_subjects", None)
+    if not path:
+        return None
+    cached = getattr(args, "_train_subjects_set", None)
+    if cached is None:
+        from .io import read_subject_list
+
+        cached = read_subject_list(path, flag="--train-subjects")
+        args._train_subjects_set = cached
+    return cached
+
+
 def _training_block(frames: dict, train: list[str], cols: list[str], args):
     """The merged training matrix -> (X, per-(task,sub) lengths, row share).
 
@@ -669,9 +739,42 @@ def _training_block(frames: dict, train: list[str], cols: list[str], args):
     (task, sub) either way -- an HMM given one stacked sequence would learn a
     transition from the last frame of one person to the first frame of the next.
     """
-    counts = {c: len(frames[c]) for c in train}
+    # BY WHOLE SUBJECTS, like --balance-train below and for the same reason:
+    # dropping rows from the middle of a subject's sequence would break the
+    # contiguity `lengths` asserts to an HMM. Applied to the TRAINING frames
+    # only -- every cohort present is still labelled in full, which is what
+    # makes a subject-level split work: the state space is defined without the
+    # subjects the supervised stage will score, and they still get labels.
+    keep_subs = train_subjects_of(args)
+    if keep_subs is not None:
+        frames = dict(frames)
+        for c in train:
+            f = frames[c]
+            m = f["sub"].astype(str).str.strip().str.upper().isin(keep_subs)
+            frames[c] = f.loc[m.to_numpy()]
+        empty = [c for c in train if not len(frames[c])]
+        if len(empty) == len(train):
+            raise SystemExit(
+                f"--train-subjects matched no subject in any training cell "
+                f"({', '.join(f'{a}/{b}' for a, b in train)}).\n"
+                f"  Check that its ids are spelled as the latents spell them; "
+                f"they are compared upper-cased and stripped.")
+        for c in empty:
+            # Reported, because a training cell that contributes nothing is
+            # something to notice rather than to silently drop -- it usually
+            # means the split and this condition do not overlap at all.
+            log(f"  --train-subjects: {c[0]}/{c[1]} contributes no row")
+        fitted = [c for c in train if len(frames[c])]
+    else:
+        fitted = list(train)
+
+    counts = {c: len(frames[c]) for c in fitted}
     total = sum(counts.values()) or 1
-    share = {c: counts[c] / total for c in train}
+    # Keyed by every cell that was ASKED for, not only the ones that survived:
+    # `run_one` logs `share[k]` for each of its train_cells, and a dropped cell
+    # would have taken the log line down with a KeyError.
+    share = {c: counts.get(c, 0) / total for c in train}
+    train = fitted
 
     if not args.balance_train:
         X = np.vstack([frames[c][cols].to_numpy(float) for c in train])
@@ -825,11 +928,31 @@ def read_embedding(path: Path, cols: list[str]) -> pd.DataFrame | None:
     return read_file(path, need).to_pandas()
 
 
+def _train_scope(train_tasks, train_subjects_digest) -> dict:
+    """The optional training-scope keys, for both hashes below.
+
+    Present only when the flag was given, which is the rule `decompose`'s
+    `fit_meta` follows: an absent key means "every task" / "every subject", so
+    adding these moves no cache key already on disk. `n_train_rows` would
+    already catch most changes here -- it is in both payloads -- but it cannot
+    tell two different task sets that happen to have the same row count apart,
+    and it says nothing about WHICH conditions a fit saw.
+    """
+    out = {}
+    if train_tasks:
+        out["train_tasks"] = sorted(str(t) for t in train_tasks)
+    if train_subjects_digest:
+        out["train_subjects"] = train_subjects_digest
+    return out
+
+
 def fit_hash(method: str, embedding: str, k, params: dict, train: list[str],
-             n_rows: int, balanced: bool = False) -> str:
+             n_rows: int, balanced: bool = False, train_tasks=None,
+             train_subjects=None) -> str:
     payload = json.dumps({"method": method, "embedding": embedding, "k": k,
                           "params": params, "train": sorted(train),
-                          "n_train_rows": n_rows, "balanced": balanced},
+                          "n_train_rows": n_rows, "balanced": balanced,
+                          **_train_scope(train_tasks, train_subjects)},
                          sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
@@ -841,7 +964,8 @@ _OPTS_NOT_IN_RECIPE = frozenset({"n_jobs"})
 
 
 def recipe_hash(method: str, embedding: str, k, opts: dict, train: list[str],
-                n_rows: int, balanced: bool = False) -> str:
+                n_rows: int, balanced: bool = False, train_tasks=None,
+                train_subjects=None) -> str:
     """What was ASKED FOR, as opposed to what came out. The cache key.
 
     `fit_hash` describes the FITTED model: it carries `cl.params()`, which for
@@ -859,7 +983,8 @@ def recipe_hash(method: str, embedding: str, k, opts: dict, train: list[str],
          "opts": {k2: v for k2, v in sorted(opts.items())
                   if k2 not in _OPTS_NOT_IN_RECIPE},
          "train": sorted(train), "n_train_rows": n_rows,
-         "balanced": balanced},
+         "balanced": balanced,
+         **_train_scope(train_tasks, train_subjects)},
         sort_keys=True, default=str)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
@@ -1066,11 +1191,42 @@ def run_one(root: Path, atlas: str, window_s, args):
     # every fit_hash the day a training cohort gained a condition even though
     # the rows were unchanged. `n_train_rows` is what records an actual change.
     train_cells = [k for k in paths if k[0] in set(args.train)]
-    train = sorted({k[0] for k in train_cells})
     if not train_cells:
         raise SystemExit(f"none of --train {args.train} has latents at "
                          f"atlas={atlas} window_s={window_s}; found "
                          f"{_cells(paths)}")
+    # Shared with `decompose`, deliberately: the embedding and the clusterer
+    # must be able to say "these conditions" the same way, with the same
+    # refusals, or an experiment that pins the tasks at stage 4 and not at 4b
+    # gives a movie-only embedding under a clusterer that also saw rest -- and
+    # the resulting state set is a claim about neither.
+    from .decompose import keep_train_tasks
+
+    train_cells = keep_train_tasks(train_cells,
+                                   getattr(args, "train_tasks", None),
+                                   window_s, atlas, source="latents")
+    train = sorted({k[0] for k in train_cells})
+    # Computed once: it goes into both hashes and into the per-column
+    # provenance, and `train_subjects_of` memoises the read so a file edited
+    # mid-run cannot give one answer to the hash and another to the fit.
+    _keep = train_subjects_of(args)
+    train_digest = None
+    if _keep is not None:
+        from .io import subject_list_digest
+
+        train_digest = subject_list_digest(_keep)
+        log(f"  --train-subjects: {len(_keep):,} id(s), digest {train_digest}")
+
+    # Checked against what the EMBEDDING under these latents was fitted on.
+    # One footer read, the same one `cell_model_hash` below already pays for.
+    from .decompose import latents_fit_description
+
+    _stored, _ = latents_fit_description(paths[train_cells[0]])
+    for _w in check_against_embedding(
+            _stored.get("train_cells"), _stored.get("train_subjects"),
+            [f"{a}/{b}" for a, b in train_cells], train_digest,
+            paths[train_cells[0]]):
+        log(f"  {_w}")
 
     # Every requested embedding is checked BEFORE anything is fitted. Checking
     # inside the loop would still have failed, but only after the earlier
@@ -1179,7 +1335,10 @@ def run_one(root: Path, atlas: str, window_s, args):
                 # adding it in a day.
                 recipe = recipe_hash(method, emb, k, _opts(method, args),
                                      train, len(Xtr),
-                                     balanced=bool(args.balance_train))
+                                     balanced=bool(args.balance_train),
+                                     train_tasks=getattr(args, "train_tasks",
+                                                         None),
+                                     train_subjects=train_digest)
                 cache = clusterer_cache_path(root, atlas, window_s, recipe)
                 reused = (None if args.refit
                           else load_clusterer(cache, cell_model_hash, log=log))
@@ -1224,7 +1383,9 @@ def run_one(root: Path, atlas: str, window_s, args):
 
                 col = column_name(method, emb, cl.k_found)
                 h = fit_hash(method, emb, cl.k_found, cl.params(), train,
-                             len(Xtr), balanced=bool(args.balance_train))
+                             len(Xtr), balanced=bool(args.balance_train),
+                             train_tasks=getattr(args, "train_tasks", None),
+                             train_subjects=train_digest)
                 if reused is None:
                     # Filed under the RECIPE, so the next run can find it, and
                     # carrying the fit_hash so a reload can be checked against
@@ -1275,6 +1436,15 @@ def run_one(root: Path, atlas: str, window_s, args):
                                           "fit_diagnostics":
                                               getattr(cl, "diagnostics", None) or None,
                                           "train_cohorts": train,
+                                          # The resolved conditions and the
+                                          # subject scope, so a state column
+                                          # says what defined it -- not just
+                                          # which cohorts, which is what
+                                          # `train_cohorts` stops at.
+                                          "train_cells": sorted(
+                                              f"{a}/{b}" for a, b in
+                                              train_cells),
+                                          "train_subjects": train_digest,
                                           "n_train_rows": int(len(Xtr)),
                                           "written_utc": time.strftime(
                                               "%Y-%m-%dT%H:%M:%SZ", time.gmtime())}})
@@ -1296,6 +1466,9 @@ def run_one(root: Path, atlas: str, window_s, args):
                                 "embedding": emb, "n_dim": len(cols),
                                 "k": int(cl.k_found),
                                 "fit_hash": h, "train_cohorts": train,
+                                "train_cells": sorted(f"{a}/{b}" for a, b
+                                                      in train_cells),
+                                "train_subjects": train_digest,
                                 "states_used": written, "cohorts_kept": kept,
                                 "fit_reused": bool(reused is not None),
                                 "fit_diagnostics":
@@ -1587,6 +1760,8 @@ def run(args) -> int:
     out.write_text(json.dumps(
         {"entries": entries, "skipped": skipped, "methods": args.methods,
          "embeddings": args.embeddings, "k": args.k, "train": args.train,
+         "train_tasks": getattr(args, "train_tasks", None),
+         "train_subjects_file": getattr(args, "train_subjects", None),
          "min_k": args.min_k, "max_k": args.max_k,
          "balance_train": bool(args.balance_train),
          "n_state_columns": len(entries), "n_skipped": len(skipped),
@@ -1683,6 +1858,21 @@ def add_arguments(p) -> None:
     p.add_argument("--train", nargs="+", default=DEFAULT_TRAIN,
                    help="cohorts a clusterer may be FITTED on, MERGED into one "
                         "fit; every cohort present is then labelled from it")
+    p.add_argument("--train-tasks", nargs="+", default=None, metavar="LABEL",
+                   help="restrict the fit to these CONDITIONS of the training "
+                        "cohorts. --train names cohorts and takes every task "
+                        "they have, so this is the only way to fit a clusterer "
+                        "on movie alone once rest is also on disk. Must match "
+                        "the --train-tasks `decompose` was given, or the "
+                        "embedding and the clusterer saw different conditions "
+                        "and the state set means neither of them.")
+    p.add_argument("--train-subjects", default=None, metavar="FILE",
+                   help="restrict the fit to these subjects -- one id per "
+                        "line, or a CSV with a `sub` column. Every cohort "
+                        "present is still LABELLED in full. Pass the same file "
+                        "`decompose --train-subjects` was given: a subject the "
+                        "embedding was held out from, but the clusterer was "
+                        "fitted on, is in the fit either way.")
     p.add_argument("--balance-train", action="store_true",
                    help="subsample each training cohort to the smallest one's "
                         "row count, by whole subjects, so no cohort dominates "
