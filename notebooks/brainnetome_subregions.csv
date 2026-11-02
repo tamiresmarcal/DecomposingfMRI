@@ -1,0 +1,247 @@
+bn_index,hemi,gyrus,lobe,name
+1,L,SFG,Frontal Lobe ,A8m
+2,R,SFG,Frontal Lobe ,A8m
+3,L,SFG,Frontal Lobe ,A8dl
+4,R,SFG,Frontal Lobe ,A8dl
+5,L,SFG,Frontal Lobe ,A9l
+6,R,SFG,Frontal Lobe ,A9l
+7,L,SFG,Frontal Lobe ,A6dl
+8,R,SFG,Frontal Lobe ,A6dl
+9,L,SFG,Frontal Lobe ,A6m
+10,R,SFG,Frontal Lobe ,A6m
+11,L,SFG,Frontal Lobe ,A9m
+12,R,SFG,Frontal Lobe ,A9m
+13,L,SFG,Frontal Lobe ,A10m
+14,R,SFG,Frontal Lobe ,A10m
+15,L,MFG,Frontal Lobe ,A9/46d
+16,R,MFG,Frontal Lobe ,A9/46d
+17,L,MFG,Frontal Lobe ,IFJ
+18,R,MFG,Frontal Lobe ,IFJ
+19,L,MFG,Frontal Lobe ,A46
+20,R,MFG,Frontal Lobe ,A46
+21,L,MFG,Frontal Lobe ,A9/46v
+22,R,MFG,Frontal Lobe ,A9/46v
+23,L,MFG,Frontal Lobe ,A8vl
+24,R,MFG,Frontal Lobe ,A8vl
+25,L,MFG,Frontal Lobe ,A6vl
+26,R,MFG,Frontal Lobe ,A6vl
+27,L,MFG,Frontal Lobe ,A10l
+28,R,MFG,Frontal Lobe ,A10l
+29,L,IFG,Frontal Lobe ,A44d
+30,R,IFG,Frontal Lobe ,A44d
+31,L,IFG,Frontal Lobe ,IFS
+32,R,IFG,Frontal Lobe ,IFS
+33,L,IFG,Frontal Lobe ,A45c
+34,R,IFG,Frontal Lobe ,A45c
+35,L,IFG,Frontal Lobe ,A45r
+36,R,IFG,Frontal Lobe ,A45r
+37,L,IFG,Frontal Lobe ,A44op
+38,R,IFG,Frontal Lobe ,A44op
+39,L,IFG,Frontal Lobe ,A44v
+40,R,IFG,Frontal Lobe ,A44v
+41,L,OrG,Frontal Lobe ,A14m
+42,R,OrG,Frontal Lobe ,A14m
+43,L,OrG,Frontal Lobe ,A12/47o
+44,R,OrG,Frontal Lobe ,A12/47o
+45,L,OrG,Frontal Lobe ,A11l
+46,R,OrG,Frontal Lobe ,A11l
+47,L,OrG,Frontal Lobe ,A11m
+48,R,OrG,Frontal Lobe ,A11m
+49,L,OrG,Frontal Lobe ,A13
+50,R,OrG,Frontal Lobe ,A13
+51,L,OrG,Frontal Lobe ,A12/47l
+52,R,OrG,Frontal Lobe ,A12/47l
+53,L,PrG,Frontal Lobe ,A4hf
+54,R,PrG,Frontal Lobe ,A4hf
+55,L,PrG,Frontal Lobe ,A6cdl
+56,R,PrG,Frontal Lobe ,A6cdl
+57,L,PrG,Frontal Lobe ,A4ul
+58,R,PrG,Frontal Lobe ,A4ul
+59,L,PrG,Frontal Lobe ,A4t
+60,R,PrG,Frontal Lobe ,A4t
+61,L,PrG,Frontal Lobe ,A4tl
+62,R,PrG,Frontal Lobe ,A4tl
+63,L,PrG,Frontal Lobe ,A6cvl
+64,R,PrG,Frontal Lobe ,A6cvl
+65,L,PCL,Frontal Lobe ,A1/2/3ll
+66,R,PCL,Frontal Lobe ,A1/2/3ll
+67,L,PCL,Frontal Lobe ,A4ll
+68,R,PCL,Frontal Lobe ,A4ll
+69,L,STG,Temporal Lobe,A38m
+70,R,STG,Temporal Lobe,A38m
+71,L,STG,Temporal Lobe,A41/42
+72,R,STG,Temporal Lobe,A41/42
+73,L,STG,Temporal Lobe,TE1.0 and TE1.2
+74,R,STG,Temporal Lobe,TE1.0 and TE1.2
+75,L,STG,Temporal Lobe,A22c
+76,R,STG,Temporal Lobe,A22c
+77,L,STG,Temporal Lobe,A38l
+78,R,STG,Temporal Lobe,A38l
+79,L,STG,Temporal Lobe,A22r
+80,R,STG,Temporal Lobe,A22r
+81,L,MTG,Temporal Lobe,A21c
+82,R,MTG,Temporal Lobe,A21c
+83,L,MTG,Temporal Lobe,A21r
+84,R,MTG,Temporal Lobe,A21r
+85,L,MTG,Temporal Lobe,A37dl
+86,R,MTG,Temporal Lobe,A37dl
+87,L,MTG,Temporal Lobe,aSTS
+88,R,MTG,Temporal Lobe,aSTS
+89,L,ITG,Temporal Lobe,A20iv
+90,R,ITG,Temporal Lobe,A20iv
+91,L,ITG,Temporal Lobe,A37elv
+92,R,ITG,Temporal Lobe,A37elv
+93,L,ITG,Temporal Lobe,A20r
+94,R,ITG,Temporal Lobe,A20r
+95,L,ITG,Temporal Lobe,A20il
+96,R,ITG,Temporal Lobe,A20il
+97,L,ITG,Temporal Lobe,A37vl
+98,R,ITG,Temporal Lobe,A37vl
+99,L,ITG,Temporal Lobe,A20cl
+100,R,ITG,Temporal Lobe,A20cl
+101,L,ITG,Temporal Lobe,A20cv
+102,R,ITG,Temporal Lobe,A20cv
+103,L,FuG,Temporal Lobe,A20rv
+104,R,FuG,Temporal Lobe,A20rv
+105,L,FuG,Temporal Lobe,A37mv
+106,R,FuG,Temporal Lobe,A37mv
+107,L,FuG,Temporal Lobe,A37lv
+108,R,FuG,Temporal Lobe,A37lv
+109,L,PhG,Temporal Lobe,A35/36r
+110,R,PhG,Temporal Lobe,A35/36r
+111,L,PhG,Temporal Lobe,A35/36c
+112,R,PhG,Temporal Lobe,A35/36c
+113,L,PhG,Temporal Lobe,TL
+114,R,PhG,Temporal Lobe,TL
+115,L,PhG,Temporal Lobe,A28/34
+116,R,PhG,Temporal Lobe,A28/34
+117,L,PhG,Temporal Lobe,TI
+118,R,PhG,Temporal Lobe,TI
+119,L,PhG,Temporal Lobe,TH
+120,R,PhG,Temporal Lobe,TH
+121,L,pSTS,Temporal Lobe,rpSTS
+122,R,pSTS,Temporal Lobe,rpSTS
+123,L,pSTS,Temporal Lobe,cpSTS
+124,R,pSTS,Temporal Lobe,cpSTS
+125,L,SPL,Parietal Lobe,A7r
+126,R,SPL,Parietal Lobe,A7r
+127,L,SPL,Parietal Lobe,A7c
+128,R,SPL,Parietal Lobe,A7c
+129,L,SPL,Parietal Lobe,A5l
+130,R,SPL,Parietal Lobe,A5l
+131,L,SPL,Parietal Lobe,A7pc
+132,R,SPL,Parietal Lobe,A7pc
+133,L,SPL,Parietal Lobe,A7ip
+134,R,SPL,Parietal Lobe,A7ip
+135,L,IPL,Parietal Lobe,A39c
+136,R,IPL,Parietal Lobe,A39c
+137,L,IPL,Parietal Lobe,A39rd
+138,R,IPL,Parietal Lobe,A39rd
+139,L,IPL,Parietal Lobe,A40rd
+140,R,IPL,Parietal Lobe,A40rd
+141,L,IPL,Parietal Lobe,A40c
+142,R,IPL,Parietal Lobe,A40c
+143,L,IPL,Parietal Lobe,A39rv
+144,R,IPL,Parietal Lobe,A39rv
+145,L,IPL,Parietal Lobe,A40rv
+146,R,IPL,Parietal Lobe,A40rv
+147,L,Pcun,Parietal Lobe,A7m
+148,R,Pcun,Parietal Lobe,A7m
+149,L,Pcun,Parietal Lobe,A5m
+150,R,Pcun,Parietal Lobe,A5m
+151,L,Pcun,Parietal Lobe,dmPOS
+152,R,Pcun,Parietal Lobe,dmPOS
+153,L,Pcun,Parietal Lobe,A31
+154,R,Pcun,Parietal Lobe,A31
+155,L,PoG,Parietal Lobe,A1/2/3ulhf
+156,R,PoG,Parietal Lobe,A1/2/3ulhf
+157,L,PoG,Parietal Lobe,A1/2/3tonIa
+158,R,PoG,Parietal Lobe,A1/2/3tonIa
+159,L,PoG,Parietal Lobe,A2
+160,R,PoG,Parietal Lobe,A2
+161,L,PoG,Parietal Lobe,A1/2/3tru
+162,R,PoG,Parietal Lobe,A1/2/3tru
+163,L,INS,Insular Lobe,G
+164,R,INS,Insular Lobe,G
+165,L,INS,Insular Lobe,vIa
+166,R,INS,Insular Lobe,vIa
+167,L,INS,Insular Lobe,dIa
+168,R,INS,Insular Lobe,dIa
+169,L,INS,Insular Lobe,vId/vIg
+170,R,INS,Insular Lobe,vId/vIg
+171,L,INS,Insular Lobe,dIg
+172,R,INS,Insular Lobe,dIg
+173,L,INS,Insular Lobe,dId
+174,R,INS,Insular Lobe,dId
+175,L,CG,Limbic Lobe,A23d
+176,R,CG,Limbic Lobe,A23d
+177,L,CG,Limbic Lobe,A24rv
+178,R,CG,Limbic Lobe,A24rv
+179,L,CG,Limbic Lobe,A32p
+180,R,CG,Limbic Lobe,A32p
+181,L,CG,Limbic Lobe,A23v
+182,R,CG,Limbic Lobe,A23v
+183,L,CG,Limbic Lobe,A24cd
+184,R,CG,Limbic Lobe,A24cd
+185,L,CG,Limbic Lobe,A23c
+186,R,CG,Limbic Lobe,A23c
+187,L,CG,Limbic Lobe,A32sg
+188,R,CG,Limbic Lobe,A32sg
+189,L,MVOcC,Occipital Lobe,cLinG
+190,R,MVOcC,Occipital Lobe,cLinG
+191,L,MVOcC,Occipital Lobe,rCunG
+192,R,MVOcC,Occipital Lobe,rCunG
+193,L,MVOcC,Occipital Lobe,cCunG
+194,R,MVOcC,Occipital Lobe,cCunG
+195,L,MVOcC,Occipital Lobe,rLinG
+196,R,MVOcC,Occipital Lobe,rLinG
+197,L,MVOcC,Occipital Lobe,vmPOS
+198,R,MVOcC,Occipital Lobe,vmPOS
+199,L,LOcC,Occipital Lobe,mOccG
+200,R,LOcC,Occipital Lobe,mOccG
+201,L,LOcC,Occipital Lobe,V5/MT+
+202,R,LOcC,Occipital Lobe,V5/MT+
+203,L,LOcC,Occipital Lobe,OPC
+204,R,LOcC,Occipital Lobe,OPC
+205,L,LOcC,Occipital Lobe,iOccG
+206,R,LOcC,Occipital Lobe,iOccG
+207,L,LOcC,Occipital Lobe,msOccG
+208,R,LOcC,Occipital Lobe,msOccG
+209,L,LOcC,Occipital Lobe,lsOccG
+210,R,LOcC,Occipital Lobe,lsOccG
+211,L,Amyg,Subcortical Nuclei,mAmyg
+212,R,Amyg,Subcortical Nuclei,mAmyg
+213,L,Amyg,Subcortical Nuclei,lAmyg
+214,R,Amyg,Subcortical Nuclei,lAmyg
+215,L,Hipp,Subcortical Nuclei,rHipp
+216,R,Hipp,Subcortical Nuclei,rHipp
+217,L,Hipp,Subcortical Nuclei,cHipp
+218,R,Hipp,Subcortical Nuclei,cHipp
+219,L,BG,Subcortical Nuclei,vCa
+220,R,BG,Subcortical Nuclei,vCa
+221,L,BG,Subcortical Nuclei,GP
+222,R,BG,Subcortical Nuclei,GP
+223,L,BG,Subcortical Nuclei,NAC
+224,R,BG,Subcortical Nuclei,NAC
+225,L,BG,Subcortical Nuclei,vmPu
+226,R,BG,Subcortical Nuclei,vmPu
+227,L,BG,Subcortical Nuclei,dCa
+228,R,BG,Subcortical Nuclei,dCa
+229,L,BG,Subcortical Nuclei,dlPu
+230,R,BG,Subcortical Nuclei,dlPu
+231,L,Tha,Subcortical Nuclei,mPFtha
+232,R,Tha,Subcortical Nuclei,mPFtha
+233,L,Tha,Subcortical Nuclei,mPMtha
+234,R,Tha,Subcortical Nuclei,mPMtha
+235,L,Tha,Subcortical Nuclei,Stha
+236,R,Tha,Subcortical Nuclei,Stha
+237,L,Tha,Subcortical Nuclei,rTtha
+238,R,Tha,Subcortical Nuclei,rTtha
+239,L,Tha,Subcortical Nuclei,PPtha
+240,R,Tha,Subcortical Nuclei,PPtha
+241,L,Tha,Subcortical Nuclei,Otha
+242,R,Tha,Subcortical Nuclei,Otha
+243,L,Tha,Subcortical Nuclei,cTtha
+244,R,Tha,Subcortical Nuclei,cTtha
+245,L,Tha,Subcortical Nuclei,lPFtha
+246,R,Tha,Subcortical Nuclei,lPFtha
