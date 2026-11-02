@@ -257,3 +257,26 @@ config/phenotype/*.csv
 notebooks/cache/
 # reference maps for 08_state_maps (fetch_reference_maps.sh), ~285 MB
 notebooks/state_maps_data/
+
+# --------------------------------------------------- scratch and binaries ---
+# Container images. Built or copied next to the repo for convenience; they are
+# hundreds of MB and are rebuilt from the recipe, never from git.
+containers/
+*.sif
+
+# Jupyter's default name for a notebook nobody has named yet.
+notebooks/Untitled*.ipynb
+
+# State-map output. The `simulated/` example under it is TRACKED and stays so
+# -- gitignore does not touch a file already in the index -- but a run on REAL
+# data writes `subject_correlations.parquet` here, which is per-subject derived
+# data under the same rule as `outputs/`: Cam-CAN and CNeuroMod do not permit
+# redistributing participant-level data, and this repository is pushed.
+notebooks/state_maps_results/
+
+# The HCP participants table. `config/*_participants.csv` is tracked on purpose
+# for the cohorts whose (sub, task) mapping is a published constant, but this
+# one is rows for named HCP subjects built from a local copy, and it sat
+# untracked-and-unignored where a single `git add -A` would have committed it.
+# The BUILDER is tracked (tools/make_participants.py); the output is not.
+config/hcp7t_participants.csv
