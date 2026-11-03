@@ -217,10 +217,32 @@ stimulus:
     REST2: null
     REST3: null
     REST4: null
-  # TODO. Left empty so stage 3 falls back to each file's observed length, which
-  # is what the chain script's "--no-strict" prompt is about. Fill from the
-  # headers once extraction has run.
-  durations_s: {}
+  # MEASURED, not assumed: the per-task max `stimulus_time_s` in
+  # meta/cohorts/cohort=hcp7t/coverage.parquet after stage 2, plus one TR.
+  #
+  # At TR = 1.0 s these are volume counts, and the four movie numbers are the
+  # run lengths HCP publishes for the 7T movie task. That corroborates that the
+  # runs are COMPLETE -- none truncated, the design matches -- and nothing
+  # else. It is NOT a check on the TR: `stimulus_time_s` is built FROM the
+  # configured TR, so this arithmetic gives the same answer whatever the TR
+  # really is. The 1.0 s still rests on HCP's documentation, exactly as
+  # check_cohort says when it reports the header's unset default of 1.0.
+  #
+  # Pinning these changes no window grid. Stage 3's fallback is each run's own
+  # observed duration, which IS these numbers -- so the dfc already on disk is
+  # what they produce, and nothing needs re-running. What it buys: a SHORT run
+  # now yields a flagged incomplete grid instead of a silently shorter one, and
+  # `validate` stops reporting eight problems -- which is the state in which
+  # nobody reads the ninth.
+  durations_s:
+    MOVIE1: 921.0
+    MOVIE2: 918.0
+    MOVIE3: 915.0
+    MOVIE4: 901.0
+    REST1: 900.0
+    REST2: 900.0
+    REST3: 900.0
+    REST4: 900.0
 
 runs:
   mode: separate
