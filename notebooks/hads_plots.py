@@ -681,7 +681,7 @@ def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0, gap=1.0, pt=.01, aw
         y -= block + d
 
 def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None, fs=None, icon=None, gap=None, away=None,
-              only_drawn=False, text=1.0):
+              only_drawn=False, text=1.0, top_task=None):
     """Rows = Normal, then each phenotype; columns = tasks. pooled[(task, group)] = (p(j | i), occ, n).
     refs[(task, group)] = the panel it is compared with (its items in marks are highlighted in
     colours[(task, group)]); a panel without a ref is drawn as it is. dyn (Study.dynamics_marks) adds
@@ -689,7 +689,9 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
     group's edge_top strongest arrows of every task, plus its own highlighted ones, on ONE width scale.
     only_drawn: a transition's change is marked only if it is one of those Normal arrows (or a loop),
     so a large change of a rare transition is not drawn; occupancy and dynamics stay as they are.
-    text: every text of this figure x this, on top of cfg.font_scale."""
+    text: every text of this figure x this, on top of cfg.font_scale.
+    top_task: on the second task's Normal panel (vs the first task), only the N largest changes
+    (|pp|, transitions and occupancy together, after only_drawn)."""
     cfg = dataclasses.replace(cfg, font_scale=cfg.font_scale * text, fig_scale=cfg.fig_scale * text ** .5)
     fs = cfg.font_scale if fs is None else fs * text                 # the diagrams' own text, scaled here
     icon = cfg.dyn_icon if icon is None else icon
@@ -707,11 +709,15 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
             hT, hO = np.zeros((K, K), bool), np.zeros(K, bool)
             nT, nO = np.full((K, K), "", dtype=object), [""] * K
             if (t, g) in refs:
-                for r in marks[(marks["task"] == t) & (marks["group"] == g) & marks["hit"]].itertuples():
+                m = marks[(marks["task"] == t) & (marks["group"] == g) & marks["hit"]]
+                if only_drawn:
+                    m = m[[r.block != "cells" or r.variable.split("->")[0] == r.variable.split("->")[1]
+                           or tuple(map(int, r.variable.split("->"))) in base for r in m.itertuples()]]
+                if top_task and g == "Normal":
+                    m = m.loc[m["change"].abs().nlargest(top_task).index]
+                for r in m.itertuples():
                     if r.block == "cells":
                         a, b = map(int, r.variable.split("->"))
-                        if only_drawn and a != b and (a, b) not in base:
-                            continue
                         hT[a, b], nT[a, b] = True, r.note
                     else:
                         k = int(r.variable.split("_")[1])
