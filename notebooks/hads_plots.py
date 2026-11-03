@@ -355,11 +355,11 @@ def fig_factors(rows, cfg):
         plt.show()
 
 def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None):
-    """E1: one model, one panel per phenotype; x = bstm | fcm, colour = task, a line per task
-    from bstm to fcm; mean ± sd over the fold seeds (and each seed as a dot, from `seeds`), over
-    that model's Age + Sex baseline. legend = the label of each tree (what was selected).
-    Underneath (shares, Study.block_shares): what the bstm model uses, one row per variable type
-    and task, bar = mean share of its |SHAP|, dots = each fold seed."""
+    """E1: one model, one panel per phenotype; x = bstm | fcm, colour = task; mean ± sd over the
+    fold seeds (and each seed as a dot, from `seeds`). legend = the label of each tree (what was
+    selected). Underneath (shares, Study.block_shares): what the bstm model uses, one row per
+    variable type and task, bar = mean share of its |SHAP|, dots = each fold seed; the types in
+    order, the most used first (mean share over every phenotype and task)."""
     tasks, trees = list(cfg.tasks), ["bstm", "fcm"]
     colour, marker = dict(zip(tasks, TASK_COLOURS)), dict(zip(tasks, TASK_MARKERS))
     order = ["covariates", "cells", "occupancy", "dynamics"]
@@ -374,13 +374,10 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None):
             ax.tick_params(labelleft=False)
         p = perf[perf["phenotype"] == lab]
         ax.set_xlim(-.4, 1.4)
-        if len(p):
-            draw_band(ax, p["base_mean"].iloc[0], p["base_sd"].iloc[0])
         ends = []                                              # (y, x, task): the line's name at its end
         for k, task in enumerate(tasks):
             h = p[p["task"] == task].set_index("tree").reindex(trees)
             x = np.arange(len(trees)) + (k - (len(tasks) - 1) / 2) * .1
-            ax.plot(x, h["mean"], color=colour[task], lw=1.4, alpha=.7)
             ax.errorbar(x, h["mean"], yerr=h["std"], fmt=marker[task], ls="none", ms=8, lw=1.6, color=colour[task],
                         mec=SURFACE, mew=1, zorder=3)
             if seeds is not None:                              # each fold seed, beside its mean
@@ -402,6 +399,7 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None):
         ax.set_title(lab)
     axes[0].set_ylabel("CV score (Spearman)\nmean ± sd" + (", dots = fold seeds" if seeds is not None else ""))
     if shares is not None:
+        order = sorted(order, key=lambda b: -shares.loc[shares["block"] == b, "share"].mean())
         rows = [(b, t) for b in order for t in tasks]
         for j, lab in enumerate(cfg.targets):
             ax = fig.add_subplot(gs[1, j])
@@ -425,7 +423,6 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None):
             ax.set_title(f"bstm · what the {model} model uses ({lab})", fontsize=9)
     fig.legend(handles=[Line2D([], [], ls="none", marker=marker[t], ms=7, color=colour[t], label=t) for t in tasks] +
                        ([Patch(color=BLOCK_COLOUR[b], label=b) for b in order] if shares is not None else []) +
-                       [Patch(color=MUTED, alpha=.35, label=f"{model} on Age + Sex only (the baseline) ± sd")] +
                        [Line2D([], [], ls="none", label=f"{tree} = {legend[tree]}") for tree in trees],
                loc="lower center", ncol=4, fontsize=7.5)
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
@@ -683,15 +680,20 @@ def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0, gap=1.0, pt=.01, aw
                     color=c, gid="scaled")
         y -= block + d
 
-def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None, fs=None, icon=None, gap=None, away=None):
+def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None, fs=None, icon=None, gap=None, away=None,
+              only_drawn=False, text=1.0):
     """Rows = Normal, then each phenotype; columns = tasks. pooled[(task, group)] = (p(j | i), occ, n).
     refs[(task, group)] = the panel it is compared with (its items in marks are highlighted in
     colours[(task, group)]); a panel without a ref is drawn as it is. dyn (Study.dynamics_marks) adds
     each panel's dynamics as a column of symbols: left of the first task, right of the others. Every panel draws the Normal
-    group's edge_top strongest arrows of every task, plus its own highlighted ones, on ONE width scale."""
-    fs = cfg.font_scale if fs is None else fs                  # the diagrams' own text, scaled here
+    group's edge_top strongest arrows of every task, plus its own highlighted ones, on ONE width scale.
+    only_drawn: a transition's change is marked only if it is one of those Normal arrows (or a loop),
+    so a large change of a rare transition is not drawn; occupancy and dynamics stay as they are.
+    text: every text of this figure x this, on top of cfg.font_scale."""
+    cfg = dataclasses.replace(cfg, font_scale=cfg.font_scale * text, fig_scale=cfg.fig_scale * text ** .5)
+    fs = cfg.font_scale if fs is None else fs * text                 # the diagrams' own text, scaled here
     icon = cfg.dyn_icon if icon is None else icon
-    gap = cfg.dyn_gap if gap is None else gap
+    gap = (cfg.dyn_gap if gap is None else gap) / text     # larger text, tighter column: it still fits the panel
     away = cfg.dyn_away if away is None else away
     room = cfg.fig_scale
     columns = []                                              # drawn after the layout
@@ -708,6 +710,8 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
                 for r in marks[(marks["task"] == t) & (marks["group"] == g) & marks["hit"]].itertuples():
                     if r.block == "cells":
                         a, b = map(int, r.variable.split("->"))
+                        if only_drawn and a != b and (a, b) not in base:
+                            continue
                         hT[a, b], nT[a, b] = True, r.note
                     else:
                         k = int(r.variable.split("_")[1])
