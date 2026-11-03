@@ -11,6 +11,25 @@
 #   - Four movie runs per subject, each its OWN task: MOVIE1..MOVIE4. They are
 #     not four runs of one stimulus -- different films, and (see below) two
 #     different scan sessions.
+#   - Four REST runs per subject, REST1..REST4, in the same cohort. They are a
+#     condition of hcp7t, not a cohort of their own: one cohort holding two
+#     conditions is the shape camcan already has, and it is what lets a
+#     movie-vs-rest comparison be about the condition rather than about which
+#     cohort it came from. VERIFIED: the rest files carry the SAME suffix as
+#     the movie files -- hp2000_clean_rclean_tclean -- so the two conditions
+#     arrive at the same point of HCP's denoising chain and a difference
+#     between them is not a difference in preprocessing. They sit under a
+#     different root (cohorts/hcp_rest beside cohorts/hcp), which is why
+#     derivatives_root is the PARENT and the glob starts at `hcp*/`.
+#   - Four RESTING runs per subject, REST1..REST4, in a SECOND directory tree
+#     (cohorts/hcp_rest beside cohorts/hcp). Both are this one cohort, because
+#     they are the same people under two conditions -- the same reason Cam-CAN
+#     carries Movie and Rest in one cohort rather than two.
+#   - VERIFIED: the rest files carry the SAME suffix chain as the movie files,
+#     hp2000_clean_rclean_tclean. So the two conditions arrive at the same
+#     denoising stage and a movie-vs-rest difference here is not a difference
+#     in preprocessing. That was the thing worth checking before using them
+#     together, and it checks out.
 #   - The volumetric file is the one this pipeline can read. The *.dtseries.nii
 #     are CIFTI grayordinates and stage 1 is `nib.load` + voxel membership.
 #   - The concatenated `tfMRI_MOVIE_7T/` directory is deliberately NOT matched.
@@ -55,7 +74,12 @@ tr: 1.0                 # TODO VERIFY. 1.0s is the published 7T movie TR, but
 # `test_file_connect` and `unzip_hcp.sh` do not match the glob, and could not
 # be mistaken for subjects anyway since `subject_pattern` demands six digits
 # followed by /MNINonLinear.
-derivatives_root: /project/6008063/tamires/cohorts/hcp
+# ONE LEVEL UP from either tree, because this cohort's two conditions live in
+# two sibling directories (hcp/ for the movies, hcp_rest/ for the rest) and
+# `bold_glob` is a single pattern, not a list. Starting the glob at `hcp*/`
+# covers both; `hcp_pheno/` also matches that prefix and holds no
+# MNINonLinear, so it cannot contribute a run.
+derivatives_root: /project/6008063/tamires/cohorts
 output_root: /project/6008063/tamires/DecomposingfMRI/outputs
 space: MNI152NLin6Asym
 participants: /project/6008063/tamires/DecomposingfMRI/config/hcp7t_participants.csv
@@ -69,7 +93,17 @@ discovery:
   # matched against the WHOLE path and `task_pattern` against the FILENAME only
   # (cohort.py `_discover_glob`), which is why the first anchors on the
   # directory that follows it and the second does not need to.
-  bold_glob: "*/MNINonLinear/Results/tfMRI_MOVIE?_7T_??/tfMRI_MOVIE?_7T_??_hp2000_clean_rclean_tclean.nii.gz"
+  # `?fMRI_` matches tfMRI_ (task) and rfMRI_ (resting) in one pattern. The
+  # six-digit directory is spelled out rather than `*` so that a stray folder
+  # between the root and a subject cannot contribute runs.
+  #
+  # The trailing `_??` is still what keeps the CONCATENATED directories out --
+  # tfMRI_MOVIE_7T and rfMRI_REST_7T have no phase-encode suffix. That matters
+  # as much for rest as for movie: one 4-run file would be seen as a single
+  # run, so a 300s window could straddle two scan days with
+  # `crosses_run_boundary` never firing, because there would be no boundary to
+  # see.
+  bold_glob: "hcp*/[0-9][0-9][0-9][0-9][0-9][0-9]/MNINonLinear/Results/?fMRI_*_7T_??/?fMRI_*_7T_??_hp2000_clean_rclean_tclean.nii.gz"
   # Resolved against the BOLD file's own directory -- cohort.py does
   # `path.parent.glob(mask_glob)` -- so a bare sibling name is right here,
   # where ds002837 needs `../anat/...`.
@@ -79,9 +113,15 @@ discovery:
   # `task=MOVIE1`. That is the same rule `--keep-tasks` follows everywhere else
   # ("the BIDS labels as the data spells them"); lowercasing would mean the
   # config and the filesystem disagree about the name of the same thing.
-  task_pattern: "tfMRI_(MOVIE[0-9])_7T"
-  # The default excludes "rest"; nothing here is named that, and the
-  # concatenated directory is already excluded by the glob above.
+  # Captures MOVIE1..MOVIE4 and REST1..REST4 as the paths spell them, so the
+  # partitions come out `task=MOVIE1` and `task=REST1`. Alternation rather than
+  # a bare `([A-Z]+[0-9])` so that a future 7T task nobody has thought about
+  # cannot silently enter this cohort under its own label.
+  task_pattern: "[tr]fMRI_(MOVIE[0-9]|REST[0-9])_7T"
+  # The default is ["localizer", "retinotopy", "rest"], matched EXACTLY and in
+  # lower case, so it would not have caught REST1..REST4 anyway. Kept empty and
+  # explicit: the concatenated directories are excluded by the glob above, and
+  # the 7T retinotopy runs are not in either of these trees.
   exclude_tasks: []
 
 # THE FILE IS ALREADY FULLY CLEANED -- the suffixes are HCP pipeline stages,
@@ -153,11 +193,30 @@ stimulus:
   # rest block between them. Clip timings:
   # https://wiki.humanconnectome.org/docs/7T%20Movie%20watching%20task%20clip%20info%20timing%20versions%20shown%20per%20individual%20subject.html
   unit_of_analysis: run
-  # There IS a shared stimulus, so the alignment gate is meaningful -- unlike
-  # Cam-CAN's rest. But that wiki page is titled "versions shown per individual
-  # subject", so confirm every subject saw the same montage before trusting a
-  # FAIL here to mean misalignment rather than design.
+  # There IS a shared stimulus FOR THE MOVIES, so the alignment gate is
+  # meaningful there. But that wiki page is titled "versions shown per
+  # individual subject", so confirm every subject saw the same montage before
+  # trusting a FAIL to mean misalignment rather than design.
   isc_gate_tr: 1.0
+  # REST IS NOT GATED, and this is load-bearing rather than tidy. Resting
+  # subjects share no stimulus, so their ISC has nothing to be aligned to; at
+  # a gate of 1.0 every rest run FAILS a check that was never meaningful for
+  # it, `diagnose` exits non-zero, and --dependency=afterok cancels stage 3
+  # and the censor step for the whole cohort -- over a fact about the design.
+  #
+  # A key present with a null value turns the gate off; an ABSENT key falls
+  # back to isc_gate_tr. ISC is still COMPUTED and written for rest, because
+  # it is cheap and informative in the other direction: rest ISC should be near
+  # ZERO, and a resting cohort whose subjects correlate strongly is a finding
+  # -- a task mislabelled, or a shared artifact -- not a pass.
+  #
+  # Same pattern as config/camcan.yaml, deliberately: two cohorts holding the
+  # same two conditions should gate them the same way.
+  isc_gate_tr_by_task:
+    REST1: null
+    REST2: null
+    REST3: null
+    REST4: null
   # TODO. Left empty so stage 3 falls back to each file's observed length, which
   # is what the chain script's "--no-strict" prompt is about. Fill from the
   # headers once extraction has run.
