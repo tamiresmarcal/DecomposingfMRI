@@ -690,8 +690,8 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
     only_drawn: a transition's change is marked only if it is one of those Normal arrows (or a loop),
     so a large change of a rare transition is not drawn; occupancy and dynamics stay as they are.
     text: every text of this figure x this, on top of cfg.font_scale.
-    top_task: on the second task's Normal panel (vs the first task), only the N largest changes
-    (|pp|, transitions and occupancy together, after only_drawn)."""
+    top_task: on the second task's Normal panel (vs the first task), only the N largest transition
+    changes (|pp|, after only_drawn); occupancy is kept as it is."""
     cfg = dataclasses.replace(cfg, font_scale=cfg.font_scale * text, fig_scale=cfg.fig_scale * text ** .5)
     fs = cfg.font_scale if fs is None else fs * text                 # the diagrams' own text, scaled here
     icon = cfg.dyn_icon if icon is None else icon
@@ -714,7 +714,8 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
                     m = m[[r.block != "cells" or r.variable.split("->")[0] == r.variable.split("->")[1]
                            or tuple(map(int, r.variable.split("->"))) in base for r in m.itertuples()]]
                 if top_task and g == "Normal":
-                    m = m.loc[m["change"].abs().nlargest(top_task).index]
+                    cells = m[m["block"] == "cells"]
+                    m = pd.concat([m[m["block"] != "cells"], cells.loc[cells["change"].abs().nlargest(top_task).index]])
                 for r in m.itertuples():
                     if r.block == "cells":
                         a, b = map(int, r.variable.split("->"))
