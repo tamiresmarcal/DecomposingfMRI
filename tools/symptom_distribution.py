@@ -140,8 +140,21 @@ class MissingTable(FileNotFoundError):
     """
 
 
-def subject_ids(path: Path) -> set[str]:
-    """Subject ids from a participants table, whatever the id column is called."""
+def subject_ids(path) -> set[str]:
+    """Subject ids from a participants table, whatever the id column is called.
+
+    `path` may be SEVERAL tables (a list/tuple), in which case the ids are
+    unioned. That is not a convenience: Cam-CAN's movie and rest runs were
+    discovered as two cohorts before they were merged into one, so the subjects
+    with imaging are the union of `camcan_movie_participants.csv` and
+    `camcan_rest_participants.csv`. Taking only one of them would silently drop
+    everyone scanned under the other condition.
+    """
+    if isinstance(path, (list, tuple, set)):
+        out: set[str] = set()
+        for one in path:
+            out |= subject_ids(one)
+        return out
     path = Path(path)
     if not path.exists():
         near = sorted(p.name for p in path.parent.glob("*participants*.csv")) \
@@ -189,7 +202,7 @@ def merge_on(frames, id_col):
 # plain lists and Counters keeps this module stdlib-only; the notebook is free
 # to put them in a DataFrame.
 
-def _camcan_rows(camcan_dir: Path, camcan_subjects: Path | None):
+def _camcan_rows(camcan_dir: Path, camcan_subjects=None):
     files = [p for p in (camcan_dir / "approved_data.tsv",
                          camcan_dir / "standard_data.csv") if p.exists()]
     if not files:
@@ -254,8 +267,7 @@ def load(hcp_pheno, hcp_subjects, camcan_dir=None, camcan_subjects=None) -> dict
     out: dict = {}
 
     if camcan_dir:
-        rows, cols = _camcan_rows(Path(camcan_dir),
-                                  Path(camcan_subjects) if camcan_subjects else None)
+        rows, cols = _camcan_rows(Path(camcan_dir), camcan_subjects or None)
         hads = sorted(c for c in cols if "hads" in c.lower())
         scales = {}
         for which, pat in (("anxiety", "anx"), ("depression", "dep")):
@@ -346,8 +358,9 @@ def main() -> int:
                     help="participants csv of the imaging cohort, to restrict to.")
     ap.add_argument("--camcan-dir", type=Path,
                     help="Cam-CAN access directory holding approved_data.tsv and standard_data.csv.")
-    ap.add_argument("--camcan-subjects", type=Path,
-                    help="Cam-CAN participants csv, to restrict to.")
+    ap.add_argument("--camcan-subjects", type=Path, nargs="+",
+                    help="Cam-CAN participants csv/s to restrict to; several are unioned "
+                         "(movie and rest were separate cohorts before the merge).")
     a = ap.parse_args()
 
     # ----------------------------------------------------------- Cam-CAN ---
