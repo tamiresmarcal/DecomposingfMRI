@@ -823,10 +823,24 @@ def fig_k_curve(rows, cfg, trees=("bstm",)):
             med = g.median().reindex(ks)
             q1 = g.quantile(.25).reindex(ks)
             q3 = g.quantile(.75).reindex(ks)
+            cnt = g.size().reindex(ks).fillna(0)
             top.fill_between(ks, q1, q3, color=colour[task], alpha=.16, lw=0)
-            top.plot(ks, med, color=colour[task], lw=2, solid_capstyle="round")
-            top.plot(ks, med, marker[task], ms=7, color=colour[task],
-                     mec=SURFACE, mew=1.2, zorder=4)
+            # Solid only between ADJACENT K values. An earlier draft drew one
+            # line through the whole range, so the stretch from K=14 to K=21 --
+            # where no model exists -- looked like measured values.
+            for a, b in zip(ks, ks[1:]):
+                if np.isnan(med[a]) or np.isnan(med[b]):
+                    continue
+                gap = ks.index(b) - ks.index(a) == 1 and b - a <= 1
+                top.plot([a, b], [med[a], med[b]], color=colour[task], lw=2,
+                         ls="-" if gap else (0, (3, 2)),
+                         solid_capstyle="round", zorder=2)
+            # Marker area in proportion to how many models the median is of.
+            # Without it a median of 3 sits beside a median of 40 and reads
+            # the same, which is what made this figure look jagged.
+            top.scatter(ks, med, s=14 + 46 * cnt / max(cnt.max(), 1),
+                        marker=marker[task], color=colour[task],
+                        edgecolor=SURFACE, linewidth=1.2, zorder=4)
         top.set_title(lab, loc="left")
         if c == 0:
             top.set_ylabel("CV score (Spearman)")
@@ -848,8 +862,17 @@ def fig_k_curve(rows, cfg, trees=("bstm",)):
             bot.set_axis_off()
             bot.text(.5, .5, "n_features / n not in the summary", ha="center",
                      va="center", color=MUTED, transform=bot.transAxes)
-        bot.set_xlabel("number of states (K)")
-        bot.set_xticks(ks)
+        # The count per K, spelled out: the medians above are of very
+        # different numbers of models and nothing else would say so.
+        per_k = d.groupby("K").size().reindex(ks).fillna(0).astype(int)
+        for k_, c_ in zip(ks, per_k):
+            bot.annotate(str(c_), (k_, 0), xycoords=("data", "axes fraction"),
+                         xytext=(0, -26), textcoords="offset points",
+                         ha="center", fontsize=6, color=MUTED, gid="scaled")
+        bot.set_xlabel("number of states (K)", labelpad=14)
+        # thinned: every K labelled ran the ticks together
+        bot.set_xticks([k_ for n_, k_ in enumerate(ks)
+                        if n_ == 0 or n_ == len(ks) - 1 or k_ % 5 == 0])
 
     handles = [Line2D([], [], marker=marker[t], ms=7, color=colour[t],
                       label=f"{t}: median, band = middle half") for t in tasks]
@@ -858,6 +881,8 @@ def fig_k_curve(rows, cfg, trees=("bstm",)):
     fig.legend(handles=handles + [Patch(color=MUTED, alpha=.35,
                                         label="Age + Sex baseline ± sd")],
                loc="lower right", ncol=3, fontsize=7, bbox_to_anchor=(1, 1.035))
+    fig.text(.01, -.02, "The small grey number under each K is HOW MANY models that median is of. A dashed segment "
+             "spans K values that do not exist: nothing was measured there.", fontsize=7, color=INK2, ha="left")
     fig.suptitle(f"B2.K  score vs the number of states  ·  {', '.join(trees)}",
                  x=.01, ha="left", fontsize=10, color=INK, y=1.0)
     layout(fig, cfg)
