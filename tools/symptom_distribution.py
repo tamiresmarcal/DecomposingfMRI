@@ -99,17 +99,63 @@ def pct(n: int, total: int) -> str:
     return f"{100 * n / total:5.1f}%" if total else "    --"
 
 
-def nums(rows, col):
+def nums(rows, col, scale_max=None):
+    """Numeric values of one column, with impossible ones dropped, not kept.
+
+    `scale_max` is the instrument's maximum where it is known (21 per HADS
+    subscale). Anything outside [0, scale_max] CANNOT be a score and is a
+    missing-data sentinel: Cam-CAN's additional_HADS_depression carries 9999
+    for "no answer". Left in, it is not a rounding nuisance -- it sets the max
+    to 9999, inflates the sd by two orders of magnitude, squashes the
+    histogram into the first pixel column, and, if the column is used as a
+    modelling target, hands the regression a handful of enormous outliers that
+    dominate the fit.
+
+    With no known maximum (the ASR raw scores) nothing is dropped, because
+    there is no principled line to drop on. `out_of_range` reports the
+    suspicious ones instead, and the caller decides.
+    """
     out = []
     for r in rows:
         v = (r.get(col) or "").strip()
         if v in ("", "NA", "NaN", "nan", "."):
             continue
         try:
-            out.append(float(v))
+            x = float(v)
         except ValueError:
-            pass
+            continue
+        if scale_max is not None and not (0 <= x <= scale_max):
+            continue
+        out.append(x)
     return out
+
+
+def out_of_range(rows, col, scale_max=None) -> dict:
+    """What `nums` dropped, or would flag, so no exclusion is silent.
+
+    Two cases. With a known `scale_max`, anything outside [0, scale_max] is
+    impossible and is reported as dropped. Without one, values that look like
+    sentinels (a run of 9s, or negative) are reported as SUSPECT and kept --
+    an ASR raw score has no published ceiling, so dropping on a guess would be
+    worse than showing it.
+    """
+    bad, suspect = [], []
+    for r in rows:
+        v = (r.get(col) or "").strip()
+        if v in ("", "NA", "NaN", "nan", "."):
+            continue
+        try:
+            x = float(v)
+        except ValueError:
+            continue
+        if scale_max is not None:
+            if not (0 <= x <= scale_max):
+                bad.append(x)
+        elif x < 0 or (x >= 99 and set(str(int(x))) <= {"9"}):
+            suspect.append(x)
+    return {"column": col, "scale_max": scale_max,
+            "n_dropped": len(bad), "dropped_values": sorted(set(bad))[:8],
+            "n_suspect": len(suspect), "suspect_values": sorted(set(suspect))[:8]}
 
 
 def quantiles(v: list[float]) -> dict:
@@ -544,7 +590,8 @@ def load(hcp_pheno, hcp_subjects, camcan_dir=None, camcan_subjects=None) -> dict
         for which, pat in (("anxiety", "anx"), ("depression", "dep")):
             cat = next((c for c in hads if pat in c.lower() and "categ" in c.lower()), None)
             raw = next((c for c in hads if pat in c.lower() and "categ" not in c.lower()), None)
-            v = nums(rows, raw) if raw else []
+            v = nums(rows, raw, HADS_MAX) if raw else []
+            dropped = out_of_range(rows, raw, HADS_MAX) if raw else {}
             if cat:
                 band = Counter((r.get(cat) or "").strip() for r in rows
                                if (r.get(cat) or "").strip() not in ("", "NA"))
@@ -560,6 +607,7 @@ def load(hcp_pheno, hcp_subjects, camcan_dir=None, camcan_subjects=None) -> dict
                 "cutoffs": [8, 11, 15], "scale_max": HADS_MAX, "banded_on": banded_on,
                 "summary": _summary(v, HADS_MAX),
                 "zero_n": sum(1 for x in v if x == 0),
+                "dropped": dropped,
                 "what": f"HADS {which} (0-{HADS_MAX})"}
         out["camcan"] = {"n": len(rows), "instrument": "HADS",
                          "missing_pheno": [], "scales": scales}
@@ -581,6 +629,7 @@ def load(hcp_pheno, hcp_subjects, camcan_dir=None, camcan_subjects=None) -> dict
             "cutoffs": [bands[1][0], bands[2][0]], "scale_max": None,
             "banded_on": "T" if tv else None,
             "summary": _summary(rv), "zero_n": sum(1 for x in rv if x == 0),
+            "dropped": out_of_range(rows, rcol) if rcol in cols else {},
             "what": what, "stem": stem}
     out["hcp"] = {"n": len(rows), "instrument": "ASR/DSM-oriented",
                   "missing_pheno": missing, "scales": scales}

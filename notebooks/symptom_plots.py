@@ -59,31 +59,59 @@ def save(fig, name, save_dir=None):
 
 # ------------------------------------------------------------------ tables ---
 def band_table(d, constructs=("anxiety", "depression")):
-    """Rows of (cohort, construct, band, n, pct) with Zero split out of the lowest band.
+    """Rows of (cohort, construct, band, n, pct), with Zero split out.
+
+    THE SPLIT IS DECIDED ONCE, FOR THE WHOLE TABLE. Splitting per scale looked
+    harmless and was not: Cam-CAN's counts come from its own `_category`
+    column while the zero count comes from the raw column, and where the two
+    have different missingness the split cannot be done for that scale. Done
+    per scale, one cohort got "Normal" and the other "Normal (>0)", the pivot
+    made them two columns, and the table stopped comparing its own rows.
+
+    So: every scale splits, or none does, and `split_note` on each row says
+    which and why. The arithmetic itself needs no per-subject join -- a raw
+    score of 0 is below every cutoff on every scale here, so a zero-scoring
+    subject is necessarily in the lowest band -- but it does need the raw and
+    the band counts to cover the same subjects, which is what is checked.
 
     Returned as a list of dicts rather than a DataFrame so this module stays
     importable without pandas; the notebook wraps it in one.
     """
-    rows = []
+    todo = []
     for coh, blk in d.items():
         for con in constructs:
             sc = blk["scales"].get(con)
-            if not sc or not sc["band"]:
-                continue
-            band, order = dict(sc["band"]), list(sc["band_order"])
-            total = sum(band.values())
-            zero_ok = sc["zero_n"] is not None and sc["summary"].get("n") == total
-            if zero_ok:
-                lowest = order[0]
-                band = {"Zero": sc["zero_n"],
-                        f"{lowest} (>0)": band.get(lowest, 0) - sc["zero_n"],
-                        **{k: v for k, v in band.items() if k != lowest}}
-                order = ["Zero", f"{lowest} (>0)"] + order[1:]
-            for name in order:
-                n = band.get(name, 0)
-                rows.append({"cohort": coh, "construct": con, "band": name,
-                             "n": n, "pct": 100 * n / total if total else 0.0,
-                             "total": total})
+            if sc and sc["band"]:
+                todo.append((coh, con, sc))
+
+    blocked = [(coh, con, sum(sc["band"].values()), sc["summary"].get("n"))
+               for coh, con, sc in todo
+               if sc["zero_n"] is None
+               or sc["summary"].get("n") != sum(sc["band"].values())]
+    split = not blocked
+    note = "" if split else (
+        "zero NOT split out: " + "; ".join(
+            f"{coh}/{con} has {n_band} banded but {n_raw} raw score(s)"
+            for coh, con, n_band, n_raw in blocked)
+        + " -- the band and raw columns do not cover the same subjects, so the "
+          "lowest band cannot be divided. Not split for ANY row, so every row "
+          "keeps the same band names and the table stays comparable.")
+
+    rows = []
+    for coh, con, sc in todo:
+        band, order = dict(sc["band"]), list(sc["band_order"])
+        total = sum(band.values())
+        if split:
+            lowest = order[0]
+            band = {"Zero": sc["zero_n"],
+                    f"{lowest} (>0)": band.get(lowest, 0) - sc["zero_n"],
+                    **{k: v for k, v in band.items() if k != lowest}}
+            order = ["Zero", f"{lowest} (>0)"] + order[1:]
+        for name in order:
+            n = band.get(name, 0)
+            rows.append({"cohort": coh, "construct": con, "band": name,
+                         "n": n, "pct": 100 * n / total if total else 0.0,
+                         "total": total, "split_note": note})
     return rows
 
 
