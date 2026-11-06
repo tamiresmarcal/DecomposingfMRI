@@ -285,6 +285,12 @@ def hcp_scales(hcp_pheno, hcp_subjects) -> list[dict]:
                 "sd": round(s["sd"], 2), "n_distinct": n_distinct,
                 "binary": n_distinct <= 2,
                 "pct_at_floor": round(100 * s["floor_frac"], 1),
+                # For a 0/1 flag the floor fraction reads backwards to anyone
+                # scanning the figure: a 93% bar on "agoraphobia" looks like
+                # 93% HAVE it, when it means 93% scored 0 and 7% have it. So
+                # the positive rate is carried explicitly rather than left for
+                # the reader to subtract.
+                "pct_above_floor": round(100 * (1 - s["floor_frac"]), 1),
                 "floor_value": s["floor_value"],
                 "values": v,
             })

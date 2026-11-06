@@ -376,7 +376,7 @@ def fig_hcp_scales(scales, save_dir=None):
                        color=INK2)
     ax.invert_yaxis()
     ax.set_xlim(0, 100)
-    ax.set_xlabel("% of subjects at the scale minimum   (lower = more usable "
+    ax.set_xlabel("% of subjects AT THE SCALE MINIMUM   (lower = more usable "
                   "as a regression target)", labelpad=6)
     ax.spines["left"].set_visible(False)
     ax.tick_params(axis="y", length=0)
@@ -417,8 +417,10 @@ def fig_hcp_grid(scales, ncol=4, save_dir=None):
         # the bar.
         ax.set_ylim(0, counts.max() * 1.30)
         ax.set_title(f"{r['label']}", loc="left", fontsize=8.5)
-        ax.text(.98, .93, f"floor {r['pct_at_floor']:.0f}%", ha="right",
-                va="top", transform=ax.transAxes, fontsize=7, color=INK2)
+        tag = (f"{r['pct_above_floor']:.0f}% positive" if r["binary"]
+               else f"floor {r['pct_at_floor']:.0f}%")
+        ax.text(.98, .93, tag, ha="right", va="top", transform=ax.transAxes,
+                fontsize=7, color=INK2)
         ax.tick_params(labelsize=7)
         ax.set_xlabel(r["column"], fontsize=6.8, color=MUTED)
         ax.set_yticks([])
