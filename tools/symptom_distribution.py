@@ -244,6 +244,59 @@ HCP_LABEL = {
 HCP_HADS_PAIR = {"DSM_Anxi": "HADS anxiety", "DSM_Depr": "HADS depression"}
 
 
+def hcp_t_scales(hcp_pheno, hcp_subjects) -> list[dict]:
+    """Every scale's T-SCORE distribution, with the thresholds that apply to it.
+
+    The counterpart of `hcp_scales`, and for a different question. Raw says how
+    much variance there is to predict, which decides the modelling target. T
+    says how many people sit above a clinical line, which describes the sample.
+    Neither substitutes for the other, and the target is still fitted on raw --
+    a T-score has age and sex normed out of it, which Cam-CAN's HADS never had.
+
+    T is not "more processed" than raw. It is the same score re-expressed as a
+    position in a reference sample, normed by age and sex. T>=65 is the 93rd
+    percentile of that reference BY CONSTRUCTION, which is why the share above
+    it here is a statement about this cohort relative to that reference, not a
+    prevalence that can be compared with a HADS screening percentage.
+
+    Two different threshold pairs apply, which is why they travel with each row
+    rather than being a constant in the figure: narrow scales (DSM-oriented and
+    syndrome) use 65/70, the broad-band scales use 60/64.
+
+    Sorted by the share at or above the first threshold, descending -- the
+    scales where this cohort actually has people above the line come first.
+    SSAGA has no T and does not appear.
+    """
+    rows_all, cols, _ = _hcp_rows(Path(hcp_pheno), Path(hcp_subjects))
+    out = []
+    for family, stems in HCP_FAMILIES.items():
+        if family == "SSAGA":
+            continue
+        bands = ASR_T_BROAD if family == "broad-band" else ASR_T_NARROW
+        lo_thr, hi_thr = bands[1][0], bands[2][0]
+        for stem in stems:
+            tcol = f"{stem}_T"
+            if tcol not in cols:
+                continue
+            v = nums(rows_all, tcol)
+            if not v:
+                continue
+            n = len(v)
+            out.append({
+                "family": family, "stem": stem,
+                "label": HCP_LABEL.get(stem, stem), "column": tcol,
+                "pairs_with": HCP_HADS_PAIR.get(stem, ""),
+                "n": n, "values": v,
+                "borderline_t": lo_thr, "clinical_t": hi_thr,
+                "n_borderline_plus": sum(1 for x in v if x >= lo_thr),
+                "n_clinical": sum(1 for x in v if x >= hi_thr),
+                "pct_borderline_plus": round(100 * sum(1 for x in v if x >= lo_thr) / n, 1),
+                "pct_clinical": round(100 * sum(1 for x in v if x >= hi_thr) / n, 1),
+                "median": _summary(v)["med"], "max": max(v), "min": min(v),
+            })
+    return sorted(out, key=lambda r: -r["pct_borderline_plus"])
+
+
 def hcp_raw_cutoffs(hcp_pheno, hcp_subjects) -> list[dict]:
     """Where each ASR band begins ON THE RAW SCALE, read off this sample.
 

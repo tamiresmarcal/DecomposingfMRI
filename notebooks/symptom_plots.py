@@ -449,3 +449,76 @@ def fig_hcp_grid(scales, ncol=4, save_dir=None):
     fig.tight_layout(rect=(0, .03, 1, 1))
     save(fig, "F5_hcp_grid", save_dir)
     return fig
+
+
+def fig_hcp_t_grid(tscales, ncol=4, save_dir=None):
+    """T-score distributions with the clinical lines drawn on them.
+
+    This is the figure the raw ones cannot be: raw has no published cutoff, T
+    does. One shared x-axis is right HERE, unlike everywhere else in this
+    module, because a T-score IS a common scale -- that is the whole point of
+    it. So the panels share limits and the two rules fall in the same place in
+    every panel, which is what makes them scannable.
+
+    Two threshold pairs are in play (65/70 for the narrow scales, 60/64 for the
+    broad-band ones), so each panel draws its own and says which.
+
+    The region at or above the clinical line is shaded, and the counts above
+    each line are printed as n and %, because with a cohort this healthy some
+    panels have one or two subjects up there and a bar that thin is invisible.
+    """
+    tscales = [r for r in tscales if r["values"]]
+    if not tscales:
+        raise SystemExit("no T-score columns found")
+    lo = min(min(r["values"]) for r in tscales)
+    hi = max(max(r["values"]) for r in tscales)
+    nrow = -(-len(tscales) // ncol)
+    fig, axes = plt.subplots(nrow, ncol, figsize=(2.9 * ncol, 2.0 * nrow),
+                             squeeze=False, sharex=True)
+    for i, r in enumerate(tscales):
+        ax = axes[i // ncol][i % ncol]
+        v = np.asarray(r["values"], float)
+        counts, _, _ = ax.hist(v, bins=np.arange(lo - .5, hi + 1.5),
+                               color=FAMILY_COLOUR[r["family"]], lw=0)
+        top = counts.max() * 1.42
+        ax.set_ylim(0, top)
+        ax.axvspan(r["clinical_t"] - .5, hi + .5, color=MUTED, alpha=.14, lw=0)
+        for thr, name in ((r["borderline_t"], "borderline"),
+                          (r["clinical_t"], "clinical")):
+            ax.axvline(thr - .5, color=INK2, ls="--", lw=.9)
+            ax.text(thr - .5, top * .99, f" {name} {thr:g}", fontsize=6.2,
+                    color=INK2, ha="left", va="top", rotation=90)
+        ax.set_title(r["label"], loc="left", fontsize=8.5)
+        ax.text(.98, .95,
+                f"≥{r['borderline_t']:g}: {r['n_borderline_plus']} "
+                f"({r['pct_borderline_plus']:.0f}%)\n"
+                f"≥{r['clinical_t']:g}: {r['n_clinical']} "
+                f"({r['pct_clinical']:.0f}%)",
+                transform=ax.transAxes, ha="right", va="top", fontsize=6.8,
+                color=INK2, linespacing=1.4)
+        ax.set_xlabel(r["column"], fontsize=6.8, color=MUTED)
+        ax.set_yticks([])
+        # labelbottom on EVERY panel: sharex otherwise puts the tick labels on
+        # the bottom row only, and a last row that does not fill its columns
+        # leaves the rightmost columns with no x axis labelled at all.
+        ax.tick_params(labelsize=7, labelbottom=True)
+        ax.spines["left"].set_visible(False)
+    for j in range(len(tscales), nrow * ncol):
+        axes[j // ncol][j % ncol].set_axis_off()
+    handles = [Patch(facecolor=c, label=f) for f, c in FAMILY_COLOUR.items()
+               if any(r["family"] == f for r in tscales)]
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles),
+               fontsize=8, bbox_to_anchor=(.5, -.012))
+    fig.suptitle("HCP: T-scores, with the lines that have a published meaning",
+                 x=.01, ha="left", y=1.0, va="bottom", fontsize=10.5, color=INK)
+    fig.text(.01, -.055,
+             "T is the same score as raw, re-expressed as a position in the ASR's reference sample, "
+             "normed by age and sex. T≥65 is that reference's 93rd percentile BY CONSTRUCTION, so "
+             "the share above it\nhere is this cohort relative to that reference — NOT a prevalence "
+             "comparable with a HADS screening percentage. Thresholds are 65/70, except the "
+             "broad-band scales, which use 60/64.\nBand on T; fit on raw, because a T-score has age "
+             "and sex normed out of it and Cam-CAN's HADS does not.",
+             fontsize=7.5, color=INK2, ha="left", linespacing=1.5)
+    fig.tight_layout(rect=(0, .03, 1, 1))
+    save(fig, "F6_hcp_tscores", save_dir)
+    return fig
