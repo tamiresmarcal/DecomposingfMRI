@@ -361,9 +361,16 @@ def fig_hcp_scales(scales, save_dir=None):
                 markeredgewidth=2, zorder=3)
         tag = f"{v:.0f}%"
         ax.text(v + 1.4, yy, tag, va="center", fontsize=7.4, color=INK2)
-        note = (f"{r['n_distinct']} values" if not r["binary"]
-                else f"BINARY ({r['n_distinct']} values) — this is a base rate, "
-                     f"not a floor")
+        if r["binary"]:
+            # Spell the positive rate out. The bar is the share at the
+            # MINIMUM, so on a 0/1 flag a long bar means the condition is
+            # RARE -- the opposite of what a long bar looks like it means.
+            # A reader took agoraphobia's 93% for 93% prevalence; it is 7%.
+            note = (f"BINARY — {r['pct_above_floor']:.0f}% positive; "
+                    f"the bar is the {r['pct_at_floor']:.0f}% who scored "
+                    f"{r['floor_value']:.0f}")
+        else:
+            note = f"{r['n_distinct']} values"
         if r["pairs_with"]:
             note += f"   ·   pairs with {r['pairs_with']}"
         ax.text(101, yy, note, va="center", fontsize=7, color=INK2)
@@ -372,8 +379,11 @@ def fig_hcp_scales(scales, save_dir=None):
         ax.text(-1, yy, fam, va="center", ha="right", fontsize=8.5,
                 color=FAMILY_COLOUR[fam], fontweight="bold")
     ax.set_yticks([yy for yy, _ in labels])
-    ax.set_yticklabels([f"{r['label']}" for _, r in labels], fontsize=8,
-                       color=INK2)
+    # The COLUMN NAME, not only the readable label: the column is what goes in
+    # --target, and a reader who wants "the anxiety/depression mix" has no way
+    # to get from the words "anxious/depressed" to ASR_Anxd_Raw otherwise.
+    ax.set_yticklabels([f"{r['label']}   {r['column']}" for _, r in labels],
+                       fontsize=8, color=INK2)
     ax.invert_yaxis()
     ax.set_xlim(0, 100)
     ax.set_xlabel("% of subjects AT THE SCALE MINIMUM   (lower = more usable "
@@ -385,10 +395,13 @@ def fig_hcp_scales(scales, save_dir=None):
     ax.set_title("HCP: every symptom scale, by how much variance it leaves to "
                  "predict", loc="left", pad=12)
     fig.text(.01, -.03 - .004 * len(rows) / 4,
-             "Raw scores, never T: a T-score has age and sex normed out of it in the "
-             "reference sample, which Cam-CAN's HADS never had.\nThe distinct-value count is "
-             "printed, not plotted — it is a different measure on a different scale, and a "
-             "second x-axis for it would be a dual-axis chart.",
+             "A LONG BAR MEANS THE SCALE IS MOSTLY EMPTY, NOT THAT THE SYMPTOM IS COMMON. On a "
+             "0/1 flag it reads backwards: agoraphobia at 93% means 93% scored ZERO, so 7% have "
+             "it.\nThe positive rate is written out for every binary row.   ·   Raw scores, "
+             "never T: a T-score has age and sex normed out of it in the reference sample, which "
+             "Cam-CAN's HADS never had.\nThe distinct-value count is printed, not plotted — it "
+             "is a different measure on a different scale, and a second x-axis for it would be a "
+             "dual-axis chart.",
              fontsize=7.5, color=INK2, ha="left", linespacing=1.5)
     fig.tight_layout()
     save(fig, "F4_hcp_scales", save_dir)

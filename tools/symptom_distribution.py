@@ -244,6 +244,35 @@ HCP_LABEL = {
 HCP_HADS_PAIR = {"DSM_Anxi": "HADS anxiety", "DSM_Depr": "HADS depression"}
 
 
+def hcp_skipped(hcp_pheno, hcp_subjects) -> list[dict]:
+    """Symptom-looking columns the inventory did NOT include, and why.
+
+    `hcp_scales` keeps only what parses as a number, which is the right rule
+    and a silent one: a column of "Yes"/"No", or one this module's family
+    lists do not name, simply never appears, and a reader cannot tell a
+    deliberate omission from an oversight. This says which, so the absence of
+    a scale from a figure is answerable rather than mysterious.
+    """
+    rows_all, cols, _ = _hcp_rows(Path(hcp_pheno), Path(hcp_subjects))
+    known = {f"{s}_Raw" for v in HCP_FAMILIES.values() for s in v} \
+        | {s for v in HCP_FAMILIES.values() for s in v}
+    out = []
+    for c in cols:
+        if c in known or c.endswith("_T"):
+            continue
+        if not any(k in c.upper() for k in ("ASR", "DSM", "SSAGA")):
+            continue
+        vals = [(r.get(c) or "").strip() for r in rows_all]
+        present = [v for v in vals if v not in ("", "NA", "NaN", ".")]
+        numeric = len(nums(rows_all, c))
+        out.append({"column": c, "n_present": len(present),
+                    "n_numeric": numeric,
+                    "why": ("not in any family list" if numeric == len(present)
+                            else f"{len(present) - numeric} non-numeric value(s)"),
+                    "examples": sorted(set(present))[:5]})
+    return out
+
+
 def hcp_scales(hcp_pheno, hcp_subjects) -> list[dict]:
     """Every symptom scale in the HCP table, summarised and sorted by family.
 
