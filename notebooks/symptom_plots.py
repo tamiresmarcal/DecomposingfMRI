@@ -362,13 +362,15 @@ def fig_hcp_scales(scales, save_dir=None):
         tag = f"{v:.0f}%"
         ax.text(v + 1.4, yy, tag, va="center", fontsize=7.4, color=INK2)
         if r["binary"]:
-            # Spell the positive rate out. The bar is the share at the
-            # MINIMUM, so on a 0/1 flag a long bar means the condition is
-            # RARE -- the opposite of what a long bar looks like it means.
-            # A reader took agoraphobia's 93% for 93% prevalence; it is 7%.
-            note = (f"BINARY — {r['pct_above_floor']:.0f}% positive; "
-                    f"the bar is the {r['pct_at_floor']:.0f}% who scored "
-                    f"{r['floor_value']:.0f}")
+            # Name the actual codes. SSAGA_Agoraphobia and
+            # SSAGA_Depressive_Ep are coded 1/5, not 0/1, so "scored 1"
+            # means NO for them -- the opposite of what a reader assumes
+            # from a 0/1 habit. Both observed values are printed so there
+            # is nothing left to assume.
+            vals = sorted(set(r["values"]))
+            note = (f"BINARY, coded {vals[0]:.0f}/{vals[-1]:.0f} -- "
+                    f"{r['pct_above_floor']:.0f}% at {vals[-1]:.0f} (positive); "
+                    f"the bar is the {r['pct_at_floor']:.0f}% at {vals[0]:.0f}")
         else:
             note = f"{r['n_distinct']} values"
         if r["pairs_with"]:
@@ -496,6 +498,16 @@ def fig_hcp_t_grid(tscales, ncol=4, save_dir=None):
                 f"({r['pct_clinical']:.0f}%)",
                 transform=ax.transAxes, ha="right", va="top", fontsize=6.8,
                 color=INK2, linespacing=1.4)
+        # The spike at 50 is the ASR truncating T for the narrow scales,
+        # not a mode in these subjects. Said on the panel, because a
+        # reader comparing this with the raw histogram will otherwise
+        # think the two disagree.
+        if r.get("truncated_at_50"):
+            ax.text(.02, .95,
+                    f"T truncated at 50:\n{r['t_floor_frac']:.0f}% pile there",
+                    transform=ax.transAxes, ha="left", va="top",
+                    fontsize=6.2, color=INK2, linespacing=1.3,
+                    style="italic")
         ax.set_xlabel(r["column"], fontsize=6.8, color=MUTED)
         ax.set_yticks([])
         # labelbottom on EVERY panel: sharex otherwise puts the tick labels on
@@ -512,12 +524,14 @@ def fig_hcp_t_grid(tscales, ncol=4, save_dir=None):
     fig.suptitle("HCP: T-scores, with the lines that have a published meaning",
                  x=.01, ha="left", y=1.0, va="bottom", fontsize=10.5, color=INK)
     fig.text(.01, -.055,
-             "T is the same score as raw, re-expressed as a position in the ASR's reference sample, "
-             "normed by age and sex. T≥65 is that reference's 93rd percentile BY CONSTRUCTION, so "
-             "the share above it\nhere is this cohort relative to that reference — NOT a prevalence "
-             "comparable with a HADS screening percentage. Thresholds are 65/70, except the "
-             "broad-band scales, which use 60/64.\nBand on T; fit on raw, because a T-score has age "
-             "and sex normed out of it and Cam-CAN's HADS does not.",
+             "THE SPIKE AT 50 IS THE INSTRUMENT, NOT THE SUBJECTS: the ASR truncates T at 50 for "
+             "the narrow scales, so the whole lower part of the raw range collapses onto one "
+             "value.\nThe broad-band scales are not truncated and run below 50, which is what shows "
+             "this.   T>=65 is the reference sample's 93rd percentile BY CONSTRUCTION, so the share "
+             "above it\nis this cohort relative to that reference -- NOT a prevalence comparable with a "
+             "HADS screening percentage. Thresholds are 65/70, except the broad-band scales, which "
+             "use 60/64.\nBand on T; fit on raw -- T is both TRUNCATED and normed by age and sex, and "
+             "Cam-CAN's HADS is neither.",
              fontsize=7.5, color=INK2, ha="left", linespacing=1.5)
     fig.tight_layout(rect=(0, .03, 1, 1))
     save(fig, "F6_hcp_tscores", save_dir)

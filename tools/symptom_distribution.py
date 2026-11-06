@@ -253,11 +253,24 @@ def hcp_t_scales(hcp_pheno, hcp_subjects) -> list[dict]:
     Neither substitutes for the other, and the target is still fitted on raw --
     a T-score has age and sex normed out of it, which Cam-CAN's HADS never had.
 
-    T is not "more processed" than raw. It is the same score re-expressed as a
-    position in a reference sample, normed by age and sex. T>=65 is the 93rd
-    percentile of that reference BY CONSTRUCTION, which is why the share above
-    it here is a statement about this cohort relative to that reference, not a
-    prevalence that can be compared with a HADS screening percentage.
+    T is NOT simply "raw re-expressed", which an earlier version of this
+    docstring claimed. For the narrow scales (DSM-oriented and syndrome) the
+    ASR TRUNCATES T at 50: every raw score in the lower part of the range maps
+    to the same T. Measured on this cohort, DSM_Anxi spreads over 11 raw
+    values with only 6% at zero, yet its T piles up on a single spike at 50.
+    The broad-band scales are not truncated and run well below 50, which is
+    what shows the truncation is the instrument's convention rather than
+    something about these subjects.
+
+    `t_floor_frac` reports it per scale. Where it is large the T column has
+    thrown away most of this cohort's variation, and fitting a model on T
+    would be fitting a column that is mostly one value -- another reason, on
+    top of the age/sex norming, that the target is raw.
+
+    T>=65 is the 93rd percentile of the reference sample BY CONSTRUCTION,
+    which is why the share above it here is a statement about this cohort
+    relative to that reference, not a prevalence that can be compared with a
+    HADS screening percentage.
 
     Two different threshold pairs apply, which is why they travel with each row
     rather than being a constant in the figure: narrow scales (DSM-oriented and
@@ -293,6 +306,11 @@ def hcp_t_scales(hcp_pheno, hcp_subjects) -> list[dict]:
                 "pct_borderline_plus": round(100 * sum(1 for x in v if x >= lo_thr) / n, 1),
                 "pct_clinical": round(100 * sum(1 for x in v if x >= hi_thr) / n, 1),
                 "median": _summary(v)["med"], "max": max(v), "min": min(v),
+                # The truncation, measured rather than assumed.
+                "t_floor": min(v),
+                "t_floor_frac": round(100 * sum(1 for x in v if x == min(v)) / n, 1),
+                "truncated_at_50": min(v) >= 50 and
+                                   sum(1 for x in v if x == 50) / n > .20,
             })
     return sorted(out, key=lambda r: -r["pct_borderline_plus"])
 
