@@ -98,8 +98,14 @@ class Settings:
     label_top: int = 3
     label_max: int = 25
     highlight_max: int = 10
+    # "K_" is the number of states, read out of the `states` label. It belongs
+    # here because it is the one axis of the grid that changes HOW MANY
+    # PREDICTORS the model has to estimate: K states give K*K transition cells,
+    # so K=27 is 729 of them and K=8 is 64. Every other factor leaves the
+    # feature count alone. fig_k_curve is the figure that reads it properly.
     factors: dict = field(default_factory=lambda: {"window": "window size", "atlas": "atlas", "model": "model",
-                                                   "method": "state method", "arm": "arm"})
+                                                   "method": "state method", "arm": "arm",
+                                                   "K_": "number of states (K)"})
     factor_trees: list = field(default_factory=lambda: ["bstm"])
     top_vars: int = 15
     edge_top: int = 12

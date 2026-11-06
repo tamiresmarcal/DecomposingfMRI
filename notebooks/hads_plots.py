@@ -759,3 +759,108 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
         dynamics_column(ax, d, side, c, fs, icon, gap, pt, away)
     save(fig, name, cfg)
     plt.show()
+
+
+def fig_k_curve(rows, cfg, trees=("bstm",)):
+    """B2.K: score against the NUMBER OF STATES, with why it moves underneath.
+
+    K is not just another axis of the grid. It is the only one that changes how
+    many predictors the model has to estimate: K states give K*K transition
+    cells, so K=27 is 729 of them and K=8 is 64, from the same subjects. Two
+    opposite things therefore happen as K grows, and the single panel of B2
+    cannot separate them:
+
+      a finer description of the brain may carry MORE signal
+      more predictors from the same n are estimated WORSE
+
+    Simulation with this pipeline's own estimator (p=729, RidgeCV, 5 folds)
+    puts numbers on the second one. At a true R^2 of 0.20 and n=168, power is
+    11% with 729 predictors and 81% with 64 -- the null's 95th percentile
+    alone falls from +0.145 to +0.066, because fewer predictors overfit less
+    and the bar for "found something" drops with them. At n=649 the same
+    change takes power from 84% to 100%.
+
+    So the top row is the score and the bottom row is the mechanism:
+    predictors per subject, from the selection's own `n_features` and `n`
+    rather than from K*K, since the `all` arm adds occupancy and dynamics on
+    top of the cells. The line at 1 is where predictors start to outnumber
+    subjects.
+
+    TWO PANELS, NOT TWO Y-SCALES. A score and a ratio share no units, and
+    putting them on one pair of axes would be a dual-axis chart -- the reader
+    could not tell which curve belongs to which scale, and crossings would
+    look like findings.
+
+    What to read: if the score FALLS as K falls, the signal lives in the fine
+    detail and a small-K model cannot see it. If it is flat or RISES, the
+    coarse description keeps the signal and the extra predictors were only
+    costing precision -- which is the case where a 168-subject cohort becomes
+    usable.
+    """
+    tasks = list(cfg.tasks)
+    colour, marker = dict(zip(tasks, TASK_COLOURS)), dict(zip(tasks, TASK_MARKERS))
+    pool = rows[rows["tree"].isin(trees)].dropna(subset=["K"])
+    if pool.empty:
+        raise SystemExit(f"no rows with a K for tree(s) {trees} -- fcm has no states")
+    pool = pool.assign(K=pool["K"].astype(int))
+    ks = sorted(pool["K"].unique())
+    base = pool.groupby(["phenotype", "model"])[["base_mean", "base_sd"]].first()
+    models = list(dict.fromkeys(sorted(pool["model"])))
+
+    fig, axes = plt.subplots(2, len(cfg.targets), squeeze=False, sharex=True,
+                             figsize=_size(cfg, 5.4 * len(cfg.targets), 6.0),
+                             gridspec_kw={"height_ratios": [2.1, 1]})
+    for c, lab in enumerate(cfg.targets):
+        top, bot = axes[0][c], axes[1][c]
+        d = pool[pool["phenotype"] == lab]
+        top.set_xlim(min(ks) - .5, max(ks) + .5)
+        draw_band(top, *base.loc[(lab, models[0])])
+        for task in tasks:
+            s = d[d["task"] == task]
+            if s.empty:
+                continue
+            g = s.groupby("K")["mean"]
+            med = g.median().reindex(ks)
+            q1 = g.quantile(.25).reindex(ks)
+            q3 = g.quantile(.75).reindex(ks)
+            top.fill_between(ks, q1, q3, color=colour[task], alpha=.16, lw=0)
+            top.plot(ks, med, color=colour[task], lw=2, solid_capstyle="round")
+            top.plot(ks, med, marker[task], ms=7, color=colour[task],
+                     mec=SURFACE, mew=1.2, zorder=4)
+        top.set_title(lab, loc="left")
+        if c == 0:
+            top.set_ylabel("CV score (Spearman)")
+
+        # the mechanism: predictors per subject, measured not assumed
+        if {"n_features", "n"} <= set(d.columns):
+            r = (d.assign(ratio=d["n_features"] / d["n"])
+                  .groupby("K")["ratio"].median().reindex(ks))
+            bot.plot(ks, r, color=INK2, lw=2, solid_capstyle="round")
+            bot.plot(ks, r, "o", ms=6, color=INK2, mec=SURFACE, mew=1.2)
+            bot.axhline(1, color=RED, ls="--", lw=.9)
+            # left-anchored: right-anchored it ran into the axis edge
+            bot.text(min(ks), 1, "as many predictors as subjects ",
+                     color=RED, fontsize=7, va="bottom", ha="left")
+            bot.set_yscale("log")
+            if c == 0:
+                bot.set_ylabel("predictors per subject")
+        else:
+            bot.set_axis_off()
+            bot.text(.5, .5, "n_features / n not in the summary", ha="center",
+                     va="center", color=MUTED, transform=bot.transAxes)
+        bot.set_xlabel("number of states (K)")
+        bot.set_xticks(ks)
+
+    handles = [Line2D([], [], marker=marker[t], ms=7, color=colour[t],
+                      label=f"{t}: median, band = middle half") for t in tasks]
+    # above the title rather than beside it: this figure is narrower than
+    # the other B2 panels, so the two ran into each other at one anchor.
+    fig.legend(handles=handles + [Patch(color=MUTED, alpha=.35,
+                                        label="Age + Sex baseline ± sd")],
+               loc="lower right", ncol=3, fontsize=7, bbox_to_anchor=(1, 1.035))
+    fig.suptitle(f"B2.K  score vs the number of states  ·  {', '.join(trees)}",
+                 x=.01, ha="left", fontsize=10, color=INK, y=1.0)
+    layout(fig, cfg)
+    save(fig, "B2_K_curve", cfg)
+    plt.show()
+    return fig
