@@ -130,8 +130,31 @@ def read_csv_any(path: Path, sep=None):
         return list(csv.DictReader(f, delimiter=sep))
 
 
+class MissingTable(FileNotFoundError):
+    """A participants table that is derived, not versioned, and has not been built yet.
+
+    Raised with the command that builds it, because the traceback from
+    `Path.open` seven frames down says only that a file is absent -- not that
+    it is a GENERATED file, nor which of several candidates in config/ the
+    caller probably meant.
+    """
+
+
 def subject_ids(path: Path) -> set[str]:
     """Subject ids from a participants table, whatever the id column is called."""
+    path = Path(path)
+    if not path.exists():
+        near = sorted(p.name for p in path.parent.glob("*participants*.csv")) \
+            if path.parent.is_dir() else []
+        cfg = path.name.replace("_participants.csv", ".yaml")
+        raise MissingTable(
+            f"{path} does not exist.\n"
+            f"  Participants tables are DERIVED -- built where the data is, not committed.\n"
+            f"  Build it:   python3 tools/make_participants.py config/{cfg} -o {path}\n"
+            + (f"  Or pass one of these, which do exist in {path.parent}:\n"
+               + "".join(f"    {n}\n" for n in near) if near else
+               f"  No *participants*.csv found in {path.parent} at all.\n")
+            + "  Or pass camcan_subjects=None to use every phenotype row, unmatched to imaging.")
     rows = read_csv_any(path)
     if not rows:
         sys.exit(f"{path}: no rows")
@@ -172,7 +195,13 @@ def _camcan_rows(camcan_dir: Path, camcan_subjects: Path | None):
     if not files:
         return [], []
     ph = merge_on([read_csv_any(p) for p in files], "CCID")
-    keep = subject_ids(camcan_subjects) if camcan_subjects else None
+    if camcan_subjects:
+        keep = subject_ids(camcan_subjects)
+    else:
+        keep = None
+        print("!! Cam-CAN not restricted to an imaging cohort: every phenotype row is "
+              "included.\n   The two cohorts' n are then not matched to who actually has "
+              "scans.", file=sys.stderr)
     rows = [r for k, r in ph.items() if keep is None or k in keep]
     cols = list(next(iter(ph.values()))) if ph else []
     return rows, cols
