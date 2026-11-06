@@ -762,56 +762,58 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
 
 
 def fig_k_curve(rows, cfg, trees=("bstm",)):
-    """B2.K: score against the NUMBER OF STATES, with why it moves underneath.
+    """B2.K: three views of the same axis -- score, hit rate, and why they move.
 
     K is not just another axis of the grid. It is the only one that changes how
-    many predictors the model has to estimate: K states give K*K transition
+    many predictors the model must estimate: K states give K*K transition
     cells, so K=27 is 729 of them and K=8 is 64, from the same subjects. Two
-    opposite things therefore happen as K grows, and the single panel of B2
-    cannot separate them:
+    opposite things therefore happen as K grows:
 
       a finer description of the brain may carry MORE signal
       more predictors from the same n are estimated WORSE
 
-    Simulation with this pipeline's own estimator (p=729, RidgeCV, 5 folds)
-    puts numbers on the second one. At a true R^2 of 0.20 and n=168, power is
-    11% with 729 predictors and 81% with 64 -- the null's 95th percentile
-    alone falls from +0.145 to +0.066, because fewer predictors overfit less
-    and the bar for "found something" drops with them. At n=649 the same
-    change takes power from 84% to 100%.
+    Simulation with this pipeline's own estimator (RidgeCV, 5 folds) puts
+    numbers on the second. At a true R^2 of 0.20 and n=168, power is 11% with
+    729 predictors and 81% with 64; at n=649, 84% and 100%. The null's 95th
+    percentile alone falls from +0.145 to +0.066.
 
-    So the top row is the score and the bottom row is the mechanism:
-    predictors per subject, from the selection's own `n_features` and `n`
-    rather than from K*K, since the `all` arm adds occupancy and dynamics on
-    top of the cells. The line at 1 is where predictors start to outnumber
-    subjects.
+    THE MEDIAN IS NOT THE VERDICT, and an earlier version of this figure
+    invited reading it as one. The question "can a model at this K work?" is
+    about the BEST model at that K, not the typical one, and a median sitting
+    on the baseline is perfectly compatible with individual models well above
+    it -- which is what B1 shows. So three rows:
 
-    TWO PANELS, NOT TWO Y-SCALES. A score and a ratio share no units, and
-    putting them on one pair of axes would be a dual-axis chart -- the reader
-    could not tell which curve belongs to which scale, and crossings would
-    look like findings.
+      score      the median (line) AND the best model at that K (hollow
+                 marker). Read the hollow marker with the count below it: a
+                 maximum over sixty models beats a maximum over three for no
+                 reason but the sixty.
+      hit rate   the SHARE of models at that K that beat their own baseline.
+                 This is the count-normalised version of the same question,
+                 and the one to trust when the counts differ as much as they
+                 do here. Flat across K means small K loses nothing.
+      cost       predictors per subject, from the selection's own n_features
+                 and n rather than K*K, since the `all` arm adds occupancy and
+                 dynamics on top of the cells.
 
-    What to read: if the score FALLS as K falls, the signal lives in the fine
-    detail and a small-K model cannot see it. If it is flat or RISES, the
-    coarse description keeps the signal and the extra predictors were only
-    costing precision -- which is the case where a 168-subject cohort becomes
-    usable.
+    Three panels rather than three scales on one: a score, a proportion and a
+    ratio share no units, and crossings between them would read as findings.
     """
     tasks = list(cfg.tasks)
     colour, marker = dict(zip(tasks, TASK_COLOURS)), dict(zip(tasks, TASK_MARKERS))
     pool = rows[rows["tree"].isin(trees)].dropna(subset=["K"])
     if pool.empty:
         raise SystemExit(f"no rows with a K for tree(s) {trees} -- fcm has no states")
-    pool = pool.assign(K=pool["K"].astype(int))
+    pool = pool.assign(K=pool["K"].astype(int),
+                       over=lambda d: d["mean"] > d["base_mean"])
     ks = sorted(pool["K"].unique())
     base = pool.groupby(["phenotype", "model"])[["base_mean", "base_sd"]].first()
     models = list(dict.fromkeys(sorted(pool["model"])))
 
-    fig, axes = plt.subplots(2, len(cfg.targets), squeeze=False, sharex=True,
-                             figsize=_size(cfg, 5.4 * len(cfg.targets), 6.0),
-                             gridspec_kw={"height_ratios": [2.1, 1]})
+    fig, axes = plt.subplots(3, len(cfg.targets), squeeze=False, sharex=True,
+                             figsize=_size(cfg, 5.4 * len(cfg.targets), 8.0),
+                             gridspec_kw={"height_ratios": [2.1, 1.1, 1]})
     for c, lab in enumerate(cfg.targets):
-        top, bot = axes[0][c], axes[1][c]
+        top, mid, bot = axes[0][c], axes[1][c], axes[2][c]
         d = pool[pool["phenotype"] == lab]
         top.set_xlim(min(ks) - .5, max(ks) + .5)
         draw_band(top, *base.loc[(lab, models[0])])
@@ -821,69 +823,85 @@ def fig_k_curve(rows, cfg, trees=("bstm",)):
                 continue
             g = s.groupby("K")["mean"]
             med = g.median().reindex(ks)
-            q1 = g.quantile(.25).reindex(ks)
-            q3 = g.quantile(.75).reindex(ks)
+            q1, q3 = g.quantile(.25).reindex(ks), g.quantile(.75).reindex(ks)
+            best = g.max().reindex(ks)
             cnt = g.size().reindex(ks).fillna(0)
             top.fill_between(ks, q1, q3, color=colour[task], alpha=.16, lw=0)
-            # Solid only between ADJACENT K values. An earlier draft drew one
-            # line through the whole range, so the stretch from K=14 to K=21 --
-            # where no model exists -- looked like measured values.
-            for a, b in zip(ks, ks[1:]):
-                if np.isnan(med[a]) or np.isnan(med[b]):
+            # Solid only between ADJACENT K. A single line through the range
+            # drew the stretch from K=14 to K=21 -- where no model exists --
+            # as if it had been measured.
+            for u, v in zip(ks, ks[1:]):
+                if np.isnan(med[u]) or np.isnan(med[v]):
                     continue
-                gap = ks.index(b) - ks.index(a) == 1 and b - a <= 1
-                top.plot([a, b], [med[a], med[b]], color=colour[task], lw=2,
-                         ls="-" if gap else (0, (3, 2)),
-                         solid_capstyle="round", zorder=2)
-            # Marker area in proportion to how many models the median is of.
-            # Without it a median of 3 sits beside a median of 40 and reads
-            # the same, which is what made this figure look jagged.
+                adj = v - u <= 1
+                top.plot([u, v], [med[u], med[v]], color=colour[task], lw=2,
+                         ls="-" if adj else (0, (3, 2)), solid_capstyle="round",
+                         zorder=2)
+            # Marker area in proportion to how many models the median is of:
+            # without it a median of three sits beside a median of sixty and
+            # reads the same.
             top.scatter(ks, med, s=14 + 46 * cnt / max(cnt.max(), 1),
                         marker=marker[task], color=colour[task],
                         edgecolor=SURFACE, linewidth=1.2, zorder=4)
+            top.scatter(ks, best, s=30, marker=marker[task], facecolor="none",
+                        edgecolor=colour[task], linewidth=1.2, zorder=3)
+
+            # hit rate: a proportion, so the unequal counts do not distort it
+            rate = s.groupby("K")["over"].mean().reindex(ks)
+            for u, v in zip(ks, ks[1:]):
+                if np.isnan(rate[u]) or np.isnan(rate[v]):
+                    continue
+                mid.plot([u, v], [rate[u], rate[v]], color=colour[task], lw=2,
+                         ls="-" if v - u <= 1 else (0, (3, 2)),
+                         solid_capstyle="round")
+            mid.scatter(ks, rate, s=14 + 46 * cnt / max(cnt.max(), 1),
+                        marker=marker[task], color=colour[task],
+                        edgecolor=SURFACE, linewidth=1.2, zorder=4)
+
         top.set_title(lab, loc="left")
+        mid.set_ylim(-.04, 1.04)
+        mid.axhline(.5, color=MUTED, ls=":", lw=.8)
         if c == 0:
             top.set_ylabel("CV score (Spearman)")
+            mid.set_ylabel("share above\nits baseline")
 
-        # the mechanism: predictors per subject, measured not assumed
         if {"n_features", "n"} <= set(d.columns):
             r = (d.assign(ratio=d["n_features"] / d["n"])
                   .groupby("K")["ratio"].median().reindex(ks))
             bot.plot(ks, r, color=INK2, lw=2, solid_capstyle="round")
-            bot.plot(ks, r, "o", ms=6, color=INK2, mec=SURFACE, mew=1.2)
+            bot.plot(ks, r, "o", ms=5, color=INK2, mec=SURFACE, mew=1.2)
             bot.axhline(1, color=RED, ls="--", lw=.9)
-            # left-anchored: right-anchored it ran into the axis edge
-            bot.text(min(ks), 1, "as many predictors as subjects ",
-                     color=RED, fontsize=7, va="bottom", ha="left")
+            bot.text(min(ks), 1, "as many predictors as subjects ", color=RED,
+                     fontsize=7, va="bottom", ha="left")
             bot.set_yscale("log")
             if c == 0:
-                bot.set_ylabel("predictors per subject")
+                bot.set_ylabel("predictors\nper subject")
         else:
             bot.set_axis_off()
             bot.text(.5, .5, "n_features / n not in the summary", ha="center",
                      va="center", color=MUTED, transform=bot.transAxes)
-        # The count per K, spelled out: the medians above are of very
-        # different numbers of models and nothing else would say so.
         per_k = d.groupby("K").size().reindex(ks).fillna(0).astype(int)
         for k_, c_ in zip(ks, per_k):
             bot.annotate(str(c_), (k_, 0), xycoords=("data", "axes fraction"),
                          xytext=(0, -26), textcoords="offset points",
                          ha="center", fontsize=6, color=MUTED, gid="scaled")
         bot.set_xlabel("number of states (K)", labelpad=14)
-        # thinned: every K labelled ran the ticks together
         bot.set_xticks([k_ for n_, k_ in enumerate(ks)
                         if n_ == 0 or n_ == len(ks) - 1 or k_ % 5 == 0])
 
     handles = [Line2D([], [], marker=marker[t], ms=7, color=colour[t],
-                      label=f"{t}: median, band = middle half") for t in tasks]
-    # above the title rather than beside it: this figure is narrower than
-    # the other B2 panels, so the two ran into each other at one anchor.
+                      label=f"{t}: median (filled), best (hollow)") for t in tasks]
     fig.legend(handles=handles + [Patch(color=MUTED, alpha=.35,
-                                        label="Age + Sex baseline ± sd")],
+                                        label="Age + Sex baseline")],
                loc="lower right", ncol=3, fontsize=7, bbox_to_anchor=(1, 1.035))
-    fig.text(.01, -.02, "The small grey number under each K is HOW MANY models that median is of. A dashed segment "
-             "spans K values that do not exist: nothing was measured there.", fontsize=7, color=INK2, ha="left")
-    fig.suptitle(f"B2.K  score vs the number of states  ·  {', '.join(trees)}",
+    fig.text(.01, -.075,
+             "THE MEDIAN IS NOT THE VERDICT. It sits on the baseline whenever most of the grid is noise, while "
+             "individual models are well above it \u2014 those are in B1.\nHollow marker = the BEST model at that K; "
+             "the grey number under it is how many it is the best of, and a max over sixty beats a max over three "
+             "for no reason but the sixty.\nThe middle row is the same question without that problem: the SHARE of models "
+             "at that K that beat their own baseline.   Dashed = no model exists between those two K.",
+             fontsize=7, color=INK2, ha="left", linespacing=1.6)
+    fig.suptitle(f"B2.K  score vs the number of states  \u00b7  {', '.join(trees)}",
                  x=.01, ha="left", fontsize=10, color=INK, y=1.0)
     layout(fig, cfg)
     save(fig, "B2_K_curve", cfg)
