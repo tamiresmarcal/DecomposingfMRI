@@ -211,6 +211,10 @@ def build(root: Path, cells: list[tuple[str, str]], pheno: pd.DataFrame,
 
         C = covariate_block(pheno, d, subs, args.covariates, args.categorical)
         y = pheno.set_index("sub").reindex(subs)["y"].to_numpy(float)
+        # Aligned to `subs` the same way y is, so a group travels with its row
+        # through every arm of this cohort.
+        groups = (pheno.set_index("sub").reindex(subs)[args.group_col].to_numpy()
+                  if getattr(args, "group_col", None) else None)
         mats, info = blocks(d, args.fc_transform, args.fc_max_missing)
 
         if cohort not in seen_baseline:
@@ -218,12 +222,13 @@ def build(root: Path, cells: list[tuple[str, str]], pheno: pd.DataFrame,
             # subjects and the same quality columns at every atlas, so a second
             # baseline would be the identical fit under another name.
             seen_baseline.add(cohort)
-            data[(cohort, "(covariates only)", "-")] = (C, y)
+            data[(cohort, "(covariates only)", "-")] = (C, y, groups)
             meta.append({"cohort": cohort, "arm": "(covariates only)",
                          "atlas": "-", "kind": "base", "n": len(subs),
                          "n_features": 0, "n_covariates": C.shape[1]})
         for arm in args.arms:
-            data[(cohort, arm, atlas)] = (np.column_stack([C, mats[arm]]), y)
+            data[(cohort, arm, atlas)] = (np.column_stack([C, mats[arm]]), y,
+                                          groups)
             meta.append({"cohort": cohort, "arm": arm, "atlas": atlas,
                          "kind": "set", "n": len(subs),
                          "n_features": mats[arm].shape[1],
@@ -288,7 +293,8 @@ def run(args) -> int:
     pheno = read_phenotype(
         args.pheno, args.id_col, args.target,
         [c for c in args.covariates if c not in QUALITY_COVARIATES],
-        args.categorical, levels=args.ordinal_levels)
+        args.categorical, levels=args.ordinal_levels,
+        group_col=getattr(args, "group_col", None))
 
     log(f"{len(cells)} (cohort, atlas) cell(s): "
         + "  ".join(f"{c}/{a}" for c, a in cells))
@@ -302,7 +308,8 @@ def run(args) -> int:
     log(f"  {len(jobs)} fit job(s)")
     t0 = time.time()
     scores = Parallel(n_jobs=args.n_jobs, backend="loky", verbose=5)(
-        delayed(score_once)(data[k][0], data[k][1], m, s) for k, m, s in jobs)
+        delayed(score_once)(data[k][0], data[k][1], m, s, data[k][2])
+        for k, m, s in jobs)
     log(f"  fitted in {time.time() - t0:.0f}s")
 
     rows = [{"cohort": k[0], "arm": k[1], "atlas": k[2], "model": m,
@@ -505,6 +512,11 @@ def add_arguments(p) -> None:
                    help=f"{QUALITY_COVARIATES} are read from the static-FC "
                         f"table; the rest from the phenotype")
     p.add_argument("--categorical", nargs="+", default=["Sex"])
+    p.add_argument("--group-col", default=None, metavar="COLUMN",
+                   help="A phenotype column whose members must never be split "
+                        "across CV folds, e.g. Family_ID for HCP. See "
+                        "`select-bstm --help` for why it matters; subjects "
+                        "with no value in it are dropped.")
     p.add_argument("--atlas", nargs="*", default=None)
     p.add_argument("--output-name", default="fcm_selection", metavar="FOLDER")
     p.add_argument("--n-jobs", type=int, default=-1)

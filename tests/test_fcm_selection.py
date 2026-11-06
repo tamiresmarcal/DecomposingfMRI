@@ -142,8 +142,8 @@ class TestBuild:
     def test_the_covariates_are_prepended_to_every_arm(self, one_cell):
         root, pheno, _ = one_cell
         data, meta = F.build(root, [("cA", "mini")], pheno, args(root))
-        C, _ = data[("cA", "(covariates only)", "-")]
-        for key, (X, _) in data.items():
+        C, _, _ = data[("cA", "(covariates only)", "-")]
+        for key, (X, _, _) in data.items():
             if key[1] == "(covariates only)":
                 continue
             assert np.allclose(X[:, :C.shape[1]], C), key
@@ -171,7 +171,7 @@ class TestBuild:
         root, pheno, subs = one_cell
         data, _ = F.build(root, [("cA", "mini")], pheno, args(root))
         want = pheno.set_index("sub").loc[sorted(subs), "y"].to_numpy(float)
-        for key, (_, y) in data.items():
+        for key, (_, y, _) in data.items():
             assert np.allclose(y, want), key
 
     def test_a_phenotype_that_matches_nothing_shows_both_id_styles(

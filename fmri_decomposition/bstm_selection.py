@@ -265,9 +265,55 @@ def make_model(name: str, seed: int):
                      f"ridge, hgb, lgbm, logistic")
 
 
-def score_once(X: np.ndarray, y: np.ndarray, model: str, seed: int) -> float:
+def group_folds(groups, n_splits: int, seed: int):
+    """Partition the rows into folds that never split a group, varying with seed.
+
+    WHY NOT sklearn's GroupKFold. It accepted no `shuffle` before 1.6, and the
+    container this runs in pins scikit-learn 1.5.2. Without shuffling the folds
+    are a deterministic function of the group sizes, so every seed in --seeds
+    would produce THE SAME partition: the spread across seeds, which is read as
+    the stability of a score, would collapse to zero and look like a
+    beautifully stable model. That failure is silent, which is why this is
+    hand-rolled rather than version-gated.
+
+    Largest groups first keeps the folds balanced; the seeded permutation
+    breaks ties, which is the only thing that varies when every group is the
+    same size -- exactly the HCP case, where the families are all pairs.
+    """
+    groups = np.asarray(groups)
+    uniq, inv = np.unique(groups, return_inverse=True)
+    if len(uniq) < n_splits:
+        raise ValueError(f"{len(uniq)} group(s) cannot fill {n_splits} folds")
+    sizes = np.bincount(inv, minlength=len(uniq))
+    rank = np.empty(len(uniq), int)
+    rank[np.random.default_rng(seed).permutation(len(uniq))] = np.arange(len(uniq))
+
+    fold_of_group = np.empty(len(uniq), int)
+    load = np.zeros(n_splits)
+    for g in sorted(range(len(uniq)), key=lambda g: (-sizes[g], rank[g])):
+        f = int(np.argmin(load))
+        fold_of_group[g] = f
+        load[f] += sizes[g]
+
+    fold = fold_of_group[inv]
+    for f in range(n_splits):
+        te = np.flatnonzero(fold == f)
+        tr = np.flatnonzero(fold != f)
+        if len(te) and len(tr):
+            yield tr, te
+
+
+def score_once(X: np.ndarray, y: np.ndarray, model: str, seed: int,
+               groups=None) -> float:
     """One out-of-fold score. Never accuracy -- with the upper ordinal levels
-    this thin, predicting Normal for everyone scores well and means nothing."""
+    this thin, predicting Normal for everyone scores well and means nothing.
+
+    `groups` (from --group-col) keeps every member of a group on the same side
+    of each split. For HCP that is Family_ID: the cohort is full of twins and
+    siblings, and a sibling in the training fold makes the held-out one
+    partly predictable from family rather than from brain state. The score is
+    then optimistic, and nothing in the output says so.
+    """
     from scipy import stats
     from sklearn.base import clone
     from sklearn.metrics import roc_auc_score
@@ -278,14 +324,24 @@ def score_once(X: np.ndarray, y: np.ndarray, model: str, seed: int) -> float:
         yb = (y > 0).astype(int)
         if yb.sum() < 10 or (1 - yb).sum() < 10:
             return np.nan
+        splits = (list(group_folds(groups, 5, seed)) if groups is not None else
+                  list(StratifiedKFold(5, shuffle=True,
+                                       random_state=seed).split(X, yb)))
+        # Grouped folds are not stratified, so a training split CAN come out
+        # single-class, where `fit` raises. That is a fact about this cohort's
+        # class balance, not a bug to paper over, so it returns NaN -- the same
+        # thing the thin-class guard above does.
+        if any(len(np.unique(yb[tr])) < 2 for tr, _ in splits):
+            return np.nan
         pred = np.empty(len(yb), float)
-        for tr, te in StratifiedKFold(5, shuffle=True,
-                                      random_state=seed).split(X, yb):
+        for tr, te in splits:
             pred[te] = clone(est).fit(X[tr], yb[tr]).predict_proba(X[te])[:, 1]
         return float(roc_auc_score(yb, pred))
 
+    splits = (group_folds(groups, 5, seed) if groups is not None else
+              KFold(5, shuffle=True, random_state=seed).split(X))
     pred = np.empty(len(y), float)
-    for tr, te in KFold(5, shuffle=True, random_state=seed).split(X):
+    for tr, te in splits:
         pred[te] = clone(est).fit(X[tr], y[tr]).predict(X[te])
     return float(stats.spearmanr(pred, y).statistic)
 
@@ -297,7 +353,8 @@ def metric_name(model: str) -> str:
 # --------------------------------------------------------------- the data ---
 def read_phenotype(specs: list[str], id_col: str, target: str,
                    covariates: list[str], categorical: list[str],
-                   levels: list[str] | None = None) -> pd.DataFrame:
+                   levels: list[str] | None = None,
+                   group_col: str | None = None) -> pd.DataFrame:
     """Merge the release tables on the id column, code the ordinal, coerce types.
 
     Cam-CAN splits what is needed: the HADS categories are in one table and Age
@@ -324,7 +381,14 @@ def read_phenotype(specs: list[str], id_col: str, target: str,
         path = Path(path_s)
         if not path.exists():
             raise SystemExit(f"{path} does not exist")
-        f = pd.read_csv(path, sep=sep or ",", dtype={id_col: str})
+        # The group column is forced to str HERE, at read time, not cleaned up
+        # later: pandas would parse a Family_ID of "0012" as the integer 12,
+        # and then "0012" and "12" -- two different families -- would become
+        # one group. That merge is silent, and it reintroduces exactly the
+        # leak --group-col exists to close.
+        f = pd.read_csv(path, sep=sep or ",",
+                        dtype={id_col: str, **({group_col: str} if group_col
+                                               else {})})
         if id_col not in f.columns:
             raise SystemExit(f"{id_col!r} not in {path.name}: "
                              f"{list(f.columns)[:20]}")
@@ -339,7 +403,8 @@ def read_phenotype(specs: list[str], id_col: str, target: str,
     pheno = pheno.rename(columns={id_col: "sub"})
 
     lower = {c.strip().lower(): c for c in pheno.columns}
-    want = [target] + [c for c in covariates if c != "n_transitions"]
+    want = ([target] + [c for c in covariates if c != "n_transitions"]
+            + ([group_col] if group_col else []))
     missing = [w for w in want if w.strip().lower() not in lower]
     if missing:
         near = [c for c in pheno.columns
@@ -377,12 +442,21 @@ def read_phenotype(specs: list[str], id_col: str, target: str,
             f"ORDER, lowest first:\n"
             f"    --ordinal-levels low mid high")
     pheno["y"] = codes
+    if group_col:
+        pheno[group_col] = pheno[group_col].astype("string").str.strip()
 
     for c in covariates:
         if c in pheno.columns and c not in categorical:
             pheno[c] = pd.to_numeric(pheno[c], errors="coerce")
 
-    keep = ["sub", "y"] + [c for c in covariates if c != "n_transitions"]
+    # The group column rides along as a STRING and is never coerced, coded or
+    # used as a predictor: it only says who may not be split across folds. It
+    # is in `keep`, so a subject with no group value is dropped by the dropna
+    # below -- which is right, because a subject with no group cannot be kept
+    # out of its relatives' fold, and silently giving it its own group would
+    # restore exactly the leak --group-col exists to close.
+    keep = (["sub", "y"] + [c for c in covariates if c != "n_transitions"]
+            + ([group_col] if group_col else []))
     pheno_full = pheno[keep]
     pheno = pheno_full.dropna()
     if pheno.empty:
@@ -594,8 +668,8 @@ def one_row_per_subject(d: pd.DataFrame, what: str,
 
 def build(table: Path, pheno: pd.DataFrame, covariates: list[str],
           feature_sets: list[str], p_norms: list[str],
-          tasks: list[str] | None = None):
-    """One state set -> ({feature set: matrix}, covariates-only matrix, y, sizes).
+          tasks: list[str] | None = None, group_col: str | None = None):
+    """One state set -> ({feature set: matrix}, covariates-only, y, groups, sizes).
 
     Covariates are prepended to every feature set, so each one has to beat the
     covariates-only baseline on the same footing.
@@ -654,7 +728,8 @@ def build(table: Path, pheno: pd.DataFrame, covariates: list[str],
                 block[:, :len(cells)] = cond
             mats[(fs, nm)] = np.column_stack([C, block])
             widths[(fs, nm)] = len(cols)
-    return mats, C, d["y"].to_numpy(float), widths, len(d)
+    groups = d[group_col].to_numpy() if group_col else None
+    return mats, C, d["y"].to_numpy(float), groups, widths, len(d)
 
 
 # ------------------------------------------------------------------- run ---
@@ -668,7 +743,8 @@ def run(args) -> int:
     log(f"phenotype for target={args.target!r}")
     pheno = read_phenotype(args.pheno, args.id_col, args.target,
                            args.covariates, args.categorical,
-                           levels=args.ordinal_levels)
+                           levels=args.ordinal_levels,
+                           group_col=getattr(args, "group_col", None))
     # Applied to the PHENOTYPE rather than to each transition table: every
     # state set reaches the model through an inner join on this frame, so
     # restricting it once restricts every arm identically and there is no
@@ -693,10 +769,11 @@ def run(args) -> int:
     data, meta = {}, []
     for t in sets.itertuples():
         key = (t.atlas, t.window_s, t.states)
-        mats, C, y, widths, n = build(t.path, pheno, args.covariates,
-                                      args.features, args.p_norm,
-                                      getattr(args, "tasks", None))
-        data[key] = (mats, C, y)
+        mats, C, y, groups, widths, n = build(
+            t.path, pheno, args.covariates, args.features, args.p_norm,
+            getattr(args, "tasks", None),
+            group_col=getattr(args, "group_col", None))
+        data[key] = (mats, C, y, groups)
         for (fs, nm), w in widths.items():
             meta.append({"atlas": t.atlas, "window_s": t.window_s_num,
                          "states": t.states, "K": t.K, "features": fs,
@@ -724,8 +801,9 @@ def run(args) -> int:
         f"+ {n_base} baseline)")
 
     def one(kind, key, arm, model, seed):
-        mats, C, y = data[key]
-        return score_once(mats[arm] if kind == "set" else C, y, model, seed)
+        mats, C, y, groups = data[key]
+        return score_once(mats[arm] if kind == "set" else C, y, model, seed,
+                          groups=groups)
 
     t0 = time.time()
     scores = Parallel(n_jobs=args.n_jobs, backend="loky", verbose=5)(
@@ -1207,7 +1285,7 @@ def _save_models(scores, data, model_dir: Path, top_n: int,
                    else str(window_s), states)
             if key not in data:
                 continue
-            mats, C, y = data[key]
+            mats, C, y, _groups = data[key]
             base, _, nm = fs.partition(" [")
             arm = (base, nm.rstrip("]") or "-")
             if arm not in mats:
@@ -1275,6 +1353,15 @@ def add_arguments(p) -> None:
     p.add_argument("--covariates", nargs="+",
                    default=["Age", "Sex", "n_transitions"])
     p.add_argument("--categorical", nargs="+", default=["Sex"])
+    p.add_argument("--group-col", default=None, metavar="COLUMN",
+                   help="A phenotype column whose members must never be split "
+                        "across CV folds, e.g. Family_ID for HCP. Without it, "
+                        "a twin in the training fold makes the held-out one "
+                        "partly predictable from family rather than from brain "
+                        "state, and the score is optimistic with nothing saying "
+                        "so. Subjects with no value in this column are DROPPED, "
+                        "because a subject with no group cannot be kept out of "
+                        "its relatives' fold.")
     p.add_argument("--cohort", required=True,
                    help="whose transition tables to rank. Required: this stage "
                         "spans cohorts, so it must not name one by default. "
