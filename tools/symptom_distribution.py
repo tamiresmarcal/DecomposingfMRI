@@ -196,6 +196,102 @@ def merge_on(frames, id_col):
     return out
 
 
+# ------------------------------------------------- the whole HCP instrument ---
+# Everything the ASR/SSAGA battery offers, not just the four scales that pair
+# with HADS. Grouped by family, because the families mean different things and
+# should not be read as one ranked list:
+#
+#   DSM-oriented   the scales built to line up with DSM categories. These are
+#                  what pairs with a HADS subscale.
+#   syndrome       the empirically derived ASR syndromes. Narrower, and
+#                  `Anxd` deliberately mixes anxiety with depression.
+#   broad-band     sums over several syndromes. MORE ITEMS, so a lower floor
+#                  and more resolution -- often the better regression target
+#                  even with no HADS counterpart.
+#   SSAGA          diagnostic-interview counts and flags, a different kind of
+#                  measurement: some are 0/1, where a Spearman is a point-
+#                  biserial and the floor fraction means something else.
+HCP_FAMILIES = {
+    "DSM-oriented": ["DSM_Depr", "DSM_Anxi", "DSM_Somp", "DSM_Avoid",
+                     "DSM_Adh", "DSM_Inat", "DSM_Hype", "DSM_Antis"],
+    "syndrome": ["ASR_Anxd", "ASR_Witd", "ASR_Soma", "ASR_Thot", "ASR_Attn",
+                 "ASR_Aggr", "ASR_Rule", "ASR_Intr", "ASR_Oth", "ASR_Crit"],
+    "broad-band": ["ASR_Intn", "ASR_Extn", "ASR_TAO_Sum", "ASR_Totp"],
+    "SSAGA": ["SSAGA_ChildhoodConduct", "SSAGA_PanicDisorder",
+              "SSAGA_Agoraphobia", "SSAGA_Depressive_Ep",
+              "SSAGA_Depressive_Sx"],
+}
+
+HCP_LABEL = {
+    "DSM_Depr": "depressive", "DSM_Anxi": "anxiety", "DSM_Somp": "somatic",
+    "DSM_Avoid": "avoidant personality", "DSM_Adh": "ADH problems",
+    "DSM_Inat": "inattention", "DSM_Hype": "hyperactivity",
+    "DSM_Antis": "antisocial personality",
+    "ASR_Anxd": "anxious/depressed", "ASR_Witd": "withdrawn",
+    "ASR_Soma": "somatic complaints", "ASR_Thot": "thought problems",
+    "ASR_Attn": "attention problems", "ASR_Aggr": "aggressive behaviour",
+    "ASR_Rule": "rule-breaking", "ASR_Intr": "intrusive",
+    "ASR_Oth": "other problems", "ASR_Crit": "critical items",
+    "ASR_Intn": "internalizing", "ASR_Extn": "externalizing",
+    "ASR_TAO_Sum": "total adaptive/other", "ASR_Totp": "total problems",
+    "SSAGA_ChildhoodConduct": "childhood conduct",
+    "SSAGA_PanicDisorder": "panic disorder", "SSAGA_Agoraphobia": "agoraphobia",
+    "SSAGA_Depressive_Ep": "depressive episode",
+    "SSAGA_Depressive_Sx": "depressive symptoms",
+}
+
+# The two that pair with a HADS subscale, marked so a figure can say so.
+HCP_HADS_PAIR = {"DSM_Anxi": "HADS anxiety", "DSM_Depr": "HADS depression"}
+
+
+def hcp_scales(hcp_pheno, hcp_subjects) -> list[dict]:
+    """Every symptom scale in the HCP table, summarised and sorted by family.
+
+    RAW only. The T-scores exist for the ASR scales, but a T-score has age and
+    sex normed out of it in the reference sample, so fitting one removes age
+    and sex from this cohort in a way Cam-CAN's HADS never had. T is for
+    describing the sample; raw is for fitting, and this function is for
+    choosing what to fit.
+
+    Sorted within each family by floor fraction, ascending -- i.e. the most
+    usable target first. That ordering is the point of the table: a scale
+    where most subjects tie at the minimum has far less power than its n
+    suggests, and no extra subjects fix it.
+
+    A binary column (two distinct values) is FLAGGED rather than ranked
+    alongside the counts: its floor fraction is just its base rate, which is
+    not the same quantity, and Spearman on it is a point-biserial.
+    """
+    rows_all, cols, _ = _hcp_rows(Path(hcp_pheno), Path(hcp_subjects))
+    out = []
+    for family, stems in HCP_FAMILIES.items():
+        got = []
+        for stem in stems:
+            col = f"{stem}_Raw" if f"{stem}_Raw" in cols else (
+                stem if stem in cols else None)
+            if col is None:
+                continue
+            v = nums(rows_all, col)
+            if not v:
+                continue
+            s = _summary(v)
+            n_distinct = len(set(v))
+            got.append({
+                "family": family, "stem": stem, "column": col,
+                "label": HCP_LABEL.get(stem, stem),
+                "pairs_with": HCP_HADS_PAIR.get(stem, ""),
+                "n": s["n"], "median": s["med"], "p75": s["p75"],
+                "p90": s["p90"], "p95": s["p95"], "max": s["max"],
+                "sd": round(s["sd"], 2), "n_distinct": n_distinct,
+                "binary": n_distinct <= 2,
+                "pct_at_floor": round(100 * s["floor_frac"], 1),
+                "floor_value": s["floor_value"],
+                "values": v,
+            })
+        out += sorted(got, key=lambda r: (r["binary"], r["pct_at_floor"]))
+    return out
+
+
 # -------------------------------------------------------------------- load ---
 # The notebook (notebooks/12_symptom_distributions.ipynb) imports `load`, so the
 # band definitions and the id matching live in exactly one place. Returning

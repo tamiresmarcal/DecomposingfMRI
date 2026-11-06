@@ -300,3 +300,137 @@ def fig_quantiles(d, constructs=("anxiety", "depression"), save_dir=None):
     fig.tight_layout()
     save(fig, "F3_quantiles", save_dir)
     return fig
+
+
+# ---------------------------------------------- the whole HCP instrument ---
+# Four families, assigned in fixed order and never cycled. Validated: worst
+# adjacent dE 9.1 (protan), 22.9 (normal vision). Two of the four fall below
+# 3:1 against this surface, which obligates visible labels -- every row here
+# is named, and the notebook ships the table beside the figure.
+FAMILY_COLOUR = {"DSM-oriented": "#2a78d6", "syndrome": "#eb6834",
+                 "broad-band": "#1baf7a", "SSAGA": "#eda100"}
+
+
+def hcp_scale_table(scales):
+    """The rows of `symptom_distribution.hcp_scales`, minus the raw values."""
+    return [{k: v for k, v in r.items() if k != "values"} for r in scales]
+
+
+def fig_hcp_scales(scales, save_dir=None):
+    """Every HCP scale ranked by how usable it is as a regression target.
+
+    The quantity on the axis is the FLOOR FRACTION: the share of subjects
+    sitting at the scale's minimum. It is the thing that decides power. A
+    Spearman over a column where most subjects tie at the floor has far less
+    power than its n suggests, and more subjects do not fix it -- which is the
+    whole reason this cohort's n was raised in the first place.
+
+    Resolution (the count of distinct values observed) is printed rather than
+    plotted: it is a different measure on a different scale, and giving it a
+    second x-axis on the same plot is the one chart mistake worth naming.
+    Shorter bar + more distinct values = better target.
+
+    Binary columns sit at the bottom of their family and are marked, because
+    their "floor fraction" is just a base rate and a Spearman on them is a
+    point-biserial. Reading them against the counts would be comparing two
+    different quantities on one axis.
+    """
+    rows, labels, colours, heads = [], [], [], []
+    y = 0
+    for fam in FAMILY_COLOUR:
+        got = [r for r in scales if r["family"] == fam]
+        if not got:
+            continue
+        heads.append((y, fam))
+        y += 1
+        for r in got:
+            rows.append((y, r))
+            labels.append((y, r))
+            colours.append(FAMILY_COLOUR[fam])
+            y += 1
+        y += .4
+    if not rows:
+        raise SystemExit("no HCP scales found -- check the phenotype columns")
+
+    fig, ax = plt.subplots(figsize=(9.6, .30 * y + 1.6))
+    for (yy, r), col in zip(rows, colours):
+        v = r["pct_at_floor"]
+        ax.plot([0, v], [yy, yy], color=col, lw=2, solid_capstyle="round",
+                alpha=.55 if r["binary"] else 1.0)
+        ax.plot(v, yy, "o", ms=8, color=col, markeredgecolor=SURFACE,
+                markeredgewidth=2, zorder=3)
+        tag = f"{v:.0f}%"
+        ax.text(v + 1.4, yy, tag, va="center", fontsize=7.4, color=INK2)
+        note = (f"{r['n_distinct']} values" if not r["binary"]
+                else f"BINARY ({r['n_distinct']} values) — this is a base rate, "
+                     f"not a floor")
+        if r["pairs_with"]:
+            note += f"   ·   pairs with {r['pairs_with']}"
+        ax.text(101, yy, note, va="center", fontsize=7, color=INK2)
+
+    for yy, fam in heads:
+        ax.text(-1, yy, fam, va="center", ha="right", fontsize=8.5,
+                color=FAMILY_COLOUR[fam], fontweight="bold")
+    ax.set_yticks([yy for yy, _ in labels])
+    ax.set_yticklabels([f"{r['label']}" for _, r in labels], fontsize=8,
+                       color=INK2)
+    ax.invert_yaxis()
+    ax.set_xlim(0, 100)
+    ax.set_xlabel("% of subjects at the scale minimum   (lower = more usable "
+                  "as a regression target)", labelpad=6)
+    ax.spines["left"].set_visible(False)
+    ax.tick_params(axis="y", length=0)
+    ax.grid(axis="x", color=MUTED, alpha=.25, lw=.6)
+    ax.set_axisbelow(True)
+    ax.set_title("HCP: every symptom scale, by how much variance it leaves to "
+                 "predict", loc="left", pad=12)
+    fig.text(.01, -.03 - .004 * len(rows) / 4,
+             "Raw scores, never T: a T-score has age and sex normed out of it in the "
+             "reference sample, which Cam-CAN's HADS never had.\nThe distinct-value count is "
+             "printed, not plotted — it is a different measure on a different scale, and a "
+             "second x-axis for it would be a dual-axis chart.",
+             fontsize=7.5, color=INK2, ha="left", linespacing=1.5)
+    fig.tight_layout()
+    save(fig, "F4_hcp_scales", save_dir)
+    return fig
+
+
+def fig_hcp_grid(scales, ncol=4, save_dir=None):
+    """A small histogram of every HCP scale, each on its own axis.
+
+    Small multiples rather than one shared axis, for the same reason F1 uses
+    them: these scales have different item counts and different ranges, and
+    one axis they all had to fit would compress the short ones to nothing.
+    """
+    scales = [r for r in scales if r["values"]]
+    nrow = -(-len(scales) // ncol)
+    fig, axes = plt.subplots(nrow, ncol, figsize=(2.5 * ncol, 1.75 * nrow),
+                             squeeze=False)
+    for i, r in enumerate(scales):
+        ax = axes[i // ncol][i % ncol]
+        v = np.asarray(r["values"], float)
+        lo, hi = int(v.min()), int(v.max())
+        counts, _, _ = ax.hist(v, bins=np.arange(lo - .5, hi + 1.5), lw=0,
+                               color=FAMILY_COLOUR[r["family"]], rwidth=.86)
+        # Headroom for the floor annotation. Without it a two-bar panel (the
+        # binary SSAGA flags) fills its axes to the top and the text lands on
+        # the bar.
+        ax.set_ylim(0, counts.max() * 1.30)
+        ax.set_title(f"{r['label']}", loc="left", fontsize=8.5)
+        ax.text(.98, .93, f"floor {r['pct_at_floor']:.0f}%", ha="right",
+                va="top", transform=ax.transAxes, fontsize=7, color=INK2)
+        ax.tick_params(labelsize=7)
+        ax.set_xlabel(r["column"], fontsize=6.8, color=MUTED)
+        ax.set_yticks([])
+        ax.spines["left"].set_visible(False)
+    for j in range(len(scales), nrow * ncol):
+        axes[j // ncol][j % ncol].set_axis_off()
+    handles = [Patch(facecolor=c, label=f) for f, c in FAMILY_COLOUR.items()
+               if any(r["family"] == f for r in scales)]
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles),
+               fontsize=8, bbox_to_anchor=(.5, -.015))
+    fig.suptitle("HCP: the shape of every scale, each on its own axis",
+                 x=.01, ha="left", y=1.0, va="bottom", fontsize=10.5, color=INK)
+    fig.tight_layout(rect=(0, .03, 1, 1))
+    save(fig, "F5_hcp_grid", save_dir)
+    return fig
