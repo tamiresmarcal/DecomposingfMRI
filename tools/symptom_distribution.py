@@ -244,6 +244,75 @@ HCP_LABEL = {
 HCP_HADS_PAIR = {"DSM_Anxi": "HADS anxiety", "DSM_Depr": "HADS depression"}
 
 
+def hcp_raw_cutoffs(hcp_pheno, hcp_subjects) -> list[dict]:
+    """Where each ASR band begins ON THE RAW SCALE, read off this sample.
+
+    THERE IS NO PUBLISHED RAW CUTOFF. The ASR's bands are defined on the
+    T-score (>=65 borderline, >=70 clinical), and raw -> T goes through the
+    manual's norm tables, which are normed BY AGE AND SEX and are not in the
+    data. So nothing here is a cutoff from the instrument; it is a lookup in
+    this cohort's own paired (_Raw, _T) columns.
+
+    And the lookup cannot return a single number. Because T is normed by age
+    and sex, two subjects with the same raw score can land on different sides
+    of 65. What this returns per band is therefore a RANGE:
+
+      first_at_or_above   the LOWEST raw seen with T >= the threshold
+      last_below          the HIGHEST raw seen with T <  the threshold
+      unambiguous_from    the lowest raw at or above which EVERY subject in
+                          this sample is over the threshold
+
+    When `last_below` >= `first_at_or_above` the two overlap, and inside that
+    overlap the raw score alone does not decide the band -- which is the thing
+    to know before using a raw cutoff for anything.
+
+    SSAGA columns have no T and so get no row: there is nothing to read the
+    band from, published or empirical.
+    """
+    rows_all, cols, _ = _hcp_rows(Path(hcp_pheno), Path(hcp_subjects))
+    out = []
+    for family, stems in HCP_FAMILIES.items():
+        if family == "SSAGA":
+            continue
+        bands = ASR_T_BROAD if family == "broad-band" else ASR_T_NARROW
+        for stem in stems:
+            rcol, tcol = f"{stem}_Raw", f"{stem}_T"
+            if rcol not in cols or tcol not in cols:
+                continue
+            pair = []
+            for r in rows_all:
+                rv, tv = (r.get(rcol) or "").strip(), (r.get(tcol) or "").strip()
+                try:
+                    pair.append((float(rv), float(tv)))
+                except ValueError:
+                    continue
+            if not pair:
+                continue
+            row = {"family": family, "label": HCP_LABEL.get(stem, stem),
+                   "column": rcol, "n": len(pair)}
+            for name, thr in ((bands[1][2], bands[1][0]),
+                              (bands[2][2], bands[2][0])):
+                at = [rv for rv, tv in pair if tv >= thr]
+                be = [rv for rv, tv in pair if tv < thr]
+                if not at:
+                    row[f"{name}_from"] = None
+                    row[f"{name}_note"] = f"nobody in this sample reaches T>={thr:g}"
+                    continue
+                lo, hi = min(at), (max(be) if be else None)
+                unamb = min(rv for rv in at if not be or rv > max(be)) \
+                    if (not be or any(rv > max(be) for rv in at)) else None
+                row[f"{name}_from"] = lo
+                row[f"{name}_note"] = (
+                    f"T>={thr:g} first seen at raw {lo:g}"
+                    + (f"; still seen below at raw {hi:g}, so raw {lo:g}-{hi:g} "
+                       f"is ambiguous (age/sex decide)" if hi is not None and hi >= lo
+                       else "")
+                    + (f"; unambiguous from raw {unamb:g}" if unamb is not None
+                       and (hi is None or unamb != lo) else ""))
+            out.append(row)
+    return out
+
+
 def hcp_skipped(hcp_pheno, hcp_subjects) -> list[dict]:
     """Symptom-looking columns the inventory did NOT include, and why.
 
