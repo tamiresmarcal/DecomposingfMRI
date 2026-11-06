@@ -280,3 +280,6 @@ notebooks/state_maps_results/
 # untracked-and-unignored where a single `git add -A` would have committed it.
 # The BUILDER is tracked (tools/make_participants.py); the output is not.
 config/hcp7t_participants.csv
+# Same rule for the 168-subject table of the hp2000_clean copy
+# (config/hcp7t_fix.yaml). Named HCP subjects, built on the cluster.
+config/hcp7t_fix_participants.csv

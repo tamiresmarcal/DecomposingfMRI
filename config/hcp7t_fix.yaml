@@ -1,0 +1,232 @@
+# HCP Young Adult 7T movie-watching + rest -- the FULL 7T cohort (168 subjects),
+# at a SHALLOWER point of HCP's denoising chain than config/hcp7t.yaml.
+#
+# WHY THIS FILE EXISTS, AND WHY IT IS A SEPARATE COHORT
+# -----------------------------------------------------
+# config/hcp7t.yaml reads 59 subjects whose files end
+# `_hp2000_clean_rclean_tclean.nii.gz`. Those were fetched by hand from
+# ConnectomeDB. The remaining 109 subjects cannot be had that way at this
+# scale, and the open S3 mirror (s3://hcp-openaccess) does NOT carry rclean or
+# tclean -- VERIFIED by scanning 32,189 objects under subject 100610, a subject
+# we hold locally in the deeper form, and finding zero hits for either suffix.
+# What S3 does carry, with 80/80 coverage across a 10-subject x 8-run probe, is
+# `{run}_hp2000_clean.nii.gz`: volumetric, hp2000 + sICA+FIX.
+#
+# So the choice was 59 subjects deeply cleaned or 168 subjects less deeply
+# cleaned, and n is the binding constraint. With p = 729 edges and
+# RidgeCV(alphas=logspace(-2,4,25)) under 5-fold CV, simulation with the exact
+# pipeline estimator gives, at n = 37 (one per family):
+#
+#   SEM sinal          mediana -0.239   95% [-0.525, +0.263]
+#   COM sinal R2=0.15  mediana -0.228   95% [-0.489, +0.222]
+#
+# Signal and no-signal are INDISTINGUISHABLE, and the null is centred at -0.24
+# rather than 0 -- out-of-fold predictions from an over-parameterised fit are
+# anti-correlated with held-out y. At n = 650 the two separate cleanly
+# (-0.031 vs +0.098). That is the whole argument for this file.
+#
+# It is a SEPARATE COHORT (`cohort: hcp7t_fix`), not a variant of hcp7t,
+# because the preprocessing differs. Giving two cleaning depths the same cohort
+# label would put a preprocessing difference inside a label the analysis treats
+# as one thing -- exactly the confound the ds002837/camcan/cneuromod split
+# exists to avoid. Both can be run; a hcp7t-vs-hcp7t_fix comparison on the 59
+# shared subjects is then a clean sensitivity analysis on cleaning depth, with
+# n held fixed.
+#
+# IS THE SHALLOWER FILE WORSE? NOT UNIFORMLY -- read this before assuming so.
+# ---------------------------------------------------------------------------
+#   hp2000   highpass at 2000s (0.0005 Hz)          <- present here
+#   clean    sICA + FIX                             <- present here
+#   rclean   ReClean (improved sICA artifact removal) <- ABSENT
+#   tclean   temporal ICA (removes global NOISE,
+#            preserves global SIGNAL)               <- ABSENT
+#
+# ReClean is a real loss: it is strictly better artifact removal than FIX
+# alone, and nothing here replaces it.
+#
+# tICA is NOT a loss for THIS study's purpose, and arguably a gain. None of the
+# other three cohorts removes anything global -- camcan and cneuromod use 24
+# HMP, ds002837 arrives with AFNI nuisance regression -- so hcp7t was the one
+# cohort whose global signal had been treated, and treated by a method no other
+# cohort could be given. Dropping tICA makes this cohort MORE comparable to the
+# other three, not less. That reversed the initial recommendation here.
+#
+# WHAT IS ESTABLISHED ABOUT THE DATA ITSELF
+# -----------------------------------------
+# Everything in config/hcp7t.yaml's header still holds and is not repeated:
+# four movies as four separate tasks, PE/film/session aliasing (MOVIE1+2 one
+# session, MOVIE3+4 another), the concatenated directories deliberately
+# unmatched, volumetric rather than CIFTI, MNI152NLin6Asym rather than
+# MNI152NLin2009cAsym, and why MSMAll/Glasser is not used.
+#
+# NEW, specific to this copy:
+#   - VERIFIED 2026-11: 168 six-digit subject directories, 1343 BOLD files.
+#     168 x 8 = 1344, and the one missing run is
+#     111312/rfMRI_REST4_7T_AP -- a 404 on HEAD against S3, i.e. the object
+#     does not exist, not a failed transfer. That subject has 4 movies and 3
+#     rests. Glob discovery handles it without special-casing; it matters only
+#     when the four rests are AGGREGATED, where 111312's denominator is 3.
+#   - Movies and rest live in ONE tree here (cohorts/hcp_fix/<sub>/MNINonLinear/
+#     Results/), unlike hcp7t where they are split across cohorts/hcp and
+#     cohorts/hcp_rest. So derivatives_root points AT the tree and bold_glob
+#     starts at the subject directory, with no `hcp*/` prefix.
+#   - Both conditions carry the SAME suffix (`_hp2000_clean`), so movie-vs-rest
+#     here is not confounded by preprocessing depth -- the same property that
+#     made hcp7t usable, preserved.
+#   - Every file was size-verified against S3's ContentLength and renamed from
+#     a `.part` only on a match, so the truncated 706040/MOVIE3 of the earlier
+#     manual download cannot recur here.
+
+cohort: hcp7t_fix
+tr: 1.0                 # Same provenance as hcp7t: HCP's published 7T movie
+                        # TR, from the protocol rather than the headers.
+                        # check_cohort.py reports what the files say; the
+                        # headers' unset default is also 1.0, so that report
+                        # corroborates nothing on its own.
+
+# AT the tree, not one level up: both conditions are in this single root.
+derivatives_root: /project/6008063/tamires/cohorts/hcp_fix
+output_root: /project/6008063/tamires/DecomposingfMRI/outputs
+space: MNI152NLin6Asym
+# 168 rows, vs the 59 of config/hcp7t_participants.csv. Also gitignored:
+# HCP participant-level data is not redistributable.
+participants: /project/6008063/tamires/DecomposingfMRI/config/hcp7t_fix_participants.csv
+
+atlases: [harvardoxford, yeo7, networks]
+
+discovery:
+  backend: glob
+  # Differs from hcp7t.yaml in exactly two ways:
+  #   1. no `hcp*/` prefix -- one tree, pointed at directly by derivatives_root
+  #   2. suffix `_hp2000_clean.nii.gz` rather than
+  #      `_hp2000_clean_rclean_tclean.nii.gz`
+  #
+  # The suffix is anchored by `.nii.gz`, so it cannot also match a
+  # `_hp2000_clean_rclean_tclean.nii.gz` if one ever appeared in this tree.
+  #
+  # `?fMRI_` matches tfMRI_ (movie) and rfMRI_ (rest) in one pattern. The
+  # six-digit directory is spelled out rather than `*` so a stray folder cannot
+  # contribute runs. The trailing `_??` demands the phase-encode suffix, which
+  # is what keeps the CONCATENATED tfMRI_MOVIE_7T / rfMRI_REST_7T directories
+  # out -- one 4-run file would be seen as a single run, so a 300s window could
+  # straddle two scan days with `crosses_run_boundary` never firing, because
+  # there would be no boundary to see. (Those directories were not downloaded
+  # here, but the pattern should not depend on that.)
+  bold_glob: "[0-9][0-9][0-9][0-9][0-9][0-9]/MNINonLinear/Results/?fMRI_*_7T_??/?fMRI_*_7T_??_hp2000_clean.nii.gz"
+  # Resolved against the BOLD file's own directory (cohort.py does
+  # `path.parent.glob(mask_glob)`), so a bare sibling name is right. One copy
+  # per run directory, as HCP stores it; 1343 of them here, matching the BOLD
+  # count exactly.
+  mask_glob: "brainmask_fs.1.60.nii.gz"
+  # Matched against the WHOLE path. Unchanged from hcp7t: the layout under each
+  # subject is identical, only the root above it moved.
+  subject_pattern: "/([0-9]{6})/MNINonLinear"
+  # Captures MOVIE1..MOVIE4 and REST1..REST4 as the paths spell them, so the
+  # partitions come out `task=MOVIE1` and `task=REST1` -- the same rule
+  # `--keep-tasks` and `--train-tasks` follow everywhere else ("the labels as
+  # the data spells them"). Alternation rather than a bare `([A-Z]+[0-9])` so
+  # that a future 7T task nobody has thought about cannot silently enter this
+  # cohort under its own label.
+  task_pattern: "[tr]fMRI_(MOVIE[0-9]|REST[0-9])_7T"
+  # The default is ["localizer", "retinotopy", "rest"], matched EXACTLY and in
+  # lower case, so it would not have caught REST1..REST4 anyway. Kept empty and
+  # explicit. No retinotopy directories were downloaded into this tree.
+  exclude_tasks: []
+
+filtering:
+  # `already_applied` is about the BAND, and the band is not applied: hp2000 is
+  # the only highpass and nothing was lowpassed. Measured on the deeper copy
+  # (100610/MOVIE1: 20.8% of power below 0.01 Hz, 31.2% above 0.1 Hz); the
+  # shallower file has had strictly LESS done to it, so it cannot be more
+  # band-limited. Band-passing here is the ANALYSIS band every cohort ends up
+  # in, not re-doing preprocessing.
+  already_applied: false
+  bandpass: [0.01, 0.1]
+  detrend: true
+  standardize: false
+
+confounds:
+  # NOTHING, and this is the same decision as hcp7t for a slightly different
+  # reason. There, tICA had removed global noise and regressing motion on top
+  # would have undone it. Here there is no tICA, but sICA+FIX is still the
+  # stage at which HCP recommends against further motion regression: Glasser
+  # et al. argue spatial ICA cleanup already removes head-motion effects and
+  # regressing beyond it removes neural signal; the recommended approach
+  # excludes scrubbing, GSR and CompCor-style regression alike.
+  #
+  # There is also no motion SOURCE in this tree: the Movement_*.txt files were
+  # deliberately not downloaded (they would have added nothing usable --
+  # Movement_RelativeRMS_mean.txt is an RMS displacement, not Power FD, so it
+  # is not comparable to the other cohorts' thresholds and must not be fed to
+  # one).
+  #
+  # CONSEQUENCE TO RECORD IN THE DESIGN TABLE, accepted knowingly: with no
+  # motion source this cohort has no `mean_fd`, so config/censor/motion.yaml's
+  # max_mean_fd and min_frac_good_frames both report NOT APPLIED and every
+  # subject passes. hcp7t_fix is gated differently from camcan, cneuromod and
+  # ds002837, exactly as hcp7t is.
+  format: none
+  strategy: none
+  censor_glob: null
+  motion_glob: null
+  dilate_tr: 1
+
+stimulus:
+  timing_source: identity
+  # NOT `clip`. `dfc.py` flags `crosses_clip_boundary` from a `clip_idx`
+  # column and nothing in the repo produces that column -- the branch is dead.
+  # Until it is implemented a long window will silently span the cut between
+  # two unrelated clips and the rest block between them. Clip timings:
+  # https://wiki.humanconnectome.org/docs/7T%20Movie%20watching%20task%20clip%20info%20timing%20versions%20shown%20per%20individual%20subject.html
+  unit_of_analysis: run
+  isc_gate_tr: 1.0
+  # REST IS NOT GATED, and this is load-bearing rather than tidy. Resting
+  # subjects share no stimulus, so their ISC has nothing to be aligned to; at a
+  # gate of 1.0 every rest run FAILS a check that was never meaningful for it,
+  # `diagnose` exits non-zero, and --dependency=afterok cancels stage 3 and the
+  # censor step for the WHOLE cohort -- over a fact about the design.
+  #
+  # A key present with a null value turns the gate off; an ABSENT key falls
+  # back to isc_gate_tr. ISC is still COMPUTED and written for rest, because it
+  # is cheap and informative in the other direction: rest ISC should be near
+  # ZERO, and a resting cohort whose subjects correlate strongly is a finding
+  # -- a task mislabelled, or a shared artifact -- not a pass.
+  #
+  # Same pattern as config/camcan.yaml and config/hcp7t.yaml, deliberately:
+  # cohorts holding the same two conditions should gate them the same way.
+  isc_gate_tr_by_task:
+    REST1: null
+    REST2: null
+    REST3: null
+    REST4: null
+  # MEASURED on the deeper copy (per-task max `stimulus_time_s` in
+  # meta/cohorts/cohort=hcp7t/coverage.parquet after stage 2, plus one TR) and
+  # carried over unchanged, because the RUN LENGTHS are a property of HCP's
+  # acquisition, not of how far the denoising went. The four movie numbers are
+  # the lengths HCP publishes for the 7T movie task.
+  #
+  # CONFIRM AFTER STAGE 2 HERE, by the same query against
+  # cohort=hcp7t_fix/coverage.parquet. If a number disagrees, the download is
+  # short, not the duration wrong -- these files were size-verified, so a
+  # disagreement would mean S3's own copy differs in length from ConnectomeDB's.
+  #
+  # At TR = 1.0 s these are volume counts. This arithmetic is NOT a check on
+  # the TR: `stimulus_time_s` is built FROM the configured TR, so it gives the
+  # same answer whatever the TR really is.
+  #
+  # What pinning buys: a SHORT run yields a flagged incomplete grid instead of
+  # a silently shorter one, and `validate` stops reporting eight problems --
+  # which is the state in which nobody reads the ninth.
+  durations_s:
+    MOVIE1: 921.0
+    MOVIE2: 918.0
+    MOVIE3: 915.0
+    MOVIE4: 901.0
+    REST1: 900.0
+    REST2: 900.0
+    REST3: 900.0
+    REST4: 900.0
+
+runs:
+  mode: separate
+  drop_boundary_windows: false
