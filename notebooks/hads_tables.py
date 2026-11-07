@@ -57,6 +57,17 @@ class Settings:
     camcan: Path = Path(os.environ.get("CAMCAN_PHENO", "/project/6008063/tamires/cohorts/camcan/dataman/"
                                        "useraccess/opendata/paule_toussaint_camcan01870"))
     pheno_id: str = "CCID"
+    # None = Cam-CAN's own pair under `camcan`. A second cohort's phenotype is
+    # a different file with a different id column, which is the whole reason
+    # these are settings and not constants: a transfer test loads one Study
+    # per cohort and they must not both read Cam-CAN.
+    pheno_files: list | None = None          # [(path, sep), ...]
+    # label -> (lo, hi) on the instrument's own scale. A RAW score outside it
+    # is a missing-data sentinel: Cam-CAN codes "no answer" as 9999 in
+    # additional_HADS_depression while HADS runs 0-21. Harmless while the
+    # target was the *_category column (text never coded), and an enormous
+    # outlier the moment a raw column is the target.
+    target_range: dict | None = None
     targets: dict = field(default_factory=lambda: {"anxiety": "additional_HADS_anx_category",
                                                    "depression": "additional_HADS_dep_category"})
     ordinal_levels: list = field(default_factory=lambda: ["Normal", "Mild", "Moderate", "Severe"])
@@ -278,7 +289,8 @@ class Study:
     def _pheno(self):
         c = self.cfg
         covariates = list(dict.fromkeys(c.covariates + c.baseline_covariates))
-        files = [(c.camcan / "approved_data.tsv", "\t"), (c.camcan / "standard_data.csv", ",")]   # HADS; Age, Sex
+        files = c.pheno_files or [(c.camcan / "approved_data.tsv", "\t"),
+                                  (c.camcan / "standard_data.csv", ",")]   # HADS; Age, Sex
         frames = [pd.read_csv(p, sep=s, dtype={c.pheno_id: str}) for p, s in files]
         ph = frames[0]
         for f in frames[1:]:
@@ -286,9 +298,25 @@ class Study:
         lower = {x.lower(): x for x in ph.columns}                  # Age vs age
         ph = ph.rename(columns={lower[x.lower()]: x for x in covariates if x.lower() in lower})
         ph["sub"] = ph[c.pheno_id].astype(str).str.strip().str.upper()
-        code = {lvl: k for k, lvl in enumerate(c.ordinal_levels)}
+        # A NUMBER FIRST, then a level name. The old form mapped only names,
+        # so a raw questionnaire column -- DSM_Anxi_Raw, or HADS before it is
+        # banded -- coded to NaN for every subject and the frame emptied two
+        # steps later as "the phenotype join matched nothing". Same rule as
+        # bstm_selection.read_phenotype, so both read a target the same way.
+        code = {lvl.strip().lower(): k for k, lvl in enumerate(c.ordinal_levels)}
         for lab, col in c.targets.items():
-            ph[lab] = ph[col].astype("string").str.strip().map(code).astype(float)
+            raw = ph[col].astype("string").str.strip()
+            v = pd.to_numeric(raw, errors="coerce")
+            v = v.where(v.notna(), raw.str.lower().map(code))
+            if c.target_range and lab in c.target_range:
+                lo, hi = c.target_range[lab]
+                out = v.notna() & ~v.between(lo, hi)
+                if out.any():
+                    print(f"  {lab} [{col}]: dropping {int(out.sum())} value(s) "
+                          f"outside [{lo:g}, {hi:g}], e.g. "
+                          f"{sorted(v[out].unique())[:4]}")
+                v = v.mask(out)
+            ph[lab] = v.astype(float)
         for x in set(covariates) - set(c.categorical) - {"n_transitions"}:
             ph[x] = pd.to_numeric(ph[x], errors="coerce")
         return ph[["sub", *c.targets, *(x for x in covariates if x in ph)]]
