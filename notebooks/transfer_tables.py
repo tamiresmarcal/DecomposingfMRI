@@ -358,3 +358,219 @@ def as_report_rows(rows: "pd.DataFrame") -> "pd.DataFrame":
     d["entity"] = d["tree"] + " · " + d["label"] + " · " + d["arm"] + " · " + d["model"]
     d["K"] = d["states"].map(n_states)
     return d
+
+
+# --------------------------------------------------------------- static FC ---
+def pool_fc(d: "pd.DataFrame", log=print) -> "pd.DataFrame":
+    """Several runs of one condition -> one row per subject, for a static-FC table.
+
+    NOT exact, unlike `pool_tasks`, and the difference is worth stating. A
+    transition table stores counts in disguise, so pooling them is addition. A
+    correlation is not: the correlation of four runs concatenated is not any
+    function of the four correlations, because each was computed against its
+    own run's mean.
+
+    What is done instead is the standard meta-analytic pooling -- a mean of
+    the Fisher-z values weighted by how much data each run contributed
+    (`n_tr_used`). It is the right approximation and it is still an
+    approximation.
+
+    THE EXACT ALTERNATIVE EXISTS: `static-fc --pool subject` concatenates a
+    subject's timeseries and correlates once. It pools every task though, rest
+    together with movie, which is not what a per-condition score wants. A
+    `--pool` that took a task filter would make this function unnecessary.
+    """
+    from fmri_decomposition import static_fc as _sfc
+
+    cols = _sfc.fc_columns(d)
+    if d["sub"].is_unique:
+        return d
+    out = []
+    for sub, g in d.groupby("sub", sort=True):
+        if len(g) == 1:
+            out.append(g.iloc[0].to_dict())
+            continue
+        w = g["n_tr_used"].to_numpy(float) if "n_tr_used" in g else np.ones(len(g))
+        w = np.where(np.isfinite(w) & (w > 0), w, 0.0)
+        if not w.sum():
+            w = np.ones(len(g))
+        z = np.arctanh(np.clip(g[cols].to_numpy(float), -0.999999, 0.999999))
+        # a NaN edge in one run must not take the subject's whole edge with it
+        m = np.isfinite(z)
+        num = np.nansum(np.where(m, z, 0) * w[:, None], axis=0)
+        den = (m * w[:, None]).sum(axis=0)
+        pooled = np.divide(num, den, out=np.full(len(cols), np.nan), where=den > 0)
+        row = dict(zip(cols, np.tanh(pooled)))           # back to r, as stored
+        row.update({
+            "sub": sub,
+            "task": "+".join(sorted(g["task"].astype(str))),
+            "n_runs_pooled": len(g),
+            "fc_pooled_approximately": True,
+        })
+        for c in ("n_tr_total", "n_tr_good", "n_tr_used", "n_tasks"):
+            if c in g:
+                row[c] = g[c].sum()
+        if {"frac_good_frames", "n_tr_used"} <= set(g.columns):
+            row["frac_good_frames"] = float(
+                (g["frac_good_frames"].to_numpy(float) * w).sum() / w.sum())
+        for c in g.columns:
+            row.setdefault(c, g.iloc[0][c])
+        out.append(row)
+    pooled = pd.DataFrame(out)
+    log(f"  pooled {len(d)} run-rows into {len(pooled)} subject-row(s)")
+    return pooled
+
+
+def _fc_cell(root, atlas, cohorts, task_value, pheno, covariates, categorical,
+             pool: bool, log):
+    """One cohort group's static-FC table and phenotype, as (edges_r, cov, y, subs)."""
+    from fmri_decomposition import static_fc as _sfc
+
+    frames = [_sfc.read_cohort_table(root, atlas, c) for c in cohorts]
+    d = pd.concat(frames, ignore_index=True)
+    d["sub"] = d["sub"].astype(str).str.strip().str.upper()
+    if task_value is not None:
+        d = d[d["task"].astype(str).str.upper().str.startswith(task_value.upper())]
+    if d.empty:
+        raise SystemExit(f"no static-FC rows for {cohorts} atlas={atlas} "
+                         f"task~{task_value}")
+    if pool:
+        d = pool_fc(d, log=lambda *_: None)
+    if not d["sub"].is_unique:
+        raise SystemExit(
+            f"{cohorts} atlas={atlas} task~{task_value}: a subject appears "
+            f"more than once and pooling is off. Either narrow the task or "
+            f"pass pool=True.")
+    d = d[d["sub"].isin(set(pheno["sub"]))].sort_values("sub").reset_index(drop=True)
+    subs = d["sub"].tolist()
+    cols = _sfc.fc_columns(d)
+    return d, cols, subs
+
+
+def fcm_transfer_rows(train: Study, test: Study, atlases=None,
+                      train_tasks=None, test_tasks=None,
+                      models=None, covariates=None, categorical=("Sex",),
+                      max_missing: float = .10, seed: int = 0,
+                      n_boot: int = 2000, pool_test: bool = True,
+                      log=print) -> pd.DataFrame:
+    """The fcm half of the transfer, so the four tables can be compared.
+
+    Mirrors fcm_selection, split into a fit and an apply. Two things have to
+    come from the TRAINING cohort alone, and both would be invisible if they
+    did not:
+
+      WHICH EDGES. fcm_selection drops an edge that is NaN in more than
+      `max_missing` of subjects, so the surviving set depends on the cohort's
+      own coverage. Let the test cohort choose its own and the model is handed
+      a different feature space than it was fitted on, with the columns still
+      lining up by count.
+
+      THE IMPUTED VALUE. A NaN is filled with the column mean. Filled from the
+      TEST cohort's mean, every test subject's missing edge is shifted toward
+      that cohort's centre -- a quiet adaptation to the data being scored.
+
+    Everything else follows transfer_rows: Spearman on the test cohort, a
+    bootstrap interval over the test subjects, and a covariates-only baseline
+    trained and applied the same way.
+    """
+    from fmri_decomposition import static_fc as _sfc
+
+    root = train.cfg.root
+    covariates = list(covariates or ["Age", "Sex", "frac_good_frames", "n_tr_used"])
+    models = models or train.models()
+    labels = [lab for lab in train.cfg.targets if lab in test.cfg.targets]
+    atlases = atlases or sorted({hive(p, "atlas") for p in
+                                 (root / "static_fc").rglob("subjects.parquet")})
+    tr_tasks = train_tasks or {k: v for k, v in train.cfg.tasks.items()}
+    te_tasks = test_tasks or {k: v for k, v in test.cfg.tasks.items()}
+    rows = []
+    for atlas in atlases:
+        for task in [t for t in tr_tasks if t in te_tasks]:
+            try:
+                dtr, ctr, str_ = _fc_cell(root, atlas, train.cfg.cohorts,
+                                          tr_tasks[task], train.pheno,
+                                          covariates, categorical, False, log)
+                dte, cte, ste = _fc_cell(root, atlas, test.cfg.cohorts,
+                                         te_tasks[task], test.pheno,
+                                         covariates, categorical, pool_test, log)
+            except SystemExit as e:
+                log(f"  skip fcm {atlas} {task}: {e}")
+                continue
+            edges = [c for c in ctr if c in set(cte)]
+            if not edges:
+                raise SystemExit(
+                    f"fcm {atlas} {task}: the two cohorts share no edge "
+                    f"column. Same atlas must give the same parcels -- check "
+                    f"that both were run with `static-fc --atlas {atlas}`.")
+
+            Ztr = np.arctanh(np.clip(dtr[edges].to_numpy(float), -.999999, .999999))
+            Zte = np.arctanh(np.clip(dte[edges].to_numpy(float), -.999999, .999999))
+            keep = np.isnan(Ztr).mean(axis=0) <= max_missing       # TRAIN only
+            Ztr, Zte = Ztr[:, keep], Zte[:, keep]
+            mu = np.nanmean(Ztr, axis=0)                           # TRAIN only
+            Ztr = np.where(np.isnan(Ztr), mu, Ztr)
+            Zte = np.where(np.isnan(Zte), mu, Zte)
+
+            arms = {"edges": (Ztr, Zte),
+                    "global": (np.column_stack([Ztr.mean(1), Ztr.std(1)]),
+                               np.column_stack([Zte.mean(1), Zte.std(1)]))}
+            for lab in labels:
+                ytr = train.pheno.set_index("sub").reindex(str_)[lab].to_numpy(float)
+                yte = test.pheno.set_index("sub").reindex(ste)[lab].to_numpy(float)
+                ok_tr, ok_te = np.isfinite(ytr), np.isfinite(yte)
+                Ctr = _cov_frame(train.pheno, dtr, str_, covariates, categorical)
+                Cte = _cov_frame(test.pheno, dte, ste, covariates, categorical)
+                want = align_columns(list(Ctr.columns), list(Cte.columns))
+                Ctr_, Cte_ = Ctr[want].to_numpy(float), Cte[want].to_numpy(float)
+                base = {}
+                for arm, (Atr, Ate) in arms.items():
+                    Xtr = np.column_stack([Ctr_, Atr])[ok_tr]
+                    Xte = np.column_stack([Cte_, Ate])[ok_te]
+                    for model in models:
+                        if model not in base:
+                            bp = fit_predict(Ctr_[ok_tr], ytr[ok_tr],
+                                             Cte_[ok_te], model, seed)
+                            base[model] = bootstrap_ci(yte[ok_te], bp, n_boot, seed)
+                        bsc, blo, bhi = base[model]
+                        pred = fit_predict(Xtr, ytr[ok_tr], Xte, model, seed)
+                        sc, lo, hi = bootstrap_ci(yte[ok_te], pred, n_boot, seed)
+                        rows.append({
+                            "atlas": atlas, "window_s": np.nan,
+                            "states": "(static FC)", "K": np.nan,
+                            "task": task, "phenotype": lab, "arm": arm,
+                            "model": model, "tree": "fcm",
+                            "score": sc, "lo": lo, "hi": hi,
+                            "base_score": bsc, "base_lo": blo, "base_hi": bhi,
+                            "over_base": sc > bsc,
+                            "n_train": int(ok_tr.sum()), "n_test": int(ok_te.sum()),
+                            "n_covariates": len(want),
+                            "n_features": Xtr.shape[1],
+                            "n_edges_used": int(keep.sum()),
+                            "n_edges_dropped": int((~keep).sum())})
+    return pd.DataFrame(rows)
+
+
+def _cov_frame(pheno, quality, subs, covariates, categorical):
+    """covariate_block's design, kept as a NAMED frame so it can be aligned.
+
+    fcm_selection returns a bare array, which is right there -- one cohort,
+    one call. Across two cohorts the names are the only safe way to line the
+    columns up, since get_dummies names them after the values each cohort
+    holds.
+    """
+    ph = pheno.set_index("sub").reindex(subs)
+    q = quality.set_index("sub").reindex(subs)
+    cols = []
+    for c in covariates:
+        src = q if (c in q.columns and c not in ph.columns) else ph
+        if c not in src.columns:
+            raise SystemExit(
+                f"covariate {c!r} is in neither the phenotype nor the "
+                f"static-FC table.\n  phenotype: "
+                f"{[x for x in ph.columns if x != 'y'][:10]}\n  static FC: "
+                f"{[x for x in q.columns if '__' not in x][:10]}")
+        cols.append(src[c].rename(c))
+    X = pd.concat(cols, axis=1)
+    X = pd.get_dummies(X, columns=[c for c in categorical if c in X.columns],
+                       drop_first=True, dummy_na=False).astype(float)
+    return X.fillna(X.mean())
