@@ -41,6 +41,12 @@ DYNAMICS = ["n_states_visited", "n_distinct_transitions", "switch_rate", "self_t
             "switches_per_min", "mean_dwell_s", "entropy_rate_bits", "dispersion"]
 ARM_BLOCKS = {"cells": ["cells"], "occupancy": ["occupancy"], "dynamics": ["dynamics"],
               "summary": ["occupancy", "dynamics"], "all": ["cells", "occupancy", "dynamics"]}
+# Covariates that come from the TRANSITION or static-FC table rather than the
+# phenotype file. Not finding one of these in the phenotype is normal; not
+# finding any other covariate there is the setting being wrong.
+TABLE_COLUMNS = frozenset({"n_transitions", "n_transitions_independent", "n_windows",
+                           "n_tasks", "frac_good_frames", "n_tr_used", "n_tr_total",
+                           "n_tr_good", "dispersion"})
 PROBABILITY = {"cells", "occupancy"}                   # blocks that take MIN_PRESENT and the block pseudocount
 GRAPH = {"cells", "occupancy"}                         # blocks a state diagram can draw
 ALL = "all [cond]"                                     # the chosen space's variables: p(j | i), occupancy, dynamics
@@ -88,6 +94,21 @@ class Settings:
     cohorts: list = field(default_factory=lambda: ["camcan", "camcan_rest"])
     covariates: list = field(default_factory=lambda: ["Age", "Sex", "n_transitions"])
     categorical: list = field(default_factory=lambda: ["Sex"])
+    # Each cohort spells the covariates its own way: HCP has Gender and
+    # Age_in_Yrs where Cam-CAN has Sex and Age. Maps the CANONICAL name this
+    # analysis uses to THIS cohort's column, e.g. {"Sex": "Gender",
+    # "Age": "Age_in_Yrs"}, and the alias WINS over a column that already
+    # carries the canonical name -- HCP's file also has an `Age` holding the
+    # open-access age BAND ("26-30"), which is not a number.
+    covariate_aliases: dict | None = None
+    # And the VALUES, not just the column name: {column: {raw: canonical}}.
+    # `matrix` one-hots with get_dummies, which names its columns after the
+    # values each cohort happens to hold, so Cam-CAN's MALE/FEMALE and HCP's
+    # M/F give DIFFERENT dummy columns from the same variable. A value the map
+    # does not cover is REFUSED rather than guessed: a numeric 1/2 coding
+    # could be either way round, and backwards flips every subject's sex with
+    # nothing downstream looking wrong.
+    covariate_values: dict | None = None
     # the statistical rule
     case_from: str = "Mild"
     alpha: float = 0.10
@@ -327,8 +348,43 @@ class Study:
         ph = frames[0]
         for f in frames[1:]:
             ph = ph.merge(f.drop(columns=[x for x in f if x in ph and x != c.pheno_id]), on=c.pheno_id, how="outer")
+        # The alias first, and it WINS: HCP's file carries both Age_in_Yrs and
+        # an `Age` holding the open-access age band ("26-30"), and renaming
+        # onto a name already taken would leave two columns called Age.
+        for want, col in (c.covariate_aliases or {}).items():
+            if col == want or col not in ph.columns:
+                continue
+            if want in ph.columns:
+                print(f"  {want}: reading {col!r}, not the column already called "
+                      f"{want!r} (covariate_aliases)")
+                ph = ph.drop(columns=[want])
+            ph = ph.rename(columns={col: want})
         lower = {x.lower(): x for x in ph.columns}                  # Age vs age
         ph = ph.rename(columns={lower[x.lower()]: x for x in covariates if x.lower() in lower})
+        missing = [x for x in covariates if x not in ph.columns and x not in TABLE_COLUMNS]
+        if missing:
+            raise SystemExit(
+                f"the phenotype has no column for covariate(s) {missing}.\n"
+                f"  it has: {sorted(ph.columns)[:24]}\n"
+                f"  Set `covariate_aliases` on this cohort's Settings to map the name "
+                f"this analysis uses to this file's own column, e.g. "
+                f"{{'Sex': 'Gender', 'Age': 'Age_in_Yrs'}}. Dropping it quietly is how "
+                f"a missing covariate became `KeyError: ['Sex']` four frames later.")
+        for col, m in (c.covariate_values or {}).items():
+            if col not in ph.columns:
+                continue
+            key = ph[col].astype("string").str.strip().str.upper()
+            mapped = key.map({str(k).strip().upper(): v for k, v in m.items()})
+            bad = sorted(set(key[key.notna() & mapped.isna()]))
+            if bad:
+                raise SystemExit(
+                    f"covariate {col!r} holds value(s) {bad[:8]} that `covariate_values` "
+                    f"does not map (it covers {sorted(m)}). Map them rather than letting "
+                    f"them through: the dummy columns are named after these values, so "
+                    f"two cohorts spelling one variable differently is a transfer that "
+                    f"reads sex as something else. A numeric coding is not guessed here "
+                    f"-- 1/2 could be either way round.")
+            ph[col] = mapped
         ph["sub"] = ph[c.pheno_id].astype(str).str.strip().str.upper()
         # A NUMBER FIRST, then a level name. The old form mapped only names,
         # so a raw questionnaire column -- DSM_Anxi_Raw, or HADS before it is
@@ -349,8 +405,17 @@ class Study:
                           f"{sorted(v[out].unique())[:4]}")
                 v = v.mask(out)
             ph[lab] = v.astype(float)
-        for x in set(covariates) - set(c.categorical) - {"n_transitions"}:
-            ph[x] = pd.to_numeric(ph[x], errors="coerce")
+        for x in sorted(set(covariates) - set(c.categorical) - set(TABLE_COLUMNS)):
+            v = pd.to_numeric(ph[x], errors="coerce")
+            if ph[x].notna().any() and not v.notna().any():
+                raise SystemExit(
+                    f"covariate {x!r} is not a number anywhere: all "
+                    f"{int(ph[x].notna().sum())} value(s) coerced to NaN, e.g. "
+                    f"{sorted(set(ph[x].dropna().astype(str)))[:4]}.\n"
+                    f"  If it is a BAND rather than a number -- HCP's open-access Age is "
+                    f"'26-30' -- point `covariate_aliases` at the numeric column "
+                    f"(Age_in_Yrs), or list it in `categorical`.")
+            ph[x] = v
         return ph[["sub", *c.targets, *(x for x in covariates if x in ph)]]
 
     def numeric(self, covariates=None):
@@ -625,7 +690,7 @@ class Study:
         d = t.merge(self.pheno, on="sub", suffixes=("", "_pheno")).dropna(subset=[lab, *self.numeric()])
         # select-bstm drops a subject missing ANY covariate (Sex too) before the folds are drawn;
         # keeping one would shift every fold after it and the refit would no longer be its model
-        d = d.dropna(subset=[x for x in c.covariates if x != "n_transitions"]).reset_index(drop=True)
+        d = d.dropna(subset=[x for x in c.covariates if x not in TABLE_COLUMNS]).reset_index(drop=True)
         cov = pd.get_dummies(d[list(c.covariates)], drop_first=True).astype(float)
         cov = cov.fillna(cov.mean())
         cols = arm_columns(d, arm)

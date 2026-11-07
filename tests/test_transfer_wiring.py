@@ -343,3 +343,111 @@ class TestTheFiguresReadTheTransferredRows:
         """The knob must not change what notebooks 9-11 draw."""
         assert ht.Settings().score_name == "CV score (Spearman)"
         assert ht.Settings().spread_name == "sd over seeds"
+
+
+# ------------------------------------------------- how a cohort spells things ---
+def hcp_pheno(path, subs, target_cols, seed=1, band=True):
+    """HCP's own spelling: Gender, Age_in_Yrs, and an `Age` that is a BAND."""
+    rng = np.random.default_rng(seed)
+    d = {"sub": list(subs),
+         "Age_in_Yrs": rng.integers(22, 36, len(subs)),
+         "Gender": ["M" if i % 2 else "F" for i in range(len(subs))]}
+    if band:
+        d["Age"] = ["26-30"] * len(subs)
+    for c in target_cols:
+        d[c] = rng.integers(0, 15, len(subs))
+    pd.DataFrame(d).to_csv(path, index=False)
+    return path
+
+
+SEX = {"Sex": {"M": "M", "MALE": "M", "F": "F", "FEMALE": "F"}}
+ALIASES = {"Sex": "Gender", "Age": "Age_in_Yrs"}
+
+
+def hcp_study(tmp_path, aliases=ALIASES, values=SEX, band=True, n=24, **kw):
+    root = tmp_path / "outputs"
+    subs = [f"H{i:04d}" for i in range(n)]
+    for t in ("MOVIE1", "MOVIE2"):
+        write_transitions(root, "hcp7t_fix", t, subs)
+    for tree in ("bstm", "fcm"):
+        write_summary(root, tree, "movie", "DSM_Anxi_Raw")
+    ph = hcp_pheno(tmp_path / "hcp.csv", subs, TE.values(), band=band)
+    cfg = ht.Settings(
+        root=root, cohorts=["hcp7t_fix"], tasks={"movie": "MOVIE"}, targets=TE,
+        pheno_files=[(ph, ",")], pheno_id="sub", cache_dir=None,
+        covariates=["Age", "Sex", "n_transitions"],
+        baseline_covariates=["Age", "Sex"],
+        covariate_aliases=aliases, covariate_values=values,
+        task_match="prefix",
+        pool_fn=lambda d, k: tt.pool_tasks(d, k, log=lambda *_: None), **kw)
+    return cfg
+
+
+class TestCovariateSpelling:
+    """`KeyError: ['Sex']`, four frames below the setting that caused it.
+
+    HCP's phenotype has Gender, not Sex. `_pheno` renamed case-insensitively,
+    found nothing, and then DROPPED the covariate on its way out -- so the
+    frame came back looking fine and `matrix` raised a bare KeyError on a
+    column nobody had said was missing.
+    """
+
+    def test_the_alias_supplies_the_canonical_name(self, tmp_path):
+        st = ht.Study(hcp_study(tmp_path))
+        assert {"Age", "Sex"} <= set(st.pheno.columns)
+        assert set(st.pheno["Sex"]) == {"M", "F"}
+
+    def test_the_alias_beats_a_column_that_already_has_the_name(self, tmp_path, capsys):
+        """HCP's file carries BOTH Age_in_Yrs and an `Age` holding the
+        open-access band. Renaming onto the taken name would leave two columns
+        called Age; taking the band would leave Age all-NaN."""
+        st = ht.Study(hcp_study(tmp_path, band=True))
+        assert st.pheno["Age"].between(22, 36).all()
+        assert "Age_in_Yrs" in capsys.readouterr().out      # and it said so
+
+    def test_no_alias_and_no_column_is_refused_by_name(self, tmp_path):
+        with pytest.raises(SystemExit) as e:
+            ht.Study(hcp_study(tmp_path, aliases=None))
+        msg = str(e.value)
+        assert "'Sex'" in msg and "covariate_aliases" in msg
+        assert "Gender" in msg                 # the column it does have
+
+    def test_a_band_where_a_number_belongs_is_refused(self, tmp_path):
+        """Without the alias, `Age` resolves to '26-30' and coerces to NaN for
+        every subject -- which used to empty the frame silently."""
+        with pytest.raises(SystemExit) as e:
+            ht.Study(hcp_study(tmp_path, aliases={"Sex": "Gender"}))
+        assert "not a number anywhere" in str(e.value)
+        assert "26-30" in str(e.value)
+
+    def test_an_unmapped_value_is_refused_rather_than_guessed(self, tmp_path):
+        cfg = hcp_study(tmp_path, values={"Sex": {"MALE": "M", "FEMALE": "F"}})
+        with pytest.raises(SystemExit) as e:
+            ht.Study(cfg)
+        assert "'M'" in str(e.value) and "covariate_values" in str(e.value)
+
+    def test_the_two_cohorts_line_up_once_the_values_are_mapped(self, tmp_path):
+        """End to end: MALE/FEMALE and M/F must give ONE dummy column name, or
+        align_columns refuses and no row is ever produced."""
+        train, _ = studies(tmp_path / "a", TR, TE)
+        train.cfg.covariate_values = SEX
+        train = ht.Study(train.cfg)
+        test = ht.Study(hcp_study(tmp_path / "b"))
+        # one tree per Study here, so point the test cohort at the train tree
+        test.cfg.root = train.cfg.root
+        test = ht.Study(test.cfg)
+        rows = tt.transfer_rows(train, test, models=["ridge"], arms=["cells"],
+                                n_boot=20, log=lambda *_: None)
+        assert len(rows) and rows["n_test"].iloc[0] == 24
+
+    def test_unmapped_values_do_reach_align_columns(self, tmp_path):
+        """Not a hypothetical hazard: without the value map the dummy columns
+        really are Sex_MALE against Sex_M, and the transfer refuses."""
+        train, _ = studies(tmp_path / "a", TR, TE)
+        test = ht.Study(hcp_study(tmp_path / "b", values=None))
+        test.cfg.root = train.cfg.root
+        test = ht.Study(test.cfg)
+        with pytest.raises(SystemExit) as e:
+            tt.transfer_rows(train, test, models=["ridge"], arms=["cells"],
+                             n_boot=20, log=lambda *_: None)
+        assert "Sex_" in str(e.value)
