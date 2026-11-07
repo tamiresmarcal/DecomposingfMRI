@@ -72,6 +72,19 @@ class Settings:
                                                    "depression": "additional_HADS_dep_category"})
     ordinal_levels: list = field(default_factory=lambda: ["Normal", "Mild", "Moderate", "Severe"])
     tasks: dict = field(default_factory=lambda: {"rest": "rest", "movie": "movie"})   # first = the base
+    # How a hive `task=` value is matched to a condition. "exact" for a cohort
+    # with one run per condition (Cam-CAN's task=Movie is the movie); "prefix"
+    # for HCP, whose four movies are task=MOVIE1..MOVIE4 and whose four rests
+    # are task=REST1..REST4 -- four partitions of ONE condition, which no
+    # equality can name. Opt-in, because a prefix is looser than an equality
+    # and would quietly widen a cohort that did not need it.
+    task_match: str = "exact"
+    # Called when a cohort has SEVERAL rows per subject for one condition,
+    # with (frame, K), and must return one row per subject. None = refuse, so
+    # a duplicate nobody meant to pool stays an error. transfer_tables passes
+    # its `pool_tasks` here; it is a setting rather than an import because
+    # hads_tables must not depend on the transfer notebook's module.
+    pool_fn: object | None = None
     cohorts: list = field(default_factory=lambda: ["camcan", "camcan_rest"])
     covariates: list = field(default_factory=lambda: ["Age", "Sex", "n_transitions"])
     categorical: list = field(default_factory=lambda: ["Sex"])
@@ -120,6 +133,14 @@ class Settings:
     factor_trees: list = field(default_factory=lambda: ["bstm"])
     top_vars: int = 15
     edge_top: int = 12
+    # What the y axis and the error bar of B1 / B2 / B2.K are CALLED. The
+    # defaults are the Cam-CAN report's: a cross-validated score, and a spread
+    # over the fold seeds. A TRANSFER notebook has neither -- one fit on every
+    # training subject, one score on the test cohort, and an interval from
+    # resampling the test SUBJECTS -- and a figure captioned "sd over seeds"
+    # there would be wrong about the one thing a reader checks.
+    score_name: str = "CV score (Spearman)"
+    spread_name: str = "sd over seeds"
     font_scale: float = 2.0                            # every text of every figure x this
     fig_scale: float = 1.5                             # every figure's size x this, to make room for it
     dyn_gap: float = 2.0                               # D3 / E3: space between the dynamics items (x .16)
@@ -143,6 +164,17 @@ class Settings:
 def hive(path, key):
     """One `key=value` partition from a path, by name."""
     return next((p.split("=", 1)[1] for p in Path(path).parts if p.startswith(f"{key}=")), None)
+
+def task_hit(value, want, match="exact"):
+    """Does a hive `task=` value belong to the condition `want`?
+
+    `exact` fits every cohort whose runs are one per condition. `prefix` is
+    for HCP: MOVIE1..MOVIE4 are four partitions of one condition, and only a
+    prefix names all four. See `Settings.task_match` for why it is opt-in.
+    """
+    v, w = str(value).strip().lower(), str(want).strip().lower()
+    return v.startswith(w) if match == "prefix" else v == w
+
 
 def fmt_window(w):
     return str(int(w)) if float(w).is_integer() else str(w)
@@ -329,15 +361,29 @@ class Study:
         c = self.cfg
         base = (c.root / "transitions" / f"atlas={space['atlas']}" / f"window_s={fmt_window(space['window_s'])}"
                 / f"states={space['states']}")
+        want = c.tasks[task]
         files = [p for p in base.rglob("subjects.parquet")
-                 if hive(p, "cohort") in c.cohorts and (hive(p, "task") or task).lower() == c.tasks[task].lower()]
+                 if hive(p, "cohort") in c.cohorts
+                 and task_hit(hive(p, "task") or want, want, c.task_match)]
         if not files:
-            raise SystemExit(f"no transition table for {base} task={task}")
+            rule = "starting with" if c.task_match == "prefix" else "=="
+            raise SystemExit(f"no transition table for {base} task={task} "
+                             f"(cohort in {list(c.cohorts)}, hive task {rule} {want!r})")
         d = pd.concat(map(pd.read_parquet, files), ignore_index=True)
-        d = d[d["task"].astype(str).str.lower() == c.tasks[task].lower()]
+        d = d[d["task"].astype(str).map(lambda v: task_hit(v, want, c.task_match))]
         d["sub"] = d["sub"].astype(str).str.strip().str.upper()
+        if d["sub"].duplicated().any() and c.pool_fn is not None:
+            # Several runs of one condition per subject (HCP's MOVIE1-4). The
+            # models score ONE row per subject and will not average them, so
+            # the runs are pooled HERE -- before any arm is built, so that
+            # every arm of one cell sees the same pooled row, and before the
+            # phenotype join, so the pooling cannot depend on who has a score.
+            d = c.pool_fn(d, n_states(space["states"]))
+            d["sub"] = d["sub"].astype(str).str.strip().str.upper()
         if d["sub"].duplicated().any():
-            raise SystemExit(f"{space['states']} {task}: a subject appears twice -- narrow cohorts")
+            raise SystemExit(
+                f"{space['states']} {task}: a subject appears twice -- narrow `cohorts`, "
+                f"or set `pool_fn` if this cohort has several runs of one condition")
         return d
 
     def table(self, space, task):
@@ -564,10 +610,16 @@ class Study:
         d["label"] = d["model"] + " · " + d["arm"] + " · " + d.apply(set_label, axis=1)
         return d[["task", "phenotype", "model", "arm", "atlas", "window_s", "states", "cv", "label"]]
 
-    def matrix(self, space, task, lab, arm):
-        """One model's data as select-bstm builds it: (X, y, names, blocks), covariates first."""
+    def matrix(self, space, task, lab, arm, t=None):
+        """One model's data as select-bstm builds it: (X, y, names, blocks), covariates first.
+
+        `t` is an already-loaded `load_set` frame. Passing it matters once a
+        cohort is POOLED: without it every arm of one cell re-reads four
+        parquet files and re-pools them, and a 282-set multiverse pays that
+        six times per target per task for nothing.
+        """
         c = self.cfg
-        t = self.load_set(space, task)
+        t = self.load_set(space, task) if t is None else t
         if "[cond]" in arm:
             t = conditional(t, n_states(space["states"]))
         d = t.merge(self.pheno, on="sub", suffixes=("", "_pheno")).dropna(subset=[lab, *self.numeric()])

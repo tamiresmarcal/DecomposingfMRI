@@ -290,9 +290,9 @@ def fig_rankings(rows, cfg, above_both):
             ax.set_title(f"{model} · {lab}")
             leg.axis("off")
             leg.legend(handles=handles, loc="upper center", fontsize=7, title=title, title_fontsize=7)
-        axes[2 * k, 0].set_ylabel("CV score (Spearman)")
+        axes[2 * k, 0].set_ylabel(cfg.score_name)
     fig.suptitle("B1  every row · dashed = that model's Age + Sex baseline, band ± sd · coloured = above it at "
-                 f"{' and '.join(tasks)}, ± sd over seeds", fontsize=8, color=INK2, y=.995)
+                 f"{' and '.join(tasks)}, ± {cfg.spread_name}", fontsize=8, color=INK2, y=.995)
     layout(fig, cfg, )
     save(fig, "B1_rankings", cfg)
     plt.show()
@@ -344,7 +344,7 @@ def fig_factors(rows, cfg):
                 d = pool[(pool["phenotype"] == lab) & ((pool["model"] == model) if model else True)]
                 compare(ax, d, col, lab, [model] if model else models, lev)
                 ax.set_title(f"{model} · {lab}" if model else lab)
-            axes[r, 0].set_ylabel("CV score (Spearman)")
+            axes[r, 0].set_ylabel(cfg.score_name)
         handles = [Line2D([], [], ls="none", marker=marker[t], ms=7, color=colour[t],
                           label=f"{t}: median, bar = middle half") for t in tasks]
         fig.legend(handles=handles + [Patch(color=MUTED, alpha=.35, label="that model's Age + Sex baseline ± sd")],
@@ -862,7 +862,7 @@ def fig_k_curve(rows, cfg, trees=("bstm",)):
         mid.set_ylim(-.04, 1.04)
         mid.axhline(.5, color=MUTED, ls=":", lw=.8)
         if c == 0:
-            top.set_ylabel("CV score (Spearman)")
+            top.set_ylabel(cfg.score_name)
             mid.set_ylabel("share above\nits baseline")
 
         if {"n_features", "n"} <= set(d.columns):

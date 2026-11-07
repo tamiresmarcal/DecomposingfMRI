@@ -41,6 +41,9 @@ null, a null here adds nothing.
 """
 from __future__ import annotations
 
+import re
+from collections import Counter
+
 import numpy as np
 import pandas as pd
 from scipy import stats
@@ -147,17 +150,51 @@ def common_sets(train: Study, test: Study) -> pd.DataFrame:
     return a.loc[a.index.intersection(b.index)].reset_index()
 
 
+# The models a transfer fits when nothing says otherwise. NOT `train.models()`:
+# that reads the model names out of the stored SELECTION SUMMARIES, which only
+# exist for the target columns the selections were run on. Ask for a target
+# they were not run on -- the raw HADS score rather than the banded category --
+# and `summ` filters to nothing, `models()` returns [], and the loop below runs
+# zero times and hands back an empty frame that then fails seven frames later
+# on a missing column. A transfer notebook fits its OWN models; what the
+# selections happened to rank is not what it can fit.
+DEFAULT_MODELS = ("ridge", "hgb")
+
+
+def _reason(e) -> str:
+    """One skip message with the per-cell names removed, so causes collapse.
+
+    282 state sets x 2 tasks x 2 targets x 6 arms is 13,536 chances to print
+    the same sentence. Counting them by cause says the one thing the flood
+    did not: THAT it was always the same cause.
+    """
+    m = " ".join(str(e).split())
+    m = re.sub(r"\S*atlas=\S*", "<cell>", m)
+    m = re.sub(r"\b(HMM|KMeans|GMM|hmm|kmeans|gmm)\w*", "<states>", m)
+    return m
+
+
 def transfer_rows(train: Study, test: Study, arms=None, models=None,
-                  seed: int = 0, n_boot: int = 2000, log=print) -> pd.DataFrame:
+                  sets=None, seed: int = 0, n_boot: int = 2000,
+                  log=print) -> pd.DataFrame:
     """One row per (atlas, window, states, task, target, arm, model).
 
     `score` is Spearman on the test cohort; `lo`/`hi` its bootstrap interval;
     `base_score` the same for a covariates-only model trained the same way, so
     the comparison is like for like. Both targets are each cohort's own: the
     labels must match between the two Settings, the columns need not.
+
+    REFUSES rather than returning an empty frame. Every one of the four loops
+    can be emptied by a setting that looks right -- a target the selections
+    never ran on, a task label that is not the hive value, a cohort whose
+    transitions are not on disk yet -- and an empty frame reports none of
+    that. It reports `KeyError` in whatever reads it next.
     """
     arms = arms or [a for a in ARM_BLOCKS if a != "summary"]
-    models = models or train.models()
+    # None means "decide for me"; an empty list is a request for nothing and
+    # is refused below rather than quietly turned into the default.
+    models = list(DEFAULT_MODELS if models is None and train.cfg.models is None
+                  else train.cfg.models if models is None else models)
     labels = [lab for lab in train.cfg.targets if lab in test.cfg.targets]
     if not labels:
         raise SystemExit(
@@ -165,15 +202,49 @@ def transfer_rows(train: Study, test: Study, arms=None, models=None,
             f"test has {list(test.cfg.targets)}. The LABELS must match (both "
             f"'anxiety'); the columns behind them need not.")
     tasks = [t for t in train.cfg.tasks if t in test.cfg.tasks]
-    sets = common_sets(train, test)
-    log(f"{len(sets)} state set(s) in both cohorts; "
-        f"{len(tasks)} task(s), {len(labels)} target(s), "
-        f"{len(arms)} arm(s), {len(models)} model(s)")
+    if not tasks:
+        raise SystemExit(
+            f"no task in common: train has {list(train.cfg.tasks)}, test has "
+            f"{list(test.cfg.tasks)}. The KEYS must match ('movie'); the hive "
+            f"values they map to are each cohort's own ('Movie' vs 'MOVIE').")
+    # `sets` restricts the grid: the full multiverse is one hgb fit per
+    # (set, task, target, arm, model) and there are hundreds of sets, which is
+    # hours. A subset of `common_sets(train, test)` is the way to try the
+    # chain end to end before paying for all of it.
+    sets = common_sets(train, test) if sets is None else sets
+    if not len(sets):
+        raise SystemExit(
+            f"no state set under transitions/ for both cohorts: train has "
+            f"{len(train.sets())} for {list(train.cfg.cohorts)}, test has "
+            f"{len(test.sets())} for {list(test.cfg.cohorts)}. Stage 5a has to "
+            f"have run for the test cohort with the SAME fit -- see "
+            f"slurm/project_and_select.sh with STOP_AFTER=transitions.")
+    if not models:
+        raise SystemExit("no model to fit: `models` is empty and so is "
+                         "`train.cfg.models`.")
+    n_cell = len(sets) * len(tasks) * len(labels)
+    log(f"{len(sets)} state set(s); {len(tasks)} task(s), {len(labels)} "
+        f"target(s), {len(arms)} arm(s), {len(models)} model(s): "
+        f"{', '.join(models)}\n"
+        f"  up to {n_cell * len(arms) * len(models):,} model fit(s) + "
+        f"{n_cell * len(models):,} baseline(s), each on every training "
+        f"subject. Pass `sets=` a subset of tt.common_sets(train, test) to "
+        f"try the chain before paying for all of it.")
 
-    rows = []
+    rows, skipped = [], Counter()
     for s in sets.itertuples():
         space = {"atlas": s.atlas, "window_s": s.window_s, "states": s.states}
         for task in tasks:
+            # ONE probe per (space, task). A missing transition table is a
+            # property of the cell, not of the arm or the target, and loading
+            # it once also means a pooled cohort pools once per cell instead
+            # of once per arm per target.
+            try:
+                t_tr = train.load_set(space, task)
+                t_te = test.load_set(space, task)
+            except SystemExit as e:
+                skipped[_reason(e)] += 1
+                continue
             for lab in labels:
                 # The baseline is computed ONCE per (space, task, target), not
                 # once per arm: `matrix` drops subjects on the target and the
@@ -183,10 +254,15 @@ def transfer_rows(train: Study, test: Study, arms=None, models=None,
                 base = {}
                 for arm in arms:
                     try:
-                        Xtr, ytr, ntr, btr = train.matrix(space, task, lab, arm)
-                        Xte, yte, nte, _ = test.matrix(space, task, lab, arm)
-                    except SystemExit as e:        # a set one cohort lacks
-                        log(f"  skip {s.states} {task} {arm}: {e}")
+                        Xtr, ytr, ntr, btr = train.matrix(space, task, lab, arm, t=t_tr)
+                        Xte, yte, nte, _ = test.matrix(space, task, lab, arm, t=t_te)
+                    except SystemExit as e:        # an arm one cohort lacks
+                        skipped[_reason(e)] += 1
+                        continue
+                    if len(yte) < 3 or len(np.unique(yte)) < 2:
+                        skipped[f"test cohort has {len(yte)} usable subject(s) "
+                                f"with {len(np.unique(yte))} distinct score(s) "
+                                f"-- Spearman is undefined"] += 1
                         continue
                     want = align_columns(ntr, nte)
                     Xte = reorder(nte, Xte, want)
@@ -211,6 +287,17 @@ def transfer_rows(train: Study, test: Study, arms=None, models=None,
                             "n_train": len(ytr), "n_test": len(yte),
                             "n_covariates": len(cov),
                             "n_features": Xtr.shape[1]})
+    for why, k in skipped.most_common():
+        log(f"  skipped {k}x: {why}")
+    if not rows:
+        raise SystemExit(
+            "no configuration could be scored. "
+            + (f"Every one of {sum(skipped.values())} attempt(s) was skipped; "
+               f"the commonest reason was: {skipped.most_common(1)[0][0]}"
+               if skipped else
+               f"{len(sets)} set(s) x {len(tasks)} task(s) x {len(labels)} "
+               f"target(s) x {len(arms)} arm(s) and not one was reached, which "
+               f"should be impossible -- check `arms`."))
     return pd.DataFrame(rows)
 
 
@@ -346,11 +433,28 @@ def as_report_rows(rows: "pd.DataFrame") -> "pd.DataFrame":
     """
     from hads_tables import n_states, set_label, window_name
 
+    need = ["score", "lo", "hi", "base_score", "base_lo", "base_hi",
+            "states", "window_s", "tree", "arm", "model", "n_test"]
+    missing = [c for c in need if c not in rows.columns]
+    if missing:
+        raise SystemExit(
+            f"as_report_rows got a frame with no {', '.join(missing)} column"
+            + (" -- it is EMPTY (no rows, no columns), so nothing upstream "
+               "produced a score. Read the refusal or the skip counts from "
+               "the function that built it; this one cannot know why."
+               if not len(rows.columns) else
+               f". It has: {', '.join(map(str, rows.columns[:12]))}"))
+
     d = rows.copy()
     d["mean"] = d["score"]
     d["std"] = (d["hi"] - d["lo"]) / _CI_TO_SD
     d["base_mean"] = d["base_score"]
     d["base_sd"] = (d["base_hi"] - d["base_lo"]) / _CI_TO_SD
+    # B1 prints the baseline's n. In the report that is the number of subjects
+    # the CV ran over; here it is the number of TEST subjects the score was
+    # computed on, which is the n that limits this claim.
+    d["n"] = d["n_test"]
+    d["base_n"] = d["n_test"]
     d["window"] = d["window_s"].map(window_name)
     d[["method", "embedding", "K_"]] = (
         d["states"].str.rsplit("_", n=2, expand=True).reindex(columns=range(3)))
@@ -477,10 +581,22 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
 
     root = train.cfg.root
     covariates = list(covariates or ["Age", "Sex", "frac_good_frames", "n_tr_used"])
-    models = models or train.models()
+    # same reason as transfer_rows: not train.models(), which is empty for a
+    # target the selections never ran on
+    # None means "decide for me"; an empty list is a request for nothing and
+    # is refused below rather than quietly turned into the default.
+    models = list(DEFAULT_MODELS if models is None and train.cfg.models is None
+                  else train.cfg.models if models is None else models)
     labels = [lab for lab in train.cfg.targets if lab in test.cfg.targets]
+    if not labels or not models:
+        raise SystemExit(
+            f"nothing to fit: target labels in common = {labels}, models = "
+            f"{models}. The LABELS must match between the two Settings.")
     atlases = atlases or sorted({hive(p, "atlas") for p in
                                  (root / "static_fc").rglob("subjects.parquet")})
+    if not atlases:
+        raise SystemExit(f"no static-FC table under {root / 'static_fc'} -- "
+                         f"stage 5a's static-fc has not run for either cohort")
     tr_tasks = train_tasks or {k: v for k, v in train.cfg.tasks.items()}
     te_tasks = test_tasks or {k: v for k, v in test.cfg.tasks.items()}
     rows = []
