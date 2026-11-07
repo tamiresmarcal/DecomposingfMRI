@@ -318,3 +318,43 @@ def pool_tasks(d: "pd.DataFrame", n_states: int, log=print) -> "pd.DataFrame":
         f"runs per subject {pooled['n_runs_pooled'].min() if 'n_runs_pooled' in pooled else 1}"
         f"-{pooled['n_runs_pooled'].max() if 'n_runs_pooled' in pooled else 1}")
     return pooled
+
+
+# ------------------------------------------------------- the report's shape ---
+# 1.96 sd each side of a percentile interval, so an interval width -> one sd.
+_CI_TO_SD = 2 * 1.959963985
+
+
+def as_report_rows(rows: "pd.DataFrame") -> "pd.DataFrame":
+    """Transfer rows in the shape hads_plots' B1 and B2 already read.
+
+    A NAMED conversion rather than columns quietly emitted by transfer_rows,
+    because one of them changes meaning and the figures cannot say so
+    themselves.
+
+    In the Cam-CAN report `std` is the spread of one model's score over the
+    FOLD SEEDS: how much the answer moves when the folds are drawn again.
+    There are no folds here. `std` becomes the bootstrap sd over the TEST
+    SUBJECTS: how much the answer moves when a different 168 people are
+    tested. Both are an error bar and both belong on the same axis, but they
+    are answers to different questions, and a figure captioned "+/- sd over
+    seeds" would be wrong about this one. The notebook relabels it; this
+    docstring is why.
+
+    The conversion itself: a 95% percentile interval spans 1.96 sd either
+    side, so sd = (hi - lo) / 3.92.
+    """
+    from hads_tables import n_states, set_label, window_name
+
+    d = rows.copy()
+    d["mean"] = d["score"]
+    d["std"] = (d["hi"] - d["lo"]) / _CI_TO_SD
+    d["base_mean"] = d["base_score"]
+    d["base_sd"] = (d["base_hi"] - d["base_lo"]) / _CI_TO_SD
+    d["window"] = d["window_s"].map(window_name)
+    d[["method", "embedding", "K_"]] = (
+        d["states"].str.rsplit("_", n=2, expand=True).reindex(columns=range(3)))
+    d["label"] = d.apply(set_label, axis=1)
+    d["entity"] = d["tree"] + " · " + d["label"] + " · " + d["arm"] + " · " + d["model"]
+    d["K"] = d["states"].map(n_states)
+    return d
