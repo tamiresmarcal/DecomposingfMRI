@@ -354,7 +354,8 @@ def metric_name(model: str) -> str:
 def read_phenotype(specs: list[str], id_col: str, target: str,
                    covariates: list[str], categorical: list[str],
                    levels: list[str] | None = None,
-                   group_col: str | None = None) -> pd.DataFrame:
+                   group_col: str | None = None,
+                   target_range: tuple[float, float] | None = None) -> pd.DataFrame:
     """Merge the release tables on the id column, code the ordinal, coerce types.
 
     Cam-CAN splits what is needed: the HADS categories are in one table and Age
@@ -442,6 +443,27 @@ def read_phenotype(specs: list[str], id_col: str, target: str,
             f"ORDER, lowest first:\n"
             f"    --ordinal-levels low mid high")
     pheno["y"] = codes
+
+    if target_range is not None:
+        # A RAW questionnaire score has a known range, and a value outside it
+        # is a missing-data sentinel, not a score. Cam-CAN's
+        # additional_HADS_depression carries 9999 for "no answer"; HADS runs
+        # 0-21. Left in, those few rows are enormous outliers for a regression
+        # to chase, and they set the scale of every plot that shows the column.
+        #
+        # None of this mattered while the target was the *_category column:
+        # that one is text, so 9999 would never have coded. It starts
+        # mattering the moment a raw column is the target, which is why this
+        # is a flag the caller sets from the instrument's own range rather
+        # than a silent clamp -- and why the drop is reported.
+        lo, hi = target_range
+        bad = pheno["y"].notna() & ~pheno["y"].between(lo, hi)
+        if bad.any():
+            seen = sorted(pheno.loc[bad, "y"].unique())[:6]
+            log(f"  --target-range {lo:g} {hi:g}: {int(bad.sum())} subject(s) "
+                f"outside it, dropped. Values: {seen}")
+        pheno.loc[bad, "y"] = np.nan
+
     if group_col:
         pheno[group_col] = pheno[group_col].astype("string").str.strip()
 
@@ -744,7 +766,8 @@ def run(args) -> int:
     pheno = read_phenotype(args.pheno, args.id_col, args.target,
                            args.covariates, args.categorical,
                            levels=args.ordinal_levels,
-                           group_col=getattr(args, "group_col", None))
+                           group_col=getattr(args, "group_col", None),
+                           target_range=getattr(args, "target_range", None))
     # Applied to the PHENOTYPE rather than to each transition table: every
     # state set reaches the model through an inner join on this frame, so
     # restricting it once restricts every arm identically and there is no
@@ -1353,6 +1376,15 @@ def add_arguments(p) -> None:
     p.add_argument("--covariates", nargs="+",
                    default=["Age", "Sex", "n_transitions"])
     p.add_argument("--categorical", nargs="+", default=["Sex"])
+    p.add_argument("--target-range", nargs=2, type=float, default=None,
+                   metavar=("LO", "HI"),
+                   help="Lower and upper bound of the TARGET's own scale, e.g. 0 21 for a "
+                        "HADS subscale. A value outside it is a missing-data "
+                        "sentinel, not a score: Cam-CAN codes 'no answer' as 9999, "
+                        "which a regression on the raw column would chase as an "
+                        "enormous outlier. Those subjects are dropped and the drop "
+                        "is reported. Not needed for an ordinal *_category target, "
+                        "whose text never codes to a number.")
     p.add_argument("--group-col", default=None, metavar="COLUMN",
                    help="A phenotype column whose members must never be split "
                         "across CV folds, e.g. Family_ID for HCP. Without it, "

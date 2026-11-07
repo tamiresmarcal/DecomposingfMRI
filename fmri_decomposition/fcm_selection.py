@@ -294,7 +294,8 @@ def run(args) -> int:
         args.pheno, args.id_col, args.target,
         [c for c in args.covariates if c not in QUALITY_COVARIATES],
         args.categorical, levels=args.ordinal_levels,
-        group_col=getattr(args, "group_col", None))
+        group_col=getattr(args, "group_col", None),
+        target_range=getattr(args, "target_range", None))
 
     log(f"{len(cells)} (cohort, atlas) cell(s): "
         + "  ".join(f"{c}/{a}" for c, a in cells))
@@ -512,6 +513,15 @@ def add_arguments(p) -> None:
                    help=f"{QUALITY_COVARIATES} are read from the static-FC "
                         f"table; the rest from the phenotype")
     p.add_argument("--categorical", nargs="+", default=["Sex"])
+    p.add_argument("--target-range", nargs=2, type=float, default=None,
+                   metavar=("LO", "HI"),
+                   help="Lower and upper bound of the TARGET's own scale, e.g. 0 21 for a "
+                        "HADS subscale. A value outside it is a missing-data "
+                        "sentinel, not a score: Cam-CAN codes 'no answer' as 9999, "
+                        "which a regression on the raw column would chase as an "
+                        "enormous outlier. Those subjects are dropped and the drop "
+                        "is reported. Not needed for an ordinal *_category target, "
+                        "whose text never codes to a number.")
     p.add_argument("--group-col", default=None, metavar="COLUMN",
                    help="A phenotype column whose members must never be split "
                         "across CV folds, e.g. Family_ID for HCP. See "

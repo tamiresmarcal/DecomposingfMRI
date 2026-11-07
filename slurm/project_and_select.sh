@@ -44,12 +44,28 @@ done
                                   # assumed already done -- see the check below.
 : "${ALL_APERTURES:=-1 $APERTURES}"
 : "${TRAIN:=ds002837 cneuromod}"
-: "${TARGETS:?set TARGETS, e.g. TARGETS=\"DSM_Depr_Raw DSM_Anxi_Raw\"}"
-: "${CONDITIONS:?set CONDITIONS, e.g. CONDITIONS=\"movie=MOVIE1 rest=REST1\"}"
+# Required for the selections only: with STOP_AFTER=transitions nothing reads
+# them, and demanding them anyway would be asking for a target before there is
+# anything to score.
+if [[ "${STOP_AFTER:-selections}" == "selections" ]]; then
+  : "${TARGETS:?set TARGETS, e.g. TARGETS=\"DSM_Depr_Raw DSM_Anxi_Raw\"}"
+  : "${CONDITIONS:?set CONDITIONS, e.g. CONDITIONS=\"movie=MOVIE1 rest=REST1\"}"
+fi
 : "${MODELS:=ridge hgb}"
 : "${SEEDS:=0 1 2 3 4}"
 : "${OUT_SUFFIX:=_${COHORT}}"     # the selections WIPE their target folder, so
                                   # never write into the default name.
+# STOP_AFTER=transitions submits stage 4, 4b and 5a and stops there. That is
+# the whole chain when the scoring happens somewhere else -- a notebook that
+# trains on one cohort and tests on this one does its own fitting, and needs
+# only this cohort's transitions to exist beside the training cohort's. With
+# the default, the selections run too.
+: "${STOP_AFTER:=selections}"
+case "$STOP_AFTER" in
+  transitions|selections) ;;
+  *) echo "STOP_AFTER must be 'transitions' or 'selections', not '$STOP_AFTER'" >&2
+     exit 2 ;;
+esac
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p slurm_logs
@@ -151,6 +167,12 @@ T_ID=$(sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable \
   "$HERE/brain_states_transitions.sbatch" \
   -- --atlas "$ATLAS" --window-s $ALL_APERTURES)
 echo "   jobid ${T_ID}"
+
+if [[ "$STOP_AFTER" == "transitions" ]]; then
+  echo "== STOP_AFTER=transitions: stage 5b not submitted"
+  echo "   transitions land under outputs/transitions/.../cohort=${COHORT}/"
+  exit 0
+fi
 
 echo "== stage 5b: the selections"
 for cond in $CONDITIONS; do
