@@ -212,3 +212,109 @@ def transfer_rows(train: Study, test: Study, arms=None, models=None,
                             "n_covariates": len(cov),
                             "n_features": Xtr.shape[1]})
     return pd.DataFrame(rows)
+
+
+# ------------------------------------------------------------------ pooling ---
+def pool_tasks(d: "pd.DataFrame", n_states: int, log=print) -> "pd.DataFrame":
+    """Several runs of one condition -> ONE row per subject, recomputed not averaged.
+
+    HCP gives four movies and four rests per subject; the selections score one
+    row per subject and will not average them. Averaging the columns would be
+    wrong for most of them, so each is pooled the way its own definition
+    allows. Almost all of it is exact:
+
+      cells        p_joint * n_transitions is the COUNT matrix, exactly (the
+                   table's own docstring says so). Counts add. The pooled
+                   cells are the summed counts over the summed transitions.
+      occupancy    occ_k * n_windows is a window count. Counts add.
+      n_windows,
+      n_transitions, n_transitions_independent      sums.
+      n_states_visited, n_distinct_transitions,
+      switch_rate, self_transition_rate,
+      entropy_rate_bits                             RECOMPUTED from the pooled
+                   count matrix, which is what they are functions of. Averaging
+                   an entropy rate over runs is not an entropy rate of
+                   anything.
+      mean_dwell_s the mean dwell is total windows over number of episodes,
+                   and the episode count is recoverable: switches + 1, with
+                   switches = switch_rate * n_transitions. So the pooled mean
+                   dwell is sum(windows) / sum(episodes), times the stride.
+      switches_per_min   switches over minutes; both add.
+
+    The two that are NOT exact, and are reported rather than hidden:
+
+      stride_s     not a column. It is recovered per run from
+                   switches_per_min, and the runs of one subject must agree:
+                   a pooled rate over runs sampled at different strides is not
+                   a rate. Mixed strides REFUSE.
+      dispersion   the mean distance from the subject's centroid in latent
+                   space, which needs the latents, not this table. Pooled as a
+                   mean weighted by n_windows, which is the centroid of each
+                   run rather than of all of them together. Flagged in the
+                   returned frame as `dispersion_pooled_approximately`.
+    """
+    from fmri_decomposition.transitions import _entropy_rate
+    from hads_tables import cell_cols
+
+    cells = cell_cols(d)
+    occ = [c for c in d.columns if c.startswith("occ_")]
+    out = []
+    for sub, g in d.groupby("sub", sort=True):
+        if len(g) == 1:
+            out.append(g.iloc[0].to_dict())
+            continue
+        w = g["n_windows"].to_numpy(float)
+        ntr = g["n_transitions"].to_numpy(float)
+        counts = (g[cells].to_numpy(float) * ntr[:, None]).sum(0)
+        tot_tr = ntr.sum()
+        M = counts.reshape(n_states, n_states)
+        n_change = tot_tr - np.trace(M)
+
+        # the stride each run was sampled at, recovered and required to agree
+        sw = (g["switch_rate"].to_numpy(float) * ntr)       # switches per run
+        spm = g["switches_per_min"].to_numpy(float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            stride = np.where(spm > 0, sw / spm * 60 / np.where(w > 0, w, np.nan),
+                              np.nan)
+        ok = np.isfinite(stride)
+        if ok.sum() and not np.allclose(stride[ok], stride[ok][0], rtol=1e-3):
+            raise SystemExit(
+                f"sub={sub}: the runs being pooled were sampled at different "
+                f"strides ({np.unique(np.round(stride[ok], 3))}). A rate "
+                f"pooled across them is not a rate. Pool only runs of one "
+                f"condition at one aperture.")
+        s = float(stride[ok][0]) if ok.sum() else np.nan
+
+        row = dict(zip(cells, counts / tot_tr if tot_tr else np.nan))
+        row.update({f: (g[f].to_numpy(float) * w).sum() / w.sum()
+                    for f in occ})                       # window counts, added
+        episodes = sw.sum() + len(g)                     # switches + 1 per run
+        row.update({
+            "sub": sub,
+            "task": "+".join(sorted(g["task"].astype(str))),
+            "n_windows": w.sum(),
+            "n_transitions": tot_tr,
+            "n_transitions_independent": g["n_transitions_independent"].sum(),
+            "n_states": n_states,
+            "n_states_visited": int(sum(row[f] > 0 for f in occ)),
+            "n_distinct_transitions": int((M > 0).sum()),
+            "switch_rate": n_change / tot_tr if tot_tr else np.nan,
+            "self_transition_rate": 1 - n_change / tot_tr if tot_tr else np.nan,
+            "entropy_rate_bits": _entropy_rate(M),
+            "switches_per_min": (sw.sum() / (w.sum() * s / 60)
+                                 if np.isfinite(s) and w.sum() else np.nan),
+            "mean_dwell_s": (w.sum() / episodes * s
+                             if np.isfinite(s) and episodes else np.nan),
+            "dispersion": ((g["dispersion"].to_numpy(float) * w).sum() / w.sum()
+                           if "dispersion" in g else np.nan),
+            "dispersion_pooled_approximately": True,
+            "n_runs_pooled": len(g),
+        })
+        for c in g.columns:                        # anything else: first value
+            row.setdefault(c, g.iloc[0][c])
+        out.append(row)
+    pooled = pd.DataFrame(out)
+    log(f"  pooled {len(d)} run-rows into {len(pooled)} subject-row(s); "
+        f"runs per subject {pooled['n_runs_pooled'].min() if 'n_runs_pooled' in pooled else 1}"
+        f"-{pooled['n_runs_pooled'].max() if 'n_runs_pooled' in pooled else 1}")
+    return pooled
