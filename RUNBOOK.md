@@ -1242,6 +1242,21 @@ sbatch slurm/static_fc.sbatch hcp7t_fix -- \
     --atlas harvardoxford yeo7 networks --censor-policy "$POLICY"
 ```
 
+**Stage 3b needs stage 3.5 for that cohort first.** `--censor-policy motion`
+reads `censor/policy=motion/cohort=<c>/`, so a cohort that never went through
+`fmri-decomp censor` refuses:
+
+```
+--censor-policy 'motion' but no .../censor/policy=motion/cohort=camcan_rest/... exists
+Run:  fmri-decomp censor --policy config/censor/motion.yaml --cohorts camcan_rest
+```
+
+Before running it, check what that cohort's **state** tables used —
+`--status` prints it under "censor policy of the STATE trees". If they carry no
+policy, censoring its static FC now would make the fcm arm censored while the
+bstm arm is not: one comparison fixed by breaking another. Match the state
+trees, whatever they say.
+
 **Every cohort of every side needs a table, not just one of them.**
 `_fc_cell` reads one table per cohort and concatenates them *before* filtering
 by task, so one absent cohort skips every cell of that side — the movie cells

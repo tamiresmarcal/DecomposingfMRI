@@ -1346,3 +1346,97 @@ class TestTheReportBuildsTheCommand:
                     if "static_fc.sbatch camcan_rest" in l)
         assert "--censor-policy motion" in line
         assert "somethingelse" not in line
+
+
+class TestTheStateTreesPolicyIsReported:
+    """`static_fc` for camcan_rest refused:
+
+        --censor-policy 'motion' but no .../censor/policy=motion/
+        cohort=camcan_rest/... exists
+
+    Stage 3.5 never ran for that cohort. Which raises a question the report
+    could not answer: what policy do camcan_rest's own TRANSITIONS carry? If
+    none, then running stage 3.5 now and censoring its static FC would make
+    the fcm rest arm censored while the bstm rest arm is not -- fixing one
+    comparison by breaking another. So the state trees' policy is printed
+    beside the static-FC one, and a disagreement is named.
+    """
+
+    def static_fc(self, root, atlas, cohort, task, policy="motion"):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        d = pd.DataFrame({"sub": ["S1"], "task": task, "r1__r2": .1,
+                          "censor_policy": policy,
+                          "match_bandpass": "[0.01, 0.1]",
+                          "zscore_runs": True, "pool": "task"})
+        write_table_atomic(
+            pa.Table.from_pandas(d, preserve_index=False),
+            root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
+            / f"task={task}" / "subjects.parquet")
+
+    def stamp(self, root, cohort, policy):
+        import pyarrow.parquet as pq
+        from fmri_decomposition.io import write_table_atomic
+        for q in (root / "transitions").rglob("*.parquet"):
+            if tt.hive(q, "cohort") != cohort:
+                continue
+            t = pq.read_table(q)
+            md = {**(t.schema.metadata or {})}
+            if policy is not None:
+                md[b"censor_policy"] = f'"{policy}"'.encode()
+            write_table_atomic(t.replace_schema_metadata(md), q)
+
+    def report(self, world, capsys):
+        import transfer_grid
+        tt.censor_policies.cache_clear() if hasattr(
+            tt.censor_policies, "cache_clear") else None
+        put(world["out"], 0, 1)
+        transfer_grid.main(["--status", "--target", "raw",
+                            "--out", str(world["out"]),
+                            "--outputs", str(world["root"])])
+        return capsys.readouterr().out
+
+    def test_the_state_policy_is_printed_per_cohort(self, world, capsys):
+        self.stamp(world["root"], "hcp7t_fix", "motion")
+        out = self.report(world, capsys)
+        assert "censor policy of the STATE trees" in out
+        assert "cohort=hcp7t_fix" in out and "'motion'" in out
+
+    def test_a_cohort_with_no_policy_recorded_says_so_plainly(
+            self, world, capsys):
+        out = self.report(world, capsys)
+        assert "none recorded -- its tables were built WITHOUT a policy" in out
+
+    def test_static_fc_disagreeing_with_its_own_state_trees_is_named(
+            self, world, capsys):
+        self.stamp(world["root"], "hcp7t_fix", "none")
+        self.static_fc(world["root"], "yeo7", "camcan", "Movie")
+        self.static_fc(world["root"], "yeo7", "camcan_rest", "Rest")
+        self.static_fc(world["root"], "yeo7", "hcp7t_fix", "MOVIE1",
+                       policy="motion")
+        out = self.report(world, capsys)
+        assert "static FC says censor_policy='motion'" in out
+        assert "its STATE tables say 'none'" in out
+        assert "disagrees with its state trees" in out
+
+
+class TestTheFcmDryRunUsesTheSameRule:
+    """The pre-flight said "static FC on 3 atlas(es) both cohorts have" and
+    then every one of those three refused: the dry run asked whether ANY cohort
+    of a side had a table, and `_fc_cell` needs ALL of them."""
+
+    def test_an_atlas_missing_one_cohort_is_not_counted_as_ready(
+            self, world, capsys):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        for co, task in (("camcan", "Movie"), ("hcp7t_fix", "MOVIE1")):
+            d = pd.DataFrame({"sub": ["S1"], "task": task, "r1__r2": .1})
+            write_table_atomic(
+                pa.Table.from_pandas(d, preserve_index=False),
+                world["root"] / "static_fc" / "atlas=yeo7" / f"cohort={co}"
+                / f"task={task}" / "subjects.parquet")
+        run(world, "--target", "raw", "--tree", "fcm", "--n-shards", "1",
+            "--dry-run")
+        out = capsys.readouterr().out
+        assert "static FC on 0 atlas(es)" in out
+        assert "atlas=yeo7: missing ['camcan_rest']" in out

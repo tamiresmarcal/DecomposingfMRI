@@ -270,6 +270,19 @@ def status(a, root_out) -> int:
                 pd.read_parquet(q, columns=cols), f"{at}/{co}")
         except SystemExit as e:
             say(f"  static FC {at}/{co}: {e}")
+    # THE STATE TREES' OWN POLICY, printed whether or not static FC exists.
+    # The comparison between the two is what makes bstm and fcm comparable,
+    # and this is also the only way to see that a cohort's state tables were
+    # built with NO policy -- which decides whether running stage 3.5 for it
+    # now would fix the fcm arm or break its agreement with the bstm arm.
+    state = tt.censor_policies(outputs, list(tr_co) + list(te_co))
+    say("  censor policy of the STATE trees (transitions/latents):")
+    for c in list(tr_co) + list(te_co):
+        v = state.get(c)
+        say(f"      cohort={c:<12} "
+            + ("none recorded -- its tables were built WITHOUT a policy, or "
+               "predate the stamp" if not v else repr(v)))
+
     if not seen:
         say(f"  static FC: nothing under {fc_root} -- stage 3b has not run")
         todo.append("static FC: stage 3b has not run")
@@ -305,6 +318,20 @@ def status(a, root_out) -> int:
             # rebinding it here made `a.target` twenty lines below raise
             # AttributeError on a dict. One-letter names do not get to shadow
             # a parameter.
+            # each side's static FC against its own state trees
+            for s_, co in (("train", tr_co), ("test", te_co)):
+                for c in co:
+                    r = recs.get((at, c))
+                    if not r or "censor_policy" not in r:
+                        continue
+                    fc_p, st_p = (r["censor_policy"] or None), state.get(c)
+                    if st_p is not None and fc_p != st_p:
+                        say(f"      atlas={at} cohort={c}: static FC says "
+                            f"censor_policy={fc_p!r} and its STATE tables say "
+                            f"{st_p!r}. bstm and fcm would differ in frames as "
+                            f"well as in model; the fcm transfer refuses this.")
+                        todo.append(f"static FC {at}/{c}: disagrees with its "
+                                    f"state trees")
             rec_tr, rec_te = tr[0], te[0]
             if rec_tr is not None and rec_te is not None and rec_tr != rec_te:
                 diff = {k: (rec_tr.get(k), rec_te.get(k)) for k in rec_tr
@@ -446,12 +473,19 @@ def main(argv=None) -> int:
             pres = {}
             for q in (train_cfg.root / "static_fc").rglob("subjects.parquet"):
                 pres.setdefault(tt.hive(q, "atlas"), set()).add(tt.hive(q, "cohort"))
-            both = sorted(a_ for a_, v in pres.items()
-                          if v & set(train_cfg.cohorts) and v & set(test_cfg.cohorts))
+            # ALL cohorts of each side, as `fcm_transfer_rows` requires:
+            # `_fc_cell` reads one table per cohort and concatenates before
+            # filtering by task, so ANY-of-them said three atlases were ready
+            # while the real run refused all three.
+            need = set(train_cfg.cohorts) | set(test_cfg.cohorts)
+            both = sorted(a_ for a_, v in pres.items() if need <= v)
             say(f"dry run: static FC on {len(both)} atlas(es) both cohorts have"
                 f" {both} x 2 task(s) x 2 target(s) x 2 arm(s) x {n_mod} "
                 f"model(s) = {len(both) * 2 * 2 * 2 * n_mod:,} fit(s)")
             if not both:
+                short = {a_: sorted(need - v) for a_, v in pres.items()}
+                for a_, co in sorted(short.items()):
+                    say(f"  atlas={a_}: missing {co}")
                 say(f"  NONE: the static_fc tree has "
                     + ("; ".join(f"atlas={k}: {sorted(v)}"
                                  for k, v in sorted(pres.items())) or "nothing")
