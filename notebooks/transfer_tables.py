@@ -954,13 +954,29 @@ RECIPE = ["n_shards", "n_boot", "seed"]
 
 
 def recipes(d: "pd.DataFrame") -> dict:
-    """{shard: (n_shards, n_boot, seed, grid_hash, arms, models)} per shard."""
+    """{shard: (n_shards, n_boot, seed, arms, models)} per shard.
+
+    Only the first three are grounds to REFUSE. Shards differing in their arms
+    or models is suspicious and reported, but it is not proof of contamination:
+    a shard whose only state set lost an arm -- every column of it NaN across
+    the training cohort -- is legitimately short of one, and refusing there
+    would block a grid that is fine.
+    """
     out = {}
     for sh, h in d.groupby("shard", sort=True):
         out[int(sh)] = tuple(
             [h[c].iloc[0] for c in RECIPE if c in h]
             + [tuple(sorted(h["arm"].unique())), tuple(sorted(h["model"].unique()))])
     return out
+
+
+def disagreements(rec: dict) -> tuple[dict, dict]:
+    """(hard, soft): shards grouped by the part that refuses, and by arms/models."""
+    hard, soft = {}, {}
+    for sh, r in rec.items():
+        hard.setdefault(r[:len(RECIPE)], []).append(sh)
+        soft.setdefault(r[len(RECIPE):], []).append(sh)
+    return hard, soft
 
 
 def inventory(root, target_set: str, train: str, test: str, tree: str) -> dict:
@@ -1034,20 +1050,28 @@ def read_transferred(root, target_set: str, train: str = "camcan",
         # interactively with --arms cells --models ridge --n-boot 50, say --
         # lands in the same tree as the array's and reads as part of it. The
         # grid hash cannot see it: the GRID was the same, the ANALYSIS was not.
-        if len(set(rec.values())) > 1:
-            groups = {}
-            for sh, r in rec.items():
-                groups.setdefault(r, []).append(sh)
+        hard, soft = disagreements(rec)
+        if len(hard) > 1:
             lines = [f"    shard(s) {v}: n_shards={k[0]}, n_boot={k[1]}, "
-                     f"seed={k[2]}, arms={list(k[3])}, models={list(k[4])}"
-                     for k, v in groups.items()]
+                     f"seed={k[2]}" for k, v in hard.items()]
             raise SystemExit(
                 f"tree={tree}: the shards on disk were NOT computed the same "
                 f"way, so concatenating them would concatenate two analyses:\n"
                 + "\n".join(lines)
                 + f"\n  Delete the odd one out of {inv['base']} and resubmit "
-                  f"that shard. A shard tried by hand with fewer arms, fewer "
-                  f"models or fewer bootstrap draws is the usual cause.")
+                  f"that shard. A shard tried by hand -- with --n-shards or "
+                  f"--n-boot of its own, to see the chain work -- is the usual "
+                  f"cause; `--no-write` is how to do that without writing one.")
+        if len(soft) > 1:
+            # Reported, not refused: see `recipes`. Either a hand-run shard
+            # with --arms/--models, or cells that were skipped.
+            log(f"  tree={tree}: NOTE -- the shards do not all carry the same "
+                f"arms and models. "
+                + "; ".join(f"shard(s) {v}: arms={list(k[0])}, models={list(k[1])}"
+                            for k, v in soft.items())
+                + ". Either a shard was run by hand with fewer of them, or "
+                  "those cells were skipped -- the per-model counts in "
+                  "`transfer_grid.py --status` say which.")
         n, have, gaps = inv["n_shards"], inv["have"], inv["gaps"]
         log(f"  tree={tree}: {len(d):,} row(s) from {len(have)}/{n} shard(s)"
             + (f"  MISSING {gaps}" if gaps else ""))

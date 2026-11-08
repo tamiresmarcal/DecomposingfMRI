@@ -163,30 +163,64 @@ def status(a, root_out) -> int:
                 todo.append(f"{tree}: nothing on disk")
             continue
         n, have, gaps = inv["n_shards"], inv["have"], inv["gaps"]
-        say(f"{head} {len(have)}/{n} shard(s), {len(inv['rows']):,} row(s), "
-            f"{inv['rows']['states'].nunique()} state set(s)"
+        # no state-set count here: it belongs on the coverage line below, where
+        # a set is (atlas, window_s, states). Two numbers both called "state
+        # sets" and counted differently is how a report stops being read.
+        say(f"{head} {len(have)}/{n} shard(s), {len(inv['rows']):,} row(s)"
             + (f"  MISSING {gaps}" if gaps else "  COMPLETE"))
         if gaps:
             todo.append(f"{tree}: shard(s) {gaps}")
+        # "40/40 shards" answers whether the TASKS finished. It does not answer
+        # whether every model scored in every atlas and every window, which is
+        # a different question with a different failure: a cell can be skipped
+        # (a missing arm, a test set with one distinct score) or scored and
+        # come out as NaN (the model predicted one value for everyone, so
+        # Spearman has nothing to rank). Both leave the shard count at 40/40.
+        d = inv["rows"]
+        want = int(d["n_sets_total"].iloc[0]) if "n_sets_total" in d else None
+        got = d.groupby(["atlas", "window_s", "states"]).ngroups
+        say(f"      {got}" + (f"/{want}" if want else "") + " state set(s) with "
+            f"at least one row" + ("" if want is None or got == want else
+            "   <-- SHORT: some cells were skipped, grep the logs for 'skipped'"))
+        for m, h in d.groupby("model"):
+            sets_m = h.groupby(["atlas", "window_s", "states"]).ngroups
+            nan = int(h["score"].isna().sum()) if "score" in h else 0
+            say(f"      {m:>6}: {sets_m} set(s), {len(h):,} row(s)"
+                + (f", {nan} with NO score (predicted a constant)" if nan else "")
+                + ("" if sets_m == got else "   <-- fewer sets than the other models"))
+        for col in ("atlas", "window_s", "arm"):
+            if col not in d:
+                continue
+            # a dict comprehension rather than groupby.apply: `include_groups`
+            # moved between pandas 2 and 3 and this has to read the same on the
+            # cluster's 2.2 and anywhere else
+            per = {k: h.groupby(["atlas", "window_s", "states"]).ngroups
+                   for k, h in d.groupby(col, dropna=False)}
+            if per:
+                say(f"      {col:>6}: " + ", ".join(
+                    f"{k}={v}" for k, v in per.items()) + "  (state sets each)")
         # The check the grid hash cannot make: same grid, different analysis.
-        groups = {}
-        for sh, r in inv["recipes"].items():
-            groups.setdefault(r, []).append(sh)
-        if len(groups) > 1:
+        hard, soft = tt.disagreements(inv["recipes"])
+        if len(hard) > 1:
             say(f"{head} the shards DISAGREE on how they were computed -- "
                 f"concatenating them would concatenate two analyses:")
-            for k, v in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+            for k, v in sorted(hard.items(), key=lambda kv: -len(kv[1])):
                 say(f"      shard(s) {v if len(v) < 12 else f'{len(v)} of them'}"
-                    f": n_shards={k[0]}, n_boot={k[1]}, seed={k[2]}, "
-                    f"arms={list(k[3])}, models={list(k[4])}")
-            odd = min(groups.items(), key=lambda kv: len(kv[1]))[1]
+                    f": n_shards={k[0]}, n_boot={k[1]}, seed={k[2]}")
+            odd = min(hard.items(), key=lambda kv: len(kv[1]))[1]
             say(f"    the odd one out is shard(s) {odd}. A shard tried by hand "
-                f"with fewer arms, models or bootstrap draws is the usual "
-                f"cause, and `n_shards` above is read from it, which is why "
-                f"the count can look absurd. Delete and resubmit it:")
+                f"is the usual cause, and `n_shards` above is read from it, "
+                f"which is why the count can look absurd. Delete and resubmit:")
             for sh in odd:
                 say(f"      rm -r {inv['base']}/shard={int(sh):02d}")
             todo.append(f"{tree}: shard(s) {odd} were computed differently")
+        if len(soft) > 1:
+            say(f"{head} NOTE -- not every shard carries the same arms and "
+                f"models. Either one was run by hand with fewer, or those "
+                f"cells were skipped; the per-model counts above say which:")
+            for k, v in sorted(soft.items(), key=lambda kv: -len(kv[1])):
+                say(f"      shard(s) {v if len(v) < 12 else f'{len(v)} of them'}"
+                    f": arms={list(k[0])}, models={list(k[1])}")
     if todo:
         say("\nNOT finished: " + "; ".join(todo))
         say(f"  Resubmitting is the same command -- a shard whose rows.parquet "

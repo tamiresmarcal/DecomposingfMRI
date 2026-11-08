@@ -543,6 +543,21 @@ class TestShardsThatDisagree:
         assert "n_boot=50" in msg and "n_boot=2000" in msg
         assert "n_shards=282" in msg
 
+    def test_arms_and_models_alone_are_reported_not_refused(self, tmp_path):
+        """A shard whose only state set lost an arm -- every column of it NaN
+        across the training cohort -- is legitimately short of one. Refusing
+        there would block a grid that is fine, so this half only warns."""
+        put(tmp_path, 0, 2)
+        d = fake_rows(3).assign(arm="occupancy")       # same n_boot/seed/n_shards
+        tt.write_transferred(d, tmp_path, train="camcan", test="hcp7t_fix",
+                             target_set="raw", tree="bstm", shard=1, n_shards=2,
+                             grid_hash="abc123", n_sets_total=9, n_boot=2000,
+                             seed=0, git_sha="x", written_at="t")
+        seen = []
+        out = tt.read_transferred(tmp_path, "raw", trees=("bstm",), log=seen.append)
+        assert len(out) == 6
+        assert any("do not all carry the same arms and models" in m for m in seen)
+
     def test_it_refuses_even_when_looking_at_a_run_in_progress(self, tmp_path):
         """Incomplete is a smaller analysis; contaminated is two analyses."""
         self.contaminate(tmp_path)
@@ -655,3 +670,68 @@ class TestStatus:
         transfer_grid.main(["--status", "--target", "raw",
                             "--out", str(world["out"])])
         assert not list(world["out"].rglob("rows.parquet"))
+
+
+class TestCoverageReport:
+    """"40/40 shards" answers whether the TASKS finished. It does not answer
+    whether every model scored in every atlas and every window -- a cell can be
+    skipped, or scored and come out NaN because the model predicted one value
+    for everyone. Both leave the shard count at 40/40."""
+
+    def rows_over(self, atlases, windows, models, n_sets_total=4, nan_for=None):
+        out = []
+        for a in atlases:
+            for w in windows:
+                for m in models:
+                    r = fake_rows(1, atlas=a, window_s=w, model=m,
+                                  states=f"HMM1_pca3_8")
+                    if m == nan_for:
+                        r["score"] = np.nan
+                    out.append(r)
+        d = pd.concat(out, ignore_index=True)
+        return d.assign(n_sets_total=n_sets_total)
+
+    def write(self, root, d):
+        return tt.write_transferred(
+            d, root, train="camcan", test="hcp7t_fix", target_set="raw",
+            tree="bstm", shard=0, n_shards=1, grid_hash="abc123",
+            n_boot=2000, seed=0, git_sha="x", written_at="t")
+
+    def report(self, root, capsys):
+        import transfer_grid
+        transfer_grid.main(["--status", "--target", "raw", "--out", str(root)])
+        return capsys.readouterr().out
+
+    def test_it_counts_the_state_sets_each_model_reached(self, tmp_path, capsys):
+        self.write(tmp_path, self.rows_over(["yeo7", "networks"], [-1.0, 30.0],
+                                            ["ridge", "hgb"]))
+        out = self.report(tmp_path, capsys)
+        assert "ridge: 4 set(s)" in out and "hgb: 4 set(s)" in out
+
+    def test_a_model_short_of_the_others_is_flagged(self, tmp_path, capsys):
+        d = pd.concat([
+            self.rows_over(["yeo7", "networks"], [-1.0, 30.0], ["ridge"]),
+            self.rows_over(["yeo7"], [-1.0], ["hgb"]),
+        ], ignore_index=True)
+        out = self.report(tmp_path, self.write(tmp_path, d) and capsys)
+        assert "fewer sets than the other models" in out
+
+    def test_rows_with_no_score_are_reported_per_model(self, tmp_path, capsys):
+        self.write(tmp_path, self.rows_over(["yeo7"], [-1.0, 30.0],
+                                            ["ridge", "hgb"], nan_for="hgb"))
+        out = self.report(tmp_path, capsys)
+        assert "with NO score (predicted a constant)" in out
+        assert "ridge: 2 set(s), 2 row(s)\n" in out or "ridge: 2 set(s), 2 row(s)" in out
+
+    def test_the_atlases_and_windows_are_broken_out(self, tmp_path, capsys):
+        self.write(tmp_path, self.rows_over(["yeo7", "networks"],
+                                            [-1.0, 30.0, 60.0], ["ridge"]))
+        out = self.report(tmp_path, capsys)
+        assert "atlas: networks=3, yeo7=3" in out
+        assert "-1.0=2" in out and "60.0=2" in out
+
+    def test_fewer_sets_than_the_grid_says_is_flagged(self, tmp_path, capsys):
+        self.write(tmp_path, self.rows_over(["yeo7"], [-1.0], ["ridge"],
+                                            n_sets_total=282))
+        out = self.report(tmp_path, capsys)
+        assert "1/282 state set(s)" in out and "SHORT" in out
