@@ -713,6 +713,28 @@ def _fc_cell(root, atlas, cohorts, task_value, pheno, covariates, categorical,
     return d, cols, subs
 
 
+def censor_policy_of(root, cohort: str) -> str | None:
+    """The censor policy a cohort's tables were built with, read from a footer.
+
+    So a refusal can print a command that RUNS, rather than one with a
+    placeholder in angle brackets. That is not cosmetic: pasted into bash,
+    `<the one decompose used>` is a redirection and a syntax error, and the
+    person then has to go and find the value anyway.
+    """
+    from pathlib import Path
+
+    from fmri_decomposition.status import _meta
+
+    for stem in ("transitions", "latents"):
+        for q in sorted((Path(root) / stem).rglob("*.parquet")):
+            if hive(q, "cohort") != cohort:
+                continue
+            v = _meta(q, "censor_policy")
+            if v:
+                return str(v)
+    return None
+
+
 def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                       train_tasks=None, test_tasks=None,
                       models=None, covariates=None, categorical=("Sex",),
@@ -775,6 +797,14 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
         covered = [a for a in atlases if set(cfg.cohorts) & present.get(a, set())]
         if not covered:
             have = sorted({c for v in present.values() for c in v})
+            # the policy its OWN tables carry, so the command below runs as
+            # printed rather than carrying a placeholder
+            pol = next((censor_policy_of(root, c) for c in cfg.cohorts
+                        if censor_policy_of(root, c)), None)
+            # a cohort whose name is a prefix of, or starts with, one of ours:
+            # hcp7t beside hcp7t_fix is the case this exists for
+            near = [c for c in have if c not in cfg.cohorts and any(
+                c.startswith(x) or x.startswith(c) for x in cfg.cohorts)]
             raise SystemExit(
                 f"the {side} cohort{'s' if len(cfg.cohorts) > 1 else ''} "
                 f"{list(cfg.cohorts)} have NO static-FC table for any atlas.\n"
@@ -787,12 +817,23 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                   f"trees (the header of slurm/static_fc.sbatch says why), and "
                   f"the same --censor-policy `decompose` was given:\n"
                   f"    sbatch slurm/static_fc.sbatch {' '.join(cfg.cohorts)} -- "
-                  f"--atlas {' '.join(sorted(present)) or '<atlas ...>'} "
-                  f"--censor-policy <the one decompose used>\n"
+                  f"--atlas {' '.join(sorted(present)) or 'ATLAS'} "
+                  f"--censor-policy "
+                  + (pol or "POLICY  # not recorded; the one decompose was given")
+                  + "\n"
                   f"  Keep the default --pool task: it writes one row per "
                   f"(task, sub), which is what pools MOVIE1-4 into one here. "
                   f"`--pool subject` would pool movie WITH rest."
-                  f"\n  Only cohorts {have} have one now.")
+                  f"\n  Only cohorts {have} have one now."
+                + (f"\n  NOTE: {near} is NOT a substitute for "
+                   f"{list(cfg.cohorts)}. A differently named cohort is a "
+                   f"different cohort here, and that is the whole reason the "
+                   f"label exists: two preprocessing depths under one name "
+                   f"would put a preprocessing difference inside something "
+                   f"the analysis treats as one thing. Its subjects and its "
+                   f"cleaning are not the ones the transitions were built "
+                   f"from, so an E1 panel mixing them would not be two "
+                   f"models on one sample." if near else ""))
     tr_tasks = train_tasks or {k: v for k, v in train.cfg.tasks.items()}
     te_tasks = test_tasks or {k: v for k, v in test.cfg.tasks.items()}
     rows = []

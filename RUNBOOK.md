@@ -1229,10 +1229,25 @@ differ in preprocessing as well as in model:
 find outputs/static_fc -name subjects.parquet \
   | sed 's#.*/atlas=\([^/]*\)/cohort=\([^/]*\)/.*#\1 \2#' | sort -u
 
+# the policy `decompose` was given for this cohort, from its own footer --
+# never a guess, and never a placeholder in angle brackets, which bash reads
+# as a redirection and refuses
+POLICY=$($RUN python3 -c "
+import sys; sys.path.insert(0, 'notebooks')
+from transfer_tables import censor_policy_of
+print(censor_policy_of('outputs', 'hcp7t_fix') or '')")
+echo "policy = ${POLICY:?not recorded -- pass the one decompose was given}"
+
 sbatch slurm/static_fc.sbatch hcp7t_fix -- \
-    --atlas harvardoxford yeo7 networks \
-    --censor-policy <the one `decompose` was given for this cohort>
+    --atlas harvardoxford yeo7 networks --censor-policy "$POLICY"
 ```
+
+**A cohort whose name merely looks like yours is not yours.** The tree can hold
+`hcp7t` (59 subjects, `_hp2000_clean_rclean_tclean`) while the transitions are
+`hcp7t_fix` (168, `_hp2000_clean`) — two preprocessing depths, which is exactly
+why `config/hcp7t_fix.yaml` makes them separate cohorts. An E1 panel mixing
+them would not be two models on one sample. `fcm_transfer_rows` says so by
+name when it sees a lookalike.
 
 Keep the default `--pool task`: it writes one row per `(task, sub)`, which is
 what lets `pool_fc` pool MOVIE1–4 into one. `--pool subject` would pool movie

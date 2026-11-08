@@ -852,3 +852,75 @@ class TestStaticFcPrecondition:
             n_boot=20, log=lambda *_: None)
         assert len(rows) and set(rows["tree"]) == {"fcm"}
         assert rows["n_test"].iloc[0] == 24          # the four runs pooled
+
+
+class TestTheNearMissCohort:
+    """`find outputs/static_fc` came back with `hcp7t`, not `hcp7t_fix`.
+
+    Those are deliberately different cohorts: 59 subjects at
+    `_hp2000_clean_rclean_tclean` against 168 at `_hp2000_clean`. config/
+    hcp7t_fix.yaml says why they are not one label -- two preprocessing depths
+    under one name would put a preprocessing difference inside something the
+    analysis treats as one thing. So the refusal has to say that the lookalike
+    is not a substitute, or it reads as a typo to be worked around.
+    """
+
+    def static_fc(self, root, atlas, cohort, task="Movie", subs=("S1",)):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        d = pd.DataFrame({"sub": list(subs), "task": task, "n_tr_used": 180,
+                          "frac_good_frames": .95, "r1__r2": .2, "r1__r3": .1,
+                          "r2__r3": .3})
+        write_table_atomic(
+            pa.Table.from_pandas(d, preserve_index=False),
+            root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
+            / f"task={task}" / "subjects.parquet")
+
+    def test_a_lookalike_cohort_is_called_out_as_not_a_substitute(self, tmp_path):
+        train, test = studies(tmp_path, TR, TE)
+        self.static_fc(train.cfg.root, "yeo7", "camcan",
+                       subs=[f"CC{i:04d}" for i in range(60)])
+        self.static_fc(train.cfg.root, "yeo7", "hcp7t")      # NOT hcp7t_fix
+        with pytest.raises(SystemExit) as e:
+            tt.fcm_transfer_rows(train, test, log=lambda *_: None)
+        msg = str(e.value)
+        assert "NOT a substitute" in msg and "hcp7t" in msg
+        assert "preprocessing difference" in msg
+
+    def test_an_unrelated_cohort_is_not_called_a_lookalike(self, tmp_path):
+        train, test = studies(tmp_path, TR, TE)
+        self.static_fc(train.cfg.root, "yeo7", "camcan",
+                       subs=[f"CC{i:04d}" for i in range(60)])
+        self.static_fc(train.cfg.root, "yeo7", "ds002837")
+        with pytest.raises(SystemExit) as e:
+            tt.fcm_transfer_rows(train, test, log=lambda *_: None)
+        assert "NOT a substitute" not in str(e.value)
+
+    def test_the_command_in_the_refusal_has_no_angle_brackets(self, tmp_path):
+        """Pasted into bash, `<the one decompose used>` is a redirection and a
+        syntax error -- which is exactly what it did."""
+        train, test = studies(tmp_path, TR, TE)
+        self.static_fc(train.cfg.root, "yeo7", "camcan",
+                       subs=[f"CC{i:04d}" for i in range(60)])
+        with pytest.raises(SystemExit) as e:
+            tt.fcm_transfer_rows(train, test, log=lambda *_: None)
+        line = next(l for l in str(e.value).splitlines() if "sbatch" in l)
+        assert "<" not in line and ">" not in line
+
+    def test_the_recorded_censor_policy_goes_into_the_command(self, tmp_path):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        train, test = studies(tmp_path, TR, TE)
+        self.static_fc(train.cfg.root, "yeo7", "camcan",
+                       subs=[f"CC{i:04d}" for i in range(60)])
+        # stamp a policy onto one of the test cohort's own transition tables
+        p = next(q for q in (train.cfg.root / "transitions").rglob("*.parquet")
+                 if tt.hive(q, "cohort") == "hcp7t_fix")
+        t = pa.parquet.read_table(p)
+        t = t.replace_schema_metadata({**(t.schema.metadata or {}),
+                                       b"censor_policy": b'"motion"'})
+        write_table_atomic(t, p)
+        assert tt.censor_policy_of(train.cfg.root, "hcp7t_fix") == "motion"
+        with pytest.raises(SystemExit) as e:
+            tt.fcm_transfer_rows(train, test, log=lambda *_: None)
+        assert "--censor-policy motion" in str(e.value)
