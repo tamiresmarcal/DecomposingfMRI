@@ -924,3 +924,123 @@ class TestTheNearMissCohort:
         with pytest.raises(SystemExit) as e:
             tt.fcm_transfer_rows(train, test, log=lambda *_: None)
         assert "--censor-policy motion" in str(e.value)
+
+
+class TestFramesMustMatch:
+    """slurm/static_fc.sbatch's header: "THIS MUST USE THE SAME FRAME SETTINGS
+    AS THE STATE TREES ... or the two trees differ in preprocessing as well as
+    in model". Nothing enforced it, and stage 3b for the test cohort was run by
+    hand, days after the state trees, with the policy typed in again.
+
+    E1 is two MODELS on one sample. If one tree's frames were censored and the
+    other's were not, the panel compares preprocessing and calls it a model --
+    and nothing in the figure could say so.
+    """
+
+    def static_fc(self, root, atlas, cohort, tasks, subs, policy="motion",
+                  band="[0.01, 0.1]", zscore=True, pool="task"):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        for t in tasks:
+            d = pd.DataFrame({
+                "sub": list(subs), "task": t, "n_tr_used": 180,
+                "frac_good_frames": .95,
+                "r1__r2": np.linspace(.1, .4, len(subs)),
+                "r1__r3": np.linspace(-.2, .2, len(subs)),
+                "r2__r3": np.linspace(0, .3, len(subs)),
+                "censor_policy": policy, "match_bandpass": band,
+                "zscore_runs": zscore, "pool": pool})
+            write_table_atomic(
+                pa.Table.from_pandas(d, preserve_index=False),
+                root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
+                / f"task={t}" / "subjects.parquet")
+
+    def stamp_state_policy(self, root, cohort, policy):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from fmri_decomposition.io import write_table_atomic
+        for q in (root / "transitions").rglob("*.parquet"):
+            if tt.hive(q, "cohort") != cohort:
+                continue
+            t = pq.read_table(q)
+            write_table_atomic(t.replace_schema_metadata(
+                {**(t.schema.metadata or {}),
+                 b"censor_policy": f'"{policy}"'.encode()}), q)
+
+    def world(self, tmp_path, **over):
+        train, test = studies(tmp_path, TR, TE)
+        self.static_fc(train.cfg.root, "yeo7", "camcan", ["Movie"],
+                       [f"CC{i:04d}" for i in range(60)])
+        self.static_fc(train.cfg.root, "yeo7", "hcp7t_fix",
+                       ["MOVIE1", "MOVIE2"], [f"H{i:04d}" for i in range(24)],
+                       **over)
+        return train, test
+
+    def run(self, train, test):
+        return tt.fcm_transfer_rows(
+            train, test, train_tasks={"movie": "Movie"},
+            test_tasks={"movie": "MOVIE"}, models=["ridge"],
+            covariates=["Age", "Sex", "frac_good_frames", "n_tr_used"],
+            n_boot=20, log=lambda *_: None)
+
+    def test_matching_frames_pass(self, tmp_path):
+        train, test = self.world(tmp_path)
+        assert len(self.run(train, test))
+
+    def test_a_different_censor_policy_between_cohorts_is_refused(self, tmp_path):
+        train, test = self.world(tmp_path, policy="none")
+        with pytest.raises(SystemExit) as e:
+            self.run(train, test)
+        msg = str(e.value)
+        assert "DIFFERENT frames" in msg
+        assert "censor_policy: train 'motion'  test 'none'" in msg
+
+    def test_a_different_bandpass_is_refused_too(self, tmp_path):
+        train, test = self.world(tmp_path, band="[0.009, 0.08]")
+        with pytest.raises(SystemExit) as e:
+            self.run(train, test)
+        assert "match_bandpass" in str(e.value)
+
+    def test_static_fc_disagreeing_with_the_state_trees_is_refused(self, tmp_path):
+        """Both sides agree with each other and neither agrees with the
+        transitions -- so bstm and fcm are on different frames."""
+        train, test = self.world(tmp_path)
+        self.stamp_state_policy(train.cfg.root, "hcp7t_fix", "strict")
+        with pytest.raises(SystemExit) as e:
+            self.run(train, test)
+        msg = str(e.value)
+        assert "differ in PREPROCESSING as well as in model" in msg
+        assert "--censor-policy strict" in msg
+
+    def test_agreeing_with_the_state_trees_passes(self, tmp_path):
+        train, test = self.world(tmp_path)
+        self.stamp_state_policy(train.cfg.root, "hcp7t_fix", "motion")
+        self.stamp_state_policy(train.cfg.root, "camcan", "motion")
+        assert len(self.run(train, test))
+
+    def test_a_side_whose_rows_disagree_is_refused(self):
+        """Tested at the function, not through the pipeline: for camcan the two
+        cohorts hold different TASKS, so a cell never loads both. The guard is
+        cheap and covers a cohort pair that does overlap -- but a test that
+        fabricated an unreachable path would be testing the fixture."""
+        d = pd.DataFrame({"censor_policy": ["motion", "none"],
+                          "match_bandpass": "[0.01, 0.1]",
+                          "zscore_runs": True, "pool": "task"})
+        with pytest.raises(SystemExit) as e:
+            tt.frame_recipe(d, "train ['camcan', 'camcan_rest'] atlas=yeo7")
+        msg = str(e.value)
+        assert "disagree on censor_policy" in msg
+        assert "different runs of stage" in msg and "camcan_rest" in msg
+
+    def test_a_consistent_table_reads_back_its_recipe(self):
+        d = pd.DataFrame({"censor_policy": ["motion"] * 3,
+                          "match_bandpass": "[0.01, 0.1]",
+                          "zscore_runs": True, "pool": "task"})
+        assert tt.frame_recipe(d, "x") == {
+            "censor_policy": "motion", "match_bandpass": "[0.01, 0.1]",
+            "zscore_runs": True, "pool": "task"}
+
+    def test_a_table_predating_the_provenance_columns_is_not_refused(self):
+        """An older static_fc table has none of these columns. Absent is not
+        disagreeing, and refusing there would block a tree that may be fine."""
+        assert tt.frame_recipe(pd.DataFrame({"sub": ["a"]}), "x") == {}

@@ -713,26 +713,66 @@ def _fc_cell(root, atlas, cohorts, task_value, pheno, covariates, categorical,
     return d, cols, subs
 
 
-def censor_policy_of(root, cohort: str) -> str | None:
-    """The censor policy a cohort's tables were built with, read from a footer.
+def censor_policies(root, cohorts) -> dict:
+    """{cohort: the censor policy its STATE tables were built with}, in one pass.
 
-    So a refusal can print a command that RUNS, rather than one with a
-    placeholder in angle brackets. That is not cosmetic: pasted into bash,
-    `<the one decompose used>` is a redirection and a syntax error, and the
-    person then has to go and find the value anyway.
+    One pass because `transitions/` holds a table per (atlas, window, states,
+    cohort, task) -- thousands of files over a 282-set grid -- and scanning it
+    once per cohort would read the same footers five times.
+
+    Used for two things: printing a command that RUNS (rather than one with a
+    placeholder in angle brackets, which bash reads as a redirection), and
+    checking that the static-FC tables were built from the same frames.
     """
     from pathlib import Path
 
     from fmri_decomposition.status import _meta
 
+    want, out = set(cohorts), {}
     for stem in ("transitions", "latents"):
-        for q in sorted((Path(root) / stem).rglob("*.parquet")):
-            if hive(q, "cohort") != cohort:
+        for q in (Path(root) / stem).rglob("*.parquet"):
+            c = hive(q, "cohort")
+            if c not in want or c in out:
                 continue
             v = _meta(q, "censor_policy")
-            if v:
-                return str(v)
-    return None
+            if v is not None:
+                out[c] = str(v)
+            if want <= set(out):
+                return out
+    return out
+
+
+def censor_policy_of(root, cohort: str) -> str | None:
+    """One cohort's state-table censor policy. See `censor_policies`."""
+    return censor_policies(root, [cohort]).get(cohort)
+
+
+# What static-fc records about the FRAMES it correlated. The two cohorts must
+# agree on all of it, and it must agree with what the state trees were built
+# from -- otherwise the bstm-vs-fcm comparison is a preprocessing comparison
+# wearing a model's name. slurm/static_fc.sbatch's header says exactly this,
+# and until now nothing enforced it.
+FRAME_RECIPE = ("censor_policy", "match_bandpass", "zscore_runs", "pool")
+
+
+def frame_recipe(d: "pd.DataFrame", where: str) -> dict:
+    """What one static-FC table says it was built from, or a refusal.
+
+    `static_fc.write_cohort` stores its provenance as COLUMNS, so this is a
+    read of the table already in memory -- no extra I/O.
+    """
+    out = {}
+    for c in FRAME_RECIPE:
+        if c not in d:
+            continue
+        vals = sorted({"" if pd.isna(v) else v for v in d[c]}, key=str)
+        if len(vals) > 1:
+            raise SystemExit(
+                f"{where}: the static-FC rows disagree on {c} ({vals}). Two "
+                f"cohorts of one side were built by different runs of stage "
+                f"3b; rebuild them together, or the side is not one sample.")
+        out[c] = vals[0] if vals else None
+    return out
 
 
 def fcm_transfer_rows(train: Study, test: Study, atlases=None,
@@ -834,6 +874,9 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                    f"cleaning are not the ones the transitions were built "
                    f"from, so an E1 panel mixing them would not be two "
                    f"models on one sample." if near else ""))
+    # read once: transitions/ holds thousands of files over a 282-set grid
+    state_pol = censor_policies(
+        root, list(train.cfg.cohorts) + list(test.cfg.cohorts))
     tr_tasks = train_tasks or {k: v for k, v in train.cfg.tasks.items()}
     te_tasks = test_tasks or {k: v for k, v in test.cfg.tasks.items()}
     rows = []
@@ -849,6 +892,41 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
             except SystemExit as e:
                 log(f"  skip fcm {atlas} {task}: {e}")
                 continue
+            # THE FRAMES, before the edges. The whole point of E1 is two
+            # MODELS on one sample; if the two tables were correlated over
+            # different frames -- a different censor policy, a different
+            # band -- the panel compares preprocessing and calls it a model.
+            rtr = frame_recipe(dtr, f"train {list(train.cfg.cohorts)} atlas={atlas}")
+            rte = frame_recipe(dte, f"test {list(test.cfg.cohorts)} atlas={atlas}")
+            differ = {k: (rtr.get(k), rte.get(k)) for k in FRAME_RECIPE
+                      if k in rtr and k in rte and rtr[k] != rte[k]}
+            if differ:
+                raise SystemExit(
+                    f"fcm {atlas} {task}: the two cohorts' static-FC tables "
+                    f"were built from DIFFERENT frames, so a difference "
+                    f"between them is not a difference between cohorts:\n"
+                    + "\n".join(f"    {k}: train {a!r}  test {b!r}"
+                                 for k, (a, b) in differ.items())
+                    + "\n  Re-run stage 3b for the side that is wrong with "
+                      "the other's settings. slurm/static_fc.sbatch's header "
+                      "says why they have to match.")
+            # ... and against the STATE trees, which is what makes bstm and
+            # fcm comparable at all.
+            for side, cfg, rec in (("train", train.cfg, rtr),
+                                   ("test", test.cfg, rte)):
+                want = {state_pol.get(c) for c in cfg.cohorts
+                        if state_pol.get(c) is not None}
+                got = rec.get("censor_policy") or None
+                if want and got not in want:
+                    raise SystemExit(
+                        f"fcm {atlas} {task}: the {side} cohort's static FC "
+                        f"was built with censor_policy={got!r} while its "
+                        f"transition tables carry {sorted(want)}. The two "
+                        f"trees would then differ in PREPROCESSING as well as "
+                        f"in model, and E1 could not tell the two apart.\n"
+                        f"  Re-run stage 3b with --censor-policy "
+                        f"{sorted(want)[0]}, or say in the write-up that the "
+                        f"fcm arm is on different frames.")
             edges = [c for c in ctr if c in set(cte)]
             if not edges:
                 raise SystemExit(
