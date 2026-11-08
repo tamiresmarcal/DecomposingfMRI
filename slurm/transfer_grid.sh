@@ -26,6 +26,12 @@ set -euo pipefail
 : "${TARGETS:=raw category}"
 : "${N_SHARDS:=40}"
 : "${TREES:=bstm fcm}"
+# Threads per fit. 1 by default, and --cpus-per-task follows it, because the
+# two disagreeing is what crashed the first array: unset thread caps inside the
+# container mean OpenBLAS reads the NODE's core count, not the cgroup's. See
+# the block at the top of transfer.sbatch.
+: "${THREADS:=1}"
+export THREADS
 
 EXTRA=(); seen=0
 for a in "$@"; do
@@ -59,11 +65,13 @@ for target in $TARGETS; do
   for tree in $TREES; do
     if [[ "$tree" == "fcm" ]]; then
       J=$(TREE=fcm sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable \
+          --cpus-per-task="$THREADS" \
           "$HERE/transfer.sbatch" "$target" 1 \
           ${EXTRA[@]+-- "${EXTRA[@]}"})
       echo "   ${target}/fcm   jobid ${J}  (one job: static FC has no state set)"
     else
       J=$(TREE=bstm sbatch ${ACCOUNT_ARG[@]+"${ACCOUNT_ARG[@]}"} --parsable \
+          --cpus-per-task="$THREADS" \
           --array=0-$((N_SHARDS - 1)) "$HERE/transfer.sbatch" "$target" "$N_SHARDS" \
           ${EXTRA[@]+-- "${EXTRA[@]}"})
       echo "   ${target}/bstm  jobid ${J}  (${N_SHARDS} shards)"

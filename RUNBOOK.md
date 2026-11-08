@@ -1215,6 +1215,24 @@ parallelism. Here each fit is on *every* training subject — 649 rows by up to
 and a shard that hits the walltime is one shard to resubmit. Threads go
 *inside* the fit; `OMP_NUM_THREADS` is left alone.
 
+**If a task dies, read the `.err` before resubmitting.** The script prints its
+resolved thread caps, the library versions, and one line per state set as it
+goes, so the log says where it got to; `faulthandler` turns a segfault into a
+python traceback. A task that is *stuck* rather than dead will dump its stack
+on demand:
+
+```bash
+scancel --signal=USR1 <jobid>_<task>        # then read slurm_logs/transfer_*.err
+grep -c . outputs/transferred_models/train=camcan/test=hcp7t_fix/targets=raw/tree=bstm/shard=*/rows.parquet 2>/dev/null | wc -l
+```
+
+`THREADS` is the knob, and it must not exceed `--cpus-per-task` — the script
+refuses if it does:
+
+```bash
+THREADS=4 sbatch --cpus-per-task=4 --array=0-39 slurm/transfer.sbatch raw 40
+```
+
 Then `notebooks/13_camcan_to_hcp.ipynb` reads it and draws. The reader
 **refuses a half-finished grid**: a smaller multiverse reads as a valid one,
 and "the best of 282 state sets" from the shards that happened to finish is a
@@ -1377,6 +1395,9 @@ Each of these cost real time at least once.
 | MeanShift returns K=1 | bandwidth too wide for this data | it now searches the quantile; `--min-k` refuses a degenerate result |
 | stage 6 ranks fewer state sets than exist | stage 5 was not re-run after stage 4 | `status` reports it as **behind** |
 | the grid spans two censor policies | one aperture built without `--censor-policy` | rebuild that aperture; the flag is required now |
+| every task of an array dies `Segmentation fault (core dumped)`, log holds only the script's own `echo` | thread caps left unset: inside the container OpenBLAS/libgomp read the NODE's core count, so a 4-cpu task on a 192-core node starts 192 threads | `export OMP/MKL/OPENBLAS/NUMBA_NUM_THREADS` **below** the `#SBATCH` block, and keep them ≤ `--cpus-per-task` |
+| a crashed job's log says nothing about how far it got | block-buffered stdout is lost when a process dies on a signal | `export PYTHONUNBUFFERED=1` and `python3 -u`; `tools/transfer_grid.py` also installs `faulthandler` |
+| `#SBATCH --cpus-per-task` etc. appear to be ignored | a command (an `export`, an assignment) sits above the `#SBATCH` block; SLURM stops reading directives at the first command | move it below `set -euo pipefail`; `tests/test_slurm_scripts.py` now checks every `.sbatch` |
 
 ---
 

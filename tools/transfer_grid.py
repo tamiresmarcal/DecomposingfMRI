@@ -40,12 +40,37 @@ a file behind that reads as "scored nothing is the answer".
 from __future__ import annotations
 
 import argparse
-import json
+import faulthandler
 import os
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+# A segfault in a C extension leaves nothing but "Segmentation fault" in the
+# shell's log -- which is exactly what the first real array produced, forty
+# times. faulthandler prints the PYTHON stack that was running when the signal
+# arrived, to stderr, so the next one says which line. SIGUSR1 does the same on
+# demand, for a task that is not dead but stuck:
+#
+#   scancel --signal=USR1 <jobid>_<task>     then read the .err
+# Guarded: faulthandler needs a stderr with a real file descriptor, and a test
+# runner that captures output does not supply one. A diagnostic that cannot
+# install itself must not take the run down with it.
+try:
+    faulthandler.enable()
+    for _sig in ("SIGUSR1", "SIGUSR2"):
+        if hasattr(signal, _sig):
+            faulthandler.register(getattr(signal, _sig), chain=True)
+except Exception as _e:                                   # pragma: no cover
+    print(f"NOTE: faulthandler not installed ({_e}); a segfault will leave no "
+          f"python traceback", flush=True)
+
+
+def say(*a):
+    """print that reaches the log even if the next line segfaults."""
+    print(*a, flush=True)
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(REPO / "notebooks"), str(REPO)]
@@ -108,9 +133,18 @@ def main(argv=None) -> int:
         a.target, models=a.models, root=a.outputs, camcan=a.camcan_pheno,
         hcp_pheno=a.hcp_pheno)
     root_out = root_out or (train_cfg.root / "transferred_models")
-    print(f"target={a.target} tree={a.tree} shard={a.shard}/{a.n_shards} "
-          f"threads={a.threads}")
-    print(f"train {len(train.pheno):,} subject(s) with phenotype, "
+    import numpy, sklearn
+    say(f"target={a.target} tree={a.tree} shard={a.shard}/{a.n_shards} "
+        f"threads={a.threads}")
+    # The thread caps, printed because an UNSET one does not mean "one thread":
+    # inside the container the runtimes read the NODE's core count, and 192
+    # OpenBLAS threads in a 4-cpu cgroup is how the first array segfaulted.
+    say("  env " + "  ".join(
+        f"{k}={os.environ.get(k, 'UNSET')}"
+        for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")))
+    say(f"  numpy {numpy.__version__}  pandas {pd.__version__}  "
+        f"sklearn {sklearn.__version__}")
+    say(f"train {len(train.pheno):,} subject(s) with phenotype, "
           f"test {len(test.pheno):,}")
 
     sets = tt.common_sets(train, test)
@@ -132,7 +166,7 @@ def main(argv=None) -> int:
     path = (tt.transfer_dir(root_out, "camcan", "hcp7t_fix", a.target, a.tree)
             / f"shard={a.shard:02d}" / "rows.parquet")
     if path.exists() and not a.overwrite:
-        print(f"exists, skipping (pass --overwrite to refit): {path}")
+        say(f"exists, skipping (pass --overwrite to refit): {path}")
         return 0
 
     if a.tree == "fcm":
@@ -140,11 +174,11 @@ def main(argv=None) -> int:
             raise SystemExit("--tree fcm is one job: it has no state set to "
                              "shard by. Submit it with --n-shards 1.")
         mine = sets
-        print(f"fcm: atlases from the static_fc tree, {len(sets)} bstm set(s) "
+        say(f"fcm: atlases from the static_fc tree, {len(sets)} bstm set(s) "
               f"ignored (static FC has no aperture and no state set)")
     else:
         mine = tt.shard_of(sets, a.shard, a.n_shards)
-        print(f"grid {len(sets)} set(s), hash {gh}; this shard has {len(mine)}: "
+        say(f"grid {len(sets)} set(s), hash {gh}; this shard has {len(mine)}: "
               + ", ".join(f"{r.states}/{r.atlas}/{r.window_s:g}"
                           for r in mine.head(4).itertuples())
               + (" ..." if len(mine) > 4 else ""))
@@ -157,7 +191,7 @@ def main(argv=None) -> int:
     if a.dry_run:
         n_arm = len(a.arms) if a.arms else 4
         n_mod = len(a.models or train_cfg.models or tt.DEFAULT_MODELS)
-        print(f"dry run: {len(mine)} set(s) x 2 task(s) x 2 target(s) x "
+        say(f"dry run: {len(mine)} set(s) x 2 task(s) x 2 target(s) x "
               f"{n_arm} arm(s) x {n_mod} model(s) = "
               f"{len(mine) * 4 * n_arm * n_mod:,} fit(s); would write {path}")
         return 0
@@ -168,16 +202,16 @@ def main(argv=None) -> int:
             test_tasks=dict(test_cfg.tasks),
             covariates=["Age", "Sex", "frac_good_frames", "n_tr_used"],
             models=a.models, max_missing=a.max_missing, seed=a.seed,
-            n_boot=a.n_boot, threads=a.threads)
+            n_boot=a.n_boot, threads=a.threads, log=say)
     else:
         rows = tt.transfer_rows(train, test, arms=a.arms, models=a.models,
                                 sets=mine, seed=a.seed, n_boot=a.n_boot,
-                                threads=a.threads)
+                                threads=a.threads, log=say)
     out = tt.write_transferred(rows, root_out, train="camcan", test="hcp7t_fix",
                                target_set=a.target, tree=a.tree, shard=a.shard,
                                n_shards=a.n_shards, **prov)
-    print(f"{len(rows):,} row(s) -> {out}")
-    print(f"done in {time.time() - t0:.0f}s")
+    say(f"{len(rows):,} row(s) -> {out}")
+    say(f"done in {time.time() - t0:.0f}s")
     return 0
 
 

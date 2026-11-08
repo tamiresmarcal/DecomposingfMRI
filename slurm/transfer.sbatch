@@ -22,10 +22,29 @@
 # nothing, and a shard that hits the walltime is one shard to resubmit instead
 # of the whole grid. Hence: array indices, and threads INSIDE the fit.
 #
-# THREADS, NOT JOBLIB. There is no joblib loop in the script, so the estimator
-# gets the task's whole allocation and OMP_NUM_THREADS is left alone -- the
-# opposite of model_selection.sbatch, where a threaded estimator inside a
-# joblib worker oversubscribes the node.
+# THREADS ARE CAPPED, AND THE CAP IS EXPORTED BEFORE PYTHON STARTS. The first
+# version of this script left OMP_NUM_THREADS alone, reasoning that with no
+# joblib loop the estimator may as well have the task's whole allocation. Every
+# task of the first real array then died with
+#
+#   Segmentation fault      (core dumped)   tools/transfer_grid.py
+#
+# and one hung. UNSET is not "use my 4 cpus": inside the container OpenBLAS and
+# libgomp read the NODE's core count, not the cgroup's, so a 4-cpu task on a
+# 192-core node starts 192 threads, and OpenBLAS allocating its per-thread
+# buffers under a cgroup that small is a known way to crash. Which is exactly
+# why every other stage 4-5 script here exports these to 1.
+#
+# So: THREADS, default 1, exported to all four runtimes AND passed to the
+# script, so nothing can read the node instead. To give the fits real threads,
+# raise both together -- they must agree:
+#
+#   THREADS=4 sbatch --cpus-per-task=4 --array=0-39 slurm/transfer.sbatch raw 40
+#
+# Block-buffered stdout is lost when a process is killed by a signal, which is
+# how the segfaulting tasks came to leave a log holding only this script's own
+# echo -- nothing about how far python had got. Hence PYTHONUNBUFFERED and
+# `python3 -u` below.
 #
 # COST. ~9,000 fits + ~2,250 baselines over 282 state sets, two tasks, two
 # targets, four arms and two models. Boosting dominates; ridge is milliseconds.
@@ -36,13 +55,24 @@
 
 #SBATCH --job-name=fmridecomp_transfer
 #SBATCH --account=rpp-aevans-ab
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=1
 #SBATCH --mem=16G
 #SBATCH --time=03:00:00
 #SBATCH --output=slurm_logs/transfer_%A_%a.out
 #SBATCH --error=slurm_logs/transfer_%A_%a.err
 
 set -euo pipefail
+
+# The thread cap, and why it is exported here rather than left to the runtimes:
+# see the block above. Below `set -euo pipefail`, because SLURM reads #SBATCH
+# directives only until the first command -- an assignment above them would
+# have silently thrown away every resource request in this file.
+: "${THREADS:=1}"
+export OMP_NUM_THREADS="${THREADS}"
+export MKL_NUM_THREADS="${THREADS}"
+export OPENBLAS_NUM_THREADS="${THREADS}"
+export NUMBA_NUM_THREADS="${THREADS}"
+export PYTHONUNBUFFERED=1
 
 TARGET="${1:?usage: sbatch --array=0-N slurm/transfer.sbatch <raw|category> <n_shards> [-- extra]}"
 N_SHARDS="${2:?how many shards the array has}"
@@ -61,7 +91,13 @@ done
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$HERE/env.sh" ]] && source "$HERE/env.sh"
 
-echo "host=$(hostname) target=${TARGET} tree=${TREE} shard=${SHARD}/${N_SHARDS} cpus=${SLURM_CPUS_PER_TASK:-1}"
+echo "host=$(hostname) target=${TARGET} tree=${TREE} shard=${SHARD}/${N_SHARDS} cpus=${SLURM_CPUS_PER_TASK:-1} threads=${THREADS}"
+if [[ "${THREADS}" -gt "${SLURM_CPUS_PER_TASK:-1}" ]]; then
+  echo "ERROR: THREADS=${THREADS} but this task has ${SLURM_CPUS_PER_TASK:-1} cpu(s)." >&2
+  echo "       More threads than cpus is what crashed the first array. Submit with" >&2
+  echo "       --cpus-per-task=${THREADS}, or leave THREADS unset." >&2
+  exit 1
+fi
 
 # Stages 4-5 need the stage45 image (containers/README.md); the reasoning and
 # the full set of guards are in slurm/model_selection.sbatch.
@@ -87,10 +123,10 @@ else
   RUN=(python3)
 fi
 
-"${RUN[@]}" tools/transfer_grid.py \
+"${RUN[@]}" -u tools/transfer_grid.py \
     --target "${TARGET}" --tree "${TREE}" \
     --shard "${SHARD}" --n-shards "${N_SHARDS}" \
-    --threads "${SLURM_CPUS_PER_TASK:-1}" \
+    --threads "${THREADS}" \
     ${EXTRA[@]+"${EXTRA[@]}"}
 
 echo "target=${TARGET} tree=${TREE} shard=${SHARD} done"

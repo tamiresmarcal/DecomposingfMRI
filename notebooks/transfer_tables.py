@@ -42,6 +42,7 @@ null, a null here adds nothing.
 from __future__ import annotations
 
 import re
+import time
 from collections import Counter
 
 import numpy as np
@@ -290,7 +291,8 @@ def transfer_rows(train: Study, test: Study, arms=None, models=None,
         f"try the chain before paying for all of it.")
 
     rows, skipped = [], Counter()
-    for s in sets.itertuples():
+    t0 = time.time()
+    for i, s in enumerate(sets.itertuples(), 1):
         space = {"atlas": s.atlas, "window_s": s.window_s, "states": s.states}
         for task in tasks:
             # ONE probe per (space, task). A missing transition table is a
@@ -360,6 +362,13 @@ def transfer_rows(train: Study, test: Study, arms=None, models=None,
                             "n_covariates": len(cov),
                             "n_features": Xtr.shape[1],
                             "pred_constant": bool(const), **imp})
+        # One line per state set, so a log says where a run got to. The first
+        # cluster array left nothing but the job script's own echo: stdout was
+        # block-buffered and the task was killed by a signal, so there was no
+        # way to tell an import crash from a crash 200 fits in.
+        log(f"  [{i}/{len(sets)}] {s.states} {s.atlas} "
+            f"{fmt_window(s.window_s)}s  {len(rows)} row(s), "
+            f"{time.time() - t0:.0f}s")
     for why, k in skipped.most_common():
         log(f"  skipped {k}x: {why}")
     if not rows:
