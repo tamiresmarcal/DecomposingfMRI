@@ -1044,3 +1044,61 @@ class TestFramesMustMatch:
         """An older static_fc table has none of these columns. Absent is not
         disagreeing, and refusing there would block a tree that may be fine."""
         assert tt.frame_recipe(pd.DataFrame({"sub": ["a"]}), "x") == {}
+
+
+class TestThePreflightChecksWhatIsSubmitted:
+    """Asked for `TREES=fcm`, the submitter dry-ran **bstm** -- and then, since
+    bstm's shard 0 was already written, took the "exists, skipping" path and
+    returned. So the pre-flight reported on a grid nobody was about to run,
+    and said nothing about the one that was. Twice silent."""
+
+    def test_a_dry_run_is_not_short_circuited_by_an_existing_shard(
+            self, world, capsys):
+        run(world, "--target", "raw", "--shard", "0", "--n-shards", "4",
+            "--arms", "cells", "--models", "ridge", "--n-boot", "20")
+        capsys.readouterr()
+        run(world, "--target", "raw", "--shard", "0", "--n-shards", "4",
+            "--dry-run")
+        out = capsys.readouterr().out
+        assert "dry run:" in out
+        assert "already there; the real run would skip it" in out
+
+    def test_no_write_is_not_short_circuited_either(self, world, capsys):
+        run(world, "--target", "raw", "--shard", "0", "--n-shards", "4",
+            "--arms", "cells", "--models", "ridge", "--n-boot", "20")
+        capsys.readouterr()
+        run(world, "--target", "raw", "--shard", "0", "--n-shards", "4",
+            "--arms", "cells", "--models", "ridge", "--n-boot", "20",
+            "--no-write")
+        assert "NOT written" in capsys.readouterr().out
+
+    def test_the_fcm_dry_run_counts_atlases_not_state_sets(self, world, capsys):
+        """`--tree fcm --dry-run` used to print the bstm arithmetic, which is
+        wrong by a factor of the whole state-set grid."""
+        run(world, "--target", "raw", "--tree", "fcm", "--n-shards", "1",
+            "--dry-run")
+        out = capsys.readouterr().out
+        assert "static FC on 0 atlas(es)" in out
+        assert "Stage 3b" in out and "static_fc.sbatch" in out
+
+    def test_it_names_what_the_static_fc_tree_does_hold(self, world, capsys):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        d = pd.DataFrame({"sub": ["CC0000"], "task": "Movie", "r1__r2": .1})
+        write_table_atomic(
+            pa.Table.from_pandas(d, preserve_index=False),
+            world["root"] / "static_fc" / "atlas=yeo7" / "cohort=camcan"
+            / "task=Movie" / "subjects.parquet")
+        run(world, "--target", "raw", "--tree", "fcm", "--n-shards", "1",
+            "--dry-run")
+        out = capsys.readouterr().out
+        assert "atlas=yeo7: ['camcan']" in out
+        assert "held by BOTH" in out
+
+    def test_the_submitter_preflights_each_tree_it_submits(self):
+        t = (Path(__file__).resolve().parent.parent / "slurm"
+             / "transfer_grid.sh").read_text()
+        i = t.index("pre-flight")
+        block = t[i:i + 500]
+        assert "for tree in $TREES" in block
+        assert '--tree "$tree"' in block

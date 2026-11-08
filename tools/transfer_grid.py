@@ -301,7 +301,11 @@ def main(argv=None) -> int:
                 written_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
     path = (tt.transfer_dir(root_out, "camcan", "hcp7t_fix", a.target, a.tree)
             / f"shard={a.shard:02d}" / "rows.parquet")
-    if path.exists() and not a.overwrite:
+    # NOT before --dry-run. A pre-flight on a tree whose shard 0 is already
+    # written took this path and returned, so it printed "exists, skipping"
+    # and said nothing at all about the grid it was asked to check -- the one
+    # job of a pre-flight, skipped silently.
+    if path.exists() and not a.overwrite and not (a.dry_run or a.no_write):
         say(f"exists, skipping (pass --overwrite to refit): {path}")
         return 0
 
@@ -327,9 +331,32 @@ def main(argv=None) -> int:
     if a.dry_run:
         n_arm = len(a.arms) if a.arms else 4
         n_mod = len(a.models or train_cfg.models or tt.DEFAULT_MODELS)
-        say(f"dry run: {len(mine)} set(s) x 2 task(s) x 2 target(s) x "
-              f"{n_arm} arm(s) x {n_mod} model(s) = "
-              f"{len(mine) * 4 * n_arm * n_mod:,} fit(s); would write {path}")
+        if a.tree == "fcm":
+            # the fcm grid is atlases x tasks x targets x 2 arms x models, and
+            # the atlases are the ones BOTH cohorts have a static_fc table for
+            pres = {}
+            for q in (train_cfg.root / "static_fc").rglob("subjects.parquet"):
+                pres.setdefault(tt.hive(q, "atlas"), set()).add(tt.hive(q, "cohort"))
+            both = sorted(a_ for a_, v in pres.items()
+                          if v & set(train_cfg.cohorts) and v & set(test_cfg.cohorts))
+            say(f"dry run: static FC on {len(both)} atlas(es) both cohorts have"
+                f" {both} x 2 task(s) x 2 target(s) x 2 arm(s) x {n_mod} "
+                f"model(s) = {len(both) * 2 * 2 * 2 * n_mod:,} fit(s)")
+            if not both:
+                say(f"  NONE: the static_fc tree has "
+                    + ("; ".join(f"atlas={k}: {sorted(v)}"
+                                 for k, v in sorted(pres.items())) or "nothing")
+                    + f", and this needs an atlas held by BOTH "
+                      f"{list(train_cfg.cohorts)} and {list(test_cfg.cohorts)}. "
+                      f"Stage 3b -- slurm/static_fc.sbatch -- has not run for "
+                      f"one of them.")
+        else:
+            say(f"dry run: {len(mine)} set(s) x 2 task(s) x 2 target(s) x "
+                f"{n_arm} arm(s) x {n_mod} model(s) = "
+                f"{len(mine) * 4 * n_arm * n_mod:,} fit(s)")
+        say(f"  would write {path}"
+            + ("   (already there; the real run would skip it)"
+               if path.exists() and not a.overwrite else ""))
         return 0
 
     if a.tree == "fcm":

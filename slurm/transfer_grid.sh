@@ -55,10 +55,19 @@ elif [[ -x "${FMRIDECOMP_VENV:-$HOME/venvs/fmridecomp}/bin/python" ]]; then
   RUN=("${FMRIDECOMP_VENV:-$HOME/venvs/fmridecomp}/bin/python")
 fi
 
+# The pre-flight checks the TREES being submitted, not whichever one is the
+# script's default. Asked for TREES=fcm, it used to dry-run bstm -- so it
+# reported on a grid nobody was about to run, and said nothing about the one
+# that was.
 for target in $TARGETS; do
-  echo "== pre-flight: ${target}"
-  "${RUN[@]}" tools/transfer_grid.py --target "$target" --dry-run \
-      --n-shards "$N_SHARDS" ${EXTRA[@]+"${EXTRA[@]}"}
+  for tree in $TREES; do
+    echo "== pre-flight: ${target} / ${tree}"
+    shards="$N_SHARDS"
+    [[ "$tree" == "fcm" ]] && shards=1
+    TREE="$tree" "${RUN[@]}" tools/transfer_grid.py --target "$target" \
+        --tree "$tree" --dry-run --n-shards "$shards" \
+        ${EXTRA[@]+"${EXTRA[@]}"}
+  done
 done
 
 for target in $TARGETS; do
