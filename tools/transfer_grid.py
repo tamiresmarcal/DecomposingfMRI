@@ -122,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--dry-run", action="store_true",
                     help="resolve the grid, print what this shard would do, fit "
                          "nothing")
+    ap.add_argument("--no-write", action="store_true",
+                    help="fit and score, report, write NOTHING. This is how to "
+                         "try the chain on real data: a trial run with --shard "
+                         "and --n-shards writes a real shard file into the real "
+                         "tree, where it reads as part of the array.")
     ap.add_argument("--status", action="store_true",
                     help="read-only: which shards are on disk and which are "
                          "missing, for both trees. The question an array leaves "
@@ -131,38 +136,64 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def status(a, root_out) -> int:
-    """What is on disk, per tree, without importing a Study or fitting anything.
+    """What is on disk, per tree: shards, gaps, and whether they AGREE.
 
     An array that has left the queue has either finished or been killed, and
-    squeue cannot tell you which afterwards. `sacct` can, per task; this says
-    it in terms of the thing that matters -- the shards whose rows exist.
+    squeue cannot tell you which afterwards. This says it in terms of the thing
+    that matters -- the shards whose rows exist, and whether they were all
+    computed the same way.
     """
-    import pandas as pd
     import transfer_tables as tt
 
     root = root_out or Path(os.environ.get(
         "FMRIDECOMP_OUTPUTS",
         "/project/6008063/tamires/DecomposingfMRI/outputs")) / "transferred_models"
     say(f"{root}")
-    missing = 0
+    todo = []
     for tree in ("bstm", "fcm"):
-        base = tt.transfer_dir(root, "camcan", "hcp7t_fix", a.target, tree)
-        files = sorted(base.glob("shard=*/rows.parquet"))
-        if not files:
-            say(f"  targets={a.target} tree={tree}: NOTHING under {base}")
-            missing += 1
+        inv = tt.inventory(root, a.target, "camcan", "hcp7t_fix", tree)
+        head = f"  targets={a.target} tree={tree}:"
+        for f in inv["empty"]:
+            say(f"{head} EMPTY FILE {f} -- nothing was scored; read that job's "
+                f"log for the skip reasons, delete it and resubmit")
+            todo.append(f"{tree}: an empty shard file to delete")
+        if inv["rows"] is None:
+            if not inv["empty"]:
+                say(f"{head} NOTHING under {inv['base']}")
+                todo.append(f"{tree}: nothing on disk")
             continue
-        have = sorted(int(p.parent.name.split("=")[1]) for p in files)
-        d = pd.read_parquet(files[0], columns=["n_shards", "grid_hash"])
-        n = int(d["n_shards"].iloc[0])
-        gaps = [i for i in range(n) if i not in set(have)]
-        say(f"  targets={a.target} tree={tree}: {len(have)}/{n} shard(s), grid "
-            f"{d['grid_hash'].iloc[0]}" + (f"  MISSING {gaps}" if gaps else "  COMPLETE"))
-        missing += len(gaps)
-    if missing:
-        say(f"\n{missing} shard(s)/tree(s) to go. Resubmitting is the same "
-            f"command -- a shard whose rows.parquet exists is skipped:")
-        say(f"  ./slurm/transfer_grid.sh    # TARGETS={a.target} to do just this one")
+        n, have, gaps = inv["n_shards"], inv["have"], inv["gaps"]
+        say(f"{head} {len(have)}/{n} shard(s), {len(inv['rows']):,} row(s), "
+            f"{inv['rows']['states'].nunique()} state set(s)"
+            + (f"  MISSING {gaps}" if gaps else "  COMPLETE"))
+        if gaps:
+            todo.append(f"{tree}: shard(s) {gaps}")
+        # The check the grid hash cannot make: same grid, different analysis.
+        groups = {}
+        for sh, r in inv["recipes"].items():
+            groups.setdefault(r, []).append(sh)
+        if len(groups) > 1:
+            say(f"{head} the shards DISAGREE on how they were computed -- "
+                f"concatenating them would concatenate two analyses:")
+            for k, v in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+                say(f"      shard(s) {v if len(v) < 12 else f'{len(v)} of them'}"
+                    f": n_shards={k[0]}, n_boot={k[1]}, seed={k[2]}, "
+                    f"arms={list(k[3])}, models={list(k[4])}")
+            odd = min(groups.items(), key=lambda kv: len(kv[1]))[1]
+            say(f"    the odd one out is shard(s) {odd}. A shard tried by hand "
+                f"with fewer arms, models or bootstrap draws is the usual "
+                f"cause, and `n_shards` above is read from it, which is why "
+                f"the count can look absurd. Delete and resubmit it:")
+            for sh in odd:
+                say(f"      rm -r {inv['base']}/shard={int(sh):02d}")
+            todo.append(f"{tree}: shard(s) {odd} were computed differently")
+    if todo:
+        say("\nNOT finished: " + "; ".join(todo))
+        say(f"  Resubmitting is the same command -- a shard whose rows.parquet "
+            f"exists is skipped, so only the gaps run:")
+        say(f"  TARGETS={a.target} ./slurm/transfer_grid.sh")
+    else:
+        say(f"\ntargets={a.target}: finished. Read it in notebook 13 section 2.")
     return 0
 
 
@@ -265,6 +296,12 @@ def main(argv=None) -> int:
         rows = tt.transfer_rows(train, test, arms=a.arms, models=a.models,
                                 sets=mine, seed=a.seed, n_boot=a.n_boot,
                                 threads=a.threads, log=say)
+    if a.no_write:
+        say(f"{len(rows):,} row(s) scored, NOT written (--no-write). "
+            f"{rows['over_base'].mean():.0%} above their transferred baseline; "
+            f"best {rows['score'].max():+.3f}")
+        say(f"done in {time.time() - t0:.0f}s")
+        return 0
     out = tt.write_transferred(rows, root_out, train="camcan", test="hcp7t_fix",
                                target_set=a.target, tree=a.tree, shard=a.shard,
                                n_shards=a.n_shards, **prov)

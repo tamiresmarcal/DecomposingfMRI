@@ -924,6 +924,16 @@ def write_transferred(rows: "pd.DataFrame", root, *, train: str, test: str,
     import pyarrow as pa
     from fmri_decomposition.io import write_table_atomic
 
+    if not len(rows):
+        raise SystemExit(
+            f"refusing to write an EMPTY {tree} shard. A file with no rows "
+            f"reads as a finished shard downstream -- the status report counts "
+            f"it as present and `.iloc[0]` on its provenance raises an "
+            f"IndexError seven frames away, which is exactly what it did.\n"
+            f"  Nothing was scored, so read why: the skip lines above name "
+            f"every (atlas, task) that was dropped and the reason. For fcm "
+            f"that is usually no static_fc table for one of the two cohorts.")
+
     d = rows.copy()
     for k, v in {"train_cohorts": train, "test_cohorts": test,
                  "target_set": target_set, "tree": tree, "shard": int(shard),
@@ -932,6 +942,54 @@ def write_transferred(rows: "pd.DataFrame", root, *, train: str, test: str,
     path = (transfer_dir(root, train, test, target_set, tree)
             / f"shard={int(shard):02d}" / "rows.parquet")
     return write_table_atomic(pa.Table.from_pandas(d, preserve_index=False), path)
+
+
+# What a shard was computed WITH. Two shards of one analysis must agree on all
+# of it; if they do not, concatenating them is concatenating two analyses.
+# `grid_hash` is NOT here: it has its own check, because it means something
+# different. A changed grid renumbers the sets, so the shards overlap and leave
+# gaps and the whole tree has to go; shards that merely disagree on n_boot or
+# arms are one odd shard to delete.
+RECIPE = ["n_shards", "n_boot", "seed"]
+
+
+def recipes(d: "pd.DataFrame") -> dict:
+    """{shard: (n_shards, n_boot, seed, grid_hash, arms, models)} per shard."""
+    out = {}
+    for sh, h in d.groupby("shard", sort=True):
+        out[int(sh)] = tuple(
+            [h[c].iloc[0] for c in RECIPE if c in h]
+            + [tuple(sorted(h["arm"].unique())), tuple(sorted(h["model"].unique()))])
+    return out
+
+
+def inventory(root, target_set: str, train: str, test: str, tree: str) -> dict:
+    """What is on disk for one tree: files, shards, gaps, recipes, rows.
+
+    Shared by `read_transferred` and the status report so the two cannot
+    disagree about whether a grid is finished.
+    """
+    base = transfer_dir(root, train, test, target_set, tree)
+    files = sorted(base.glob("shard=*/rows.parquet"))
+    out = dict(base=base, files=files, rows=None, n_shards=None, have=[],
+               gaps=[], recipes={}, empty=[])
+    if not files:
+        return out
+    frames, empty = [], []
+    for f in files:
+        h = pd.read_parquet(f)
+        (empty if not len(h) else frames).append(f if not len(h) else h)
+    out["empty"] = empty
+    if not frames:
+        return out
+    d = pd.concat(frames, ignore_index=True)
+    out["rows"] = d
+    out["recipes"] = recipes(d) if "shard" in d else {}
+    out["have"] = sorted(out["recipes"]) or list(range(len(frames)))
+    out["n_shards"] = (max(int(v[0]) for v in out["recipes"].values())
+                       if out["recipes"] and "n_shards" in d else len(frames))
+    out["gaps"] = [i for i in range(out["n_shards"]) if i not in set(out["have"])]
+    return out
 
 
 def read_transferred(root, target_set: str, train: str = "camcan",
@@ -952,22 +1010,45 @@ def read_transferred(root, target_set: str, train: str = "camcan",
 
     frames, missing = [], []
     for tree in trees:
-        base = transfer_dir(root, train, test, target_set, tree)
-        files = sorted(base.glob("shard=*/rows.parquet"))
-        if not files:
-            missing.append(f"tree={tree}: nothing under {base}")
+        inv = inventory(root, target_set, train, test, tree)
+        if inv["empty"]:
+            raise SystemExit(
+                f"tree={tree}: {len(inv['empty'])} shard file(s) hold NO rows: "
+                + ", ".join(str(p) for p in inv["empty"][:4])
+                + f"\n  Nothing was scored there, and an empty file reads as a "
+                  f"finished shard. Read that job's log for the skip reasons, "
+                  f"delete the file(s) and resubmit.")
+        if inv["rows"] is None:
+            missing.append(f"tree={tree}: nothing under {inv['base']}")
             continue
-        d = pd.concat(map(pd.read_parquet, files), ignore_index=True)
+        d, rec = inv["rows"], inv["recipes"]
         hashes = sorted(set(d["grid_hash"])) if "grid_hash" in d else []
         if len(hashes) > 1:
             raise SystemExit(
                 f"tree={tree}: the shards were cut from {len(hashes)} different "
-                f"grids ({hashes}). The state sets on disk changed while the "
-                f"array was running, so the shards overlap and leave gaps. "
-                f"Delete {base} and resubmit.")
-        n = int(d["n_shards"].iloc[0]) if "n_shards" in d else len(files)
-        have = sorted(set(d["shard"])) if "shard" in d else list(range(len(files)))
-        gaps = [i for i in range(n) if i not in set(have)]
+                f"grids ({hashes}). A shard is sets[i::n] of a sorted list, so "
+                f"the state sets on disk changing mid-array renumbers them: "
+                f"these shards overlap AND leave gaps, and no subset of them is "
+                f"a grid. Delete {inv['base']} and resubmit the whole tree.")
+        # DO THE SHARDS AGREE ON WHAT THEY ARE? A hand-run shard -- one tried
+        # interactively with --arms cells --models ridge --n-boot 50, say --
+        # lands in the same tree as the array's and reads as part of it. The
+        # grid hash cannot see it: the GRID was the same, the ANALYSIS was not.
+        if len(set(rec.values())) > 1:
+            groups = {}
+            for sh, r in rec.items():
+                groups.setdefault(r, []).append(sh)
+            lines = [f"    shard(s) {v}: n_shards={k[0]}, n_boot={k[1]}, "
+                     f"seed={k[2]}, arms={list(k[3])}, models={list(k[4])}"
+                     for k, v in groups.items()]
+            raise SystemExit(
+                f"tree={tree}: the shards on disk were NOT computed the same "
+                f"way, so concatenating them would concatenate two analyses:\n"
+                + "\n".join(lines)
+                + f"\n  Delete the odd one out of {inv['base']} and resubmit "
+                  f"that shard. A shard tried by hand with fewer arms, fewer "
+                  f"models or fewer bootstrap draws is the usual cause.")
+        n, have, gaps = inv["n_shards"], inv["have"], inv["gaps"]
         log(f"  tree={tree}: {len(d):,} row(s) from {len(have)}/{n} shard(s)"
             + (f"  MISSING {gaps}" if gaps else ""))
         if gaps:

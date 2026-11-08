@@ -512,6 +512,115 @@ class TestThreads:
         assert "CLAMPED" in ap.format_help()
 
 
+class TestShardsThatDisagree:
+    """The contamination the grid hash cannot see.
+
+    A shard tried by hand -- `--shard 0 --n-shards 282 --arms cells --models
+    ridge --n-boot 50`, to check the chain works on real data -- writes a real
+    shard file into the real tree, and it reads as part of the array. The GRID
+    was the same, so grid_hash matches; the ANALYSIS was not. It also makes the
+    status count absurd, because `n_shards` is read from it.
+    """
+
+    def contaminate(self, root):
+        for i in range(1, 4):                       # the array's own shards
+            put(root, i, 4)
+        # and the one tried by hand: a different n_shards, one arm, one model,
+        # fewer draws
+        tt.write_transferred(
+            fake_rows(1, arm="cells", model="ridge"), root, train="camcan",
+            test="hcp7t_fix", target_set="raw", tree="bstm", shard=0,
+            n_shards=282, grid_hash="abc123", n_sets_total=9, n_boot=50,
+            seed=0, git_sha="deadbee", written_at="2026-01-01T00:00:00")
+
+    def test_the_reader_refuses_and_names_the_difference(self, tmp_path):
+        self.contaminate(tmp_path)
+        with pytest.raises(SystemExit) as e:
+            tt.read_transferred(tmp_path, "raw", trees=("bstm",),
+                                log=lambda *_: None)
+        msg = str(e.value)
+        assert "NOT computed the same way" in msg
+        assert "n_boot=50" in msg and "n_boot=2000" in msg
+        assert "n_shards=282" in msg
+
+    def test_it_refuses_even_when_looking_at_a_run_in_progress(self, tmp_path):
+        """Incomplete is a smaller analysis; contaminated is two analyses."""
+        self.contaminate(tmp_path)
+        with pytest.raises(SystemExit):
+            tt.read_transferred(tmp_path, "raw", trees=("bstm",),
+                                require_complete=False, log=lambda *_: None)
+
+    def test_shards_computed_the_same_way_pass(self, tmp_path):
+        for i in range(4):
+            put(tmp_path, i, 4)
+        d = tt.read_transferred(tmp_path, "raw", trees=("bstm",),
+                                log=lambda *_: None)
+        assert len(d) == 12
+
+    def test_the_status_report_points_at_the_odd_shard(self, tmp_path, capsys):
+        self.contaminate(tmp_path)
+        import transfer_grid
+        transfer_grid.main(["--status", "--target", "raw", "--out", str(tmp_path)])
+        out = capsys.readouterr().out
+        assert "DISAGREE" in out and "the odd one out is shard(s) [0]" in out
+        assert "rm -r" in out and "shard=00" in out
+        assert "why the count can look absurd" in out
+
+
+class TestEmptyShardFiles:
+    """`IndexError: single positional indexer is out-of-bounds`, from
+    `.iloc[0]` on a shard file with no rows. The fcm job wrote one: every
+    (atlas, task) was skipped, `fcm_transfer_rows` returned an empty frame and
+    `write_transferred` saved it. A file with no rows reads as a finished
+    shard."""
+
+    def test_writing_an_empty_frame_is_refused(self, tmp_path):
+        with pytest.raises(SystemExit) as e:
+            tt.write_transferred(fake_rows(0), tmp_path, train="camcan",
+                                 test="hcp7t_fix", target_set="raw", tree="fcm",
+                                 shard=0, n_shards=1, grid_hash="x")
+        msg = str(e.value)
+        assert "EMPTY" in msg and "skip lines" in msg
+
+    def test_the_reader_names_an_empty_file_already_on_disk(self, tmp_path):
+        """One is already there, written before the refusal existed."""
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        d = fake_rows(0).assign(shard=0, n_shards=1, grid_hash="x", n_boot=2000,
+                                seed=0)
+        write_table_atomic(
+            pa.Table.from_pandas(d, preserve_index=False),
+            tt.transfer_dir(tmp_path, "camcan", "hcp7t_fix", "raw", "fcm")
+            / "shard=00" / "rows.parquet")
+        with pytest.raises(SystemExit) as e:
+            tt.read_transferred(tmp_path, "raw", trees=("fcm",),
+                                log=lambda *_: None)
+        assert "hold NO rows" in str(e.value)
+
+    def test_the_status_report_does_not_crash_on_one(self, tmp_path, capsys):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        d = fake_rows(0).assign(shard=0, n_shards=1, grid_hash="x", n_boot=2000,
+                                seed=0)
+        write_table_atomic(
+            pa.Table.from_pandas(d, preserve_index=False),
+            tt.transfer_dir(tmp_path, "camcan", "hcp7t_fix", "raw", "fcm")
+            / "shard=00" / "rows.parquet")
+        import transfer_grid
+        assert transfer_grid.main(["--status", "--target", "raw",
+                                   "--out", str(tmp_path)]) == 0
+        assert "EMPTY FILE" in capsys.readouterr().out
+
+
+class TestNoWrite:
+    def test_it_scores_and_writes_nothing(self, world, capsys):
+        assert run(world, "--target", "raw", "--shard", "0", "--n-shards", "4",
+                   "--arms", "cells", "--models", "ridge", "--n-boot", "20",
+                   "--no-write") == 0
+        assert "NOT written" in capsys.readouterr().out
+        assert not list(world["out"].rglob("rows.parquet"))
+
+
 class TestStatus:
     """"Did they finish, or were they killed?" -- the question an array leaves
     behind, which squeue cannot answer once the tasks are gone."""
