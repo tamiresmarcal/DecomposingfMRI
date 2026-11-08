@@ -1242,6 +1242,15 @@ sbatch slurm/static_fc.sbatch hcp7t_fix -- \
     --atlas harvardoxford yeo7 networks --censor-policy "$POLICY"
 ```
 
+**Every cohort of every side needs a table, not just one of them.**
+`_fc_cell` reads one table per cohort and concatenates them *before* filtering
+by task, so one absent cohort skips every cell of that side — the movie cells
+too, even though `camcan` alone could have served them. A run that had
+`camcan` and `hcp7t_fix` but not `camcan_rest` scored nothing at all. The
+`--status` report lists the missing cohort per atlas per side, and
+`fcm_transfer_rows` refuses up front rather than skipping six cells into an
+empty frame.
+
 **A cohort whose name merely looks like yours is not yours.** The tree can hold
 `hcp7t` (59 subjects, `_hp2000_clean_rclean_tclean`) while the transitions are
 `hcp7t_fix` (168, `_hp2000_clean`) — two preprocessing depths, which is exactly

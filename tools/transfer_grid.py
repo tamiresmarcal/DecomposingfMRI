@@ -279,15 +279,24 @@ def status(a, root_out) -> int:
                 + ("no provenance columns (predates them)" if r is None else
                    ", ".join(f"{k}={v!r}" for k, v in r.items())))
         for at in sorted({x for x, _ in recs}):
+            # EVERY cohort of a side. `_fc_cell` reads one table per cohort
+            # and concatenates before filtering by task, so one absent cohort
+            # skips every cell of that side -- which is exactly how a job
+            # dropped all six (atlas, task) cells over a missing camcan_rest
+            # while camcan's own table sat right there.
+            missing = {s_: [c for c in co if (at, c) not in recs]
+                       for s_, co in (("train", tr_co), ("test", te_co))}
+            if any(missing.values()):
+                for s_, co in missing.items():
+                    if co:
+                        say(f"      atlas={at}: the {s_} side is MISSING {co}"
+                            f" -- every cell of that side skips, movie as well "
+                            f"as rest")
+                        todo.append(f"static FC atlas={at}: {s_} side missing {co}")
+                continue
             # lists, not sets: a recipe is a dict and a dict is unhashable
             tr = [recs[(at, c)] for c in tr_co if (at, c) in recs]
             te = [recs[(at, c)] for c in te_co if (at, c) in recs]
-            if not tr or not te:
-                side = "train" if not tr else "test"
-                say(f"      atlas={at}: no table for the {side} cohort(s) "
-                    f"{tr_co if not tr else te_co} -- fcm cannot use this atlas")
-                todo.append(f"static FC atlas={at}: no table for the {side} side")
-                continue
             # NOT `a, b`: `a` is this function's argparse namespace, and
             # rebinding it here made `a.target` twenty lines below raise
             # AttributeError on a dict. One-letter names do not get to shadow

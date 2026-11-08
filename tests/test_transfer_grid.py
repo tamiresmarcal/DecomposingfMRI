@@ -1131,8 +1131,14 @@ class TestStatusReportsTheFcmInputs:
                             "--outputs", str(world["root"])])
         return capsys.readouterr().out
 
+    def whole_train_side(self, root, atlas="yeo7", **kw):
+        """transfer_config.TRAIN_COHORTS is camcan AND camcan_rest, and
+        `_fc_cell` needs a table for both."""
+        self.static_fc(root, atlas, "camcan", task="Movie", **kw)
+        self.static_fc(root, atlas, "camcan_rest", task="Rest", **kw)
+
     def test_it_prints_each_tables_frame_recipe(self, world, capsys):
-        self.static_fc(world["root"], "yeo7", "camcan")
+        self.whole_train_side(world["root"])
         self.static_fc(world["root"], "yeo7", "hcp7t_fix", task="MOVIE1")
         out = self.report(world, capsys)
         assert "static FC inputs" in out
@@ -1141,7 +1147,7 @@ class TestStatusReportsTheFcmInputs:
 
     def test_a_disagreement_is_named_before_anything_is_submitted(
             self, world, capsys):
-        self.static_fc(world["root"], "yeo7", "camcan", policy="motion")
+        self.whole_train_side(world["root"], policy="motion")
         self.static_fc(world["root"], "yeo7", "hcp7t_fix", task="MOVIE1",
                        policy="none")
         out = self.report(world, capsys)
@@ -1150,9 +1156,19 @@ class TestStatusReportsTheFcmInputs:
         assert "the two sides disagree" in out        # and in the NOT finished line
 
     def test_an_atlas_only_one_side_has_is_called_out(self, world, capsys):
-        self.static_fc(world["root"], "yeo7", "camcan")
+        self.whole_train_side(world["root"])
         out = self.report(world, capsys)
-        assert "no table for the test cohort(s) ['hcp7t_fix']" in out
+        assert "the test side is MISSING ['hcp7t_fix']" in out
+
+    def test_a_side_missing_ONE_of_its_cohorts_is_called_out(self, world, capsys):
+        """The real failure: camcan had a table, camcan_rest did not, and
+        `_fc_cell` concatenates before filtering by task -- so all six
+        (atlas, task) cells skipped, the movie ones included."""
+        self.static_fc(world["root"], "yeo7", "camcan", task="Movie")
+        self.static_fc(world["root"], "yeo7", "hcp7t_fix", task="MOVIE1")
+        out = self.report(world, capsys)
+        assert "the train side is MISSING ['camcan_rest']" in out
+        assert "movie as well as rest" in out
 
     def test_an_empty_static_fc_tree_says_stage_3b_has_not_run(
             self, world, capsys):
@@ -1166,3 +1182,91 @@ class TestStatusReportsTheFcmInputs:
         out = self.report(world, capsys)
         assert "no provenance columns (predates them)" in out
         assert "DISAGREE" not in out            # absent is not disagreeing
+
+
+class TestAPartialSide:
+    """One absent cohort skipped SIX cells, the movie ones included.
+
+    `_fc_cell` reads one table per cohort of a side and concatenates them
+    BEFORE filtering by task, so a missing `camcan_rest` takes the movie cells
+    down with the rest cells -- even though camcan's own table was right there
+    and the movie cells need nothing else. The job then scored nothing and the
+    empty-frame refusal fired, which is the right failure for the wrong-looking
+    reason: it reads as "static FC has not run" when static FC had run for two
+    of the three cohorts.
+    """
+
+    def static_fc(self, root, atlas, cohort, task, policy="motion"):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        subs = ([f"CC{i:04d}" for i in range(60)] if cohort.startswith("camcan")
+                else [f"H{i:04d}" for i in range(24)])
+        d = pd.DataFrame({"sub": subs, "task": task, "n_tr_used": 180,
+                          "frac_good_frames": .95,
+                          "r1__r2": np.linspace(.1, .4, len(subs)),
+                          "r1__r3": np.linspace(-.2, .2, len(subs)),
+                          "r2__r3": np.linspace(0, .3, len(subs)),
+                          "censor_policy": policy,
+                          "match_bandpass": "[0.01, 0.1]",
+                          "zscore_runs": True, "pool": "task"})
+        write_table_atomic(
+            pa.Table.from_pandas(d, preserve_index=False),
+            root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
+            / f"task={task}" / "subjects.parquet")
+
+    def two_sided(self, tmp_path, rest_policy="motion", with_rest=True):
+        train, test = studies(tmp_path, TR, TE)
+        train.cfg.cohorts = ["camcan", "camcan_rest"]
+        r = train.cfg.root
+        self.static_fc(r, "yeo7", "camcan", "Movie")
+        if with_rest:
+            self.static_fc(r, "yeo7", "camcan_rest", "Rest", policy=rest_policy)
+        for t in ("MOVIE1", "MOVIE2"):
+            self.static_fc(r, "yeo7", "hcp7t_fix", t)
+        # the test side's rest matches the train side's rest, so a disagreement
+        # between CONDITIONS is not also a disagreement between SIDES -- which
+        # would fire first and test the other check
+        self.static_fc(r, "yeo7", "hcp7t_fix", "REST1", policy=rest_policy)
+        return train, test
+
+    def run(self, train, test, **kw):
+        kw.setdefault("log", lambda *_: None)
+        return tt.fcm_transfer_rows(
+            train, test, train_tasks={"movie": "Movie", "rest": "Rest"},
+            test_tasks={"movie": "MOVIE", "rest": "REST"}, models=["ridge"],
+            covariates=["Age", "Sex", "frac_good_frames", "n_tr_used"],
+            n_boot=20, **kw)
+
+    def test_a_side_missing_one_cohort_is_refused_up_front(self, tmp_path):
+        train, test = self.two_sided(tmp_path, with_rest=False)
+        with pytest.raises(SystemExit) as e:
+            self.run(train, test)
+        msg = str(e.value)
+        assert "INCOMPLETE" in msg and "camcan_rest" in msg
+        assert "movie cells too" in msg
+        assert "sbatch slurm/static_fc.sbatch camcan_rest" in msg
+
+    def test_the_refusal_comes_before_the_cells_are_tried(self, tmp_path):
+        """Not six skip lines and an empty frame."""
+        train, test = self.two_sided(tmp_path, with_rest=False)
+        seen = []
+        with pytest.raises(SystemExit):
+            self.run(train, test, log=seen.append)
+        assert not [m for m in seen if "skip fcm" in m]
+
+    def test_a_complete_side_runs(self, tmp_path):
+        train, test = self.two_sided(tmp_path)
+        rows = self.run(train, test)
+        assert len(rows) and set(rows["task"]) == {"movie", "rest"}
+
+    def test_the_two_conditions_of_one_side_must_share_a_recipe(self, tmp_path):
+        """camcan's movie table and camcan_rest's rest table are two separate
+        runs of stage 3b. If they disagree, rest-vs-movie is partly a
+        preprocessing difference wearing a condition's name."""
+        train, test = self.two_sided(tmp_path, rest_policy="none")
+        with pytest.raises(SystemExit) as e:
+            self.run(train, test)
+        msg = str(e.value)
+        assert "difference between the two CONDITIONS" in msg
+        assert "censor_policy" in msg
+        assert "different runs of stage 3b" in msg

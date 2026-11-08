@@ -833,8 +833,36 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
             f"3b and nothing upstream runs it:\n"
             f"  sbatch slurm/static_fc.sbatch {' '.join(train.cfg.cohorts)} "
             f"{' '.join(test.cfg.cohorts)} -- --atlas <atlas ...>")
+    # EVERY cohort of a side, not any of them. `_fc_cell` reads one table per
+    # cohort and concatenates before filtering by task, so one missing cohort
+    # kills every cell of that side -- which is how a job skipped all six
+    # (atlas, task) cells over a single absent `camcan_rest`, including the
+    # movie cells that camcan alone could have served.
     for side, cfg in (("train", train.cfg), ("test", test.cfg)):
-        covered = [a for a in atlases if set(cfg.cohorts) & present.get(a, set())]
+        gaps = {a: [c for c in cfg.cohorts if c not in present.get(a, set())]
+                for a in atlases}
+        if all(gaps.values()):                    # no atlas has the full side
+            short = sorted({c for v in gaps.values() for c in v})
+            pol = next((censor_policy_of(root, c) for c in cfg.cohorts
+                        if censor_policy_of(root, c)), None)
+            if len(short) < len(cfg.cohorts):
+                # SOME of the side is there: a partial side, which reads as
+                # "static FC has run" everywhere except where it matters
+                raise SystemExit(
+                    f"the {side} side is INCOMPLETE: {short} ha"
+                    + ("s" if len(short) == 1 else "ve")
+                    + f" no static-FC table, while {[c for c in cfg.cohorts if c not in short]} "
+                      f"do(es).\n  `_fc_cell` reads one table per cohort and "
+                      f"concatenates them before filtering by task, so a "
+                      f"missing cohort skips EVERY cell of this side -- the "
+                      f"movie cells too, not just the rest ones.\n"
+                      f"  Run stage 3b for it with the SAME settings as the "
+                      f"rest of this side (see `--status` for what they are):\n"
+                    + f"    sbatch slurm/static_fc.sbatch {' '.join(short)} -- "
+                      f"--atlas {' '.join(sorted(present)) or 'ATLAS'}"
+                    + (f" --censor-policy {pol}" if pol else "")
+                    + "\n")
+        covered = [a for a in atlases if not gaps[a]]
         if not covered:
             have = sorted({c for v in present.values() for c in v})
             # the policy its OWN tables carry, so the command below runs as
@@ -879,8 +907,15 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
         root, list(train.cfg.cohorts) + list(test.cfg.cohorts))
     tr_tasks = train_tasks or {k: v for k, v in train.cfg.tasks.items()}
     te_tasks = test_tasks or {k: v for k, v in test.cfg.tasks.items()}
-    rows = []
-    for atlas in atlases:
+    # an atlas is usable only where BOTH sides are complete
+    usable = [a for a in atlases
+              if all(c in present.get(a, set())
+                     for c in list(train.cfg.cohorts) + list(test.cfg.cohorts))]
+    if usable != list(atlases):
+        log(f"  using {len(usable)} of {len(atlases)} atlas(es): {usable}"
+            f" (the rest are missing a cohort on one side)")
+    rows, side_recipe = [], {}
+    for atlas in usable:
         for task in [t for t in tr_tasks if t in te_tasks]:
             try:
                 dtr, ctr, str_ = _fc_cell(root, atlas, train.cfg.cohorts,
@@ -927,6 +962,26 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                         f"  Re-run stage 3b with --censor-policy "
                         f"{sorted(want)[0]}, or say in the write-up that the "
                         f"fcm arm is on different frames.")
+            # ONE recipe per side across tasks, too. The train side's movie
+            # cells come from camcan and its rest cells from camcan_rest, and
+            # those are two separate runs of stage 3b -- so rest-vs-movie
+            # could be a preprocessing difference wearing a condition's name.
+            for side, rec in (("train", rtr), ("test", rte)):
+                prev = side_recipe.setdefault((side, atlas), (task, rec))
+                if prev[1] != rec:
+                    raise SystemExit(
+                        f"fcm {atlas}: the {side} side's {prev[0]} and {task} "
+                        f"tables were built from different frames, so a "
+                        f"difference between the two CONDITIONS would partly "
+                        f"be a difference in preprocessing:\n"
+                        + "\n".join(f"    {k}: {prev[0]} {prev[1].get(k)!r}  "
+                                     f"{task} {rec.get(k)!r}"
+                                     for k in rec if prev[1].get(k) != rec.get(k))
+                        + f"\n  Those cells come from different cohorts "
+                          f"({list(train.cfg.cohorts) if side == 'train' else list(test.cfg.cohorts)}) "
+                          f"and therefore from different runs of stage 3b. "
+                          f"Re-run the odd one with the other's settings.")
+
             edges = [c for c in ctr if c in set(cte)]
             if not edges:
                 raise SystemExit(
