@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
+import math
 import os
 import signal
 import subprocess
@@ -179,9 +180,21 @@ def status(a, root_out) -> int:
         d = inv["rows"]
         want = int(d["n_sets_total"].iloc[0]) if "n_sets_total" in d else None
         got = d.groupby(["atlas", "window_s", "states"]).ngroups
-        say(f"      {got}" + (f"/{want}" if want else "") + " state set(s) with "
-            f"at least one row" + ("" if want is None or got == want else
-            "   <-- SHORT: some cells were skipped, grep the logs for 'skipped'"))
+        # A shortfall has TWO causes and they need different actions. A missing
+        # shard accounts for a known number of sets -- the grid is sets[i::n] of
+        # a sorted list, so shard i holds ceil((N - i) / n) of them -- and
+        # anything beyond that is cells that were skipped. Saying "grep for
+        # skipped" when the cause is the shard you already know is missing
+        # sends you looking for a second problem that is not there.
+        owed = sum(math.ceil((want - i) / n) for i in gaps) if want and n else 0
+        note = ""
+        if want and got < want:
+            note = (f"   <-- {owed} of them are the missing shard(s) {gaps}"
+                    if got + owed == want else
+                    f"   <-- SHORT by {want - got - owed} beyond the missing "
+                    f"shard(s): cells were skipped, grep the logs for 'skipped'")
+        say(f"      {got}" + (f"/{want}" if want else "")
+            + " state set(s) with at least one row" + note)
         for m, h in d.groupby("model"):
             sets_m = h.groupby(["atlas", "window_s", "states"]).ngroups
             nan = int(h["score"].isna().sum()) if "score" in h else 0

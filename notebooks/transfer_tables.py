@@ -695,8 +695,11 @@ def _fc_cell(root, atlas, cohorts, task_value, pheno, covariates, categorical,
     if task_value is not None:
         d = d[d["task"].astype(str).str.upper().str.startswith(task_value.upper())]
     if d.empty:
-        raise SystemExit(f"no static-FC rows for {cohorts} atlas={atlas} "
-                         f"task~{task_value}")
+        raise SystemExit(
+            f"no static-FC rows for {list(cohorts)} atlas={atlas} "
+            f"task~{task_value}"
+            + (f"; the tasks present are {sorted(set(pd.concat(frames)['task'].astype(str)))[:8]}"
+               if len(frames) and len(pd.concat(frames)) else " (the table is empty)"))
     if pool:
         d = pool_fc(d, log=lambda *_: None)
     if not d["sub"].is_unique:
@@ -751,11 +754,45 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
         raise SystemExit(
             f"nothing to fit: target labels in common = {labels}, models = "
             f"{models}. The LABELS must match between the two Settings.")
-    atlases = atlases or sorted({hive(p, "atlas") for p in
-                                 (root / "static_fc").rglob("subjects.parquet")})
-    if not atlases:
-        raise SystemExit(f"no static-FC table under {root / 'static_fc'} -- "
-                         f"stage 5a's static-fc has not run for either cohort")
+    # WHICH COHORTS ARE IN THE static_fc TREE AT ALL. Checked up front, because
+    # the failure without it is silent in the worst way: every (atlas, task)
+    # cell skips, `fcm_transfer_rows` returns an empty frame, and whatever
+    # reads it next dies on a missing column with nothing naming the cause.
+    # Static FC is STAGE 3b, a separate job -- `project_and_select.sh` does not
+    # run it, so a cohort projected onto an existing fit has transitions and no
+    # static FC until stage 3b is run for it too.
+    present = {}
+    for q in (root / "static_fc").rglob("subjects.parquet"):
+        present.setdefault(hive(q, "atlas"), set()).add(hive(q, "cohort"))
+    atlases = atlases or sorted(present)
+    if not present:
+        raise SystemExit(
+            f"no static-FC table under {root / 'static_fc'} at all. It is stage "
+            f"3b and nothing upstream runs it:\n"
+            f"  sbatch slurm/static_fc.sbatch {' '.join(train.cfg.cohorts)} "
+            f"{' '.join(test.cfg.cohorts)} -- --atlas <atlas ...>")
+    for side, cfg in (("train", train.cfg), ("test", test.cfg)):
+        covered = [a for a in atlases if set(cfg.cohorts) & present.get(a, set())]
+        if not covered:
+            have = sorted({c for v in present.values() for c in v})
+            raise SystemExit(
+                f"the {side} cohort{'s' if len(cfg.cohorts) > 1 else ''} "
+                f"{list(cfg.cohorts)} have NO static-FC table for any atlas.\n"
+                f"  the tree has: "
+                + "; ".join(f"atlas={a}: {sorted(v)}" for a, v in sorted(present.items()))
+                + f"\n  Static FC is STAGE 3b and is a separate job -- "
+                  f"project_and_select.sh does not run it, so a cohort "
+                  f"projected onto an existing fit has transitions and no "
+                  f"static FC. Run it with the SAME frame settings as the state "
+                  f"trees (the header of slurm/static_fc.sbatch says why), and "
+                  f"the same --censor-policy `decompose` was given:\n"
+                  f"    sbatch slurm/static_fc.sbatch {' '.join(cfg.cohorts)} -- "
+                  f"--atlas {' '.join(sorted(present)) or '<atlas ...>'} "
+                  f"--censor-policy <the one decompose used>\n"
+                  f"  Keep the default --pool task: it writes one row per "
+                  f"(task, sub), which is what pools MOVIE1-4 into one here. "
+                  f"`--pool subject` would pool movie WITH rest."
+                  f"\n  Only cohorts {have} have one now.")
     tr_tasks = train_tasks or {k: v for k, v in train.cfg.tasks.items()}
     te_tasks = test_tasks or {k: v for k, v in test.cfg.tasks.items()}
     rows = []

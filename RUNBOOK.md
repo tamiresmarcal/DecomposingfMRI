@@ -1218,6 +1218,27 @@ parallelism. Here each fit is on *every* training subject — 649 rows by up to
 and a shard that hits the walltime is one shard to resubmit. Threads go
 *inside* the fit; `OMP_NUM_THREADS` is left alone.
 
+**The fcm half needs STAGE 3b run for the test cohort.** `project_and_select.sh`
+does not run it, so a cohort projected onto an existing fit has transitions and
+no static FC — and every `(atlas, task)` cell of the fcm transfer then skips.
+Static FC must use the SAME frame settings as the state trees, or the two trees
+differ in preprocessing as well as in model:
+
+```bash
+# which atlases and cohorts the tree already has
+find outputs/static_fc -name subjects.parquet \
+  | sed 's#.*/atlas=\([^/]*\)/cohort=\([^/]*\)/.*#\1 \2#' | sort -u
+
+sbatch slurm/static_fc.sbatch hcp7t_fix -- \
+    --atlas harvardoxford yeo7 networks \
+    --censor-policy <the one `decompose` was given for this cohort>
+```
+
+Keep the default `--pool task`: it writes one row per `(task, sub)`, which is
+what lets `pool_fc` pool MOVIE1–4 into one. `--pool subject` would pool movie
+**with** rest. `fcm_transfer_rows` refuses up front, naming the cohort and
+printing this command, rather than skipping every cell into an empty frame.
+
 **"Did they finish, or were they killed?"** The queue cannot answer it once the
 tasks are gone, and a log that ends mid-run looks much like one that ended:
 

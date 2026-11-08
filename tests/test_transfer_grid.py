@@ -735,3 +735,120 @@ class TestCoverageReport:
                                             n_sets_total=282))
         out = self.report(tmp_path, capsys)
         assert "1/282 state set(s)" in out and "SHORT" in out
+
+
+class TestShortfallAccounting:
+    """A shortfall has two causes and they need different actions.
+
+    Her real report said `274/282 state set(s)  <-- SHORT: some cells were
+    skipped` while one shard was missing. 282 sets into 40 shards puts
+    ceil(282/40) = 8 in shard 0, and 274 + 8 = 282 -- so NOTHING was skipped.
+    Telling her to grep for skips sent her after a second problem that was not
+    there.
+    """
+
+    def put_sets(self, root, shard, n_shards, states, n_sets_total=282):
+        d = pd.concat([fake_rows(1, states=st, atlas="yeo7", window_s=-1.0)
+                       for st in states], ignore_index=True)
+        return tt.write_transferred(
+            d.assign(n_sets_total=n_sets_total), root, train="camcan",
+            test="hcp7t_fix", target_set="raw", tree="bstm", shard=shard,
+            n_shards=n_shards, grid_hash="g", n_boot=2000, seed=0, git_sha="x",
+            written_at="t")
+
+    def report(self, root, capsys):
+        import transfer_grid
+        transfer_grid.main(["--status", "--target", "raw", "--out", str(root)])
+        return capsys.readouterr().out
+
+    def test_a_shortfall_that_is_exactly_the_missing_shard_is_not_a_skip(
+            self, tmp_path, capsys):
+        # 10 sets, 2 shards -> shard 0 holds 5. Write only shard 1.
+        self.put_sets(tmp_path, 1, 2, [f"HMM1_pca3_{i}" for i in range(5)],
+                      n_sets_total=10)
+        out = self.report(tmp_path, capsys)
+        assert "5/10 state set(s)" in out
+        assert "5 of them are the missing shard(s) [0]" in out
+        assert "grep the logs" not in out
+
+    def test_a_shortfall_beyond_the_missing_shard_is_a_skip(self, tmp_path, capsys):
+        # shard 1 should hold 5 of 10 and only has 3
+        self.put_sets(tmp_path, 1, 2, [f"HMM1_pca3_{i}" for i in range(3)],
+                      n_sets_total=10)
+        out = self.report(tmp_path, capsys)
+        assert "SHORT by 2 beyond the missing shard(s)" in out
+        assert "grep the logs for 'skipped'" in out
+
+    def test_a_complete_grid_says_nothing_about_shortfalls(self, tmp_path, capsys):
+        self.put_sets(tmp_path, 0, 1, [f"HMM1_pca3_{i}" for i in range(4)],
+                      n_sets_total=4)
+        out = self.report(tmp_path, capsys)
+        assert "4/4 state set(s) with at least one row\n" in out
+        assert "SHORT" not in out and "missing shard" not in out
+
+
+class TestStaticFcPrecondition:
+    """The fcm tree came out EMPTY, and the reason is structural: static FC is
+    stage 3b, a separate job. `project_and_select.sh` does not run it, so a
+    cohort projected onto an existing fit has transitions and no static FC --
+    and every (atlas, task) cell then skips, leaving an empty frame that said
+    nothing about why."""
+
+    def static_fc(self, root, atlas, cohort, tasks, subs):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        for t in tasks:
+            d = pd.DataFrame({
+                "sub": subs, "task": t,
+                "n_tr_used": 180, "n_tr_total": 200, "n_tr_good": 190,
+                "frac_good_frames": .95,
+                "r1__r2": np.linspace(.1, .4, len(subs)),
+                "r1__r3": np.linspace(-.2, .2, len(subs)),
+                "r2__r3": np.linspace(0, .3, len(subs))})
+            write_table_atomic(
+                pa.Table.from_pandas(d, preserve_index=False),
+                root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
+                / f"task={t}" / "subjects.parquet")
+
+    def test_no_table_for_the_test_cohort_names_the_stage_and_the_command(
+            self, tmp_path):
+        train, test = studies(tmp_path, TR, TE)
+        self.static_fc(train.cfg.root, "yeo7", "camcan", ["Movie"],
+                       [f"CC{i:04d}" for i in range(60)])
+        with pytest.raises(SystemExit) as e:
+            tt.fcm_transfer_rows(train, test, log=lambda *_: None)
+        msg = str(e.value)
+        assert "hcp7t_fix" in msg and "NO static-FC table" in msg
+        assert "STAGE 3b" in msg
+        assert "sbatch slurm/static_fc.sbatch hcp7t_fix" in msg
+        assert "--pool task" in msg and "pool movie WITH rest" in msg
+        assert "camcan" in msg                      # and what IS there
+
+    def test_an_empty_tree_says_to_run_stage_3b_for_both(self, tmp_path):
+        train, test = studies(tmp_path, TR, TE)
+        with pytest.raises(SystemExit) as e:
+            tt.fcm_transfer_rows(train, test, log=lambda *_: None)
+        assert "no static-FC table" in str(e.value)
+        assert "static_fc.sbatch" in str(e.value)
+
+    def test_the_refusal_comes_before_any_fitting(self, tmp_path):
+        """Not after an hour of cells that each skip."""
+        train, test = studies(tmp_path, TR, TE)
+        self.static_fc(train.cfg.root, "yeo7", "camcan", ["Movie"], ["CC0000"])
+        with pytest.raises(SystemExit):
+            tt.fcm_transfer_rows(train, test, models=["ridge"],
+                                 log=lambda *_: None)
+
+    def test_with_both_cohorts_present_it_proceeds(self, tmp_path):
+        train, test = studies(tmp_path, TR, TE)
+        self.static_fc(train.cfg.root, "yeo7", "camcan", ["Movie"],
+                       [f"CC{i:04d}" for i in range(60)])
+        self.static_fc(train.cfg.root, "yeo7", "hcp7t_fix",
+                       ["MOVIE1", "MOVIE2"], [f"H{i:04d}" for i in range(24)])
+        rows = tt.fcm_transfer_rows(
+            train, test, train_tasks={"movie": "Movie"},
+            test_tasks={"movie": "MOVIE"}, models=["ridge"],
+            covariates=["Age", "Sex", "frac_good_frames", "n_tr_used"],
+            n_boot=20, log=lambda *_: None)
+        assert len(rows) and set(rows["tree"]) == {"fcm"}
+        assert rows["n_test"].iloc[0] == 24          # the four runs pooled
