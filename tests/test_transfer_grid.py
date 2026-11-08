@@ -1270,3 +1270,79 @@ class TestAPartialSide:
         assert "difference between the two CONDITIONS" in msg
         assert "censor_policy" in msg
         assert "different runs of stage 3b" in msg
+
+
+class TestTheReportBuildsTheCommand:
+    """Twice now I have handed over a command with `<the one camcan used>` in
+    it, and the second time the report was already printing the value three
+    lines above. If the data is there, the command is there."""
+
+    def static_fc(self, root, atlas, cohort, task, policy="motion",
+                  band="[0.01, 0.1]", zscore=True, pool="task"):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        d = pd.DataFrame({"sub": ["S1"], "task": task, "r1__r2": .1,
+                          "censor_policy": policy, "match_bandpass": band,
+                          "zscore_runs": zscore, "pool": pool})
+        write_table_atomic(
+            pa.Table.from_pandas(d, preserve_index=False),
+            root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
+            / f"task={task}" / "subjects.parquet")
+
+    def report(self, world, capsys):
+        import transfer_grid
+        put(world["out"], 0, 1)
+        transfer_grid.main(["--status", "--target", "raw",
+                            "--out", str(world["out"]),
+                            "--outputs", str(world["root"])])
+        return capsys.readouterr().out
+
+    def test_it_prints_a_runnable_line_for_the_missing_cohort(
+            self, world, capsys):
+        for at in ("harvardoxford", "networks", "yeo7"):
+            self.static_fc(world["root"], at, "camcan", "Movie")
+            self.static_fc(world["root"], at, "hcp7t_fix", "MOVIE1")
+        out = self.report(world, capsys)
+        line = next(l for l in out.splitlines() if "static_fc.sbatch" in l)
+        assert "camcan_rest" in line
+        assert "--atlas harvardoxford networks yeo7" in line
+        assert "--censor-policy motion" in line
+        assert "<" not in line and ">" not in line
+
+    def test_one_line_for_three_atlases_not_three_lines(self, world, capsys):
+        for at in ("harvardoxford", "networks", "yeo7"):
+            self.static_fc(world["root"], at, "camcan", "Movie")
+            self.static_fc(world["root"], at, "hcp7t_fix", "MOVIE1")
+        out = self.report(world, capsys)
+        assert len([l for l in out.splitlines() if "static_fc.sbatch" in l]) == 1
+
+    def test_non_default_frame_settings_are_carried_over(self, world, capsys):
+        for at in ("yeo7",):
+            self.static_fc(world["root"], at, "camcan", "Movie",
+                           policy="strict", band="[0.009, 0.08]", zscore=False)
+            self.static_fc(world["root"], at, "hcp7t_fix", "MOVIE1",
+                           policy="strict", band="[0.009, 0.08]", zscore=False)
+        line = next(l for l in self.report(world, capsys).splitlines()
+                    if "static_fc.sbatch" in l)
+        assert "--censor-policy strict" in line
+        assert "--match-bandpass 0.009 0.08" in line
+        assert "--no-zscore-runs" in line
+
+    def test_with_no_sibling_to_copy_from_it_says_so(self, world, capsys):
+        """Nothing on the train side at all: there is no recipe to reproduce,
+        and inventing one would be worse than saying it is unknown."""
+        self.static_fc(world["root"], "yeo7", "hcp7t_fix", "MOVIE1")
+        out = self.report(world, capsys)
+        lines = [l for l in out.splitlines() if "static_fc.sbatch" in l]
+        assert any("NOTE no sibling table" in l for l in lines)
+
+    def test_it_copies_from_the_same_side_only(self, world, capsys):
+        """The test side's settings are not the train side's to inherit."""
+        self.static_fc(world["root"], "yeo7", "camcan", "Movie",
+                       policy="motion")
+        self.static_fc(world["root"], "yeo7", "hcp7t_fix", "MOVIE1",
+                       policy="somethingelse")
+        line = next(l for l in self.report(world, capsys).splitlines()
+                    if "static_fc.sbatch camcan_rest" in l)
+        assert "--censor-policy motion" in line
+        assert "somethingelse" not in line

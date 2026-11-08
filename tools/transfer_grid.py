@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
+import json
 import math
 import os
 import signal
@@ -273,6 +274,7 @@ def status(a, root_out) -> int:
         say(f"  static FC: nothing under {fc_root} -- stage 3b has not run")
         todo.append("static FC: stage 3b has not run")
     else:
+        gaps_fc = {}
         say(f"  static FC inputs under {fc_root}:")
         for (at, co), r in sorted(recs.items()):
             say(f"      atlas={at:<14} cohort={co:<12} "
@@ -293,6 +295,8 @@ def status(a, root_out) -> int:
                             f" -- every cell of that side skips, movie as well "
                             f"as rest")
                         todo.append(f"static FC atlas={at}: {s_} side missing {co}")
+                        for c in co:
+                            gaps_fc.setdefault((s_, c), set()).add(at)
                 continue
             # lists, not sets: a recipe is a dict and a dict is unhashable
             tr = [recs[(at, c)] for c in tr_co if (at, c) in recs]
@@ -311,6 +315,33 @@ def status(a, root_out) -> int:
                     + ". The fcm transfer refuses this: a difference between "
                       "the two would be a difference in frames, not in cohort.")
                 todo.append(f"static FC atlas={at}: the two sides disagree")
+
+        # The command, BUILT -- not a line with a placeholder in it. Every
+        # flag comes from a cohort of the SAME side that already has a table,
+        # so the new one reproduces its sibling's frames exactly, which is the
+        # only version of this command worth printing.
+        for (s_, c), ats in sorted(gaps_fc.items()):
+            sib = next((r for (a_, c_), r in sorted(recs.items())
+                        if r and c_ in (tr_co if s_ == "train" else te_co)), None)
+            flags = []
+            if sib:
+                if sib.get("censor_policy"):
+                    flags += ["--censor-policy", str(sib["censor_policy"])]
+                if sib.get("match_bandpass"):
+                    try:
+                        lo, hi = json.loads(str(sib["match_bandpass"]))
+                        flags += ["--match-bandpass", f"{lo:g}", f"{hi:g}"]
+                    except Exception:
+                        pass
+                if sib.get("zscore_runs") is False:
+                    flags += ["--no-zscore-runs"]
+                if sib.get("pool"):
+                    flags += ["--pool", str(sib["pool"])]
+            say(f"    run, with the frames its own side already uses:")
+            say(f"      sbatch slurm/static_fc.sbatch {c} -- --atlas "
+                + " ".join(sorted(ats)) + (" " + " ".join(flags) if flags else "")
+                + ("" if sib else
+                   "   # NOTE no sibling table to copy the frame settings from"))
 
     if todo:
         say("\nNOT finished: " + "; ".join(todo))
