@@ -1257,6 +1257,25 @@ policy, censoring its static FC now would make the fcm arm censored while the
 bstm arm is not: one comparison fixed by breaking another. Match the state
 trees, whatever they say.
 
+**The asymmetry this project actually has**, as of stage 3.5 having run for
+`camcan`, `cneuromod`, `ds002837`, `hcp7t` and `hcp7t_fix` but **not**
+`camcan_rest`: Cam-CAN's movie tables carry `censor_policy=motion` and its rest
+tables carry none. So in the **rest** arm the model is trained on uncensored
+frames and tested on censored ones — in the finished bstm tree as well as in
+the fcm one. Two coherent responses:
+
+* **Mirror it** (cheap). Build `camcan_rest`'s static FC with no policy, so each
+  arm's fcm matches its own bstm and E1 still compares *models*. Pass
+  `--allow-frame-mismatch`; every row then carries `train_censor_policy`,
+  `test_censor_policy` and `frames_mismatch`, §2 prints them, and a rest-vs-movie
+  difference has to be reported as partly a preprocessing difference.
+* **Remove it** (hours). `fmri-decomp censor --cohorts camcan_rest`, then refit
+  stages 4, 4b and 5a for that cohort with `--censor-policy motion`. Then all
+  four arms share their frames and nothing has to be conceded.
+
+Refusing the mismatch in fcm while the bstm tree already carries it would be
+inconsistent, which is why it is allowable at all — but only on the record.
+
 **Every cohort of every side needs a table, not just one of them.**
 `_fc_cell` reads one table per cohort and concatenates them *before* filtering
 by task, so one absent cohort skips every cell of that side — the movie cells

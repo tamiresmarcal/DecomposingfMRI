@@ -116,6 +116,16 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--window-s", nargs="*", type=float, default=None)
     ap.add_argument("--arms", nargs="*", default=None)
     ap.add_argument("--models", nargs="*", default=None)
+    ap.add_argument("--allow-frame-mismatch", action="store_true",
+                    help="fcm only: proceed when the two sides' static-FC "
+                         "tables, or one side's two conditions, were built "
+                         "from different frames. A DECISION, not a workaround: "
+                         "every row then carries train_censor_policy, "
+                         "test_censor_policy and frames_mismatch, and the "
+                         "figure has to say so. Use it when the state trees "
+                         "already carry the same asymmetry -- mirroring it "
+                         "keeps fcm comparable to bstm, which is what E1 is "
+                         "about.")
     ap.add_argument("--max-missing", type=float, default=.10,
                     help="fcm only: drop an edge NaN in more than this share of "
                          "TRAINING subjects")
@@ -508,7 +518,8 @@ def main(argv=None) -> int:
             test_tasks=dict(test_cfg.tasks),
             covariates=["Age", "Sex", "frac_good_frames", "n_tr_used"],
             models=a.models, max_missing=a.max_missing, seed=a.seed,
-            n_boot=a.n_boot, threads=a.threads, log=say)
+            n_boot=a.n_boot, threads=a.threads,
+            allow_frame_mismatch=a.allow_frame_mismatch, log=say)
     else:
         rows = tt.transfer_rows(train, test, arms=a.arms, models=a.models,
                                 sets=mine, seed=a.seed, n_boot=a.n_boot,

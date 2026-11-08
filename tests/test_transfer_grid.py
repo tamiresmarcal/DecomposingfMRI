@@ -1440,3 +1440,94 @@ class TestTheFcmDryRunUsesTheSameRule:
         out = capsys.readouterr().out
         assert "static FC on 0 atlas(es)" in out
         assert "atlas=yeo7: missing ['camcan_rest']" in out
+
+
+class TestTheConcession:
+    """camcan's movie tables carry censor_policy=motion and camcan_rest's rest
+    tables carry none -- stage 3.5 never ran for that cohort. So in the REST
+    arm the model is trained on uncensored frames and tested on censored ones,
+    in the bstm tree that is already finished as well as in the fcm tree.
+
+    Refusing it in fcm while bstm has it is inconsistent, so it is allowable --
+    but only as a DECISION that is recorded. Every row carries the two policies
+    and a description, because a concession that travels in a job log is one
+    nobody reads again.
+    """
+
+    def static_fc(self, root, atlas, cohort, task, policy="motion"):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        subs = ([f"CC{i:04d}" for i in range(60)] if cohort.startswith("camcan")
+                else [f"H{i:04d}" for i in range(24)])
+        d = pd.DataFrame({"sub": subs, "task": task, "n_tr_used": 180,
+                          "frac_good_frames": .95,
+                          "r1__r2": np.linspace(.1, .4, len(subs)),
+                          "r1__r3": np.linspace(-.2, .2, len(subs)),
+                          "r2__r3": np.linspace(0, .3, len(subs)),
+                          "censor_policy": policy,
+                          "match_bandpass": "[0.01, 0.1]",
+                          "zscore_runs": True, "pool": "task"})
+        write_table_atomic(
+            pa.Table.from_pandas(d, preserve_index=False),
+            root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
+            / f"task={task}" / "subjects.parquet")
+
+    def her_tree(self, tmp_path):
+        """The real shape: camcan movie censored, camcan_rest rest NOT, HCP
+        both censored."""
+        train, test = studies(tmp_path, TR, TE)
+        train.cfg.cohorts = ["camcan", "camcan_rest"]
+        r = train.cfg.root
+        self.static_fc(r, "yeo7", "camcan", "Movie", policy="motion")
+        self.static_fc(r, "yeo7", "camcan_rest", "Rest", policy="")
+        for t in ("MOVIE1", "MOVIE2", "REST1"):
+            self.static_fc(r, "yeo7", "hcp7t_fix", t, policy="motion")
+        return train, test
+
+    def run(self, train, test, **kw):
+        kw.setdefault("log", lambda *_: None)
+        return tt.fcm_transfer_rows(
+            train, test, train_tasks={"movie": "Movie", "rest": "Rest"},
+            test_tasks={"movie": "MOVIE", "rest": "REST"}, models=["ridge"],
+            covariates=["Age", "Sex", "frac_good_frames", "n_tr_used"],
+            n_boot=20, **kw)
+
+    def test_by_default_it_still_refuses(self, tmp_path):
+        train, test = self.her_tree(tmp_path)
+        with pytest.raises(SystemExit) as e:
+            self.run(train, test)
+        assert "allow_frame_mismatch=True" in str(e.value)
+        assert "a decision, not a workaround" in str(e.value)
+
+    def test_allowed_it_runs_and_every_row_says_what_was_conceded(self, tmp_path):
+        train, test = self.her_tree(tmp_path)
+        rows = self.run(train, test, allow_frame_mismatch=True)
+        assert len(rows)
+        assert {"train_censor_policy", "test_censor_policy",
+                "frames_mismatch"} <= set(rows.columns)
+        rest = rows[rows["task"] == "rest"]
+        assert (rest["train_censor_policy"] == "").all()
+        assert (rest["test_censor_policy"] == "motion").all()
+        assert rest["frames_mismatch"].str.contains("censor_policy").all()
+
+    def test_the_arm_that_matches_is_not_flagged(self, tmp_path):
+        """Only the rest arm is asymmetric; the movie arm is motion on both
+        sides and must come through clean."""
+        train, test = self.her_tree(tmp_path)
+        rows = self.run(train, test, allow_frame_mismatch=True)
+        movie = rows[rows["task"] == "movie"]
+        assert (movie["train_censor_policy"] == "motion").all()
+        assert (movie["frames_mismatch"] == "").all()
+
+    def test_it_is_logged_as_allowed_not_silently(self, tmp_path):
+        train, test = self.her_tree(tmp_path)
+        seen = []
+        self.run(train, test, allow_frame_mismatch=True, log=seen.append)
+        assert any("ALLOWED frame mismatch" in m for m in seen)
+
+    def test_the_cross_task_mismatch_is_recorded_too(self, tmp_path):
+        """The train side's own two conditions differ, which is a second,
+        separate statement from the per-cell one."""
+        train, test = self.her_tree(tmp_path)
+        rows = self.run(train, test, allow_frame_mismatch=True)
+        assert rows["frames_mismatch"].str.contains("across tasks").any()

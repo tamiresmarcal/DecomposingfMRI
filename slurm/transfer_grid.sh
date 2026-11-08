@@ -5,6 +5,7 @@
 #   ./slurm/transfer_grid.sh                    # both target sets, 40 shards
 #   TARGETS=raw N_SHARDS=20 ./slurm/transfer_grid.sh
 #   ./slurm/transfer_grid.sh -- --atlas yeo7    # a slice, to try the chain
+#   TREES=fcm ./slurm/transfer_grid.sh -- --allow-frame-mismatch
 #
 # The notebook then READS what this writes:
 #

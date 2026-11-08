@@ -780,7 +780,8 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                       models=None, covariates=None, categorical=("Sex",),
                       max_missing: float = .10, seed: int = 0,
                       n_boot: int = 2000, pool_test: bool = True,
-                      threads: int = 1, log=print) -> pd.DataFrame:
+                      threads: int = 1, allow_frame_mismatch: bool = False,
+                      log=print) -> pd.DataFrame:
     """The fcm half of the transfer, so the four tables can be compared.
 
     Mirrors fcm_selection, split into a fit and an apply. Two things have to
@@ -935,16 +936,25 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
             rte = frame_recipe(dte, f"test {list(test.cfg.cohorts)} atlas={atlas}")
             differ = {k: (rtr.get(k), rte.get(k)) for k in FRAME_RECIPE
                       if k in rtr and k in rte and rtr[k] != rte[k]}
+            note = ""
             if differ:
-                raise SystemExit(
-                    f"fcm {atlas} {task}: the two cohorts' static-FC tables "
-                    f"were built from DIFFERENT frames, so a difference "
-                    f"between them is not a difference between cohorts:\n"
-                    + "\n".join(f"    {k}: train {a!r}  test {b!r}"
-                                 for k, (a, b) in differ.items())
-                    + "\n  Re-run stage 3b for the side that is wrong with "
-                      "the other's settings. slurm/static_fc.sbatch's header "
-                      "says why they have to match.")
+                lines = "\n".join(f"    {k}: train {x!r}  test {y!r}"
+                                  for k, (x, y) in differ.items())
+                if not allow_frame_mismatch:
+                    raise SystemExit(
+                        f"fcm {atlas} {task}: the two cohorts' static-FC "
+                        f"tables were built from DIFFERENT frames, so a "
+                        f"difference between them is not a difference between "
+                        f"cohorts:\n" + lines
+                        + "\n  Re-run stage 3b for the side that is wrong "
+                          "with the other's settings (slurm/static_fc.sbatch's "
+                          "header says why), or pass allow_frame_mismatch=True "
+                          "-- which is a decision, not a workaround: every row "
+                          "then carries `frames_mismatch` and the figure has "
+                          "to say so.")
+                note = "; ".join(f"{k}: train={x!r} test={y!r}"
+                                 for k, (x, y) in differ.items())
+                log(f"  fcm {atlas} {task}: ALLOWED frame mismatch -- {note}")
             # ... and against the STATE trees, which is what makes bstm and
             # fcm comparable at all.
             for side, cfg, rec in (("train", train.cfg, rtr),
@@ -968,7 +978,14 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
             # could be a preprocessing difference wearing a condition's name.
             for side, rec in (("train", rtr), ("test", rte)):
                 prev = side_recipe.setdefault((side, atlas), (task, rec))
-                if prev[1] != rec:
+                if prev[1] != rec and allow_frame_mismatch:
+                    extra = "; ".join(
+                        f"{k}: {prev[0]}={prev[1].get(k)!r} {task}={rec.get(k)!r}"
+                        for k in rec if prev[1].get(k) != rec.get(k))
+                    note = (note + " | " if note else "") + f"{side} across tasks: {extra}"
+                    log(f"  fcm {atlas}: ALLOWED {side} frame mismatch across "
+                        f"tasks -- {extra}")
+                elif prev[1] != rec:
                     raise SystemExit(
                         f"fcm {atlas}: the {side} side's {prev[0]} and {task} "
                         f"tables were built from different frames, so a "
@@ -980,7 +997,9 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                         + f"\n  Those cells come from different cohorts "
                           f"({list(train.cfg.cohorts) if side == 'train' else list(test.cfg.cohorts)}) "
                           f"and therefore from different runs of stage 3b. "
-                          f"Re-run the odd one with the other's settings.")
+                          f"Re-run the odd one with the other's settings, or "
+                          f"pass allow_frame_mismatch=True to accept it on the "
+                          f"record.")
 
             edges = [c for c in ctr if c in set(cte)]
             if not edges:
@@ -1032,7 +1051,13 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                             "n_covariates": len(want),
                             "n_features": Xtr.shape[1],
                             "n_edges_used": int(keep.sum()),
-                            "n_edges_dropped": int((~keep).sum())})
+                            "n_edges_dropped": int((~keep).sum()),
+                            # the frames each side was correlated over, ON the
+                            # row: a concession that travels only in a job log
+                            # is a concession nobody reads again
+                            "train_censor_policy": rtr.get("censor_policy"),
+                            "test_censor_policy": rte.get("censor_policy"),
+                            "frames_mismatch": note})
     return pd.DataFrame(rows)
 
 
