@@ -22,22 +22,28 @@
 # nothing, and a shard that hits the walltime is one shard to resubmit instead
 # of the whole grid. Hence: array indices, and threads INSIDE the fit.
 #
-# THREADS ARE CAPPED, AND THE CAP IS EXPORTED BEFORE PYTHON STARTS. The first
-# version of this script left OMP_NUM_THREADS alone, reasoning that with no
-# joblib loop the estimator may as well have the task's whole allocation. Every
-# task of the first real array then died with
+# THREADS, AND WHY THE EXPORT IS PREFIXED. Two arrays died here with
 #
 #   Segmentation fault      (core dumped)   tools/transfer_grid.py
 #
-# and one hung. UNSET is not "use my 4 cpus": inside the container OpenBLAS and
-# libgomp read the NODE's core count, not the cgroup's, so a 4-cpu task on a
-# 192-core node starts 192 threads, and OpenBLAS allocating its per-thread
-# buffers under a cgroup that small is a known way to crash. Which is exactly
-# why every other stage 4-5 script here exports these to 1.
+# and faulthandler named the line: scipy.linalg.eigh inside RidgeCV's
+# `_eigen_decompose_gram`, its n_features > n_samples branch -- which is why
+# the K=4 sets finished and the K=27 sets died, in the same shard.
 #
-# So: THREADS, default 1, exported to all four runtimes AND passed to the
-# script, so nothing can read the node instead. To give the fits real threads,
-# raise both together -- they must agree:
+# The cause is a thread count RAISED mid-process. OpenBLAS sizes its per-thread
+# buffers the first time it runs, so `threadpool_limits(4)` in a process that
+# started at OPENBLAS_NUM_THREADS=1 can walk off the end of them. And the
+# process DOES start at 1: the container sets it, and
+#
+#   apptainer exec --cleanenv
+#
+# drops a plain `export OMP_NUM_THREADS=4` on the way in. So the export has to
+# be prefixed -- APPTAINERENV_* survives --cleanenv -- or the cap python sees
+# is whatever the image says and the request to raise it is a crash.
+# transfer_tables.usable_threads() refuses to raise one either way; this is
+# what makes a raise actually possible.
+#
+# Both halves must agree, and the script refuses if they do not:
 #
 #   THREADS=4 sbatch --cpus-per-task=4 --array=0-39 slurm/transfer.sbatch raw 40
 #
@@ -68,11 +74,16 @@ set -euo pipefail
 # directives only until the first command -- an assignment above them would
 # have silently thrown away every resource request in this file.
 : "${THREADS:=1}"
-export OMP_NUM_THREADS="${THREADS}"
-export MKL_NUM_THREADS="${THREADS}"
-export OPENBLAS_NUM_THREADS="${THREADS}"
-export NUMBA_NUM_THREADS="${THREADS}"
-export PYTHONUNBUFFERED=1
+for _v in OMP MKL OPENBLAS NUMBA; do
+  # the plain name for the venv path, and the two prefixes that survive
+  # `apptainer exec --cleanenv` (SINGULARITYENV_ for older builds)
+  export "${_v}_NUM_THREADS=${THREADS}"
+  export "APPTAINERENV_${_v}_NUM_THREADS=${THREADS}"
+  export "SINGULARITYENV_${_v}_NUM_THREADS=${THREADS}"
+done
+unset _v
+export PYTHONUNBUFFERED=1 APPTAINERENV_PYTHONUNBUFFERED=1 \
+       SINGULARITYENV_PYTHONUNBUFFERED=1
 
 TARGET="${1:?usage: sbatch --array=0-N slurm/transfer.sbatch <raw|category> <n_shards> [-- extra]}"
 N_SHARDS="${2:?how many shards the array has}"

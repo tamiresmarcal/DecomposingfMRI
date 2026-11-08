@@ -41,6 +41,7 @@ null, a null here adds nothing.
 """
 from __future__ import annotations
 
+import functools
 import re
 import time
 from collections import Counter
@@ -167,6 +168,72 @@ def bootstrap_ci(y: np.ndarray, pred: np.ndarray, n_boot: int, seed: int,
     return float(obs), float(lo), float(hi)
 
 
+@functools.lru_cache(maxsize=None)
+def usable_threads(threads: int) -> int:
+    """`threads`, but NEVER more than the process already allows.
+
+    threadpoolctl can lower a thread limit safely and cannot safely RAISE one.
+    OpenBLAS sizes its per-thread buffers the first time it runs, so asking for
+    4 threads in a process that started at OPENBLAS_NUM_THREADS=1 can walk off
+    the end of them.
+
+    That is what killed the cluster array, twice, and the traceback said so
+    exactly:
+
+        scipy/linalg/_decomp.py  eigh
+        sklearn/linear_model/_ridge.py  _eigen_decompose_gram
+        ...
+        transfer_tables.py  fit_predict
+        Segmentation fault
+
+    `_eigen_decompose_gram` is RidgeCV's n_features > n_samples branch -- which
+    is why the K=4 sets finished (16 cells, fewer features than subjects, a
+    different solver) and the K=27 sets died (729 cells). The first array had
+    the limits unset, the second had them at 1 inside the container; both then
+    had `threadpool_limits(4)` raise the count mid-process.
+
+    A thread count has to be raised BEFORE any BLAS call, which means in the
+    ENVIRONMENT, not here. Inside `apptainer --cleanenv` that takes
+    APPTAINERENV_*, because --cleanenv drops a plain export -- see
+    slurm/transfer.sbatch.
+    """
+    cur = _current_threads()
+    return max(1, threads if cur is None else min(threads, cur))
+
+
+@functools.lru_cache(maxsize=None)
+def _current_threads():
+    """The tightest thread limit the loaded BLAS/OpenMP runtimes already have.
+
+    Cached: nothing here ever RAISES a limit, so the answer cannot go up, and
+    asking per fit would cost a library scan 9,000 times.
+    """
+    try:
+        from threadpoolctl import threadpool_info
+        have = [i["num_threads"] for i in threadpool_info() if i.get("num_threads")]
+    except Exception:                                   # pragma: no cover
+        return None
+    return min(have) if have else None
+
+
+def thread_ctx(threads: int):
+    """A limiter only when it LOWERS the count; otherwise nothing at all.
+
+    Setting a limit to the value it already has ought to be harmless, and
+    probably is. But both crashes were inside OpenBLAS's LAPACK right after a
+    limit had been set, and a no-op that touches nothing cannot be the cause of
+    a third. With the default of one thread in a container that already says
+    one, this path never calls into OpenBLAS's thread machinery at all.
+    """
+    import contextlib
+
+    use, cur = usable_threads(threads), _current_threads()
+    if cur is None or use >= cur:
+        return contextlib.nullcontext()
+    from threadpoolctl import threadpool_limits
+    return threadpool_limits(use)
+
+
 def fit_predict(X_tr, y_tr, X_te, model: str, seed: int,
                 threads: int = 1) -> np.ndarray:
     """One model, fitted on EVERY training subject, applied to the test set.
@@ -177,7 +244,6 @@ def fit_predict(X_tr, y_tr, X_te, model: str, seed: int,
     a number cannot predict anything. This builds the same estimator
     select-bstm would, fits it on every training row, and predicts.
     """
-    from threadpoolctl import threadpool_limits
     from sklearn.base import clone
     from fmri_decomposition.bstm_selection import make_model
 
@@ -185,8 +251,9 @@ def fit_predict(X_tr, y_tr, X_te, model: str, seed: int,
     # One thread by default: inside a joblib loop a threaded estimator
     # oversubscribes the node and runs slower than either alone. The sharded
     # script has no such loop -- one process, one cell at a time -- so there
-    # `threads` is the task's whole cpu allocation.
-    with threadpool_limits(threads):
+    # `threads` is the task's whole cpu allocation, IF the process started with
+    # room for them. `usable_threads` is why it cannot be taken on trust.
+    with thread_ctx(threads):
         if kind == "clf":
             # the only classifier here is `logistic`, binarised at y > 0 the
             # way score_once does, and its prediction is a probability so that
@@ -366,9 +433,15 @@ def transfer_rows(train: Study, test: Study, arms=None, models=None,
         # cluster array left nothing but the job script's own echo: stdout was
         # block-buffered and the task was killed by a signal, so there was no
         # way to tell an import crash from a crash 200 fits in.
+        # n_train/n_test of this cell, because the FITTED n is the number that
+        # limits every claim and the phenotype file's row count is not it:
+        # HCP's table carries all 1,206 S1200 subjects and only the 7T ones
+        # have transitions.
+        last = rows[-1] if rows else {}
         log(f"  [{i}/{len(sets)}] {s.states} {s.atlas} "
-            f"{fmt_window(s.window_s)}s  {len(rows)} row(s), "
-            f"{time.time() - t0:.0f}s")
+            f"{fmt_window(s.window_s)}s  K={n_states(s.states)}  "
+            f"n={last.get('n_train', 0)}->{last.get('n_test', 0)}  "
+            f"{len(rows)} row(s), {time.time() - t0:.0f}s")
     for why, k in skipped.most_common():
         log(f"  skipped {k}x: {why}")
     if not rows:

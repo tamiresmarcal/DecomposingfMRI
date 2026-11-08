@@ -84,7 +84,7 @@ def git_sha() -> str:
         return ""
 
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--target", default="raw", choices=["raw", "category"],
@@ -105,10 +105,11 @@ def main(argv=None) -> int:
     ap.add_argument("--hcp-pheno", default=None, help="HCP's phenotype CSV")
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--threads", type=int,
-                    default=int(os.environ.get("SLURM_CPUS_PER_TASK", "1")),
-                    help="threads for ONE fit. There is no joblib loop here, so "
-                         "this is the task's whole cpu allocation.")
+    ap.add_argument("--threads", type=int, default=1,
+                    help="threads for ONE fit. CLAMPED to what the process "
+                         "already allows: raising a BLAS thread count mid-run "
+                         "segfaults, so a real raise has to happen in the "
+                         "ENVIRONMENT, which slurm/transfer.sbatch does.")
     ap.add_argument("--atlas", nargs="*", default=None, help="restrict the grid")
     ap.add_argument("--window-s", nargs="*", type=float, default=None)
     ap.add_argument("--arms", nargs="*", default=None)
@@ -121,7 +122,52 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="resolve the grid, print what this shard would do, fit "
                          "nothing")
-    a = ap.parse_args(argv)
+    ap.add_argument("--status", action="store_true",
+                    help="read-only: which shards are on disk and which are "
+                         "missing, for both trees. The question an array leaves "
+                         "behind is whether the tasks FINISHED or were killed, "
+                         "and the queue cannot answer it.")
+    return ap
+
+
+def status(a, root_out) -> int:
+    """What is on disk, per tree, without importing a Study or fitting anything.
+
+    An array that has left the queue has either finished or been killed, and
+    squeue cannot tell you which afterwards. `sacct` can, per task; this says
+    it in terms of the thing that matters -- the shards whose rows exist.
+    """
+    import pandas as pd
+    import transfer_tables as tt
+
+    root = root_out or Path(os.environ.get(
+        "FMRIDECOMP_OUTPUTS",
+        "/project/6008063/tamires/DecomposingfMRI/outputs")) / "transferred_models"
+    say(f"{root}")
+    missing = 0
+    for tree in ("bstm", "fcm"):
+        base = tt.transfer_dir(root, "camcan", "hcp7t_fix", a.target, tree)
+        files = sorted(base.glob("shard=*/rows.parquet"))
+        if not files:
+            say(f"  targets={a.target} tree={tree}: NOTHING under {base}")
+            missing += 1
+            continue
+        have = sorted(int(p.parent.name.split("=")[1]) for p in files)
+        d = pd.read_parquet(files[0], columns=["n_shards", "grid_hash"])
+        n = int(d["n_shards"].iloc[0])
+        gaps = [i for i in range(n) if i not in set(have)]
+        say(f"  targets={a.target} tree={tree}: {len(have)}/{n} shard(s), grid "
+            f"{d['grid_hash'].iloc[0]}" + (f"  MISSING {gaps}" if gaps else "  COMPLETE"))
+        missing += len(gaps)
+    if missing:
+        say(f"\n{missing} shard(s)/tree(s) to go. Resubmitting is the same "
+            f"command -- a shard whose rows.parquet exists is skipped:")
+        say(f"  ./slurm/transfer_grid.sh    # TARGETS={a.target} to do just this one")
+    return 0
+
+
+def main(argv=None) -> int:
+    a = build_parser().parse_args(argv)
 
     import pandas as pd
     import transfer_config as tc
@@ -129,6 +175,8 @@ def main(argv=None) -> int:
 
     t0 = time.time()
     root_out = Path(a.out) if a.out else None
+    if a.status:
+        return status(a, root_out)
     train, test, train_cfg, test_cfg = tc.studies(
         a.target, models=a.models, root=a.outputs, camcan=a.camcan_pheno,
         hcp_pheno=a.hcp_pheno)
@@ -136,16 +184,26 @@ def main(argv=None) -> int:
     import numpy, sklearn
     say(f"target={a.target} tree={a.tree} shard={a.shard}/{a.n_shards} "
         f"threads={a.threads}")
-    # The thread caps, printed because an UNSET one does not mean "one thread":
-    # inside the container the runtimes read the NODE's core count, and 192
-    # OpenBLAS threads in a 4-cpu cgroup is how the first array segfaulted.
+    # The caps AS THE PROCESS SEES THEM. Printed because the export in the job
+    # script is not what python gets: `apptainer exec --cleanenv` drops a plain
+    # export, so this line is the only place the two can be compared.
     say("  env " + "  ".join(
         f"{k}={os.environ.get(k, 'UNSET')}"
         for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")))
     say(f"  numpy {numpy.__version__}  pandas {pd.__version__}  "
         f"sklearn {sklearn.__version__}")
-    say(f"train {len(train.pheno):,} subject(s) with phenotype, "
-          f"test {len(test.pheno):,}")
+    use = tt.usable_threads(a.threads)
+    say(f"  threads requested {a.threads}, usable {use}"
+        + ("" if use >= a.threads else
+           f"  -- CLAMPED. This process started with {use}, and raising a BLAS "
+           f"thread count mid-run is what segfaulted the first two arrays. To "
+           f"give the fits more, set APPTAINERENV_OPENBLAS_NUM_THREADS before "
+           f"apptainer starts; a plain export does not survive --cleanenv."))
+    # ROWS IN THE PHENOTYPE FILE, not the number fitted. HCP's table carries
+    # all 1,206 S1200 subjects and only the 7T ones have transitions; the n
+    # that matters is per cell and appears on the [i/N] lines below.
+    say(f"phenotype rows: train {len(train.pheno):,}, test {len(test.pheno):,}"
+        f"  (the FITTED n is per state set, on the lines below)")
 
     sets = tt.common_sets(train, test)
     if a.atlas:

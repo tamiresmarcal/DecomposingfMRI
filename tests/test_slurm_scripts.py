@@ -65,17 +65,33 @@ FITTING = ["decomposition.sbatch", "clustering.sbatch",
            "fcm_selection.sbatch", "static_fc.sbatch", "transfer.sbatch"]
 
 
+def caps(p):
+    """The thread variables a script sets, however it spells the export.
+
+    `export OMP_NUM_THREADS=1` and a loop over `export "${_v}_NUM_THREADS=..."`
+    are the same instruction; a test that only knew the first form would read a
+    rewrite as a regression.
+    """
+    text = p.read_text()
+    out = set()
+    for v in THREAD_VARS:
+        stem = v.removesuffix("_NUM_THREADS")
+        if f"export {v}" in text or re.search(
+                r'for\s+\w+\s+in\b[^\n]*\b' + stem + r'\b', text):
+            out.add(v)
+    return out
+
+
 @pytest.mark.parametrize("name", FITTING)
 def test_the_thread_caps_are_set_before_python_runs(name):
-    """Unset is not "use my cpus": inside the container the runtimes read the
-    NODE's core count, so a 4-cpu task on a 192-core node starts 192 threads."""
+    """Unset leaves the count to the runtime, and the runtime inside the
+    container is not reading this task's cgroup."""
     p = SLURM / name
-    text = p.read_text()
-    missing = [v for v in THREAD_VARS if f"export {v}" not in text]
+    missing = sorted(set(THREAD_VARS) - caps(p))
     assert not missing, (
-        f"{p.name} does not export {missing}. Inside the container the "
-        f"runtimes then read the NODE's core count, not the cgroup's -- which "
-        f"is how the first transfer array segfaulted forty times out of forty.")
+        f"{p.name} does not set {missing}. Unset leaves the thread count to "
+        f"whatever the image or the node says, and two transfer arrays died "
+        f"`Segmentation fault` inside OpenBLAS's LAPACK over exactly this.")
 
 
 def test_every_fitting_script_still_exists():
@@ -106,3 +122,13 @@ class TestTransferSbatch:
         t = self.p.read_text()
         assert ': "${THREADS:=1}"' in t
         assert "#SBATCH --cpus-per-task=1" in t
+
+    def test_the_cap_is_prefixed_so_it_survives_cleanenv(self):
+        """`apptainer exec --cleanenv` DROPS a plain export, so the cap python
+        sees is whatever the image sets -- and `threadpool_limits` raising it
+        from there is what segfaulted. APPTAINERENV_* crosses the boundary."""
+        t = self.p.read_text()
+        assert "--cleanenv" in t, "if this stops using --cleanenv, re-read this test"
+        for pre in ("APPTAINERENV", "SINGULARITYENV"):
+            assert f'export "{pre}_${{_v}}_NUM_THREADS' in t or \
+                   f"{pre}_OMP_NUM_THREADS" in t, f"{pre}_* is not exported"

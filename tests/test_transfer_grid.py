@@ -438,3 +438,111 @@ class TestConstantPrediction:
         hp.fig_factors(rows, cfg)
         hp.fig_k_curve(rows, cfg)
         plt.close("all")
+
+
+# ------------------------------------------------------------------ threads ---
+class TestThreads:
+    """The crash that took two arrays, and the traceback that named it:
+
+        scipy/linalg/_decomp.py          eigh
+        sklearn/linear_model/_ridge.py   _eigen_decompose_gram
+        transfer_tables.py               fit_predict
+        Segmentation fault (core dumped)
+
+    `_eigen_decompose_gram` is RidgeCV's n_features > n_samples branch, which
+    is why the K=4 sets of a shard finished and its K=27 sets died. The cause
+    is a BLAS thread count RAISED mid-process: OpenBLAS sizes its per-thread
+    buffers on first use, and the container starts at
+    OPENBLAS_NUM_THREADS=1 -- `apptainer exec --cleanenv` drops the job
+    script's plain export, so a request for 4 threads was a raise from 1.
+    """
+
+    def setup_method(self):
+        tt.usable_threads.cache_clear()
+        tt._current_threads.cache_clear()
+
+    teardown_method = setup_method
+
+    def test_a_request_above_what_the_process_allows_is_clamped(self, monkeypatch):
+        monkeypatch.setattr(tt, "_current_threads", lambda: 1)
+        assert tt.usable_threads(4) == 1
+        assert tt.usable_threads(99) == 1
+
+    def test_a_request_below_it_is_honoured(self, monkeypatch):
+        monkeypatch.setattr(tt, "_current_threads", lambda: 8)
+        assert tt.usable_threads(4) == 4
+
+    def test_never_zero_or_negative(self, monkeypatch):
+        monkeypatch.setattr(tt, "_current_threads", lambda: 8)
+        assert tt.usable_threads(0) == 1 and tt.usable_threads(-3) == 1
+
+    def test_without_threadpoolctl_the_request_stands(self, monkeypatch):
+        monkeypatch.setattr(tt, "_current_threads", lambda: None)
+        assert tt.usable_threads(4) == 4
+
+    def test_lowering_installs_a_limiter(self, monkeypatch):
+        monkeypatch.setattr(tt, "_current_threads", lambda: 8)
+        assert type(tt.thread_ctx(2)).__name__ == "threadpool_limits"
+
+    def test_not_lowering_touches_nothing_at_all(self, monkeypatch):
+        """The conservative half: with one thread requested in a process that
+        already says one, nothing calls into OpenBLAS's thread machinery, so
+        it cannot be the cause of a third crash."""
+        import contextlib
+        monkeypatch.setattr(tt, "_current_threads", lambda: 1)
+        for want in (1, 4):
+            assert isinstance(tt.thread_ctx(want), contextlib.nullcontext)
+
+    def test_the_ridge_gram_branch_is_the_one_that_crashed(self):
+        """Not a guess: with more features than subjects, RidgeCV takes the
+        eigendecomposition path the traceback named. This is the shape the
+        K=27 sets have (729 cells, ~600 subjects) and the K=4 sets do not."""
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(40, 200))
+        y = X[:, 0] + rng.normal(0, .5, 40)
+        pred = tt.fit_predict(X, y, X[:5], "ridge", 0, threads=4)
+        assert pred.shape == (5,) and np.isfinite(pred).all()
+
+    def test_the_cli_asks_for_one_thread_unless_told_otherwise(self, world):
+        """Its old default was SLURM_CPUS_PER_TASK, which is how a raise came
+        to be requested at all."""
+        import transfer_grid
+        ap = transfer_grid.build_parser()
+        assert ap.get_default("threads") == 1
+        assert "CLAMPED" in ap.format_help()
+
+
+class TestStatus:
+    """"Did they finish, or were they killed?" -- the question an array leaves
+    behind, which squeue cannot answer once the tasks are gone."""
+
+    def test_it_names_the_missing_shards(self, world, capsys):
+        for i in (0, 2):
+            put(world["out"], i, 4)
+        import transfer_grid
+        transfer_grid.main(["--status", "--target", "raw",
+                            "--out", str(world["out"])])
+        out = capsys.readouterr().out
+        assert "2/4 shard(s)" in out and "MISSING [1, 3]" in out
+        assert "transfer_grid.sh" in out          # and what to do about it
+
+    def test_a_complete_tree_says_so(self, world, capsys):
+        put(world["out"], 0, 1)
+        put(world["out"], 0, 1, tree="fcm")
+        import transfer_grid
+        transfer_grid.main(["--status", "--target", "raw",
+                            "--out", str(world["out"])])
+        out = capsys.readouterr().out
+        assert out.count("COMPLETE") == 2 and "MISSING" not in out
+
+    def test_nothing_on_disk_is_reported_not_crashed(self, world, capsys):
+        import transfer_grid
+        assert transfer_grid.main(["--status", "--target", "raw",
+                                   "--out", str(world["out"])]) == 0
+        assert "NOTHING under" in capsys.readouterr().out
+
+    def test_it_fits_nothing(self, world):
+        import transfer_grid
+        transfer_grid.main(["--status", "--target", "raw",
+                            "--out", str(world["out"])])
+        assert not list(world["out"].rglob("rows.parquet"))

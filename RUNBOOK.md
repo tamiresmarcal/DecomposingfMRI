@@ -1215,6 +1215,14 @@ parallelism. Here each fit is on *every* training subject — 649 rows by up to
 and a shard that hits the walltime is one shard to resubmit. Threads go
 *inside* the fit; `OMP_NUM_THREADS` is left alone.
 
+**"Did they finish, or were they killed?"** The queue cannot answer it once the
+tasks are gone, and a log that ends mid-run looks much like one that ended:
+
+```bash
+$RUN python3 tools/transfer_grid.py --status --target raw    # shards on disk vs expected
+grep -L "done in" slurm_logs/transfer_*_*.out               # the tasks that did NOT finish
+```
+
 **If a task dies, read the `.err` before resubmitting.** The script prints its
 resolved thread caps, the library versions, and one line per state set as it
 goes, so the log says where it got to; `faulthandler` turns a segfault into a
@@ -1395,7 +1403,8 @@ Each of these cost real time at least once.
 | MeanShift returns K=1 | bandwidth too wide for this data | it now searches the quantile; `--min-k` refuses a degenerate result |
 | stage 6 ranks fewer state sets than exist | stage 5 was not re-run after stage 4 | `status` reports it as **behind** |
 | the grid spans two censor policies | one aperture built without `--censor-policy` | rebuild that aperture; the flag is required now |
-| every task of an array dies `Segmentation fault (core dumped)`, log holds only the script's own `echo` | thread caps left unset: inside the container OpenBLAS/libgomp read the NODE's core count, so a 4-cpu task on a 192-core node starts 192 threads | `export OMP/MKL/OPENBLAS/NUMBA_NUM_THREADS` **below** the `#SBATCH` block, and keep them ≤ `--cpus-per-task` |
+| array tasks die `Segmentation fault (core dumped)` inside `scipy.linalg.eigh`, the K=4 sets of a shard finishing and its K=27 sets not | a BLAS thread count **raised** mid-process: OpenBLAS sizes its per-thread buffers on first use, and `threadpool_limits(4)` in a process the image started at `OPENBLAS_NUM_THREADS=1` walks off the end of them. Only RidgeCV's n_features > n_samples branch calls `eigh`, hence only the high-K sets | raise the count in the **environment**, never at runtime: `APPTAINERENV_*`, because `apptainer exec --cleanenv` drops a plain export. `transfer_tables.usable_threads` now clamps instead of raising |
+| `export OMP_NUM_THREADS=4` in the job script, and python reports 1 | `apptainer exec --cleanenv` strips the host environment on the way in | `export APPTAINERENV_OMP_NUM_THREADS=4` (and `SINGULARITYENV_` for older builds) |
 | a crashed job's log says nothing about how far it got | block-buffered stdout is lost when a process dies on a signal | `export PYTHONUNBUFFERED=1` and `python3 -u`; `tools/transfer_grid.py` also installs `faulthandler` |
 | `#SBATCH --cpus-per-task` etc. appear to be ignored | a command (an `export`, an assignment) sits above the `#SBATCH` block; SLURM stops reading directives at the first command | move it below `set -euo pipefail`; `tests/test_slurm_scripts.py` now checks every `.sbatch` |
 
