@@ -144,11 +144,19 @@ def status(a, root_out) -> int:
     that matters -- the shards whose rows exist, and whether they were all
     computed the same way.
     """
+    import pandas as pd
+    import pyarrow.parquet as pq
+
     import transfer_tables as tt
 
-    root = root_out or Path(os.environ.get(
-        "FMRIDECOMP_OUTPUTS",
-        "/project/6008063/tamires/DecomposingfMRI/outputs")) / "transferred_models"
+    # The two trees are located INDEPENDENTLY: `--out` says where the transfer
+    # rows are, `--outputs` says where the pipeline's tree is. Deriving one
+    # from the other by string surgery on the path worked in the one layout
+    # where they are siblings and silently looked in the wrong place anywhere
+    # else.
+    outputs = Path(a.outputs) if a.outputs else Path(os.environ.get(
+        "FMRIDECOMP_OUTPUTS", "/project/6008063/tamires/DecomposingfMRI/outputs"))
+    root = root_out or outputs / "transferred_models"
     say(f"{root}")
     todo = []
     for tree in ("bstm", "fcm"):
@@ -234,6 +242,67 @@ def status(a, root_out) -> int:
             for k, v in sorted(soft.items(), key=lambda kv: -len(kv[1])):
                 say(f"      shard(s) {v if len(v) < 12 else f'{len(v)} of them'}"
                     f": arms={list(k[0])}, models={list(k[1])}")
+    # THE fcm INPUTS. "Did the fcm job finish" is half the question; the other
+    # half is whether its two inputs are comparable, and that is knowable from
+    # disk before anything is submitted. Printed here because this is where
+    # the question gets asked.
+    import transfer_config as tc
+
+    tr_co, te_co = tc.TRAIN_COHORTS, tc.TEST_COHORTS
+    fc_root = outputs / "static_fc"
+    recs, seen = {}, False
+    for q in sorted(fc_root.rglob("subjects.parquet")):
+        seen = True
+        at, co = tt.hive(q, "atlas"), tt.hive(q, "cohort")
+        # Which provenance columns the file HAS, from the schema, instead of
+        # reading them and catching the failure. A bare `except Exception`
+        # here labelled every table "predates the provenance columns" -- the
+        # exception it was swallowing was a NameError of mine. A catch-all
+        # around a read is a catch-all around the bug in the read.
+        names = set(pq.read_schema(q).names)
+        cols = [c for c in tt.FRAME_RECIPE if c in names]
+        if not cols:
+            recs[(at, co)] = None            # predates the provenance columns
+            continue
+        try:
+            recs[(at, co)] = tt.frame_recipe(
+                pd.read_parquet(q, columns=cols), f"{at}/{co}")
+        except SystemExit as e:
+            say(f"  static FC {at}/{co}: {e}")
+    if not seen:
+        say(f"  static FC: nothing under {fc_root} -- stage 3b has not run")
+        todo.append("static FC: stage 3b has not run")
+    else:
+        say(f"  static FC inputs under {fc_root}:")
+        for (at, co), r in sorted(recs.items()):
+            say(f"      atlas={at:<14} cohort={co:<12} "
+                + ("no provenance columns (predates them)" if r is None else
+                   ", ".join(f"{k}={v!r}" for k, v in r.items())))
+        for at in sorted({x for x, _ in recs}):
+            # lists, not sets: a recipe is a dict and a dict is unhashable
+            tr = [recs[(at, c)] for c in tr_co if (at, c) in recs]
+            te = [recs[(at, c)] for c in te_co if (at, c) in recs]
+            if not tr or not te:
+                side = "train" if not tr else "test"
+                say(f"      atlas={at}: no table for the {side} cohort(s) "
+                    f"{tr_co if not tr else te_co} -- fcm cannot use this atlas")
+                todo.append(f"static FC atlas={at}: no table for the {side} side")
+                continue
+            # NOT `a, b`: `a` is this function's argparse namespace, and
+            # rebinding it here made `a.target` twenty lines below raise
+            # AttributeError on a dict. One-letter names do not get to shadow
+            # a parameter.
+            rec_tr, rec_te = tr[0], te[0]
+            if rec_tr is not None and rec_te is not None and rec_tr != rec_te:
+                diff = {k: (rec_tr.get(k), rec_te.get(k)) for k in rec_tr
+                        if rec_tr.get(k) != rec_te.get(k)}
+                say(f"      atlas={at}: the two sides DISAGREE -- "
+                    + "; ".join(f"{k}: train {x!r} test {y!r}"
+                                for k, (x, y) in diff.items())
+                    + ". The fcm transfer refuses this: a difference between "
+                      "the two would be a difference in frames, not in cohort.")
+                todo.append(f"static FC atlas={at}: the two sides disagree")
+
     if todo:
         say("\nNOT finished: " + "; ".join(todo))
         say(f"  Resubmitting is the same command -- a shard whose rows.parquet "

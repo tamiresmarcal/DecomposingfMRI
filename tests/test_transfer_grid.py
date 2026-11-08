@@ -1102,3 +1102,67 @@ class TestThePreflightChecksWhatIsSubmitted:
         block = t[i:i + 500]
         assert "for tree in $TREES" in block
         assert '--tree "$tree"' in block
+
+
+class TestStatusReportsTheFcmInputs:
+    """Both fcm jobs left the queue with nothing on disk, and `--status` could
+    only say "NOTHING under ...". Whether the fcm half CAN run is knowable from
+    the static_fc tree before anything is submitted: both cohorts need a table
+    for one atlas, and the two tables need the same frame recipe."""
+
+    def static_fc(self, root, atlas, cohort, task="Movie", policy="motion",
+                  prov=True):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        d = pd.DataFrame({"sub": ["S1"], "task": task, "r1__r2": .1})
+        if prov:
+            d = d.assign(censor_policy=policy, match_bandpass="[0.01, 0.1]",
+                         zscore_runs=True, pool="task")
+        write_table_atomic(
+            pa.Table.from_pandas(d, preserve_index=False),
+            root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
+            / f"task={task}" / "subjects.parquet")
+
+    def report(self, world, capsys):
+        import transfer_grid
+        put(world["out"], 0, 1)
+        transfer_grid.main(["--status", "--target", "raw",
+                            "--out", str(world["out"]),
+                            "--outputs", str(world["root"])])
+        return capsys.readouterr().out
+
+    def test_it_prints_each_tables_frame_recipe(self, world, capsys):
+        self.static_fc(world["root"], "yeo7", "camcan")
+        self.static_fc(world["root"], "yeo7", "hcp7t_fix", task="MOVIE1")
+        out = self.report(world, capsys)
+        assert "static FC inputs" in out
+        assert "cohort=camcan" in out and "cohort=hcp7t_fix" in out
+        assert "censor_policy='motion'" in out
+
+    def test_a_disagreement_is_named_before_anything_is_submitted(
+            self, world, capsys):
+        self.static_fc(world["root"], "yeo7", "camcan", policy="motion")
+        self.static_fc(world["root"], "yeo7", "hcp7t_fix", task="MOVIE1",
+                       policy="none")
+        out = self.report(world, capsys)
+        assert "the two sides DISAGREE" in out
+        assert "censor_policy: train 'motion' test 'none'" in out
+        assert "the two sides disagree" in out        # and in the NOT finished line
+
+    def test_an_atlas_only_one_side_has_is_called_out(self, world, capsys):
+        self.static_fc(world["root"], "yeo7", "camcan")
+        out = self.report(world, capsys)
+        assert "no table for the test cohort(s) ['hcp7t_fix']" in out
+
+    def test_an_empty_static_fc_tree_says_stage_3b_has_not_run(
+            self, world, capsys):
+        out = self.report(world, capsys)
+        assert "stage 3b has not run" in out
+
+    def test_a_table_predating_the_provenance_columns_is_labelled(
+            self, world, capsys):
+        self.static_fc(world["root"], "yeo7", "camcan", prov=False)
+        self.static_fc(world["root"], "yeo7", "hcp7t_fix", task="MOVIE1")
+        out = self.report(world, capsys)
+        assert "no provenance columns (predates them)" in out
+        assert "DISAGREE" not in out            # absent is not disagreeing
