@@ -1202,8 +1202,11 @@ and the transfer claim quietly becomes something weaker.
 # or a slice first, to see the chain work end to end
 ./slurm/transfer_grid.sh -- --atlas yeo7
 
-# one shard by hand, to read the log
-TREE=bstm $RUN python3 tools/transfer_grid.py --target raw --shard 0 --n-shards 40
+# try the chain on real data, writing NOTHING. `--no-write` exists because a
+# trial run with --shard/--n-shards writes a REAL shard file into the real
+# tree, where it reads as part of the array and poisons `n_shards`
+$RUN python3 tools/transfer_grid.py --target raw --n-shards 282 \
+    --arms cells --models ridge --n-boot 50 --no-write
 ```
 
 `-> outputs/transferred_models/train=camcan/test=hcp7t_fix/targets=<raw|category>/`
@@ -1403,6 +1406,9 @@ Each of these cost real time at least once.
 | MeanShift returns K=1 | bandwidth too wide for this data | it now searches the quantile; `--min-k` refuses a degenerate result |
 | stage 6 ranks fewer state sets than exist | stage 5 was not re-run after stage 4 | `status` reports it as **behind** |
 | the grid spans two censor policies | one aperture built without `--censor-policy` | rebuild that aperture; the flag is required now |
+| `--status` says `40/282 shard(s)` for an array that had 40 | `n_shards` was read from a shard tried BY HAND with `--n-shards 282`, which lands in the real tree and reads as part of the array | delete that shard and resubmit it; use `--no-write` for trial runs. `read_transferred` now refuses a tree whose shards disagree on `n_shards`, `n_boot`, `seed`, arms or models |
+| `IndexError: single positional indexer is out-of-bounds` reading a shard's provenance | a shard file with **no rows** — every cell was skipped and the empty frame was written anyway | `write_transferred` refuses an empty frame now; delete the file and read that job's log for the skip reasons |
+| `$RUN` opens an interactive `[mii] Please select a module` picker | `apptainer` is not loaded and `mii` offers to | `module load apptainer/1.3.5` first — the version the sbatch scripts use. Picking a `StdEnv/2026` entry also swaps gcc, MKL and FlexiBLAS under you |
 | array tasks die `Segmentation fault (core dumped)` inside `scipy.linalg.eigh`, the K=4 sets of a shard finishing and its K=27 sets not | a BLAS thread count **raised** mid-process: OpenBLAS sizes its per-thread buffers on first use, and `threadpool_limits(4)` in a process the image started at `OPENBLAS_NUM_THREADS=1` walks off the end of them. Only RidgeCV's n_features > n_samples branch calls `eigh`, hence only the high-K sets | raise the count in the **environment**, never at runtime: `APPTAINERENV_*`, because `apptainer exec --cleanenv` drops a plain export. `transfer_tables.usable_threads` now clamps instead of raising |
 | `export OMP_NUM_THREADS=4` in the job script, and python reports 1 | `apptainer exec --cleanenv` strips the host environment on the way in | `export APPTAINERENV_OMP_NUM_THREADS=4` (and `SINGULARITYENV_` for older builds) |
 | a crashed job's log says nothing about how far it got | block-buffered stdout is lost when a process dies on a signal | `export PYTHONUNBUFFERED=1` and `python3 -u`; `tools/transfer_grid.py` also installs `faulthandler` |
