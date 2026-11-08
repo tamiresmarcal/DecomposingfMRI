@@ -89,6 +89,52 @@ def reorder(names_te: list[str], X_te: np.ndarray, want: list[str]) -> np.ndarra
     return X_te[:, [idx[n] for n in want]]
 
 
+def impute_from_train(Xtr, Xte, names, blocks, log=print):
+    """NaN filled with the TRAINING column mean; a column train cannot fill dropped.
+
+    WHY THIS IS NEEDED AT ALL. `Study.matrix` fills the COVARIATES
+    (`cov.fillna(cov.mean())`) and drops any subject missing a covariate or
+    the target -- but it does nothing about a NaN in the arm's own columns,
+    because inside one cohort of single runs there are none to find. POOLING
+    makes some: `mean_dwell_s` and `switches_per_min` need the stride,
+    recovered per run from `switches_per_min`, and a run in which nobody
+    switched gives 0/0; `dispersion` needs the latents rather than this table.
+    RidgeCV then raises `Input X contains NaN` from inside `.predict`, seven
+    frames from the column that caused it.
+
+    WHY THE TRAINING MEAN, as in `fcm_transfer_rows`: filled from the test
+    cohort's own mean, every test subject's missing value is nudged toward the
+    centre of the data being scored, which is adaptation to the test set.
+
+    A column that is NaN for EVERY training subject has no mean to fill from,
+    and is dropped from BOTH sides -- the model could not have learned
+    anything from it either. Returns the count of each, to be written into the
+    row rather than left for the reader to wonder about.
+    """
+    Xtr, Xte = np.asarray(Xtr, float), np.asarray(Xte, float)
+    # column by column, because np.nanmean over an all-NaN column warns
+    # ("Mean of empty slice") and a warning in a 9,000-fit loop is noise that
+    # buries the messages that matter
+    keep = np.isfinite(Xtr).any(axis=0) if len(Xtr) else np.zeros(Xtr.shape[1], bool)
+    mu = np.full(Xtr.shape[1], np.nan)
+    if keep.any():
+        mu[keep] = np.nanmean(Xtr[:, keep], axis=0)
+    dropped = [n for n, k in zip(names, keep) if not k]
+    if dropped:
+        log(f"  dropping {len(dropped)} column(s) the training cohort cannot "
+            f"fill (all-NaN there): {', '.join(dropped[:6])}"
+            + (f" +{len(dropped) - 6} more" if len(dropped) > 6 else ""))
+    Xtr, Xte, mu = Xtr[:, keep], Xte[:, keep], mu[keep]
+    names = [n for n, k in zip(names, keep) if k]
+    blocks = [b for b, k in zip(blocks, keep) if k]
+    n_tr, n_te = int(np.isnan(Xtr).sum()), int(np.isnan(Xte).sum())
+    Xtr = np.where(np.isnan(Xtr), mu, Xtr)
+    Xte = np.where(np.isnan(Xte), mu, Xte)
+    return Xtr, Xte, names, blocks, {"n_imputed_train": n_tr,
+                                     "n_imputed_test": n_te,
+                                     "n_columns_dropped": len(dropped)}
+
+
 # ------------------------------------------------------------------ scoring ---
 def bootstrap_ci(y: np.ndarray, pred: np.ndarray, n_boot: int, seed: int,
                  alpha: float = .05) -> tuple[float, float, float]:
@@ -99,21 +145,29 @@ def bootstrap_ci(y: np.ndarray, pred: np.ndarray, n_boot: int, seed: int,
     folds -- and quoting a bare correlation with no interval would hide that
     168 subjects is 168 subjects.
     """
+    def rho(a, b):
+        # Spearman is undefined on a constant input and scipy says so with a
+        # ConstantInputWarning. That is a real outcome -- a model that predicts
+        # one value for everyone has ranked nobody -- but 2,000 draws x 9,000
+        # rows of the same warning buries every message that matters, so the
+        # case is decided here and the NaN returned quietly.
+        if len(np.unique(a)) < 2 or len(np.unique(b)) < 2:
+            return np.nan
+        return stats.spearmanr(a, b).statistic
+
     rng = np.random.default_rng(seed)
-    obs = stats.spearmanr(pred, y).statistic
+    obs = rho(pred, y)
     n = len(y)
-    draws = np.empty(n_boot)
-    for b in range(n_boot):
-        i = rng.integers(0, n, n)
-        # a resample can be constant in y (or in pred); Spearman is undefined
-        # there and returns NaN, which nanpercentile then steps over
-        draws[b] = (np.nan if len(np.unique(y[i])) < 2
-                    else stats.spearmanr(pred[i], y[i]).statistic)
+    draws = np.array([rho(pred[i], y[i])
+                      for i in (rng.integers(0, n, n) for _ in range(n_boot))])
+    if not np.isfinite(draws).any():
+        return float(obs), float("nan"), float("nan")
     lo, hi = np.nanpercentile(draws, [100 * alpha / 2, 100 * (1 - alpha / 2)])
     return float(obs), float(lo), float(hi)
 
 
-def fit_predict(X_tr, y_tr, X_te, model: str, seed: int) -> np.ndarray:
+def fit_predict(X_tr, y_tr, X_te, model: str, seed: int,
+                threads: int = 1) -> np.ndarray:
     """One model, fitted on EVERY training subject, applied to the test set.
 
     `make_model`, not `hads_tables._fit`: that one calls `score_once` and hands
@@ -127,7 +181,11 @@ def fit_predict(X_tr, y_tr, X_te, model: str, seed: int) -> np.ndarray:
     from fmri_decomposition.bstm_selection import make_model
 
     est, kind, _ = make_model(model, seed)
-    with threadpool_limits(1):     # many tiny fits; let the outer loop have the cores
+    # One thread by default: inside a joblib loop a threaded estimator
+    # oversubscribes the node and runs slower than either alone. The sharded
+    # script has no such loop -- one process, one cell at a time -- so there
+    # `threads` is the task's whole cpu allocation.
+    with threadpool_limits(threads):
         if kind == "clf":
             # the only classifier here is `logistic`, binarised at y > 0 the
             # way score_once does, and its prediction is a probability so that
@@ -176,7 +234,7 @@ def _reason(e) -> str:
 
 def transfer_rows(train: Study, test: Study, arms=None, models=None,
                   sets=None, seed: int = 0, n_boot: int = 2000,
-                  log=print) -> pd.DataFrame:
+                  threads: int = 1, log=print) -> pd.DataFrame:
     """One row per (atlas, window, states, task, target, arm, model).
 
     `score` is Spearman on the test cohort; `lo`/`hi` its bootstrap interval;
@@ -266,16 +324,30 @@ def transfer_rows(train: Study, test: Study, arms=None, models=None,
                         continue
                     want = align_columns(ntr, nte)
                     Xte = reorder(nte, Xte, want)
+                    # before any fit: a NaN that only pooling creates would
+                    # otherwise surface as `Input X contains NaN` from inside
+                    # RidgeCV.predict, with nothing naming the column
+                    Xtr, Xte, want, btr, imp = impute_from_train(
+                        Xtr, Xte, want, btr, log=lambda *_: None)
+                    if not len(want):
+                        skipped[f"{arm}: every column was NaN across the "
+                                f"training cohort"] += 1
+                        continue
                     cov = [i for i, b in enumerate(btr) if b == "covariates"]
 
                     for model in models:
                         if model not in base:
                             bp = fit_predict(Xtr[:, cov], ytr, Xte[:, cov],
-                                             model, seed)
+                                             model, seed, threads)
                             base[model] = bootstrap_ci(yte, bp, n_boot, seed)
                         bsc, blo, bhi = base[model]
-                        pred = fit_predict(Xtr, ytr, Xte, model, seed)
+                        pred = fit_predict(Xtr, ytr, Xte, model, seed, threads)
                         sc, lo, hi = bootstrap_ci(yte, pred, n_boot, seed)
+                        # a model that predicts ONE value for everyone has
+                        # ranked nobody: Spearman is undefined and the score is
+                        # NaN. Kept as a row, because it is an outcome, and
+                        # flagged, because otherwise the NaN looks like a bug
+                        const = len(np.unique(pred)) < 2
                         rows.append({
                             "atlas": s.atlas, "window_s": s.window_s,
                             "states": s.states, "K": n_states(s.states),
@@ -286,7 +358,8 @@ def transfer_rows(train: Study, test: Study, arms=None, models=None,
                             "over_base": sc > bsc,
                             "n_train": len(ytr), "n_test": len(yte),
                             "n_covariates": len(cov),
-                            "n_features": Xtr.shape[1]})
+                            "n_features": Xtr.shape[1],
+                            "pred_constant": bool(const), **imp})
     for why, k in skipped.most_common():
         log(f"  skipped {k}x: {why}")
     if not rows:
@@ -372,7 +445,11 @@ def pool_tasks(d: "pd.DataFrame", n_states: int, log=print) -> "pd.DataFrame":
                 f"condition at one aperture.")
         s = float(stride[ok][0]) if ok.sum() else np.nan
 
-        row = dict(zip(cells, counts / tot_tr if tot_tr else np.nan))
+        # np.full, not a bare np.nan: zip() over a float raises TypeError, so a
+        # subject whose pooled runs hold no transition at all would have
+        # crashed the pooling instead of coming out as a missing row.
+        row = dict(zip(cells, counts / tot_tr if tot_tr
+                       else np.full(len(cells), np.nan)))
         row.update({f: (g[f].to_numpy(float) * w).sum() / w.sum()
                     for f in occ})                       # window counts, added
         episodes = sw.sum() + len(g)                     # switches + 1 per run
@@ -556,7 +633,7 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                       models=None, covariates=None, categorical=("Sex",),
                       max_missing: float = .10, seed: int = 0,
                       n_boot: int = 2000, pool_test: bool = True,
-                      log=print) -> pd.DataFrame:
+                      threads: int = 1, log=print) -> pd.DataFrame:
     """The fcm half of the transfer, so the four tables can be compared.
 
     Mirrors fcm_selection, split into a fit and an apply. Two things have to
@@ -645,10 +722,10 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                     for model in models:
                         if model not in base:
                             bp = fit_predict(Ctr_[ok_tr], ytr[ok_tr],
-                                             Cte_[ok_te], model, seed)
+                                             Cte_[ok_te], model, seed, threads)
                             base[model] = bootstrap_ci(yte[ok_te], bp, n_boot, seed)
                         bsc, blo, bhi = base[model]
-                        pred = fit_predict(Xtr, ytr[ok_tr], Xte, model, seed)
+                        pred = fit_predict(Xtr, ytr[ok_tr], Xte, model, seed, threads)
                         sc, lo, hi = bootstrap_ci(yte[ok_te], pred, n_boot, seed)
                         rows.append({
                             "atlas": atlas, "window_s": np.nan,
@@ -690,3 +767,141 @@ def _cov_frame(pheno, quality, subs, covariates, categorical):
     X = pd.get_dummies(X, columns=[c for c in categorical if c in X.columns],
                        drop_first=True, dummy_na=False).astype(float)
     return X.fillna(X.mean())
+
+
+def drop_degenerate(rows: "pd.DataFrame", log=print) -> "pd.DataFrame":
+    """The rows a figure can draw, with the ones it cannot COUNTED, not hidden.
+
+    A score is NaN when the model predicted one value for every test subject:
+    Spearman has nothing to rank. That is an outcome and it stays on disk, but
+    B1 takes `idxmax` per group and dies on an all-NaN group ("Encountered all
+    NA values"), so it is filtered here -- out loud, with the models it
+    happened to, because "hgb predicted a constant for every configuration" is
+    a finding about hgb, not a plotting detail.
+    """
+    bad = rows["score"].isna() | rows["base_score"].isna()
+    if bad.any():
+        by = rows[bad].groupby(["model", "arm"], dropna=False).size()
+        log(f"  {int(bad.sum())} of {len(rows)} row(s) have NO score: the model "
+            f"predicted one value for every test subject, so Spearman has "
+            f"nothing to rank. By (model, arm): "
+            + "; ".join(f"{m}/{a} x{n}" for (m, a), n in by.items()))
+    return rows[~bad].reset_index(drop=True)
+
+
+# ------------------------------------------------------------------- on disk ---
+# The grid is ~9,000 fits on every training subject, which is hours in a
+# notebook kernel and minutes as a SLURM array. So the fits happen in
+# tools/transfer_grid.py, one shard per array task, and the notebook READS the
+# rows and draws. The layout:
+#
+#   <root>/train=camcan/test=hcp7t_fix/targets=raw/tree=bstm/shard=07/rows.parquet
+#
+# `targets` is which Cam-CAN column set was used (raw | category), because
+# those are two different analyses and must never be concatenated by accident.
+GRID_KEYS = ["atlas", "window_s", "states"]
+
+
+def grid_hash(sets: "pd.DataFrame") -> str:
+    """A fingerprint of the WHOLE grid each shard was cut from.
+
+    Shards are `sets.iloc[i::n]` of a sorted list, so they only fit together
+    if every task saw the same list. Stage 5a finishing another cohort between
+    two array tasks would silently renumber the sets, and the shards would
+    then cover an overlapping, gap-ridden subset of two different grids. The
+    reader compares these and refuses.
+    """
+    import hashlib
+    d = sets[GRID_KEYS].astype(str).sort_values(GRID_KEYS)
+    return hashlib.md5(d.to_csv(index=False).encode()).hexdigest()[:16]
+
+
+def shard_of(sets: "pd.DataFrame", shard: int, n_shards: int) -> "pd.DataFrame":
+    """Shard `shard` of `n_shards`, from the grid sorted deterministically."""
+    if not (0 <= shard < n_shards):
+        raise SystemExit(f"shard must be in [0, {n_shards}), not {shard}")
+    d = sets.sort_values(GRID_KEYS).reset_index(drop=True)
+    return d.iloc[shard::n_shards].reset_index(drop=True)
+
+
+def transfer_dir(root, train: str, test: str, target_set: str, tree: str):
+    from pathlib import Path
+    return (Path(root) / f"train={train}" / f"test={test}"
+            / f"targets={target_set}" / f"tree={tree}")
+
+
+def write_transferred(rows: "pd.DataFrame", root, *, train: str, test: str,
+                      target_set: str, tree: str, shard: int, n_shards: int,
+                      **provenance) -> "Path":
+    """One shard's rows, with what produced them written INTO the frame.
+
+    Provenance as columns rather than a sidecar file: a frame that travels
+    without it is a frame somebody will plot next year not knowing which
+    target set, which seed or how many bootstrap draws it came from.
+    """
+    import pyarrow as pa
+    from fmri_decomposition.io import write_table_atomic
+
+    d = rows.copy()
+    for k, v in {"train_cohorts": train, "test_cohorts": test,
+                 "target_set": target_set, "tree": tree, "shard": int(shard),
+                 "n_shards": int(n_shards), **provenance}.items():
+        d[k] = v
+    path = (transfer_dir(root, train, test, target_set, tree)
+            / f"shard={int(shard):02d}" / "rows.parquet")
+    return write_table_atomic(pa.Table.from_pandas(d, preserve_index=False), path)
+
+
+def read_transferred(root, target_set: str, train: str = "camcan",
+                     test: str = "hcp7t_fix", trees=("bstm", "fcm"),
+                     require_complete: bool = True, log=print) -> "pd.DataFrame":
+    """Every shard of one analysis, concatenated, or a refusal saying what is missing.
+
+    THE POINT OF THE CHECKS. A half-finished array reads as a perfectly valid
+    frame -- just a smaller multiverse -- and "the best of 282 state sets" from
+    the 120 that happened to have finished is a different claim with the same
+    words. So: every shard a frame says exists must be present, and every
+    shard must have been cut from the same grid.
+
+    `require_complete=False` is for watching a run in progress, and says so in
+    the log rather than in the figure.
+    """
+    from pathlib import Path
+
+    frames, missing = [], []
+    for tree in trees:
+        base = transfer_dir(root, train, test, target_set, tree)
+        files = sorted(base.glob("shard=*/rows.parquet"))
+        if not files:
+            missing.append(f"tree={tree}: nothing under {base}")
+            continue
+        d = pd.concat(map(pd.read_parquet, files), ignore_index=True)
+        hashes = sorted(set(d["grid_hash"])) if "grid_hash" in d else []
+        if len(hashes) > 1:
+            raise SystemExit(
+                f"tree={tree}: the shards were cut from {len(hashes)} different "
+                f"grids ({hashes}). The state sets on disk changed while the "
+                f"array was running, so the shards overlap and leave gaps. "
+                f"Delete {base} and resubmit.")
+        n = int(d["n_shards"].iloc[0]) if "n_shards" in d else len(files)
+        have = sorted(set(d["shard"])) if "shard" in d else list(range(len(files)))
+        gaps = [i for i in range(n) if i not in set(have)]
+        log(f"  tree={tree}: {len(d):,} row(s) from {len(have)}/{n} shard(s)"
+            + (f"  MISSING {gaps}" if gaps else ""))
+        if gaps:
+            missing.append(f"tree={tree}: shard(s) {gaps} of {n} are not on disk")
+        frames.append(d)
+    if not frames:
+        raise SystemExit(
+            f"no rows under {Path(root)} for targets={target_set}, tree(s) "
+            f"{list(trees)}: has tools/transfer_grid.py run?\n  "
+            + "\n  ".join(missing))
+    if missing and require_complete:
+        raise SystemExit(
+            "the transfer grid is incomplete:\n  " + "\n  ".join(missing)
+            + "\n  A smaller multiverse reads as a valid one, and 'the best of "
+              "282 state sets' from the shards that happened to finish is a "
+              "different claim in the same words. Check the array's logs, "
+              "resubmit the missing shard(s), or pass "
+              "require_complete=False to look at a run in progress.")
+    return pd.concat(frames, ignore_index=True)

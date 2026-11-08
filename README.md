@@ -68,6 +68,15 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      in one `cohort` column
                                      -> outputs/fcm_selection/task=<k>/target=<t>/
 
+5d   transfer_grid.sh                TRAIN on one cohort, TEST on the other:
+                                     one fit on every Cam-CAN subject, one
+                                     Spearman on HCP, no folds. An ARRAY, because
+                                     each fit is on the whole training cohort
+                                     rather than four fifths of it -- ~9,000 fits
+                                     over the grid. 5b's within-cohort CV stays
+                                     the primary result; this is confirmation.
+                                     -> outputs/transferred_models/
+
 any  fmri-decomp status              read-only: what every stage holds, and the
                                      disagreements that span two of them
 ```
@@ -171,6 +180,22 @@ outputs/
 │       │                and `K`. No delta column anywhere: the arms share
 │       │                folds, so a difference between rows is not a test.
 │       └── scores.csv  DESIGN.md  figures/
+│
+├── transferred_models/                           STAGE 5d -- the transfer test
+│   └── train=camcan/test=hcp7t_fix/targets=raw/
+│       ├── tree=bstm/shard=00/rows.parquet ... shard=39/
+│       └── tree=fcm/ shard=00/rows.parquet
+│       One row per (state set, task, target, arm, model), with its Spearman
+│       on the test cohort, a bootstrap interval over the TEST SUBJECTS (there
+│       are no folds) and a covariates-only baseline trained the same way.
+│       `targets=` is which Cam-CAN column set was used, raw or category:
+│       two different analyses that must never be concatenated.
+│       Shards are sets[i::n] of the grid sorted by (atlas, window_s, states),
+│       and every row carries `grid_hash` -- so a reader can tell shards cut
+│       from two different grids, which is what stage 5a finishing another
+│       cohort mid-array would produce. notebooks/transfer_tables.py
+│       read_transferred() REFUSES a half-finished grid: a smaller multiverse
+│       reads as a valid one.
 │
 └── meta/
     ├── atlas-harvardoxford_labels.csv            atlas-level: cohort-independent

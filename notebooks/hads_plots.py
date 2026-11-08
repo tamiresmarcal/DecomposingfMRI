@@ -226,6 +226,26 @@ def draw_band(ax, mean, sd, x=None):
     ax.plot([lo, hi], [mean] * 2, color=INK2, ls="--", lw=.9)
     ax.axhline(0, color=MUTED, lw=.6)
 
+def _band(base, key):
+    """One baseline's (mean, sd), or None when that (phenotype, model) has no row.
+
+    A model can legitimately have NO row for one target: if it predicted the
+    same value for every test subject then Spearman is undefined, the score is
+    NaN and transfer_tables.drop_degenerate takes the row out. A figure that
+    indexes the baseline directly dies there -- on a panel whose honest content
+    is "nothing to draw".
+    """
+    try:
+        return tuple(base.loc[key])
+    except (KeyError, IndexError):
+        return None
+
+
+def _nothing(ax, what="no scorable row"):
+    ax.text(.5, .5, what, transform=ax.transAxes, ha="center", va="center",
+            fontsize=8, color=MUTED)
+
+
 def fig_rankings(rows, cfg, above_both):
     """B1: every row of the four rankings, one block of panels per model over its own baseline.
     above_both(d) -> the rows above their baseline at every task (Study.above_both)."""
@@ -239,6 +259,11 @@ def fig_rankings(rows, cfg, above_both):
         return {task: g.loc[g["mean"].idxmax()] for task, g in t.groupby("task", sort=False)}
 
     def plot_runs(ax, d):
+        if d.empty:                     # this model scored nothing for this target
+            ax.set_xlim(-.6, len(runs) - .4)
+            ax.set_xticks(range(len(runs)), [f"{tree}\n{task}" for task, tree in runs])
+            _nothing(ax)
+            return [], "no row for this model and target"
         rng = np.random.default_rng(0)
         keep = above_both(d)
         shown = keep[:cfg.highlight_max]
@@ -289,7 +314,11 @@ def fig_rankings(rows, cfg, above_both):
             handles, title = plot_runs(ax, rows[(rows["phenotype"] == lab) & (rows["model"] == model)])
             ax.set_title(f"{model} · {lab}")
             leg.axis("off")
-            leg.legend(handles=handles, loc="upper center", fontsize=7, title=title, title_fontsize=7)
+            if handles:
+                leg.legend(handles=handles, loc="upper center", fontsize=7, title=title,
+                           title_fontsize=7)
+            else:
+                leg.set_title(title, fontsize=7)
         axes[2 * k, 0].set_ylabel(cfg.score_name)
     fig.suptitle("B1  every row · dashed = that model's Age + Sex baseline, band ± sd · coloured = above it at "
                  f"{' and '.join(tasks)}, ± {cfg.spread_name}", fontsize=8, color=INK2, y=.995)
@@ -318,9 +347,15 @@ def fig_factors(rows, cfg):
         ax.set_xlim(-.6, len(lev) - .4)
         if col == "model":                                     # each model over its own band
             for i, v in enumerate(lev):
-                draw_band(ax, *base.loc[(lab, v)], (i - .45, i + .45))
+                b = _band(base, (lab, v))
+                if b:
+                    draw_band(ax, *b, (i - .45, i + .45))
         else:
-            draw_band(ax, *base.loc[(lab, ms[0])])
+            b = _band(base, (lab, ms[0]))
+            if b:
+                draw_band(ax, *b)
+        if d.empty:
+            _nothing(ax)
         for j, task in enumerate(tasks):
             dx, c = (j - (len(tasks) - 1) / 2) * .3, colour[task]
             for i, v in enumerate(lev):
@@ -816,7 +851,11 @@ def fig_k_curve(rows, cfg, trees=("bstm",)):
         top, mid, bot = axes[0][c], axes[1][c], axes[2][c]
         d = pool[pool["phenotype"] == lab]
         top.set_xlim(min(ks) - .5, max(ks) + .5)
-        draw_band(top, *base.loc[(lab, models[0])])
+        b = _band(base, (lab, models[0]))
+        if b:
+            draw_band(top, *b)
+        if d.empty:
+            _nothing(top)
         for task in tasks:
             s = d[d["task"] == task]
             if s.empty:

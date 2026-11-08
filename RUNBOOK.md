@@ -1177,6 +1177,74 @@ Each run **wipes its own `task=`/`target=` directory before writing** — and on
 that one, so a rest run cannot empty the movie ranking beside it. Back up a
 result you care about first.
 
+### PHASE 5 — TRAIN ON ONE COHORT, TEST ON THE OTHER
+
+Phases 3 and 4 cross-validate inside Cam-CAN: five folds, each fitting as many
+coefficients as the whole model has. That is what makes 168 HCP subjects a poor
+*training* cohort and a decent *test set*, and this phase splits the two jobs.
+Simulated with this pipeline's own estimator, those same 168 subjects give about
+**11%** power to detect a true R² of 0.20 as a training cohort and about **83%**
+power to detect ρ = 0.20 as a test set.
+
+**It needs no equating of the two questionnaires.** Spearman uses ranks. The
+prediction comes out in Cam-CAN's units and the truth is in the ASR's, and the
+two are never compared as values — only as order.
+
+Prerequisite: HCP has to be *through stage 5a with the same fit*, which is
+`slurm/project_and_select.sh` with `STOP_AFTER=transitions`. The pre-flight
+there refuses rather than refitting; a refit would change the state definitions
+and the transfer claim quietly becomes something weaker.
+
+```bash
+# both target sets (raw and category), 40 shards + the fcm job each
+./slurm/transfer_grid.sh
+
+# or a slice first, to see the chain work end to end
+./slurm/transfer_grid.sh -- --atlas yeo7
+
+# one shard by hand, to read the log
+TREE=bstm $RUN python3 tools/transfer_grid.py --target raw --shard 0 --n-shards 40
+```
+
+`-> outputs/transferred_models/train=camcan/test=hcp7t_fix/targets=<raw|category>/`
+
+**An array here, unlike stage 5b.** There the grid stays in one process because
+every cell needs the same small tables in memory and joblib owns the
+parallelism. Here each fit is on *every* training subject — 649 rows by up to
+729 cells, no folds — so the fits are big and few rather than small and many,
+and a shard that hits the walltime is one shard to resubmit. Threads go
+*inside* the fit; `OMP_NUM_THREADS` is left alone.
+
+Then `notebooks/13_camcan_to_hcp.ipynb` reads it and draws. The reader
+**refuses a half-finished grid**: a smaller multiverse reads as a valid one,
+and "the best of 282 state sets" from the shards that happened to finish is a
+different claim in the same words. Resubmitting is the same command — a shard
+whose `rows.parquet` exists is skipped.
+
+Three things to read in the notebook's own output before anything else:
+
+* **the two cohorts' Age range, Sex counts and target n**, printed by the setup
+  cell. A covariate read from the wrong column is the failure mode here, and
+  HCP spells all of them differently (`Gender`, `Age_in_Yrs`, and an `Age` that
+  is the open-access *band*).
+* **how many values were imputed.** Pooling HCP's four runs leaves
+  `mean_dwell_s` and `switches_per_min` undefined for a subject whose runs
+  record no switch, and `dispersion` needs the latents rather than the
+  transition table. Those are filled with the **training** cohort's column
+  mean, never HCP's. A large count means the `dynamics` arm is partly
+  measuring the imputation.
+* **how many rows had no score at all.** A model that predicted one value for
+  every test subject has ranked nobody; the row stays on disk and the notebook
+  says which (model, arm) it happened to. "hgb predicted a constant
+  everywhere" is a finding about hgb.
+
+**What a null here would and would not mean.** Three things must hold for a
+score to appear — the state space must carry over from 3T to 7T, the model from
+one age range to another, and the two questionnaires must measure the same
+thing in the same direction. A zero does not say which failed. So the
+within-Cam-CAN result stays the primary finding and this is confirmation; if
+Cam-CAN's own CV is null, a null here adds nothing.
+
 ### PHASES 2-3 as one chained submission
 
 Phase 1 stays separate: its cohorts are independent and `activation_and_dfc.sh` already
