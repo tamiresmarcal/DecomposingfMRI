@@ -732,19 +732,28 @@ def censor_policies(root, cohorts) -> dict:
     for stem in ("transitions", "latents"):
         for q in (Path(root) / stem).rglob("*.parquet"):
             c = hive(q, "cohort")
-            if c not in want or c in out:
+            if c not in want or out.get(c):
                 continue
+            # PRESENT with no policy, and ABSENT from the tree, are different
+            # facts and only one of them is about censoring. A key with None
+            # means the cohort has tables and none of them records a policy;
+            # NO key means the cohort is not in this tree at all, which is a
+            # stale entry in `cohorts` rather than a missing stage.
             v = _meta(q, "censor_policy")
-            if v is not None:
-                out[c] = str(v)
-            if want <= set(out):
+            out[c] = str(v) if v is not None else out.get(c)
+            if want <= set(out) and all(out.values()):
                 return out
     return out
 
 
 def censor_policy_of(root, cohort: str) -> str | None:
-    """One cohort's state-table censor policy. See `censor_policies`."""
+    """One cohort's state-table censor policy, or None. See `censor_policies`."""
     return censor_policies(root, [cohort]).get(cohort)
+
+
+def cohort_in_state_trees(root, cohort: str) -> bool:
+    """Does this cohort have ANY state table? See `censor_policies`."""
+    return cohort in censor_policies(root, [cohort])
 
 
 # What static-fc records about the FRAMES it correlated. The two cohorts must
@@ -846,11 +855,27 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
             short = sorted({c for v in gaps.values() for c in v})
             # THE MISSING COHORT'S OWN state-tree policy, not a sibling's.
             # Copying the sibling's was wrong in the one case that matters:
-            # camcan's trees carry 'motion' and camcan_rest's carry none, so
-            # the command this printed would have censored camcan_rest's
-            # static FC and left its fcm arm disagreeing with its own bstm arm
-            # -- the opposite of the decision it was meant to serve.
+            # a sibling's policy is not this cohort's: where the two differ,
+            # the printed command would build frames that disagree with the
+            # cohort's own state trees.
             own = {c: censor_policy_of(root, c) for c in short}
+            state_seen = censor_policies(root, short)
+            stale = [c for c in short if c not in state_seen]
+            if stale:
+                raise SystemExit(
+                    f"the {side} cohort list includes {stale}, which "
+                    + ("is" if len(stale) == 1 else "are")
+                    + " not in the output tree AT ALL -- no transitions, no "
+                      "latents, no static FC.\n"
+                      "  This is a stale entry in `cohorts`, not a missing "
+                      "stage, and no job will fix it. Cam-CAN's movie and rest "
+                      "are ONE cohort with two tasks (see README's output "
+                      "structure and tests/test_camcan_one_cohort.py: two "
+                      "cohort values for one group of people would make the "
+                      "tree claim they were two samples), so the rest data is "
+                      f"cohort=camcan task=Rest.\n  Drop {stale} from the "
+                      f"{side} cohort list; the task map already selects the "
+                      f"condition.")
             if len(short) < len(cfg.cohorts):
                 # SOME of the side is there: a partial side, which reads as
                 # "static FC has run" everywhere except where it matters
@@ -982,10 +1007,10 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                         f"  Re-run stage 3b with --censor-policy "
                         f"{sorted(want)[0]}, or say in the write-up that the "
                         f"fcm arm is on different frames.")
-            # ONE recipe per side across tasks, too. The train side's movie
-            # cells come from camcan and its rest cells from camcan_rest, and
-            # those are two separate runs of stage 3b -- so rest-vs-movie
-            # could be a preprocessing difference wearing a condition's name.
+            # ONE recipe per side across tasks, too. Where a side's two
+            # conditions come from different cohorts -- or from two runs of
+            # stage 3b on one cohort -- rest-vs-movie could be a
+            # preprocessing difference wearing a condition's name.
             for side, rec in (("train", rtr), ("test", rte)):
                 prev = side_recipe.setdefault((side, atlas), (task, rec))
                 if prev[1] != rec and allow_frame_mismatch:

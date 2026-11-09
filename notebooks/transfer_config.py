@@ -75,7 +75,17 @@ HCP_TASKS = {"rest": "REST", "movie": "MOVIE"}
 COVARIATES = ["Age", "Sex", "n_transitions"]
 BASELINE = ["Age", "Sex"]
 MODELS = ["ridge", "hgb"]
-TRAIN_COHORTS = ["camcan", "camcan_rest"]
+# ONE cohort, two conditions. Cam-CAN's movie and rest are the same people, so
+# two cohort values would make the output tree claim they were two samples --
+# README's output structure says so and tests/test_camcan_one_cohort.py pins
+# it. The rest data is `cohort=camcan task=Rest`; CC_TASKS selects it.
+#
+# A `camcan_rest` here matched nothing and was harmless for years, because
+# `load_set` filters cohorts with `in` and an absent name simply never hits.
+# It became a hard failure the moment the fcm precondition started REQUIRING
+# every listed cohort to have a static-FC table, and it sent two cluster jobs
+# and a long diagnosis after a cohort that does not exist.
+TRAIN_COHORTS = ["camcan"]
 TEST_COHORTS = ["hcp7t_fix"]
 
 

@@ -91,7 +91,12 @@ class Settings:
     # its `pool_tasks` here; it is a setting rather than an import because
     # hads_tables must not depend on the transfer notebook's module.
     pool_fn: object | None = None
-    cohorts: list = field(default_factory=lambda: ["camcan", "camcan_rest"])
+    # ONE cohort, two conditions: Cam-CAN's movie and rest are the same people
+    # (README's output structure, tests/test_camcan_one_cohort.py). A
+    # `camcan_rest` here matched nothing -- `load_set` filters with `in` -- and
+    # cost two cluster jobs once something started requiring every listed
+    # cohort to exist.
+    cohorts: list = field(default_factory=lambda: ["camcan"])
     covariates: list = field(default_factory=lambda: ["Age", "Sex", "n_transitions"])
     categorical: list = field(default_factory=lambda: ["Sex"])
     # Each cohort spells the covariates its own way: HCP has Gender and

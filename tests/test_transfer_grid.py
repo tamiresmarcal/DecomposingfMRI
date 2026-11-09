@@ -283,8 +283,13 @@ def world(tmp_path):
     hc = [f"{100000 + i}" for i in range(20)]
     for st in (f"HMM1_pca3_{K}", f"KMeans_pca3_{K}"):
         for w in (-1.0, 30.0):
+            # ONE cohort, two tasks. The fixture used to put rest under
+            # `cohort=camcan_rest`, mirroring a stale entry in the Settings
+            # default -- so it tested a tree shape the project does not have.
+            # README's output structure and tests/test_camcan_one_cohort.py:
+            # Cam-CAN's movie and rest are the same people.
             write_transitions(root, "camcan", "Movie", cc, w, st)
-            write_transitions(root, "camcan_rest", "Rest", cc, w, st)
+            write_transitions(root, "camcan", "Rest", cc, w, st)
             for i in (1, 2, 3, 4):
                 write_transitions(root, "hcp7t_fix", f"MOVIE{i}", hc, w, st)
                 write_transitions(root, "hcp7t_fix", f"REST{i}", hc, w, st)
@@ -292,6 +297,24 @@ def world(tmp_path):
         write_summary(root, tree, "movie", "additional_HADS_anx_category")
     return dict(root=root, camcan=camcan_tree(tmp_path, cc),
                 hcp=hcp_file(tmp_path, hc), out=tmp_path / "transferred_models")
+
+
+def second_cohort(world, monkeypatch, name="camcan_rest"):
+    """Give the train side a second cohort that really is in the tree.
+
+    The "missing static FC" path needs a cohort with transitions and no
+    static-FC table. Cam-CAN is one cohort in this project, so a test of that
+    path has to make a second one rather than borrow a name that matches
+    nothing -- which is what the old fixtures did, and what sent two cluster
+    jobs after a cohort that does not exist.
+    """
+    import transfer_config as tc
+    for st in (f"HMM1_pca3_{K}", f"KMeans_pca3_{K}"):
+        for w in (-1.0, 30.0):
+            write_transitions(world["root"], name, "Rest",
+                              [f"CC{i:04d}" for i in range(40)], w, st)
+    monkeypatch.setattr(tc, "TRAIN_COHORTS", ["camcan", name])
+    return name
 
 
 def run(world, *args):
@@ -1132,10 +1155,12 @@ class TestStatusReportsTheFcmInputs:
         return capsys.readouterr().out
 
     def whole_train_side(self, root, atlas="yeo7", **kw):
-        """transfer_config.TRAIN_COHORTS is camcan AND camcan_rest, and
-        `_fc_cell` needs a table for both."""
-        self.static_fc(root, atlas, "camcan", task="Movie", **kw)
-        self.static_fc(root, atlas, "camcan_rest", task="Rest", **kw)
+        """A table for every cohort transfer_config lists on the train side --
+        one, since Cam-CAN is one cohort with two conditions."""
+        import transfer_config as tc
+        for c in tc.TRAIN_COHORTS:
+            self.static_fc(root, atlas, c,
+                           task="Rest" if c.endswith("rest") else "Movie", **kw)
 
     def test_it_prints_each_tables_frame_recipe(self, world, capsys):
         self.whole_train_side(world["root"])
@@ -1160,10 +1185,11 @@ class TestStatusReportsTheFcmInputs:
         out = self.report(world, capsys)
         assert "the test side is MISSING ['hcp7t_fix']" in out
 
-    def test_a_side_missing_ONE_of_its_cohorts_is_called_out(self, world, capsys):
+    def test_a_side_missing_ONE_of_its_cohorts_is_called_out(self, world, capsys, monkeypatch):
         """The real failure: camcan had a table, camcan_rest did not, and
         `_fc_cell` concatenates before filtering by task -- so all six
         (atlas, task) cells skipped, the movie ones included."""
+        second_cohort(world, monkeypatch)
         self.static_fc(world["root"], "yeo7", "camcan", task="Movie")
         self.static_fc(world["root"], "yeo7", "hcp7t_fix", task="MOVIE1")
         out = self.report(world, capsys)
@@ -1218,6 +1244,11 @@ class TestAPartialSide:
         train, test = studies(tmp_path, TR, TE)
         train.cfg.cohorts = ["camcan", "camcan_rest"]
         r = train.cfg.root
+        # the second cohort has to be IN the tree: a name that matches nothing
+        # is a stale entry, which is a different refusal
+        write_transitions(r, "camcan_rest", "Rest",
+                          [f"CC{i:04d}" for i in range(40)], WIN,
+                          f"HMM1_pca3_{K}")
         self.static_fc(r, "yeo7", "camcan", "Movie")
         if with_rest:
             self.static_fc(r, "yeo7", "camcan_rest", "Rest", policy=rest_policy)
@@ -1298,7 +1329,8 @@ class TestTheReportBuildsTheCommand:
         return capsys.readouterr().out
 
     def test_it_prints_a_runnable_line_for_the_missing_cohort(
-            self, world, capsys):
+            self, world, capsys, monkeypatch):
+        second_cohort(world, monkeypatch)
         for at in ("harvardoxford", "networks", "yeo7"):
             self.static_fc(world["root"], at, "camcan", "Movie")
             self.static_fc(world["root"], at, "hcp7t_fix", "MOVIE1")
@@ -1312,17 +1344,19 @@ class TestTheReportBuildsTheCommand:
         assert "--censor-policy" not in line
         assert "<" not in line and ">" not in line
 
-    def test_one_line_for_three_atlases_not_three_lines(self, world, capsys):
+    def test_one_line_for_three_atlases_not_three_lines(self, world, capsys, monkeypatch):
+        second_cohort(world, monkeypatch)
         for at in ("harvardoxford", "networks", "yeo7"):
             self.static_fc(world["root"], at, "camcan", "Movie")
             self.static_fc(world["root"], at, "hcp7t_fix", "MOVIE1")
         out = self.report(world, capsys)
         assert len([l for l in out.splitlines() if "static_fc.sbatch" in l]) == 1
 
-    def test_non_default_frame_settings_are_carried_over(self, world, capsys):
+    def test_non_default_frame_settings_are_carried_over(self, world, capsys, monkeypatch):
         """Band, z-score and pool come from a sibling's static FC -- the state
         trees do not record them. The policy comes from the state trees, so
         this stamps them too."""
+        second_cohort(world, monkeypatch)
         import pyarrow.parquet as pq
         from fmri_decomposition.io import write_table_atomic
         for q in (world["root"] / "transitions").rglob("*.parquet"):
@@ -1351,9 +1385,10 @@ class TestTheReportBuildsTheCommand:
         lines = [l for l in out.splitlines() if "static_fc.sbatch" in l]
         assert any("NOTE no sibling table" in l for l in lines)
 
-    def test_it_never_inherits_the_other_sides_settings(self, world, capsys):
+    def test_it_never_inherits_the_other_sides_settings(self, world, capsys, monkeypatch):
         """The test side's frames are not the train side's to inherit, whether
         or not the train side's own state trees record a policy."""
+        second_cohort(world, monkeypatch)
         self.static_fc(world["root"], "yeo7", "camcan", "Movie",
                        policy="motion", band="[0.01, 0.1]")
         self.static_fc(world["root"], "yeo7", "hcp7t_fix", "MOVIE1",
@@ -1443,7 +1478,8 @@ class TestTheFcmDryRunUsesTheSameRule:
     of a side had a table, and `_fc_cell` needs ALL of them."""
 
     def test_an_atlas_missing_one_cohort_is_not_counted_as_ready(
-            self, world, capsys):
+            self, world, capsys, monkeypatch):
+        second_cohort(world, monkeypatch)
         import pyarrow as pa
         from fmri_decomposition.io import write_table_atomic
         for co, task in (("camcan", "Movie"), ("hcp7t_fix", "MOVIE1")):
@@ -1641,7 +1677,8 @@ class TestTheCommandUsesTheCohortsOwnPolicy:
         return capsys.readouterr().out
 
     def test_a_cohort_whose_state_trees_have_no_policy_gets_no_flag(
-            self, world, capsys):
+            self, world, capsys, monkeypatch):
+        second_cohort(world, monkeypatch)
         for at in ("harvardoxford", "networks", "yeo7"):
             self.static_fc(world["root"], at, "camcan", "Movie", "motion")
             self.static_fc(world["root"], at, "hcp7t_fix", "MOVIE1", "motion")
@@ -1650,7 +1687,8 @@ class TestTheCommandUsesTheCohortsOwnPolicy:
         assert "--censor-policy" not in line
         assert "--match-bandpass 0.01 0.1" in line     # the sibling still supplies these
 
-    def test_and_it_says_why_the_flag_is_absent(self, world, capsys):
+    def test_and_it_says_why_the_flag_is_absent(self, world, capsys, monkeypatch):
+        second_cohort(world, monkeypatch)
         for at in ("yeo7",):
             self.static_fc(world["root"], at, "camcan", "Movie", "motion")
             self.static_fc(world["root"], at, "hcp7t_fix", "MOVIE1", "motion")
@@ -1660,7 +1698,8 @@ class TestTheCommandUsesTheCohortsOwnPolicy:
         assert "--allow-frame-mismatch records" in out
 
     def test_a_cohort_whose_state_trees_do_have_one_gets_it(
-            self, world, capsys):
+            self, world, capsys, monkeypatch):
+        second_cohort(world, monkeypatch)
         self.stamp(world["root"], "camcan_rest", "motion")
         for at in ("yeo7",):
             self.static_fc(world["root"], at, "camcan", "Movie", "motion")
@@ -1673,6 +1712,9 @@ class TestTheCommandUsesTheCohortsOwnPolicy:
         """fcm_transfer_rows' own message had the same bug."""
         train, test = studies(tmp_path, TR, TE)
         train.cfg.cohorts = ["camcan", "camcan_rest"]
+        write_transitions(train.cfg.root, "camcan_rest", "Rest",
+                          [f"CC{i:04d}" for i in range(40)], WIN,
+                          f"HMM1_pca3_{K}")
         self.static_fc(train.cfg.root, "yeo7", "camcan", "Movie", "motion")
         self.static_fc(train.cfg.root, "yeo7", "hcp7t_fix", "MOVIE1", "motion")
         with pytest.raises(SystemExit) as e:
@@ -1682,3 +1724,81 @@ class TestTheCommandUsesTheCohortsOwnPolicy:
                     if "static_fc.sbatch camcan_rest" in l)
         assert "--censor-policy" not in line
         assert "would leave its fcm arm disagreeing" in msg
+
+
+class TestAStaleCohortName:
+    """`camcan_rest` was in the Settings default and is not a cohort in this
+    project. Cam-CAN's movie and rest are the same people, so the tree holds
+    ONE cohort with two tasks -- README's output structure says so and
+    tests/test_camcan_one_cohort.py pins it against config/camcan.yaml.
+
+    The name matched nothing and was harmless for as long as nothing required
+    it to exist: `load_set` filters cohorts with `in`, and an absent name
+    simply never hits. It became a hard failure the moment the fcm
+    precondition started requiring a static-FC table per listed cohort -- and
+    then sent two cluster jobs and a long diagnosis after a cohort that does
+    not exist. A missing STAGE and a name that is not in the tree need
+    different answers.
+    """
+
+    def test_the_shipped_config_lists_one_camcan_cohort(self):
+        import transfer_config as tc
+        import hads_tables as ht
+        assert tc.TRAIN_COHORTS == ["camcan"]
+        assert ht.Settings().cohorts == ["camcan"]
+        assert set(tc.CC_TASKS) == {"movie", "rest"}
+
+    def test_a_name_absent_from_every_tree_is_refused_as_stale(self, tmp_path):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        train, test = studies(tmp_path, TR, TE)
+        train.cfg.cohorts = ["camcan", "nosuchcohort"]
+        # a static_fc tree that exists, so the "nothing at all" refusal (which
+        # comes first, and is a different diagnosis) is out of the way
+        for co, task in (("camcan", "Movie"), ("hcp7t_fix", "MOVIE1")):
+            d = pd.DataFrame({"sub": ["S1"], "task": task, "r1__r2": .1})
+            write_table_atomic(
+                pa.Table.from_pandas(d, preserve_index=False),
+                train.cfg.root / "static_fc" / "atlas=yeo7" / f"cohort={co}"
+                / f"task={task}" / "subjects.parquet")
+        with pytest.raises(SystemExit) as e:
+            tt.fcm_transfer_rows(train, test, log=lambda *_: None)
+        msg = str(e.value)
+        assert "not in the output tree AT ALL" in msg
+        assert "stale entry in `cohorts`, not a missing stage" in msg
+        assert "no job will fix it" in msg
+        assert "test_camcan_one_cohort.py" in msg
+        assert "sbatch" not in msg          # and it does NOT suggest a job
+
+    def test_a_cohort_with_transitions_and_no_static_fc_is_the_other_refusal(
+            self, tmp_path):
+        """The distinction that matters: this one IS a missing stage."""
+        train, test = studies(tmp_path, TR, TE)
+        train.cfg.cohorts = ["camcan", "other"]
+        write_transitions(train.cfg.root, "other", "Rest",
+                          [f"CC{i:04d}" for i in range(40)], WIN,
+                          f"HMM1_pca3_{K}")
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        d = pd.DataFrame({"sub": ["CC0000"], "task": "Movie", "r1__r2": .1})
+        write_table_atomic(
+            pa.Table.from_pandas(d, preserve_index=False),
+            train.cfg.root / "static_fc" / "atlas=yeo7" / "cohort=camcan"
+            / "task=Movie" / "subjects.parquet")
+        with pytest.raises(SystemExit) as e:
+            tt.fcm_transfer_rows(train, test, log=lambda *_: None)
+        msg = str(e.value)
+        assert "INCOMPLETE" in msg and "sbatch slurm/static_fc.sbatch other" in msg
+        assert "stale entry" not in msg
+
+    def test_one_cohort_two_tasks_reads_both_conditions(self, tmp_path):
+        """What the one-cohort tree has to support: rest and movie from the
+        same cohort, selected by the task map."""
+        train, _ = studies(tmp_path, TR, TE, train_task="Movie")
+        write_transitions(train.cfg.root, "camcan", "Rest",
+                          [f"CC{i:04d}" for i in range(60)], WIN,
+                          f"HMM1_pca3_{K}")
+        train.cfg.tasks = {"movie": "Movie", "rest": "Rest"}
+        space = dict(atlas=ATLAS, window_s=WIN, states=f"HMM1_pca3_{K}")
+        assert len(train.load_set(space, "movie")) == 60
+        assert len(train.load_set(space, "rest")) == 60

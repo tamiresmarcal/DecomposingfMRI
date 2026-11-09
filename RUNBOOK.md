@@ -1257,24 +1257,22 @@ policy, censoring its static FC now would make the fcm arm censored while the
 bstm arm is not: one comparison fixed by breaking another. Match the state
 trees, whatever they say.
 
-**The asymmetry this project actually has**, as of stage 3.5 having run for
-`camcan`, `cneuromod`, `ds002837`, `hcp7t` and `hcp7t_fix` but **not**
-`camcan_rest`: Cam-CAN's movie tables carry `censor_policy=motion` and its rest
-tables carry none. So in the **rest** arm the model is trained on uncensored
-frames and tested on censored ones — in the finished bstm tree as well as in
-the fcm one. Two coherent responses:
+**`camcan_rest` is not a cohort.** Cam-CAN's movie and rest are the same
+people, so the tree holds **one** cohort with two tasks — `cohort=camcan`,
+`task=Movie` and `task=Rest` (README's output structure;
+`tests/test_camcan_one_cohort.py` pins it against `config/camcan.yaml`). A
+`camcan_rest` in a cohort list matches nothing, because `load_set` filters with
+`in`, so it was harmless until the fcm precondition began requiring a
+static-FC table per listed cohort — and then it sent two cluster jobs and a
+long diagnosis after a cohort that does not exist. `fmri_decomposition` tells
+you so plainly: stage 3b for it refuses with *no activation shards for
+cohort=camcan_rest*.
 
-* **Mirror it** (cheap). Build `camcan_rest`'s static FC with no policy, so each
-  arm's fcm matches its own bstm and E1 still compares *models*. Pass
-  `--allow-frame-mismatch`; every row then carries `train_censor_policy`,
-  `test_censor_policy` and `frames_mismatch`, §2 prints them, and a rest-vs-movie
-  difference has to be reported as partly a preprocessing difference.
-* **Remove it** (hours). `fmri-decomp censor --cohorts camcan_rest`, then refit
-  stages 4, 4b and 5a for that cohort with `--censor-policy motion`. Then all
-  four arms share their frames and nothing has to be conceded.
-
-Refusing the mismatch in fcm while the bstm tree already carries it would be
-inconsistent, which is why it is allowable at all — but only on the record.
+So the four arms **do** share their frames here: one run of each stage over
+`cohort=camcan`, under `censor_policy=motion`, which is what HCP's tables
+carry too. `--status` prints every table's recipe; `--allow-frame-mismatch`
+exists for a tree where they genuinely differ, and records the concession on
+every row.
 
 **Every cohort of every side needs a table, not just one of them.**
 `_fc_cell` reads one table per cohort and concatenates them *before* filtering
