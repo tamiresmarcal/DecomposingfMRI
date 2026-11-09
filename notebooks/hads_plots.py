@@ -972,7 +972,28 @@ def fig_k_curve(rows, cfg, trees=("bstm",)):
     return fig
 
 
-def fig_scatter(pred, cfg, title, name="E1b_scatter", jitter=.18, bins=5):
+def _trend(x, y, n_boot=500, seed=0, grid=60):
+    """One straight trend and a 95% band, from the SAME bootstrap as every
+    other interval in this notebook: resample the test subjects, refit, and
+    take the percentiles at each x.
+
+    A per-quantile median joined point to point was the first version. It is a
+    staircase -- every step an artefact of where the bin edges fell -- and it
+    reads as structure in the data rather than in the binning.
+    """
+    g = np.linspace(np.min(x), np.max(x), grid)
+    line = np.polyval(np.polyfit(x, y, 1), g)
+    rng = np.random.default_rng(seed)
+    draws = np.full((n_boot, grid), np.nan)
+    for i in range(n_boot):
+        k = rng.integers(0, len(x), len(x))
+        if len(np.unique(x[k])) > 1:
+            draws[i] = np.polyval(np.polyfit(x[k], y[k], 1), g)
+    lo, hi = np.nanpercentile(draws, [2.5, 97.5], axis=0)
+    return g, line, lo, hi
+
+
+def fig_scatter(pred, cfg, title, name="E1b_scatter", jitter=.18, n_boot=500):
     """E1b: predicted against observed, one panel per (target, condition, tree).
 
     WHAT IT CANNOT SHOW, AND WHY THERE IS NO IDENTITY LINE. `pred` is in the
@@ -1022,14 +1043,14 @@ def fig_scatter(pred, cfg, title, name="E1b_scatter", jitter=.18, bins=5):
             ax.scatter(x, y + rng.uniform(-jitter, jitter, len(y)), s=18,
                        marker=marker[task], color=colour[task], alpha=.55,
                        lw=.5, edgecolors=SURFACE, zorder=2)
-            # the median observed score per fifth of the PREDICTION: the
-            # monotone trend Spearman is a summary of, and the only line the
-            # two instruments license
-            q = pd.qcut(pd.Series(x).rank(method="first"), min(bins, len(x)),
-                        labels=False, duplicates="drop")
-            g = pd.DataFrame({"x": x, "y": y, "q": q}).groupby("q")
-            ax.plot(g["x"].median(), g["y"].median(), color=INK2, lw=1.4,
-                    marker="_", ms=10, zorder=3)
+            # ONE line and its interval. It summarises DIRECTION -- the two
+            # axes are different questionnaires, so its slope is not a
+            # quantity anyone should read.
+            if len(np.unique(x)) > 1 and len(np.unique(y)) > 1:
+                gx, gy, glo, ghi = _trend(x, y, n_boot=n_boot)
+                ax.fill_between(gx, glo, ghi, color=INK2, alpha=.14, lw=0,
+                                zorder=1)
+                ax.plot(gx, gy, color=INK2, lw=1.6, zorder=3)
             rho = stats.spearmanr(x, y).statistic if len(np.unique(y)) > 1 else np.nan
             ax.text(.04, .96, f"ρ = {rho:+.2f}\nn = {len(y)}", transform=ax.transAxes,
                     va="top", ha="left", fontsize=7.5, color=INK)
@@ -1042,7 +1063,7 @@ def fig_scatter(pred, cfg, title, name="E1b_scatter", jitter=.18, bins=5):
                 ax.set_xlabel("predicted (training units)", fontsize=8)
     fig.suptitle(title, x=.01, ha="left", fontsize=10, color=INK)
     fig.text(.01, -.02,
-             f"grey line = median observed per fifth of the prediction, the monotone trend ρ summarises · "
+             f"line = trend with a 95% bootstrap band over the test subjects; it shows DIRECTION, and its slope is not a quantity to read · "
              f"y jittered ±{jitter:g} for legibility (the statistics use the untouched values) · "
              f"NO identity line: the axes are different questionnaires and only their ORDER is comparable",
              fontsize=7.5, color=INK2)

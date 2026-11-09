@@ -557,11 +557,12 @@ class TestE1bScatter:
         import matplotlib.pyplot as plt
         import hads_plots as hp
         p, cfg, _ = pred
-        hp.fig_scatter(p, cfg, title="E1b")
+        hp.fig_scatter(p, cfg, title="E1b", n_boot=40)
         fig = plt.gcf()
         notes = " ".join(t.get_text() for t in fig.texts).lower()
         assert "no identity line" in notes
         assert "jitter" in notes and "order" in notes
+        assert "bootstrap band" in notes and "direction" in notes
         # 2 trees x (2 targets x 2 tasks)
         assert len([a for a in fig.axes if a.collections]) == 8
         plt.close("all")
@@ -572,11 +573,11 @@ class TestE1bScatter:
         import matplotlib.pyplot as plt
         import hads_plots as hp
         p, cfg, _ = pred
-        hp.fig_scatter(p, cfg, title="E1b", jitter=0)
+        hp.fig_scatter(p, cfg, title="E1b", jitter=0, n_boot=20)
         a = [t.get_text() for ax in plt.gcf().axes for t in ax.texts
              if "ρ" in t.get_text()]
         plt.close("all")
-        hp.fig_scatter(p, cfg, title="E1b", jitter=5.0)
+        hp.fig_scatter(p, cfg, title="E1b", jitter=5.0, n_boot=20)
         b = [t.get_text() for ax in plt.gcf().axes for t in ax.texts
              if "ρ" in t.get_text()]
         plt.close("all")
@@ -631,4 +632,59 @@ class TestE1HasNoConnectingLine:
         assert spans, "the baseline (a visible horizontal line) should still span"
         sloped = [s_ for s_ in spans if abs(s_[1][1] - s_[1][0]) > 1e-12]
         assert not sloped, f"a line joins the trees: {sloped}"
+        plt.close("all")
+
+
+class TestTheTrendLine:
+    """A per-quantile median joined point to point was the first version: a
+    staircase whose every step was an artefact of where a bin edge fell. One
+    line and one interval instead, from the same bootstrap over test subjects
+    as every other interval in this notebook."""
+
+    def test_the_line_follows_the_data(self):
+        import hads_plots as hp
+        rng = np.random.default_rng(0)
+        x = rng.normal(size=300)
+        y = 2 * x + rng.normal(0, .3, 300)
+        g, line, lo, hi = hp._trend(x, y, n_boot=200)
+        assert np.all(np.diff(line) > 0)                  # rises with x
+        assert abs(np.polyfit(g, line, 1)[0] - 2) < .2
+
+    def test_the_band_brackets_the_line(self):
+        import hads_plots as hp
+        rng = np.random.default_rng(1)
+        x = rng.normal(size=120)
+        y = x + rng.normal(0, 1.5, 120)
+        g, line, lo, hi = hp._trend(x, y, n_boot=300)
+        assert np.all(lo <= line + 1e-9) and np.all(hi >= line - 1e-9)
+
+    def test_the_band_is_wider_with_fewer_subjects(self):
+        """The interval has to mean n, or it is decoration."""
+        import hads_plots as hp
+        rng = np.random.default_rng(2)
+        wide = []
+        for n in (30, 400):
+            x = rng.normal(size=n)
+            y = x + rng.normal(0, 2, n)
+            _, _, lo, hi = hp._trend(x, y, n_boot=300)
+            wide.append(float(np.median(hi - lo)))
+        assert wide[0] > wide[1] * 1.5, wide
+
+    def test_no_staircase_markers_are_drawn(self):
+        """The old version used marker='_' per bin edge."""
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import hads_plots as hp
+        import hads_tables as ht
+        rng = np.random.default_rng(0)
+        d = pd.DataFrame({"tree": "bstm", "task": "rest", "phenotype": "anxiety",
+                          "arm": "cells", "model": "ridge",
+                          "pred": rng.normal(size=80),
+                          "y": rng.integers(0, 6, 80).astype(float)})
+        cfg = ht.Settings(tasks={"rest": "Rest"}, targets={"anxiety": "a"},
+                          cache_dir=None)
+        hp.fig_scatter(d, cfg, title="x", n_boot=20)
+        marks = {ln.get_marker() for ax in plt.gcf().axes for ln in ax.get_lines()}
+        assert "_" not in marks
         plt.close("all")
