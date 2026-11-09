@@ -11,6 +11,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy import stats
 from matplotlib.lines import Line2D
 from matplotlib.patches import Arc, Circle, FancyArrowPatch, Patch
 
@@ -428,7 +429,11 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None,
         for k, task in enumerate(tasks):
             h = p[p["task"] == task].set_index("tree").reindex(trees)
             x = np.arange(len(trees)) + (k - (len(tasks) - 1) / 2) * .1
-            ax.plot(x, h["mean"], color=colour[task], lw=1.4, alpha=.7)
+            # No line between bstm and fcm. It joins two MODELS of the same
+            # subjects, and a slope between them reads as a trend -- the
+            # steeper the more convincing -- when the x axis is nominal and
+            # the only content is "these two numbers". The points and their
+            # intervals say it without the rhetoric.
             ax.errorbar(x, h["mean"], yerr=h["std"], fmt=marker[task], ls="none", ms=8, lw=1.6, color=colour[task],
                         mec=SURFACE, mew=1, zorder=3)
             if seeds is not None:                              # each fold seed, beside its mean
@@ -965,3 +970,82 @@ def fig_k_curve(rows, cfg, trees=("bstm",)):
     save(fig, "B2_K_curve", cfg)
     plt.show()
     return fig
+
+
+def fig_scatter(pred, cfg, title, name="E1b_scatter", jitter=.18, bins=5):
+    """E1b: predicted against observed, one panel per (target, condition, tree).
+
+    WHAT IT CANNOT SHOW, AND WHY THERE IS NO IDENTITY LINE. `pred` is in the
+    TRAINING instrument's units -- Cam-CAN's HADS -- and the y axis is the test
+    cohort's ASR. The two are different questionnaires with different ranges
+    and no linking design, so a y = x line would be drawing an agreement that
+    no part of this analysis claims. Only the ORDER is comparable, which is
+    what Spearman uses, so the only line here is the median observed score per
+    fifth of the prediction: if the model ranks, that line rises.
+
+    The observed scores are integers and pile up at the floor -- most of HCP
+    is asymptomatic -- so a plain scatter would draw one black bar at y = 0.
+    The y values carry uniform jitter of +/- `jitter`, which is a drawing
+    device and is said so in the caption; the statistics use the untouched
+    values.
+    """
+    trees = [t for t in ("bstm", "fcm") if t in set(pred["tree"])]
+    tasks = [t for t in cfg.tasks if t in set(pred["task"])]
+    labs = [l for l in cfg.targets if l in set(pred["phenotype"])]
+    colour = dict(zip(list(cfg.tasks), TASK_COLOURS))
+    marker = dict(zip(list(cfg.tasks), TASK_MARKERS))
+    cols = [(lab, task) for lab in labs for task in tasks]
+    if not cols or not trees:
+        raise SystemExit("nothing to draw: pred holds "
+                         f"trees={sorted(set(pred['tree']))}, "
+                         f"tasks={sorted(set(pred['task']))}, "
+                         f"targets={sorted(set(pred['phenotype']))}")
+    rng = np.random.default_rng(0)
+    # SHARED DOWN EACH COLUMN, both axes. The two rows are two models of the
+    # SAME subjects on the same questionnaire, so a y axis that rescaled
+    # between them would make a tighter spread look like a different outcome;
+    # and both predict in the training instrument's units, so x is shared too.
+    # Not shared ACROSS columns: those are different targets and conditions.
+    fig, axes = plt.subplots(len(trees), len(cols), squeeze=False,
+                             sharex="col", sharey="col",
+                             figsize=_size(cfg, 2.6 * len(cols), 2.9 * len(trees)))
+    for r, tree in enumerate(trees):
+        for c, (lab, task) in enumerate(cols):
+            ax = axes[r][c]
+            d = pred[(pred["tree"] == tree) & (pred["task"] == task)
+                     & (pred["phenotype"] == lab)]
+            if not len(d):
+                _nothing(ax)
+                ax.set_xticks([]); ax.set_yticks([])
+                continue
+            x, y = d["pred"].to_numpy(float), d["y"].to_numpy(float)
+            ax.scatter(x, y + rng.uniform(-jitter, jitter, len(y)), s=18,
+                       marker=marker[task], color=colour[task], alpha=.55,
+                       lw=.5, edgecolors=SURFACE, zorder=2)
+            # the median observed score per fifth of the PREDICTION: the
+            # monotone trend Spearman is a summary of, and the only line the
+            # two instruments license
+            q = pd.qcut(pd.Series(x).rank(method="first"), min(bins, len(x)),
+                        labels=False, duplicates="drop")
+            g = pd.DataFrame({"x": x, "y": y, "q": q}).groupby("q")
+            ax.plot(g["x"].median(), g["y"].median(), color=INK2, lw=1.4,
+                    marker="_", ms=10, zorder=3)
+            rho = stats.spearmanr(x, y).statistic if len(np.unique(y)) > 1 else np.nan
+            ax.text(.04, .96, f"ρ = {rho:+.2f}\nn = {len(y)}", transform=ax.transAxes,
+                    va="top", ha="left", fontsize=7.5, color=INK)
+            ax.tick_params(labelsize=7)
+            if r == 0:
+                ax.set_title(f"{lab}\n{task}", fontsize=9, color=INK)
+            if c == 0:
+                ax.set_ylabel(f"{tree}\nobserved (test cohort)", fontsize=8)
+            if r == len(trees) - 1:
+                ax.set_xlabel("predicted (training units)", fontsize=8)
+    fig.suptitle(title, x=.01, ha="left", fontsize=10, color=INK)
+    fig.text(.01, -.02,
+             f"grey line = median observed per fifth of the prediction, the monotone trend ρ summarises · "
+             f"y jittered ±{jitter:g} for legibility (the statistics use the untouched values) · "
+             f"NO identity line: the axes are different questionnaires and only their ORDER is comparable",
+             fontsize=7.5, color=INK2)
+    layout(fig, cfg)
+    save(fig, name, cfg)
+    plt.show()

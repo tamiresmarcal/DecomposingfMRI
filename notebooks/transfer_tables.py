@@ -302,7 +302,7 @@ def _reason(e) -> str:
 
 def transfer_rows(train: Study, test: Study, arms=None, models=None,
                   sets=None, seed: int = 0, n_boot: int = 2000,
-                  threads: int = 1, log=print) -> pd.DataFrame:
+                  threads: int = 1, on_fit=None, log=print) -> pd.DataFrame:
     """One row per (atlas, window, states, task, target, arm, model).
 
     `score` is Spearman on the test cohort; `lo`/`hi` its bootstrap interval;
@@ -411,6 +411,15 @@ def transfer_rows(train: Study, test: Study, arms=None, models=None,
                             base[model] = bootstrap_ci(yte, bp, n_boot, seed)
                         bsc, blo, bhi = base[model]
                         pred = fit_predict(Xtr, ytr, Xte, model, seed, threads)
+                        # The predictions that produced THIS score, handed out
+                        # rather than recomputed: a scatter drawn from a second
+                        # fit is a scatter of a different model.
+                        if on_fit is not None:
+                            on_fit(dict(tree="bstm", task=task, phenotype=lab,
+                                        arm=arm, model=model, atlas=s.atlas,
+                                        states=s.states, window_s=s.window_s,
+                                        y=np.asarray(yte, float),
+                                        pred=np.asarray(pred, float)))
                         sc, lo, hi = bootstrap_ci(yte, pred, n_boot, seed)
                         # a model that predicts ONE value for everyone has
                         # ranked nobody: Spearman is undefined and the score is
@@ -805,7 +814,7 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                       max_missing: float = .10, seed: int = 0,
                       n_boot: int = 2000, pool_test: bool = True,
                       threads: int = 1, allow_frame_mismatch: bool = False,
-                      log=print) -> pd.DataFrame:
+                      on_fit=None, log=print) -> pd.DataFrame:
     """The fcm half of the transfer, so the four tables can be compared.
 
     Mirrors fcm_selection, split into a fit and an apply. Two things have to
@@ -1088,6 +1097,12 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                             base[model] = bootstrap_ci(yte[ok_te], bp, n_boot, seed)
                         bsc, blo, bhi = base[model]
                         pred = fit_predict(Xtr, ytr[ok_tr], Xte, model, seed, threads)
+                        if on_fit is not None:
+                            on_fit(dict(tree="fcm", task=task, phenotype=lab,
+                                        arm=arm, model=model, atlas=atlas,
+                                        states="(static FC)", window_s=float("nan"),
+                                        y=np.asarray(yte[ok_te], float),
+                                        pred=np.asarray(pred, float)))
                         sc, lo, hi = bootstrap_ci(yte[ok_te], pred, n_boot, seed)
                         rows.append({
                             "atlas": atlas, "window_s": np.nan,
@@ -1499,3 +1514,54 @@ def transfer_shares(train: Study, test: Study, space: dict, arm: str, model: str
                          share=float(v[blocks == b].sum() / tot))
                     for b in dict.fromkeys(blocks)]
     return pd.DataFrame(out)
+
+
+def transfer_predictions(train: Study, test: Study, best, fc_arm: str = "edges",
+                         seed: int = 0, log=print) -> "pd.DataFrame":
+    """One row per test subject per (tree, task, target): what was predicted and what is true.
+
+    Collected from the SAME fits that produced the scores, through the
+    `on_fit` hook, rather than refitting here -- a scatter drawn from a second
+    fit is a scatter of a different model, and nothing in the picture would
+    say so.
+
+    `pred` is in the TRAINING instrument's units (Cam-CAN's HADS) and `y` is
+    in the test cohort's (HCP's ASR). They are not comparable as values, only
+    as order, which is what Spearman uses and why the figure draws no identity
+    line.
+    """
+    got = []
+    sets = common_sets(train, test)
+    mine = sets[(sets["atlas"] == best["atlas"])
+                & (sets["window_s"] == best["window_s"])
+                & (sets["states"] == best["states"])]
+    if not len(mine):
+        raise SystemExit(
+            f"no state set {best['states']!r} / {best['atlas']!r} / "
+            f"window_s={best['window_s']} in both cohorts.")
+    # n_boot=2: the interval is recomputed from the stored rows, and the
+    # bootstrap here would be 2,000 resamples thrown away.
+    transfer_rows(train, test, arms=[best["arm"]], models=[best["model"]],
+                  sets=mine, seed=seed, n_boot=2, on_fit=got.append,
+                  log=lambda *_: None)
+    try:
+        fcm_transfer_rows(train, test, atlases=[best["atlas"]],
+                          models=[best["model"]],
+                          train_tasks=dict(train.cfg.tasks),
+                          test_tasks=dict(test.cfg.tasks),
+                          covariates=["Age", "Sex", "frac_good_frames", "n_tr_used"],
+                          seed=seed, n_boot=2, on_fit=got.append,
+                          log=lambda *_: None)
+    except SystemExit as e:
+        log(f"  no fcm predictions ({e}); the scatter will show bstm only")
+    out = []
+    for g in got:
+        if g["tree"] == "fcm" and g["arm"] != fc_arm:
+            continue
+        out.append(pd.DataFrame({
+            "tree": g["tree"], "task": g["task"], "phenotype": g["phenotype"],
+            "arm": g["arm"], "model": g["model"],
+            "y": g["y"], "pred": g["pred"]}))
+    if not out:
+        raise SystemExit("no predictions were collected.")
+    return pd.concat(out, ignore_index=True)

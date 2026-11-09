@@ -497,3 +497,138 @@ class TestInstallingIntoTheImage:
              / "README.md").read_text()
         assert "is **not** `PYTHONNOUSERSITE`" in t
         assert "--target" in t and "--no-deps" in t
+
+
+class TestE1bScatter:
+    """One number per panel in E1; this is what it is made of. The hazard is
+    the opposite of the usual one: the two axes are DIFFERENT questionnaires,
+    so the familiar y = x line would draw an agreement nothing here claims."""
+
+    @pytest.fixture(autouse=True)
+    def _agg(self):
+        import matplotlib
+        matplotlib.use("Agg")
+
+    @pytest.fixture(scope="class")
+    @staticmethod
+    def pred(tree, rows):
+        import transfer_config as tcfg
+        _, d = rows
+        train, test, cfg, _ = tcfg.studies("raw", root=tree["root"],
+                                           camcan=tree["camcan"],
+                                           hcp_pheno=tree["hcp"],
+                                           models=["ridge"])
+        best = d[d["tree"] == "bstm"].sort_values("score", ascending=False).iloc[0]
+        return tt.transfer_predictions(train, test, best, fc_arm=cfg.fc_arm,
+                                       log=lambda *_: None), cfg, best
+
+    def test_it_covers_both_trees_both_tasks_both_targets(self, pred):
+        p, _, _ = pred
+        assert set(p["tree"]) == {"bstm", "fcm"}
+        assert set(p["task"]) == {"movie", "rest"}
+        assert set(p["phenotype"]) == {"anxiety", "depression"}
+
+    def test_one_row_per_test_subject_per_cell(self, pred):
+        p, _, _ = pred
+        n = p.groupby(["tree", "task", "phenotype"]).size()
+        assert (n == 30).all(), n.to_dict()
+
+    def test_only_the_named_fcm_arm(self, pred):
+        p, _, cfg = pred
+        assert set(p.loc[p["tree"] == "fcm", "arm"]) == {"edges"}
+
+    def test_the_predictions_reproduce_the_stored_score(self, pred, rows):
+        """The point of collecting them from the same fit: a scatter from a
+        second fit is a scatter of a different model."""
+        from scipy import stats
+        p, _, best = pred
+        _, d = rows
+        d = d[(d["tree"] == "bstm") & (d["states"] == best["states"])
+              & (d["atlas"] == best["atlas"])
+              & (d["window_s"] == best["window_s"])
+              & (d["arm"] == best["arm"]) & (d["model"] == best["model"])]
+        for _, r in d.iterrows():
+            h = p[(p["tree"] == "bstm") & (p["task"] == r["task"])
+                  & (p["phenotype"] == r["phenotype"])]
+            rho = stats.spearmanr(h["pred"], h["y"]).statistic
+            assert abs(rho - r["score"]) < 1e-9, (r["task"], r["phenotype"])
+
+    def test_it_draws_and_says_there_is_no_identity_line(self, pred):
+        import matplotlib.pyplot as plt
+        import hads_plots as hp
+        p, cfg, _ = pred
+        hp.fig_scatter(p, cfg, title="E1b")
+        fig = plt.gcf()
+        notes = " ".join(t.get_text() for t in fig.texts).lower()
+        assert "no identity line" in notes
+        assert "jitter" in notes and "order" in notes
+        # 2 trees x (2 targets x 2 tasks)
+        assert len([a for a in fig.axes if a.collections]) == 8
+        plt.close("all")
+
+    def test_the_jitter_never_touches_the_statistics(self, pred):
+        """The rho printed in a panel is of the stored values, not the drawn
+        ones -- otherwise the figure would disagree with the table beside it."""
+        import matplotlib.pyplot as plt
+        import hads_plots as hp
+        p, cfg, _ = pred
+        hp.fig_scatter(p, cfg, title="E1b", jitter=0)
+        a = [t.get_text() for ax in plt.gcf().axes for t in ax.texts
+             if "ρ" in t.get_text()]
+        plt.close("all")
+        hp.fig_scatter(p, cfg, title="E1b", jitter=5.0)
+        b = [t.get_text() for ax in plt.gcf().axes for t in ax.texts
+             if "ρ" in t.get_text()]
+        plt.close("all")
+        assert a == b and len(a) == 8
+
+
+class TestB2KIsGone:
+    def test_the_notebook_no_longer_draws_it(self):
+        import json
+        nb = json.load(open(Path(__file__).resolve().parent.parent
+                            / "notebooks" / "13_camcan_to_hcp.ipynb"))
+        src = "\n".join("".join(c["source"]) for c in nb["cells"]
+                        if c["cell_type"] == "code")
+        assert "fig_k_curve" not in src
+
+    def test_but_the_function_stays_for_notebook_10(self):
+        import hads_plots as hp
+        assert hasattr(hp, "fig_k_curve")
+
+
+class TestE1HasNoConnectingLine:
+    def test_no_line_joins_the_two_trees(self, rows, tree):
+        """A slope between two MODELS on a nominal axis reads as a trend."""
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import hads_plots as hp
+        import transfer_config as tcfg
+        _, d = rows
+        _, _, cfg, _ = tcfg.studies("raw", root=tree["root"],
+                                    camcan=tree["camcan"],
+                                    hcp_pheno=tree["hcp"], models=["ridge"])
+        best = d[d["tree"] == "bstm"].sort_values("score", ascending=False).iloc[0]
+        perf = tt.transfer_perf(d, best, fc_arm=cfg.fc_arm)
+        hp.fig_performance(perf, cfg, title="E1", legend={"bstm": "x", "fcm": "y"},
+                           model=best["model"])
+        # A connector spans the two x positions AND changes y. The baseline
+        # also spans them and does not change y -- it is a horizontal
+        # reference, not a trend, and must stay.
+        import numpy as _np
+        spans = []
+        for ax in plt.gcf().axes:
+            for ln in ax.get_lines():
+                xs, ys = _np.asarray(ln.get_xdata()), _np.asarray(ln.get_ydata())
+                # errorbar keeps a Line2D for the markers even with
+                # ls="none", and it spans both x. A line nobody can see is
+                # not the thing being tested.
+                visible = (str(ln.get_linestyle()).lower() not in ("none", "")
+                           and ln.get_linewidth() > 0)
+                if visible and len(xs) == 2 and abs(xs[1] - xs[0]) > .5:
+                    spans.append((xs.tolist(), ys.tolist()))
+        assert spans, "the baseline (a visible horizontal line) should still span"
+        sloped = [s_ for s_ in spans if abs(s_[1][1] - s_[1][0]) > 1e-12]
+        assert not sloped, f"a line joins the trees: {sloped}"
+        plt.close("all")
