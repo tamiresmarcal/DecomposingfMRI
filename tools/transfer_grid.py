@@ -360,10 +360,29 @@ def status(a, root_out) -> int:
         for (s_, c), ats in sorted(gaps_fc.items()):
             sib = next((r for (a_, c_), r in sorted(recs.items())
                         if r and c_ in (tr_co if s_ == "train" else te_co)), None)
-            flags = []
+            flags, why = [], ""
             if sib:
-                if sib.get("censor_policy"):
-                    flags += ["--censor-policy", str(sib["censor_policy"])]
+                # THE CENSOR POLICY COMES FROM THIS COHORT'S OWN STATE TREES,
+                # not from the sibling's static FC. The sibling supplies only
+                # what the state trees do not record (band, z-score, pool).
+                # Copying the sibling's policy was wrong in the one case that
+                # matters: camcan carries 'motion' and camcan_rest carries
+                # none, so the printed command would have censored
+                # camcan_rest's static FC and left its fcm arm disagreeing
+                # with its own bstm arm.
+                mine = state.get(c)
+                if mine:
+                    flags += ["--censor-policy", str(mine)]
+                else:
+                    why = ("      no --censor-policy: this cohort's own state "
+                           "tables record none, so censoring its static FC "
+                           "would leave its fcm arm disagreeing with its bstm "
+                           "arm")
+                if sib.get("censor_policy") and str(sib["censor_policy"]) != str(mine or ""):
+                    why += ("\n      (its sibling's static FC uses "
+                            f"{sib['censor_policy']!r}: that asymmetry is "
+                            f"already in the state trees, and mirroring it is "
+                            f"what --allow-frame-mismatch records)")
                 if sib.get("match_bandpass"):
                     try:
                         lo, hi = json.loads(str(sib["match_bandpass"]))
@@ -374,11 +393,13 @@ def status(a, root_out) -> int:
                     flags += ["--no-zscore-runs"]
                 if sib.get("pool"):
                     flags += ["--pool", str(sib["pool"])]
-            say(f"    run, with the frames its own side already uses:")
+            say(f"    run, with the frames its OWN state trees were built from:")
             say(f"      sbatch slurm/static_fc.sbatch {c} -- --atlas "
                 + " ".join(sorted(ats)) + (" " + " ".join(flags) if flags else "")
                 + ("" if sib else
                    "   # NOTE no sibling table to copy the frame settings from"))
+            if why:
+                say(why)
 
     if todo:
         say("\nNOT finished: " + "; ".join(todo))

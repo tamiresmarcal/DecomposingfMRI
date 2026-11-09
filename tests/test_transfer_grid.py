@@ -1306,7 +1306,10 @@ class TestTheReportBuildsTheCommand:
         line = next(l for l in out.splitlines() if "static_fc.sbatch" in l)
         assert "camcan_rest" in line
         assert "--atlas harvardoxford networks yeo7" in line
-        assert "--censor-policy motion" in line
+        # no --censor-policy: camcan_rest's own state trees record none here.
+        # See TestTheCommandUsesTheCohortsOwnPolicy for why a sibling's is not
+        # a substitute.
+        assert "--censor-policy" not in line
         assert "<" not in line and ">" not in line
 
     def test_one_line_for_three_atlases_not_three_lines(self, world, capsys):
@@ -1317,6 +1320,18 @@ class TestTheReportBuildsTheCommand:
         assert len([l for l in out.splitlines() if "static_fc.sbatch" in l]) == 1
 
     def test_non_default_frame_settings_are_carried_over(self, world, capsys):
+        """Band, z-score and pool come from a sibling's static FC -- the state
+        trees do not record them. The policy comes from the state trees, so
+        this stamps them too."""
+        import pyarrow.parquet as pq
+        from fmri_decomposition.io import write_table_atomic
+        for q in (world["root"] / "transitions").rglob("*.parquet"):
+            if tt.hive(q, "cohort") != "camcan_rest":
+                continue
+            t = pq.read_table(q)
+            write_table_atomic(t.replace_schema_metadata(
+                {**(t.schema.metadata or {}),
+                 b"censor_policy": b'"strict"'}), q)
         for at in ("yeo7",):
             self.static_fc(world["root"], at, "camcan", "Movie",
                            policy="strict", band="[0.009, 0.08]", zscore=False)
@@ -1336,16 +1351,18 @@ class TestTheReportBuildsTheCommand:
         lines = [l for l in out.splitlines() if "static_fc.sbatch" in l]
         assert any("NOTE no sibling table" in l for l in lines)
 
-    def test_it_copies_from_the_same_side_only(self, world, capsys):
-        """The test side's settings are not the train side's to inherit."""
+    def test_it_never_inherits_the_other_sides_settings(self, world, capsys):
+        """The test side's frames are not the train side's to inherit, whether
+        or not the train side's own state trees record a policy."""
         self.static_fc(world["root"], "yeo7", "camcan", "Movie",
-                       policy="motion")
+                       policy="motion", band="[0.01, 0.1]")
         self.static_fc(world["root"], "yeo7", "hcp7t_fix", "MOVIE1",
-                       policy="somethingelse")
+                       policy="somethingelse", band="[0.5, 0.9]")
         line = next(l for l in self.report(world, capsys).splitlines()
                     if "static_fc.sbatch camcan_rest" in l)
-        assert "--censor-policy motion" in line
         assert "somethingelse" not in line
+        assert "--match-bandpass 0.01 0.1" in line
+        assert "0.5 0.9" not in line
 
 
 class TestTheStateTreesPolicyIsReported:
@@ -1576,3 +1593,92 @@ class TestTheBareLoginNodePython:
             transfer_grid.main(["--status", "--target", "raw",
                                 "--out", str(world["out"])])
         assert "pyarrow" in str(e.value)
+
+
+class TestTheCommandUsesTheCohortsOwnPolicy:
+    """The refusal printed
+
+        sbatch slurm/static_fc.sbatch camcan_rest -- --atlas ... --censor-policy motion
+
+    and `motion` came from camcan's static FC, not from camcan_rest's own
+    state trees -- which record NO policy. Running that line would have
+    censored camcan_rest's static FC and left its fcm arm disagreeing with its
+    own bstm arm: the opposite of the decision the line was meant to serve.
+
+    The censor policy comes from the cohort's OWN state trees. The sibling
+    supplies only what the state trees do not record: band, z-score, pool.
+    """
+
+    def static_fc(self, root, atlas, cohort, task, policy="motion"):
+        import pyarrow as pa
+        from fmri_decomposition.io import write_table_atomic
+        d = pd.DataFrame({"sub": ["S1"], "task": task, "r1__r2": .1,
+                          "censor_policy": policy,
+                          "match_bandpass": "[0.01, 0.1]",
+                          "zscore_runs": True, "pool": "task"})
+        write_table_atomic(
+            pa.Table.from_pandas(d, preserve_index=False),
+            root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
+            / f"task={task}" / "subjects.parquet")
+
+    def stamp(self, root, cohort, policy):
+        import pyarrow.parquet as pq
+        from fmri_decomposition.io import write_table_atomic
+        for q in (root / "transitions").rglob("*.parquet"):
+            if tt.hive(q, "cohort") != cohort:
+                continue
+            t = pq.read_table(q)
+            write_table_atomic(t.replace_schema_metadata(
+                {**(t.schema.metadata or {}),
+                 b"censor_policy": f'"{policy}"'.encode()}), q)
+
+    def report(self, world, capsys):
+        import transfer_grid
+        put(world["out"], 0, 1)
+        transfer_grid.main(["--status", "--target", "raw",
+                            "--out", str(world["out"]),
+                            "--outputs", str(world["root"])])
+        return capsys.readouterr().out
+
+    def test_a_cohort_whose_state_trees_have_no_policy_gets_no_flag(
+            self, world, capsys):
+        for at in ("harvardoxford", "networks", "yeo7"):
+            self.static_fc(world["root"], at, "camcan", "Movie", "motion")
+            self.static_fc(world["root"], at, "hcp7t_fix", "MOVIE1", "motion")
+        line = next(l for l in self.report(world, capsys).splitlines()
+                    if "static_fc.sbatch camcan_rest" in l)
+        assert "--censor-policy" not in line
+        assert "--match-bandpass 0.01 0.1" in line     # the sibling still supplies these
+
+    def test_and_it_says_why_the_flag_is_absent(self, world, capsys):
+        for at in ("yeo7",):
+            self.static_fc(world["root"], at, "camcan", "Movie", "motion")
+            self.static_fc(world["root"], at, "hcp7t_fix", "MOVIE1", "motion")
+        out = self.report(world, capsys)
+        assert "no --censor-policy: this cohort's own state tables record none" in out
+        assert "its sibling's static FC uses 'motion'" in out
+        assert "--allow-frame-mismatch records" in out
+
+    def test_a_cohort_whose_state_trees_do_have_one_gets_it(
+            self, world, capsys):
+        self.stamp(world["root"], "camcan_rest", "motion")
+        for at in ("yeo7",):
+            self.static_fc(world["root"], at, "camcan", "Movie", "motion")
+            self.static_fc(world["root"], at, "hcp7t_fix", "MOVIE1", "motion")
+        line = next(l for l in self.report(world, capsys).splitlines()
+                    if "static_fc.sbatch camcan_rest" in l)
+        assert "--censor-policy motion" in line
+
+    def test_the_refusal_prints_the_same_rule(self, tmp_path):
+        """fcm_transfer_rows' own message had the same bug."""
+        train, test = studies(tmp_path, TR, TE)
+        train.cfg.cohorts = ["camcan", "camcan_rest"]
+        self.static_fc(train.cfg.root, "yeo7", "camcan", "Movie", "motion")
+        self.static_fc(train.cfg.root, "yeo7", "hcp7t_fix", "MOVIE1", "motion")
+        with pytest.raises(SystemExit) as e:
+            tt.fcm_transfer_rows(train, test, log=lambda *_: None)
+        msg = str(e.value)
+        line = next(l for l in msg.splitlines()
+                    if "static_fc.sbatch camcan_rest" in l)
+        assert "--censor-policy" not in line
+        assert "would leave its fcm arm disagreeing" in msg

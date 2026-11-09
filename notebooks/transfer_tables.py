@@ -844,8 +844,13 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                 for a in atlases}
         if all(gaps.values()):                    # no atlas has the full side
             short = sorted({c for v in gaps.values() for c in v})
-            pol = next((censor_policy_of(root, c) for c in cfg.cohorts
-                        if censor_policy_of(root, c)), None)
+            # THE MISSING COHORT'S OWN state-tree policy, not a sibling's.
+            # Copying the sibling's was wrong in the one case that matters:
+            # camcan's trees carry 'motion' and camcan_rest's carry none, so
+            # the command this printed would have censored camcan_rest's
+            # static FC and left its fcm arm disagreeing with its own bstm arm
+            # -- the opposite of the decision it was meant to serve.
+            own = {c: censor_policy_of(root, c) for c in short}
             if len(short) < len(cfg.cohorts):
                 # SOME of the side is there: a partial side, which reads as
                 # "static FC has run" everywhere except where it matters
@@ -859,10 +864,15 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                       f"movie cells too, not just the rest ones.\n"
                       f"  Run stage 3b for it with the SAME settings as the "
                       f"rest of this side (see `--status` for what they are):\n"
-                    + f"    sbatch slurm/static_fc.sbatch {' '.join(short)} -- "
-                      f"--atlas {' '.join(sorted(present)) or 'ATLAS'}"
-                    + (f" --censor-policy {pol}" if pol else "")
-                    + "\n")
+                    + "".join(
+                        f"    sbatch slurm/static_fc.sbatch {c} -- --atlas "
+                        + (" ".join(sorted(present)) or "ATLAS")
+                        + (f" --censor-policy {own[c]}" if own[c] else "")
+                        + ("\n      (no --censor-policy: that cohort's own "
+                           "state tables record none, and censoring its static "
+                           "FC would leave its fcm arm disagreeing with its "
+                           "bstm arm)\n" if not own[c] else "\n")
+                        for c in short))
         covered = [a for a in atlases if not gaps[a]]
         if not covered:
             have = sorted({c for v in present.values() for c in v})
