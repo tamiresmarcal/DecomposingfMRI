@@ -215,7 +215,23 @@ def set_label(r):
     return f"{r['states']} · {r['atlas']} · {window_name(r['window_s'])}"
 
 def n_states(states):
-    return int(str(states).rsplit("_", 1)[1])
+    """K out of a state-set label, e.g. HMM1_pca3_8 -> 8.
+
+    Raises on anything else BY DESIGN, with the value in the message: a
+    static-FC row's `states` is the placeholder "(static FC)" and has no K,
+    and a caller that may hold both kinds has to say which it means rather
+    than get a silent NaN. The bare `IndexError: list index out of range`
+    this used to raise, from inside a `.map`, named neither the value nor the
+    reason.
+    """
+    try:
+        return int(str(states).rsplit("_", 1)[1])
+    except (IndexError, ValueError) as e:
+        raise ValueError(
+            f"{states!r} is not a state-set label, so it has no K. A "
+            f"static-FC row carries '(static FC)' here and K is NaN for it; "
+            f"read K from the row's own column, or select "
+            f"tree != 'fcm' first.") from e
 
 def space_of(r):
     return dict(atlas=r["atlas"], window_s=float(r["window_s"]), states=r["states"])

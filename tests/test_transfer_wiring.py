@@ -36,8 +36,9 @@ ATLAS, WIN, STATES = "yeo7", -1.0, f"HMM1_pca3_{K}"
 M = np.array([[10., 2, 1], [1, 8, 3], [0, 2, 7]])
 
 
-def write_transitions(root, cohort, task, subs, win=WIN, states=STATES):
-    cell = (root / "transitions" / f"atlas={ATLAS}"
+def write_transitions(root, cohort, task, subs, win=WIN, states=STATES,
+                      atlas=ATLAS):
+    cell = (root / "transitions" / f"atlas={atlas}"
             / f"window_s={ht.fmt_window(win)}" / f"states={states}"
             / f"cohort={cohort}" / f"task={task}")
     cell.mkdir(parents=True, exist_ok=True)

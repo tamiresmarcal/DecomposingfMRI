@@ -615,11 +615,26 @@ def as_report_rows(rows: "pd.DataFrame") -> "pd.DataFrame":
     d["n"] = d["n_test"]
     d["base_n"] = d["n_test"]
     d["window"] = d["window_s"].map(window_name)
-    d[["method", "embedding", "K_"]] = (
-        d["states"].str.rsplit("_", n=2, expand=True).reindex(columns=range(3)))
+    # `states` is a state-set label on a bstm row and the placeholder
+    # "(static FC)" on an fcm one, which has no K, no method and no embedding.
+    # This used to run over the whole frame, which was safe only while the fcm
+    # rows were appended AFTER the conversion -- reading both trees from disk
+    # in one call turned it into `IndexError` from inside a `.map`.
+    is_set = d["tree"].ne("fcm") & d["states"].astype(str).str.contains("_")
+    parts = (d.loc[is_set, "states"].str.rsplit("_", n=2, expand=True)
+             .reindex(columns=range(3)) if is_set.any() else None)
+    for i, col in enumerate(("method", "embedding", "K_")):
+        d[col] = parts[i].reindex(d.index) if parts is not None else None
     d["label"] = d.apply(set_label, axis=1)
     d["entity"] = d["tree"] + " · " + d["label"] + " · " + d["arm"] + " · " + d["model"]
-    d["K"] = d["states"].map(n_states)
+    # the row's own K where it has one -- transfer_rows and fcm_transfer_rows
+    # both write it -- and only then read out of the label
+    k = pd.to_numeric(d["K"], errors="coerce") if "K" in d else pd.Series(
+        np.nan, index=d.index)
+    need = k.isna() & is_set
+    if need.any():
+        k.loc[need] = d.loc[need, "states"].map(n_states)
+    d["K"] = k
     return d
 
 
