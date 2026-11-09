@@ -1378,3 +1378,107 @@ def read_transferred(root, target_set: str, train: str = "camcan",
               "resubmit the missing shard(s), or pass "
               "require_complete=False to look at a run in progress.")
     return pd.concat(frames, ignore_index=True)
+
+
+# ------------------------------------------------------------- E1, transferred ---
+def transfer_perf(rows: "pd.DataFrame", best, fc_arm: str = "edges") -> "pd.DataFrame":
+    """One row per (phenotype, task, tree): what `hads_plots.fig_performance` reads.
+
+    The notebook used to build this by hand as "every row of the chosen state
+    set, OR every fcm row of the same atlas and model". The fcm half of that
+    is TWO arms -- `edges`, the hypothesis, and `global`, its control -- and
+    the axis labelled both by tree and task alone, so it showed `fcm movie`
+    twice with different values and no way to tell which was which.
+
+    One arm, named. `global` belongs beside it only as a control, which is a
+    different figure.
+    """
+    # WINDOW_S TOO. A `states` label is not unique across apertures -- the same
+    # HMM1_raw7_8 exists at 1 TR and at 30s and at 300s -- so selecting by
+    # (states, atlas, arm, model) took one row per aperture and the figure drew
+    # them on top of each other. Nothing in the picture said so; the points
+    # simply overlapped.
+    bstm = rows[(rows["tree"] == "bstm")
+                & (rows["states"] == best["states"])
+                & (rows["atlas"] == best["atlas"])
+                & (rows["window_s"] == best["window_s"])
+                & (rows["arm"] == best["arm"])
+                & (rows["model"] == best["model"])]
+    fcm = rows[(rows["tree"] == "fcm")
+               & (rows["atlas"] == best["atlas"])
+               & (rows["model"] == best["model"])
+               & (rows["arm"] == fc_arm)]
+    if not len(fcm):
+        raise SystemExit(
+            f"no fcm row with arm={fc_arm!r} for atlas={best['atlas']!r} "
+            f"model={best['model']!r}. The arms present are "
+            f"{sorted(rows.loc[rows['tree'] == 'fcm', 'arm'].unique())}.")
+    if not len(bstm):
+        raise SystemExit(
+            f"no bstm row for {best['states']!r} / {best['atlas']!r} / "
+            f"window_s={best['window_s']} / arm={best['arm']!r} / "
+            f"model={best['model']!r}.")
+    out = pd.concat([bstm, fcm], ignore_index=True)
+    dup = out[out.duplicated(["phenotype", "task", "tree"], keep=False)]
+    if len(dup):
+        raise SystemExit(
+            "more than one row per (phenotype, task, tree):\n"
+            + dup[["phenotype", "task", "tree", "window_s", "arm", "score"]
+                  ].to_string(index=False)
+            + "\n  fig_performance draws one point per cell, so a duplicate is "
+              "two points sharing a label -- they overlap and the figure says "
+              "nothing about it.")
+    return out
+
+
+def transfer_shares(train: Study, test: Study, space: dict, arm: str, model: str,
+                    seed: int = 0, log=print) -> "pd.DataFrame":
+    """Where the Cam-CAN-fitted model looks WHEN IT SCORES HCP.
+
+    Notebook 10's E1 puts |SHAP| under the scores, computed out-of-fold inside
+    Cam-CAN: what the model used while learning. Here there are no folds -- one
+    fit on every training subject -- so the question that can be asked is a
+    different and arguably better one: what did it use on the subjects it was
+    SCORED on. The SHAP is therefore evaluated on the test rows of the model
+    fitted on the whole training cohort.
+
+    Returns (task, phenotype, block, share), which is the shape
+    `fig_performance(shares=...)` reads. One row per block rather than one per
+    fold seed, so the figure's dots are single points; pass `share_label` to
+    say so.
+    """
+    from sklearn.base import clone
+    from threadpoolctl import threadpool_limits
+
+    from fmri_decomposition.bstm_selection import make_model
+
+    labels = [lab for lab in train.cfg.targets if lab in test.cfg.targets]
+    tasks = [t for t in train.cfg.tasks if t in test.cfg.tasks]
+    est = make_model(model, seed)[0]
+    out = []
+    for task in tasks:
+        t_tr, t_te = train.load_set(space, task), test.load_set(space, task)
+        for lab in labels:
+            Xtr, ytr, ntr, btr = train.matrix(space, task, lab, arm, t=t_tr)
+            Xte, _, nte, _ = test.matrix(space, task, lab, arm, t=t_te)
+            want = align_columns(ntr, nte)
+            Xte = reorder(nte, Xte, want)
+            Xtr, Xte, want, btr, _ = impute_from_train(
+                Xtr, Xte, want, btr, log=lambda *_: None)
+            with threadpool_limits(usable_threads(1)):
+                m = clone(est).fit(Xtr, ytr)
+                if model == "ridge":
+                    S = m[-1].coef_ * m[0].transform(Xte)
+                else:
+                    import shap
+                    S = shap.TreeExplainer(m).shap_values(Xte)
+            v = np.abs(S).mean(0)
+            blocks = np.array(btr)
+            tot = v.sum()
+            if not tot:
+                log(f"  {task}/{lab}: every |SHAP| is zero -- the model is flat")
+                continue
+            out += [dict(task=task, phenotype=lab, block=b,
+                         share=float(v[blocks == b].sum() / tot))
+                    for b in dict.fromkeys(blocks)]
+    return pd.DataFrame(out)

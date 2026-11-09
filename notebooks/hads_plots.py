@@ -389,7 +389,8 @@ def fig_factors(rows, cfg):
         save(fig, f"B2_{k}_{col}", cfg)
         plt.show()
 
-def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None):
+def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None,
+                    share_label=None):
     """E1: one model, one panel per phenotype; x = bstm | fcm, colour = task, a line per task
     from bstm to fcm; mean ± sd over the fold seeds (and each seed as a dot, from `seeds`), over
     that model's Age + Sex baseline. legend = the label of each tree (what was selected).
@@ -435,7 +436,8 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None):
             ax.text(x, y, task, color=colour[task], va="center", fontsize=8)
         ax.set_xticks(range(len(trees)), trees)
         ax.set_title(lab)
-    axes[0].set_ylabel("CV score (Spearman)\nmean ± sd" + (", dots = fold seeds" if seeds is not None else ""))
+    axes[0].set_ylabel(f"{cfg.score_name}\nmean ± {cfg.spread_name}"
+                       + (", dots = fold seeds" if seeds is not None else ""))
     if shares is not None:
         rows = [(b, t) for b in order for t in tasks]
         for j, lab in enumerate(cfg.targets):
@@ -456,7 +458,12 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None):
             ax.invert_yaxis()
             ax.set_xlim(0, 1)
             ax.xaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1))
-            ax.set_xlabel("share of mean |SHAP| (out-of-fold), one dot per fold seed", fontsize=8)
+            # the default describes the within-cohort case; a transfer has no
+            # folds and explains the model on the TEST rows, which is a
+            # different statement and has to read as one
+            ax.set_xlabel(share_label or
+                          "share of mean |SHAP| (out-of-fold), one dot per fold seed",
+                          fontsize=8)
             ax.set_title(f"bstm · what the {model} model uses ({lab})", fontsize=9)
     fig.legend(handles=[Line2D([], [], ls="none", marker=marker[t], ms=7, color=colour[t], label=t) for t in tasks] +
                        ([Patch(color=BLOCK_COLOUR[b], label=b) for b in order] if shares is not None else []) +

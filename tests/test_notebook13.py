@@ -207,3 +207,104 @@ class TestSectionThree:
         assert len(perf)
         assert {"bstm", "fcm"} <= set(perf["tree"]) or best["tree"] == "fcm"
         assert isinstance(best["label"], str)
+
+
+class TestE1:
+    """The x axis showed `fcm movie` twice with different values, because the
+    hand-rolled selection took every fcm row of the atlas and model -- which is
+    two ARMS, `edges` and its control `global` -- and labelled both by tree and
+    task alone."""
+
+    @pytest.fixture(autouse=True)
+    def _agg(self):
+        import matplotlib
+        matplotlib.use("Agg")
+
+    def best_of(self, d):
+        clears = d[d["lo"] > d["base_score"]].sort_values("score", ascending=False)
+        return (clears if len(clears) else
+                d.sort_values("score", ascending=False)).iloc[0]
+
+    def test_one_row_per_cell(self, rows):
+        _, d = rows
+        best = self.best_of(d[d["tree"] == "bstm"])
+        perf = tt.transfer_perf(d, best, fc_arm="edges")
+        assert not perf.duplicated(["phenotype", "task", "tree"]).any()
+        assert set(perf["tree"]) == {"bstm", "fcm"}
+        assert set(perf.loc[perf["tree"] == "fcm", "arm"]) == {"edges"}
+
+    def test_both_arms_in_one_frame_is_refused_not_drawn(self, rows):
+        """What the old selection produced: two points sharing a label."""
+        _, d = rows
+        best = self.best_of(d[d["tree"] == "bstm"])
+        both = pd.concat([
+            d[(d["tree"] == "bstm") & (d["states"] == best["states"])
+              & (d["atlas"] == best["atlas"])
+              & (d["window_s"] == best["window_s"])
+              & (d["arm"] == best["arm"])
+              & (d["model"] == best["model"])],
+            d[d["tree"].eq("fcm") & d["atlas"].eq(best["atlas"])
+              & d["model"].eq(best["model"])]], ignore_index=True)
+        assert both.duplicated(["phenotype", "task", "tree"]).any()
+
+    def test_an_absent_arm_says_which_arms_exist(self, rows):
+        _, d = rows
+        best = self.best_of(d[d["tree"] == "bstm"])
+        with pytest.raises(SystemExit) as e:
+            tt.transfer_perf(d, best, fc_arm="nosucharm")
+        assert "edges" in str(e.value) and "global" in str(e.value)
+
+    def test_the_shares_are_per_block_and_sum_to_one(self, rows, tree):
+        import transfer_config as tcfg
+        _, d = rows
+        train, test, _, _ = tcfg.studies("raw", root=tree["root"],
+                                         camcan=tree["camcan"],
+                                         hcp_pheno=tree["hcp"], models=["ridge"])
+        best = self.best_of(d[d["tree"] == "bstm"])
+        space = dict(atlas=best["atlas"], window_s=best["window_s"],
+                     states=best["states"])
+        sh = tt.transfer_shares(train, test, space, best["arm"], best["model"],
+                                log=lambda *_: None)
+        assert set(sh.columns) == {"task", "phenotype", "block", "share"}
+        tot = sh.groupby(["task", "phenotype"])["share"].sum()
+        assert np.allclose(tot, 1.0)
+        assert "covariates" in set(sh["block"])
+
+    def test_the_whole_e1_draws(self, rows, tree):
+        import matplotlib.pyplot as plt
+        import hads_plots as hp
+        import transfer_config as tcfg
+        _, d = rows
+        train, test, train_cfg, _ = tcfg.studies(
+            "raw", root=tree["root"], camcan=tree["camcan"],
+            hcp_pheno=tree["hcp"], models=["ridge"])
+        best = self.best_of(d[d["tree"] == "bstm"])
+        space = dict(atlas=best["atlas"], window_s=best["window_s"],
+                     states=best["states"])
+        perf = tt.transfer_perf(d, best, fc_arm=train_cfg.fc_arm)
+        sh = tt.transfer_shares(train, test, space, best["arm"], best["model"],
+                                log=lambda *_: None)
+        hp.fig_performance(perf, train_cfg, title="E1", model=best["model"],
+                           legend={"bstm": "x", "fcm": "y"}, shares=sh,
+                           share_label="on the TEST subjects")
+        fig = plt.gcf()
+        # `layout` title-cases every label, so compare case-insensitively
+        assert any("test subjects" in a.get_xlabel().lower() for a in fig.axes)
+        assert any(train_cfg.score_name.lower() in a.get_ylabel().lower()
+                   for a in fig.axes if a.get_ylabel())
+        plt.close("all")
+
+    def test_the_same_states_label_at_two_apertures_is_not_one_row(self, rows):
+        """A `states` label is not unique across apertures: HMM1_pca3_3 exists
+        at 1 TR and at 30s. Selecting without window_s took both and the figure
+        drew them on top of each other, saying nothing."""
+        _, d = rows
+        best = self.best_of(d[d["tree"] == "bstm"])
+        same_label = d[(d["tree"] == "bstm") & (d["states"] == best["states"])
+                       & (d["atlas"] == best["atlas"])
+                       & (d["arm"] == best["arm"])
+                       & (d["model"] == best["model"])]
+        assert same_label["window_s"].nunique() > 1, "fixture has one aperture"
+        perf = tt.transfer_perf(d, best, fc_arm="edges")
+        assert (perf.loc[perf["tree"] == "bstm", "window_s"]
+                == best["window_s"]).all()
