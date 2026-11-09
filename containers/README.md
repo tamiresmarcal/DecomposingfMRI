@@ -183,34 +183,62 @@ was built from is one nobody will keep true. The sbatch scripts compare the
 image's `def_sha256` against **every** `containers/*.def`, so both are quiet
 while both exist.
 
-### Why `pip install` inside the notebook does not work
+### Installing a package into this image from the notebook
 
-`/opt/venv` lives inside the `.sif`, which is read-only, so pip cannot write
-there. And `%environment` sets `PYTHONNOUSERSITE=1`, which turns off
-`~/.local` as well — so `pip install --user` installs successfully and the
-import still fails. That is the "sometimes it works" (outside the container)
-and "sometimes it doesn't" (inside).
+There IS a `pip install` that works from a notebook cell. Two that do not,
+first, because both look like they should:
 
-The quick way, if a rebuild has to wait. Install to a bind-mounted directory
-with `--no-deps`, so the container's own numpy/scipy/scikit-learn are the ones
-that get used:
-
-```bash
-module load apptainer/1.3.5
-mkdir -p /project/6008063/tamires/pylibs
-apptainer exec --bind /project,/scratch,/home "$FMRIDECOMP_SIF45" \
-    /opt/venv/bin/pip install --no-cache-dir --no-deps \
-      --target=/project/6008063/tamires/pylibs \
-      shap==0.46.0 slicer==0.0.8 cloudpickle==3.1.0
+```
+pip install shap          ->  OSError: Read-only file system: '/opt/venv/...'
+pip install --user shap   ->  ERROR: Can not perform a '--user' install.
+                              User site-packages are not visible in this
+                              virtualenv.
 ```
 
-and in the notebook, **appended** rather than prepended, so nothing there can
-shadow a container package:
+The first is the `.sif`: `/opt/venv` is inside it and a SIF is read-only. It
+appears to work under `apptainer --writable-tmpfs`, and the install is then
+discarded when the container exits — which is the "sometimes it works".
+
+The second is **not** `PYTHONNOUSERSITE`. `/opt/venv` is a *venv*, and a venv
+has `site.ENABLE_USER_SITE = False` whatever that variable says — checked, not
+assumed:
+
+```
+$ PYTHONNOUSERSITE=1 venv/bin/python -c "import site; print(site.ENABLE_USER_SITE)"
+False
+$ venv/bin/python -c "import site; print(site.ENABLE_USER_SITE)"
+False            # same, with the variable unset
+```
+
+so `~/.local` is never on the path here and `--user` is refused either way.
+Unsetting `PYTHONNOUSERSITE` changes nothing about this.
+
+**What works, in one notebook cell:**
 
 ```python
-import sys; sys.path.append("/project/6008063/tamires/pylibs")
+PYLIBS = "/project/6008063/tamires/pylibs"
+%pip install --no-cache-dir --no-deps --target=$PYLIBS \
+    shap==0.46.0 slicer==0.0.8 cloudpickle==3.1.0
+
+import sys
+if PYLIBS not in sys.path:
+    sys.path.append(PYLIBS)        # APPEND: see below
+import shap
 ```
 
-`--no-deps` is the part that matters: without it pip puts its own numpy and
-scikit-learn in that directory, and an ABI mismatch against the container's
-is a segfault rather than an ImportError.
+`--target` writes to a bind-mounted host directory, which is writable, and is
+the one pip mode that neither needs `/opt/venv` nor `~/.local`. Nothing has to
+be relaunched and the directory survives the kernel, so later sessions need
+only the `sys.path.append` — which notebook 13's setup cell does for you if you
+set `EXTRA_PYLIBS`.
+
+Two details that are the whole safety of it:
+
+* **`--no-deps`.** Without it pip puts its own numpy, scipy and scikit-learn in
+  that directory. An ABI mismatch against the ones the container was built with
+  is a segfault, not an ImportError. `shap` needs `slicer` and `cloudpickle`
+  on top of what the image already has; those are the two named above.
+* **`append`, not `insert(0, ...)`.** Appended, the directory is searched
+  *after* the container's own packages, so nothing in it can shadow them. If
+  something really is missing you get a named ImportError, which is the failure
+  you want.

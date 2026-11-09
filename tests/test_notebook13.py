@@ -430,3 +430,70 @@ class TestTheShapGuard:
                                 "cells", "ridge", log=lambda *_: None)
         assert len(sh) and np.allclose(
             sh.groupby(["task", "phenotype"])["share"].sum(), 1.0)
+
+
+class TestInstallingIntoTheImage:
+    """Two pip forms that look right and are not, and the one that is.
+
+    `pip install --user` is refused here and NOT because of
+    PYTHONNOUSERSITE: `/opt/venv` is a venv, and a venv has
+    `site.ENABLE_USER_SITE = False` whatever that variable says. I had the
+    cause wrong in containers/README.md until this was measured.
+    """
+
+    @pytest.fixture(scope="class")
+    @staticmethod
+    def v(tmp_path_factory):
+        import subprocess
+        import sys as _s
+        d = tmp_path_factory.mktemp("venv")
+        subprocess.run([_s.executable, "-m", "venv", str(d / "v")], check=True,
+                       capture_output=True)
+        return d / "v"
+
+    def test_a_venv_disables_user_site_on_its_own(self, v):
+        import subprocess
+        code = "import site; print(site.ENABLE_USER_SITE)"
+        for env in ({}, {"PYTHONNOUSERSITE": "1"}):
+            import os
+            r = subprocess.run([str(v / "bin" / "python"), "-c", code],
+                               capture_output=True, text=True,
+                               env={**os.environ, **env})
+            assert r.stdout.strip() == "False", (env, r.stdout, r.stderr)
+
+    def test_target_plus_append_is_the_form_that_works(self, v, tmp_path):
+        """What the notebook cell does: install to a writable directory and
+        append it, so nothing there can shadow a container package."""
+        import subprocess
+        libs = tmp_path / "pylibs"
+        r = subprocess.run(
+            [str(v / "bin" / "pip"), "install", "--no-cache-dir", "--no-deps",
+             "--target", str(libs), "slicer==0.0.8"],
+            capture_output=True, text=True)
+        if r.returncode:
+            pytest.skip(f"no network for pip: {r.stderr[:200]}")
+        r = subprocess.run(
+            [str(v / "bin" / "python"), "-c",
+             f"import sys; sys.path.append({str(libs)!r}); import slicer; "
+             f"print(slicer.__file__)"],
+            capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert str(libs) in r.stdout
+
+    def test_the_notebook_appends_rather_than_prepends(self):
+        """`insert(0, ...)` would let an extra directory shadow the
+        container's numpy, which is a segfault rather than an ImportError."""
+        import json
+        nb = json.load(open(Path(__file__).resolve().parent.parent
+                            / "notebooks" / "13_camcan_to_hcp.ipynb"))
+        src = "\n".join("".join(c["source"]) for c in nb["cells"]
+                        if c["cell_type"] == "code")
+        assert "EXTRA_PYLIBS" in src
+        assert "sys.path.append(EXTRA_PYLIBS)" in src
+        assert "sys.path.insert(0, EXTRA_PYLIBS)" not in src
+
+    def test_the_readme_does_not_blame_pythonnousersite(self):
+        t = (Path(__file__).resolve().parent.parent / "containers"
+             / "README.md").read_text()
+        assert "is **not** `PYTHONNOUSERSITE`" in t
+        assert "--target" in t and "--no-deps" in t
