@@ -1531,3 +1531,48 @@ class TestTheConcession:
         train, test = self.her_tree(tmp_path)
         rows = self.run(train, test, allow_frame_mismatch=True)
         assert rows["frames_mismatch"].str.contains("across tasks").any()
+
+
+class TestTheBareLoginNodePython:
+    """`$RUN python3 tools/transfer_grid.py --status` came back with
+
+        ModuleNotFoundError: No module named 'pandas'
+
+    from a command that had worked an hour earlier in another shell. `$RUN` is
+    set by sourcing slurm/env.sh, and unset it expands to nothing -- so the
+    line runs the login node's own python3. env.sh's comments warn about
+    exactly this; a tool that needs the container can say it itself."""
+
+    def test_it_names_the_missing_module_and_the_env_file(self, monkeypatch):
+        import importlib.util
+
+        import transfer_grid
+        real = importlib.util.find_spec
+        monkeypatch.setattr(importlib.util, "find_spec",
+                            lambda m, *a, **k: None if m == "pandas"
+                            else real(m, *a, **k))
+        with pytest.raises(SystemExit) as e:
+            transfer_grid.require_runtime()
+        msg = str(e.value)
+        assert "pandas" in msg
+        assert "source slurm/env.sh" in msg
+        assert "An unset $RUN does not fail" in msg
+
+    def test_with_the_modules_present_it_says_nothing(self):
+        import transfer_grid
+        assert transfer_grid.require_runtime() is None
+
+    def test_main_checks_before_doing_anything(self, world, monkeypatch):
+        """Before reading a tree or importing a Study -- the diagnosis is
+        worth nothing after a traceback from somewhere else."""
+        import importlib.util
+
+        import transfer_grid
+        real = importlib.util.find_spec
+        monkeypatch.setattr(importlib.util, "find_spec",
+                            lambda m, *a, **k: None if m == "pyarrow"
+                            else real(m, *a, **k))
+        with pytest.raises(SystemExit) as e:
+            transfer_grid.main(["--status", "--target", "raw",
+                                "--out", str(world["out"])])
+        assert "pyarrow" in str(e.value)

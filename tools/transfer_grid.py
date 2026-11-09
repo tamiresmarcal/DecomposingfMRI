@@ -390,8 +390,34 @@ def status(a, root_out) -> int:
     return 0
 
 
+def require_runtime() -> None:
+    """Refuse on the login node's bare python, by name.
+
+    `$RUN` is only set by `source slurm/env.sh`; unset, `$RUN python3 ...`
+    silently runs the LOGIN NODE's python, which has no pandas -- so the
+    failure is `ModuleNotFoundError: No module named 'pandas'` from a command
+    that looks right and worked an hour ago in another shell. env.sh's own
+    comments warn about this; a tool that needs the container can say it.
+    """
+    import importlib.util
+
+    missing = [m for m in ("pandas", "pyarrow", "sklearn", "scipy")
+               if importlib.util.find_spec(m) is None]
+    if not missing:
+        return
+    raise SystemExit(
+        f"cannot import {', '.join(missing)} with {sys.executable}.\n"
+        f"  If that path is not inside a container, this is the login node's "
+        f"python and `$RUN` was empty -- it is set by sourcing the env file, "
+        f"not by being in the repo:\n"
+        f"    source slurm/env.sh\n"
+        f"    $RUN python3 tools/transfer_grid.py ...\n"
+        f"  An unset $RUN does not fail; it runs `python3` alone.")
+
+
 def main(argv=None) -> int:
     a = build_parser().parse_args(argv)
+    require_runtime()
 
     import pandas as pd
     import transfer_config as tc
