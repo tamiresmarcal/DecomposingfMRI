@@ -152,9 +152,13 @@ print(" ".join(m for m in sys.argv[1:] if importlib.util.find_spec(m) is None))'
   # start would be worse than saying so. But it is the check that was missing --
   # the image on disk was built from a definition three commits old, and the
   # lightgbm added in the newest of them went unnoticed until a job died for it.
-  _DEF="${SLURM_SUBMIT_DIR:-$PWD}/containers/stage45.def"
-  if [[ -f "${_DEF}" ]]; then
-    _WANT=$(sha256sum "${_DEF}" | cut -d" " -f1)
+  # ANY definition in containers/, not one hardcoded name. There are two now
+  # -- stage45.def and stage45_shap.def -- and an image built from the second
+  # would have been reported as "built from a DIFFERENT stage45.def" on every
+  # job, which is how a warning stops being read.
+  _DEFS=("${SLURM_SUBMIT_DIR:-$PWD}"/containers/*.def)
+  if [[ -f "${_DEFS[0]}" ]]; then
+    _WANT=$(sha256sum "${_DEFS[@]}" | cut -d" " -f1 | sort -u)
     # Through RUN as it stands (it ends in python3) rather than trying to swap
     # the interpreter out of the array: `${RUN[@]%python3}` strips the suffix from
     # EVERY element and leaves an empty string where python3 was, so the command
@@ -169,12 +173,12 @@ sys.stdout.write(p.read_text().strip() if p.exists() else "")' 2>/dev/null || tr
     if [[ -z "${_HAVE}" ]]; then
       echo "NOTE: ${SIF} records no def_sha256, so it predates provenance" >&2
       echo "      being stamped into the image. It may be missing packages the" >&2
-      echo "      current containers/stage45.def installs." >&2
-    elif [[ "${_HAVE}" != "${_WANT}" ]]; then
-      echo "NOTE: ${SIF} was built from a DIFFERENT containers/stage45.def" >&2
+      echo "      definitions in containers/ install." >&2
+    elif ! grep -qx "${_HAVE}" <<<"${_WANT}"; then
+      echo "NOTE: ${SIF} matches NO definition in containers/" >&2
       echo "      image: ${_HAVE}" >&2
-      echo "      repo : ${_WANT}" >&2
-      echo "      Rebuild per containers/README.md if a run needs a package the" >&2
+      echo "      repo : $(tr '\n' ' ' <<<"${_WANT}")" >&2
+      echo "      Rebuild per containers/README.md if a run needs a package a" >&2
       echo "      definition has gained since." >&2
     fi
   fi

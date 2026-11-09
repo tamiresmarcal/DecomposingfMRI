@@ -674,6 +674,21 @@ class Study:
             tasks=("task", "nunique"), worst=("margin", "min"))
         return worst[worst["tasks"] == len(self.cfg.tasks)].sort_values("worst", ascending=False).index.tolist()
 
+    def above_zero(self, d):
+        """Rows above ZERO in every task, best worst-task margin first.
+
+        The weaker claim, for a panel where nothing clears the baseline. It
+        says the model ranks people better than chance; it does NOT say it
+        beats Age and Sex, and where the Age + Sex baseline is itself at
+        rho = 0.20 that difference is the whole result. Whatever draws this
+        has to label it as the fallback rather than let it read as the rule.
+        """
+        margin = d["mean"] - self.cfg.margin_sd * d["std"]
+        worst = d.assign(margin=margin)[margin > 0].groupby("entity").agg(
+            tasks=("task", "nunique"), worst=("margin", "min"))
+        return worst[worst["tasks"] == len(self.cfg.tasks)].sort_values(
+            "worst", ascending=False).index.tolist()
+
     def above_table(self, rows):
         """Every row above its model's baseline at both tasks, by phenotype and model."""
         out = {}

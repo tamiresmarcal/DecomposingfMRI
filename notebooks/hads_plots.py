@@ -246,9 +246,12 @@ def _nothing(ax, what="no scorable row"):
             fontsize=8, color=MUTED)
 
 
-def fig_rankings(rows, cfg, above_both):
+def fig_rankings(rows, cfg, above_both, fallback=None):
     """B1: every row of the four rankings, one block of panels per model over its own baseline.
-    above_both(d) -> the rows above their baseline at every task (Study.above_both)."""
+    above_both(d) -> the rows above their baseline at every task (Study.above_both).
+    fallback(d) -> what to colour when NOTHING clears the baseline (Study.above_zero).
+    The two are different claims -- beating Age + Sex, and beating chance -- so the panel's
+    own caption says which one it is showing, per panel, rather than once in the title."""
     tasks, models = list(cfg.tasks), list(dict.fromkeys(sorted(rows["model"])))
     runs = [(t, tree) for t in tasks for tree in ("bstm", "fcm")]
     origin = dict(zip(tasks, ["o", "D", "s", "^"]))            # which task a winner came from
@@ -258,6 +261,15 @@ def fig_rankings(rows, cfg, above_both):
         t = d[d["tree"] == tree]
         return {task: g.loc[g["mean"].idxmax()] for task, g in t.groupby("task", sort=False)}
 
+    def chosen(d):
+        """(entities, what the colour means) -- the fallback is never silent."""
+        keep = above_both(d)
+        if keep or fallback is None:
+            return keep, f"above the baseline at {' AND '.join(tasks)}"
+        return fallback(d), (f"NOTHING cleared the baseline; these are above "
+                             f"ZERO at {' AND '.join(tasks)} -- better than "
+                             f"chance, NOT better than Age + Sex")
+
     def plot_runs(ax, d):
         if d.empty:                     # this model scored nothing for this target
             ax.set_xlim(-.6, len(runs) - .4)
@@ -265,7 +277,7 @@ def fig_rankings(rows, cfg, above_both):
             _nothing(ax)
             return [], "no row for this model and target"
         rng = np.random.default_rng(0)
-        keep = above_both(d)
+        keep, rule = chosen(d)
         shown = keep[:cfg.highlight_max]
         style = {e: (both[k % len(both)], SET_MARKERS[k // len(both) % len(SET_MARKERS)]) for k, e in enumerate(shown)}
         offset = dict(zip(shown, np.linspace(-.3, .3, len(shown)) if len(shown) > 1 else [0]))
@@ -300,7 +312,7 @@ def fig_rankings(rows, cfg, above_both):
         handles.append(Patch(color=MUTED, alpha=.35, label=f"Age + Sex baseline:  {b['base_mean']:.3f} ± "
                                                            f"{b['base_sd']:.3f}  (n={int(b['base_n'])})"))
         return handles, (f"large = best at each task: filled where it won, hollow carried over\n"
-                         f"coloured = {len(keep)} row(s) above the baseline at {' AND '.join(tasks)} (best {len(shown)} shown)")
+                         f"coloured = {len(keep)} row(s) {rule} (best {len(shown)} shown)")
 
     n_lines = cfg.highlight_max + 2 * len(tasks) + 3
     fig, axes = plt.subplots(2 * len(models), len(cfg.targets), squeeze=False,

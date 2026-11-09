@@ -308,3 +308,125 @@ class TestE1:
         perf = tt.transfer_perf(d, best, fc_arm="edges")
         assert (perf.loc[perf["tree"] == "bstm", "window_s"]
                 == best["window_s"]).all()
+
+
+class TestB1Fallback:
+    """"Nothing cleared the baseline" is a different statement from "nothing
+    ranks better than chance", and with HCP's anxiety baseline at rho ~ 0.2 the
+    first can be true while the second is false. So an empty panel falls back
+    to above-ZERO -- and says, in its own caption, that it has."""
+
+    def frame(self, base, means):
+        d = pd.DataFrame({
+            "entity": [f"e{i}" for i in range(len(means))] * 2,
+            "mean": list(means) + list(means),
+            "std": [.01] * 2 * len(means),
+            "task": ["movie"] * len(means) + ["rest"] * len(means),
+            "base_mean": base, "base_sd": .05})
+        return d
+
+    def study(self):
+        cfg = ht.Settings(tasks={"movie": "Movie", "rest": "Rest"},
+                          targets={"anxiety": "a"}, cache_dir=None)
+        st = object.__new__(ht.Study)
+        st.cfg = cfg
+        return st
+
+    def test_above_both_is_empty_when_the_baseline_is_high(self):
+        st = self.study()
+        d = self.frame(.20, [.10, .15])
+        assert st.above_both(d) == []
+
+    def test_above_zero_still_finds_them(self):
+        st = self.study()
+        d = self.frame(.20, [.10, .15])
+        assert st.above_zero(d) == ["e1", "e0"]      # best worst-task first
+
+    def test_above_zero_needs_every_task(self):
+        st = self.study()
+        d = self.frame(.20, [.10, .15])
+        d.loc[(d["entity"] == "e0") & (d["task"] == "rest"), "mean"] = -.05
+        assert st.above_zero(d) == ["e1"]
+
+    def test_the_caption_says_which_rule_is_showing(self, rows, tree):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import hads_plots as hp
+        import transfer_config as tcfg
+        _, d = rows
+        train, _, train_cfg, _ = tcfg.studies(
+            "raw", root=tree["root"], camcan=tree["camcan"],
+            hcp_pheno=tree["hcp"], models=["ridge"])
+        # a baseline nothing can clear
+        d = d.assign(base_mean=9.0, base_sd=.01)
+        hp.fig_rankings(d, train_cfg, train.above_both,
+                        fallback=train.above_zero)
+        titles = " ".join(a.get_title() or "" for a in plt.gcf().axes)
+        legs = " ".join(t.get_text() for a in plt.gcf().axes
+                        if a.get_legend() for t in [a.get_legend().get_title()])
+        assert "zero" in (titles + legs).lower()
+        assert "not better than age" in (titles + legs).lower()
+        plt.close("all")
+
+    def test_without_a_fallback_nothing_changes(self, rows, tree):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import hads_plots as hp
+        import transfer_config as tcfg
+        _, d = rows
+        train, _, train_cfg, _ = tcfg.studies(
+            "raw", root=tree["root"], camcan=tree["camcan"],
+            hcp_pheno=tree["hcp"], models=["ridge"])
+        hp.fig_rankings(d.assign(base_mean=9.0, base_sd=.01), train_cfg,
+                        train.above_both)
+        legs = " ".join(a.get_legend().get_title().get_text()
+                        for a in plt.gcf().axes if a.get_legend())
+        assert "zero" not in legs.lower()
+        plt.close("all")
+
+
+class TestTheShapGuard:
+    """shap is not in the image we run. Ridge needs none of it; a tree does.
+    The refusal has to say both, before anything is fitted."""
+
+    def test_a_tree_model_without_shap_refuses_by_name(self, tree, monkeypatch):
+        import importlib.util
+
+        import transfer_config as tcfg
+        real = importlib.util.find_spec
+        monkeypatch.setattr(importlib.util, "find_spec",
+                            lambda m, *a, **k: None if m == "shap"
+                            else real(m, *a, **k))
+        train, test, _, _ = tcfg.studies("raw", root=tree["root"],
+                                         camcan=tree["camcan"],
+                                         hcp_pheno=tree["hcp"])
+        with pytest.raises(SystemExit) as e:
+            tt.transfer_shares(train, test,
+                               dict(atlas="yeo7", window_s=-1.0,
+                                    states=f"HMM1_pca3_{K}"),
+                               "cells", "hgb", log=lambda *_: None)
+        msg = str(e.value)
+        assert "stage45_shap.def" in msg
+        assert "ridge" in msg and "exact" in msg
+        assert "without `shares`" in msg
+
+    def test_ridge_needs_no_shap_at_all(self, tree, monkeypatch):
+        import importlib.util
+
+        import transfer_config as tcfg
+        real = importlib.util.find_spec
+        monkeypatch.setattr(importlib.util, "find_spec",
+                            lambda m, *a, **k: None if m == "shap"
+                            else real(m, *a, **k))
+        train, test, _, _ = tcfg.studies("raw", root=tree["root"],
+                                         camcan=tree["camcan"],
+                                         hcp_pheno=tree["hcp"],
+                                         models=["ridge"])
+        sh = tt.transfer_shares(train, test,
+                                dict(atlas="yeo7", window_s=-1.0,
+                                     states=f"HMM1_pca3_{K}"),
+                                "cells", "ridge", log=lambda *_: None)
+        assert len(sh) and np.allclose(
+            sh.groupby(["task", "phenotype"])["share"].sum(), 1.0)

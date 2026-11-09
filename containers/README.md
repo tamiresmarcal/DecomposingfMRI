@@ -157,3 +157,60 @@ array job costs an allocation.
 It **exits non-zero** when a required module, an R package or CmdStan is
 missing — a gate that only prints is not a gate. `neuromaps` and `nimare` are
 reported and never fatal.
+
+## shap, and the two stage-4/5 definitions
+
+`containers/stage45.def` has no `shap`. Ridge does not need it — its SHAP is
+exact arithmetic, coefficient × standardised value, computed with numpy — so
+every ridge |SHAP| panel draws in the image we run today. A boosted tree's
+needs `shap.TreeExplainer`.
+
+`containers/stage45_shap.def` is that file plus one pinned line, and builds to
+its own `.sif` so the current one keeps working:
+
+```bash
+cd /project/6008063/tamires/DecomposingfMRI
+module load apptainer/1.3.5
+apptainer build --fakeroot \
+    /project/6008063/tamires/singularity/fmri_decomp_stage45_shap.sif \
+    containers/stage45_shap.def
+apptainer test /project/6008063/tamires/singularity/fmri_decomp_stage45_shap.sif
+```
+
+Then point `FMRIDECOMP_SIF45` at it in `slurm/env.sh`. When nothing uses the
+old `.sif`, delete it **and** `containers/stage45.def` — a definition no image
+was built from is one nobody will keep true. The sbatch scripts compare the
+image's `def_sha256` against **every** `containers/*.def`, so both are quiet
+while both exist.
+
+### Why `pip install` inside the notebook does not work
+
+`/opt/venv` lives inside the `.sif`, which is read-only, so pip cannot write
+there. And `%environment` sets `PYTHONNOUSERSITE=1`, which turns off
+`~/.local` as well — so `pip install --user` installs successfully and the
+import still fails. That is the "sometimes it works" (outside the container)
+and "sometimes it doesn't" (inside).
+
+The quick way, if a rebuild has to wait. Install to a bind-mounted directory
+with `--no-deps`, so the container's own numpy/scipy/scikit-learn are the ones
+that get used:
+
+```bash
+module load apptainer/1.3.5
+mkdir -p /project/6008063/tamires/pylibs
+apptainer exec --bind /project,/scratch,/home "$FMRIDECOMP_SIF45" \
+    /opt/venv/bin/pip install --no-cache-dir --no-deps \
+      --target=/project/6008063/tamires/pylibs \
+      shap==0.46.0 slicer==0.0.8 cloudpickle==3.1.0
+```
+
+and in the notebook, **appended** rather than prepended, so nothing there can
+shadow a container package:
+
+```python
+import sys; sys.path.append("/project/6008063/tamires/pylibs")
+```
+
+`--no-deps` is the part that matters: without it pip puts its own numpy and
+scikit-learn in that directory, and an ABI mismatch against the container's
+is a segfault rather than an ImportError.

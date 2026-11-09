@@ -1452,6 +1452,23 @@ def transfer_shares(train: Study, test: Study, space: dict, arm: str, model: str
 
     from fmri_decomposition.bstm_selection import make_model
 
+    # shap is needed for the TREE models only. Ridge's SHAP is exact and
+    # arithmetic -- coefficient x standardised value -- so a ridge
+    # configuration draws this panel in an image that has no shap at all.
+    # Checked here, before any fitting: the alternative is discovering it
+    # after the first fit of a figure that takes minutes.
+    import importlib.util
+    if model != "ridge" and importlib.util.find_spec("shap") is None:
+        raise SystemExit(
+            f"the SHAP panel for {model!r} needs the `shap` package and this "
+            f"image does not have it.\n"
+            f"  Either rebuild with containers/stage45_shap.def (which adds "
+            f"it) and point FMRIDECOMP_SIF45 at the new .sif,\n"
+            f"  or choose a ridge configuration: ridge's SHAP is exact "
+            f"(coefficient x standardised value) and needs no package.\n"
+            f"  Or call fig_performance without `shares` to draw E1's scores "
+            f"alone.")
+
     labels = [lab for lab in train.cfg.targets if lab in test.cfg.targets]
     tasks = [t for t in train.cfg.tasks if t in test.cfg.tasks]
     est = make_model(model, seed)[0]
