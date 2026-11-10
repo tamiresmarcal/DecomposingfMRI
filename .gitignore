@@ -259,9 +259,18 @@ notebooks/cache/
 notebooks/state_maps_data/
 
 # --------------------------------------------------- scratch and binaries ---
-# Container images. Built or copied next to the repo for convenience; they are
+# Container IMAGES. Built or copied next to the repo for convenience; they are
 # hundreds of MB and are rebuilt from the recipe, never from git.
-containers/
+#
+# The RECIPES must be tracked -- they are the only record of what is inside an
+# image. This used to ignore `containers/` wholesale, and stage45.def and
+# README.md survived only because they entered the index BEFORE the rule
+# existed (gitignore does not touch an already-tracked file). So a NEW
+# definition was silently ignored by every `git add -A`: stage45_shap.def was
+# written, reported as written, and never left the machine it was written on.
+containers/*
+!containers/*.def
+!containers/README.md
 *.sif
 
 # Jupyter's default name for a notebook nobody has named yet.
