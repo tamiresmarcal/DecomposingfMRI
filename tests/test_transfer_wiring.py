@@ -45,7 +45,13 @@ def write_transitions(root, cohort, task, subs, win=WIN, states=STATES,
     rng = np.random.default_rng(abs(hash(task)) % 2**31)
     rows = [row_from_counts(s, task, M + rng.integers(0, 4, (K, K)), 40)
             for s in subs]
-    pd.DataFrame(rows).to_parquet(cell / "subjects.parquet")
+    # The provenance columns `transitions.process` stamps into every row. They
+    # are not decoration: `pool_fn` reads the cell off them to find the latents
+    # for the exact dispersion, so a fixture without them exercises a path the
+    # cluster never takes.
+    pd.DataFrame(rows).assign(cohort=cohort, atlas=atlas,
+                              window_s=float(win), states=states,
+                              stride_s=1.0).to_parquet(cell / "subjects.parquet")
 
 
 def write_summary(root, tree, task, target):

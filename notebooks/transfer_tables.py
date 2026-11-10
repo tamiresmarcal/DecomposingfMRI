@@ -465,8 +465,96 @@ def transfer_rows(train: Study, test: Study, arms=None, models=None,
     return pd.DataFrame(rows)
 
 
+# -------------------------------------------------------------- dispersion ---
+# `dispersion` is the one dynamic that cannot be pooled from the transitions
+# table, because the table has already thrown away what it needs: it is the
+# mean distance from the subject's centroid in latent space, and a mean of
+# per-run dispersions is the distance from each RUN's centroid, not from the
+# centroid of all of them together. For HCP, whose four movies are four runs of
+# one condition, that is a real difference and not a rounding one.
+#
+# So it is recomputed from the latents, which still hold every window's
+# coordinates. The cost is far lower than it looks: the coordinates depend on
+# (atlas, window_s, cohort, task) and NOT on the state set, so one read serves
+# all 282 state sets of a cell. `_dispersion_cell` is memoised on exactly that
+# key, which is what makes that true in practice rather than in principle.
+@functools.lru_cache(maxsize=None)
+def _dispersion_cell(root: str, atlas: str, window_s: str,
+                     pairs: tuple) -> tuple:
+    """{sub: dispersion} for one (atlas, aperture), over the given runs.
+
+    `pairs` is the (cohort, task) hive partitions to pool -- the ones actually
+    present in the transition frame being pooled, so no prefix matching is
+    repeated here and a partition that is not being pooled is never read.
+
+    Returned as a tuple of items rather than a dict because lru_cache hands the
+    SAME object back to every caller, and a dict would let one cell's result be
+    mutated under the next.
+    """
+    from pathlib import Path
+
+    from fmri_decomposition.io import read_file
+    from fmri_decomposition.transitions import COORDS
+
+    frames, missing = [], []
+    for cohort, task in pairs:
+        f = (Path(root) / "latents" / f"atlas={atlas}" / f"window_s={window_s}"
+             / f"cohort={cohort}" / f"task={task}" / "data.parquet")
+        if not f.exists():
+            missing.append(str(f))
+            continue
+        t = read_file(f, ["sub", "crosses_run_boundary", *COORDS]).to_pandas()
+        gone = [c for c in COORDS if c not in t.columns]
+        if gone:
+            raise SystemExit(
+                f"{f}: no {gone} column(s), so dispersion cannot be computed "
+                f"from the latents. Those are the 3-D embedding `transitions` "
+                f"itself reads; a latents file written without them has no "
+                f"dispersion in its transition table either.")
+        # The SAME drop transitions.subject_transitions makes: a window that
+        # straddles a run boundary was computed across a discontinuity, so it
+        # is dropped outright rather than merely excluded from transitions.
+        # Skipping it here would make the pooled value disagree with the
+        # single-run value in the table for no reason but this filter.
+        if "crosses_run_boundary" in t.columns:
+            t = t.loc[~t["crosses_run_boundary"].to_numpy(dtype=bool)]
+        frames.append(t[["sub", *COORDS]])
+    if not frames:
+        raise SystemExit(
+            "dispersion from the latents needs the latents, and none of these "
+            "exist:\n  " + "\n  ".join(missing) + "\n"
+            "Either point `root` at the tree that holds them, or pool with "
+            "`dispersion=None` and accept the n_windows-weighted "
+            "approximation (it is flagged in the frame).")
+
+    d = pd.concat(frames, ignore_index=True)
+    d["sub"] = d["sub"].astype(str).str.strip().str.upper()
+    xyz = d[COORDS].to_numpy(dtype=float)
+    out = {}
+    for sub, idx in d.groupby("sub", sort=True).indices.items():
+        x = xyz[idx]
+        # No finite filter, deliberately: `transitions` takes the mean over
+        # every kept window, so one non-finite coordinate gives NaN there and
+        # must give NaN here too. A value that disagrees with the table for the
+        # single-run subjects would be worse than a missing one.
+        out[sub] = (float(np.linalg.norm(x - x.mean(0), axis=1).mean())
+                    if len(x) else np.nan)
+    return tuple(out.items())
+
+
+def exact_dispersion(root, atlas, window_s, pairs) -> dict:
+    """{sub: dispersion} computed from the latents, for one (atlas, aperture).
+
+    `pairs` is an iterable of (cohort, task) hive values. Memoised per cell, so
+    calling it once per state set costs one read, not 282.
+    """
+    return dict(_dispersion_cell(str(root), str(atlas), fmt_window(window_s),
+                                 tuple(sorted({(str(c), str(t)) for c, t in pairs}))))
+
+
 # ------------------------------------------------------------------ pooling ---
-def pool_tasks(d: "pd.DataFrame", n_states: int, log=print) -> "pd.DataFrame":
+def pool_tasks(d: "pd.DataFrame", n_states: int, log=print,
+               dispersion: dict | None = None) -> "pd.DataFrame":
     """Several runs of one condition -> ONE row per subject, recomputed not averaged.
 
     HCP gives four movies and four rests per subject; the selections score one
@@ -501,10 +589,13 @@ def pool_tasks(d: "pd.DataFrame", n_states: int, log=print) -> "pd.DataFrame":
                    existed falls back to inverting switches_per_min, which is
                    0/0 for a subject who never switched.)
       dispersion   the mean distance from the subject's centroid in latent
-                   space, which needs the latents, not this table. Pooled as a
-                   mean weighted by n_windows, which is the centroid of each
-                   run rather than of all of them together. Flagged in the
-                   returned frame as `dispersion_pooled_approximately`.
+                   space, which needs the latents, not this table. Pass
+                   `dispersion` -- {sub: value} from `exact_dispersion`, which
+                   reads them -- and it is EXACT. Without it, it falls back to
+                   a mean weighted by n_windows, which is the distance from
+                   each run's centroid rather than from the centroid of all of
+                   them together. Which of the two the frame holds is in
+                   `dispersion_pooled_approximately`, per row.
     """
     from fmri_decomposition.transitions import _entropy_rate
     from hads_tables import cell_cols
@@ -579,15 +670,30 @@ def pool_tasks(d: "pd.DataFrame", n_states: int, log=print) -> "pd.DataFrame":
                                  if np.isfinite(s) and w.sum() else np.nan),
             "mean_dwell_s": (w.sum() / episodes * s
                              if np.isfinite(s) and episodes else np.nan),
-            "dispersion": ((g["dispersion"].to_numpy(float) * w).sum() / w.sum()
+            # From the latents when they were read, and then it is the real
+            # pooled dispersion. `dispersion` may legitimately not cover a
+            # subject (a latents file missing a run the transition table has),
+            # so a miss falls back to the weighted mean for THAT subject and
+            # the flag says which of the two this row got -- rather than one
+            # flag for the whole frame, which would have been wrong either way.
+            "dispersion": (float(dispersion[sub]) if dispersion and sub in dispersion
+                           else (g["dispersion"].to_numpy(float) * w).sum() / w.sum()
                            if "dispersion" in g else np.nan),
-            "dispersion_pooled_approximately": True,
+            "dispersion_pooled_approximately": not (dispersion and sub in dispersion),
             "n_runs_pooled": len(g),
         })
         for c in g.columns:                        # anything else: first value
             row.setdefault(c, g.iloc[0][c])
         out.append(row)
     pooled = pd.DataFrame(out)
+    # A subject with ONE run took the early path above, which keeps the row the
+    # transition table wrote -- where `dispersion` is already the distance from
+    # that subject's own centroid, nothing having been pooled. So the flag is
+    # False for them, not the NaN that an absent key leaves behind: NaN reads
+    # as "unknown" and this is the one case that is certainly exact.
+    if "dispersion_pooled_approximately" in pooled:
+        pooled["dispersion_pooled_approximately"] = (
+            pooled["dispersion_pooled_approximately"].fillna(False).astype(bool))
     log(f"  pooled {len(d)} run-rows into {len(pooled)} subject-row(s); "
         f"runs per subject {pooled['n_runs_pooled'].min() if 'n_runs_pooled' in pooled else 1}"
         f"-{pooled['n_runs_pooled'].max() if 'n_runs_pooled' in pooled else 1}")

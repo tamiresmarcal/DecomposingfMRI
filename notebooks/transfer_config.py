@@ -89,15 +89,53 @@ TRAIN_COHORTS = ["camcan"]
 TEST_COHORTS = ["hcp7t_fix"]
 
 
-def _pool(record: list | None = None):
+def _pool(record: list | None = None, root=None):
     """`pool_tasks` with its per-cell log silenced, optionally recording sizes.
 
     It prints one line per cell it pools, which is 564 lines over the
     multiverse and says nothing the first one did not. The notebook verifies
     the pooling ONCE instead, from `record`.
+
+    `root` turns on the EXACT dispersion. Every other dynamic pools exactly
+    from the transition table; dispersion cannot, because the distance from
+    each run's centroid is not the distance from the centroid of all four, and
+    HCP has four runs per condition. So the coordinates are read back from the
+    latents -- once per (atlas, aperture, runs) cell, memoised, because they do
+    not depend on the state set and all 282 of a cell share them.
+
+    Without `root` it falls back to the weighted mean and the frame says so in
+    `dispersion_pooled_approximately`; the fallback is kept because a tree
+    whose latents were moved or pruned should still produce rows.
     """
+    said = []                        # the NOTE below, once per process
+
     def pool(d, K):
-        out = tt.pool_tasks(d, K, log=lambda *_: None)
+        disp = None
+        if root is not None:
+            try:
+                # The cell comes off the frame's OWN provenance columns, which
+                # `transitions` writes into every row -- not from a setting, so
+                # the latents that get read are necessarily the ones these
+                # transitions were computed from.
+                pairs = {(c, t) for c, t in zip(d["cohort"].astype(str),
+                                                d["task"].astype(str))}
+                disp = tt.exact_dispersion(root, str(d["atlas"].iloc[0]),
+                                           d["window_s"].iloc[0], pairs)
+            except (KeyError, SystemExit) as e:
+                # A tree whose latents were pruned, or a transition table
+                # written before the provenance columns existed. Degrade to the
+                # weighted mean rather than refuse: every other column still
+                # pools exactly, and `dispersion_pooled_approximately` marks
+                # the rows, so nothing silently claims to be the real thing.
+                # Said ONCE -- this runs per state set, which is 282 times.
+                if not said:
+                    said.append(True)
+                    print("NOTE: dispersion is being pooled by the "
+                          "n_windows-weighted mean, not read from the latents "
+                          f"({type(e).__name__}: {str(e).splitlines()[0]}). "
+                          "The rows are flagged "
+                          "`dispersion_pooled_approximately`.")
+        out = tt.pool_tasks(d, K, log=lambda *_: None, dispersion=disp)
         if record is not None:
             record.append((len(d), len(out)))
         return out
@@ -135,7 +173,12 @@ def build(target: str = "raw", root=None, camcan=None, hcp_pheno=None,
         cohorts=list(TEST_COHORTS), tasks=dict(HCP_TASKS), targets=dict(HCP_TARGETS),
         pheno_files=[(Path(hcp_pheno or HCP_PHENO), ",")], pheno_id="Subject",
         covariate_aliases=dict(HCP_ALIASES),
-        task_match="prefix", pool_fn=_pool(pool_record), **common)
+        task_match="prefix",
+        # Path(root) when build() was given one, else Settings' own default --
+        # the tree the test cfg is about to read its transitions from either
+        # way, so the latents read for dispersion come from beside them.
+        pool_fn=_pool(pool_record, Path(root) if root is not None else ht.Settings.root),
+        **common)
     return train_cfg, test_cfg
 
 
