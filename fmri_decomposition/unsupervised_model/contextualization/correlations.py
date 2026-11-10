@@ -436,18 +436,6 @@ def _all_subjects(paths) -> set:
     return out
 
 
-def default_output_root() -> Path:
-    """Where `fmri-decomp state-means` looks when not told: $FMRIDECOMP_OUTPUTS,
-    else `output_root` in config/camcan_movie.yaml."""
-    import os
-
-    if os.environ.get("FMRIDECOMP_OUTPUTS"):
-        return Path(os.environ["FMRIDECOMP_OUTPUTS"])
-    import yaml
-
-    return Path(yaml.safe_load((rm.REPO / "config" / "camcan_movie.yaml").read_text())["output_root"])
-
-
 # ------------------------------------------------------------- reference ---
 def reference_families(data: Path, ref, families, behavioural_csv=None, seed: int = 7,
                        taxonomy: str = "brainmap") -> dict:
