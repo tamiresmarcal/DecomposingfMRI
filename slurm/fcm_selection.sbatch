@@ -2,17 +2,25 @@
 # Stage 5b' -- rank STATIC connectivity models. The other selection tree.
 #
 #   sbatch slurm/fcm_selection.sbatch $Y -- \
-#       --cohorts camcan      --task movie --pheno "${PHENO[@]}"
+#       --cohorts camcan --keep-tasks Movie --task movie --pheno "${PHENO[@]}"
 #   sbatch slurm/fcm_selection.sbatch $Y -- \
-#       --cohorts camcan_rest --task rest  --pheno "${PHENO[@]}"
+#       --cohorts camcan --keep-tasks Rest  --task rest  --pheno "${PHENO[@]}"
+#
+# CAM-CAN IS ONE COHORT WITH TWO CONDITIONS. `--cohorts camcan_rest` is what
+# these lines used to say, and it is not a cohort -- tools/migrate_cohort.py
+# folded it into `camcan task=Rest`, and the fcm precondition now REQUIRES
+# every listed cohort to have a static-FC table, so naming it fails outright.
+#
+# A RAW TARGET NEEDS --target-range 0 21, for the 9999 "no answer" sentinel in
+# additional_HADS_depression. The *_category columns need nothing.
 #
 # TWO TREES, FOUR TABLES, ONE SHAPE, read side by side -- each tree partitioned
 # by condition, not duplicated under a second name:
 #
 #   outputs/bstm_selection/task=movie/   slurm/model_selection.sbatch
-#   outputs/bstm_selection/task=rest/      -- --cohort camcan_rest --task rest
-#   outputs/fcm_selection/ task=movie/   this, --cohorts camcan      --task movie
-#   outputs/fcm_selection/ task=rest/    this, --cohorts camcan_rest --task rest
+#   outputs/bstm_selection/task=rest/      -- --keep-tasks Rest  --task rest
+#   outputs/fcm_selection/ task=movie/   this, --keep-tasks Movie --task movie
+#   outputs/fcm_selection/ task=rest/    this, --keep-tasks Rest  --task rest
 #
 # --cohorts, --task and --pheno are all REQUIRED and none of them has a default:
 # a job script that names a cohort, or a path into one person's scratch space,
@@ -26,7 +34,7 @@
 # WHAT HAS TO EXIST FIRST: stage 3b, for every cohort named. That one IS a
 # single run over both -- it writes cohort= partitions and nothing about it is
 # per-condition:
-#   sbatch slurm/static_fc.sbatch camcan camcan_rest
+#   sbatch slurm/static_fc.sbatch camcan
 # The static-FC table is also where frac_good_frames and n_tr_used come from,
 # which are covariates here and have no equivalent in the state trees.
 #
@@ -82,7 +90,7 @@ TARGET="${1:?usage: sbatch fcm_selection.sbatch <phenotype_column> [-- extra arg
 shift
 
 # Anything after a bare `--` is forwarded verbatim, e.g.
-#   sbatch slurm/fcm_selection.sbatch <col> -- --cohorts camcan camcan_rest
+#   sbatch slurm/fcm_selection.sbatch <col> -- --cohorts camcan --keep-tasks Rest
 EXTRA=(); seen_sep=0
 for a in "$@"; do
   if [[ ${seen_sep} -eq 1 ]]; then EXTRA+=("$a")

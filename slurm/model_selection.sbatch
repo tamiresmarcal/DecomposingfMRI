@@ -5,13 +5,24 @@
 #   sbatch slurm/model_selection.sbatch additional_HADS_dep_category -- --models ridge hgb lgbm
 #
 # THE RESTING-STATE RUN IS THIS SCRIPT. Same grid, same covariates, same CV --
-# another cohort and another --task label, so both rankings sit in ONE tree
-# partitioned by condition:
+# the same cohort, another --keep-tasks row filter and another --task label, so
+# both rankings sit in ONE tree partitioned by condition:
 #
 #   sbatch slurm/model_selection.sbatch $Y -- \
-#       --cohort camcan      --task movie --pheno "$PHENO"
+#       --cohort camcan --keep-tasks Movie --task movie --pheno "$PHENO"
 #   sbatch slurm/model_selection.sbatch $Y -- \
-#       --cohort camcan_rest --task rest  --pheno "$PHENO"
+#       --cohort camcan --keep-tasks Rest  --task rest  --pheno "$PHENO"
+#
+# CAM-CAN IS ONE COHORT WITH TWO CONDITIONS. `--cohort camcan_rest` is what
+# these lines used to say, and it is not a cohort -- tools/migrate_cohort.py
+# folded it into `camcan task=Rest`. The ROW filter is --keep-tasks (the BIDS
+# labels, Movie and Rest); --task is only the output partition. Without
+# --keep-tasks a cohort holding two conditions is REFUSED, not doubled.
+#
+# A RAW TARGET NEEDS --target-range. additional_HADS_anxiety and
+# additional_HADS_depression run 0-21 and code "no answer" as 9999, which a
+# regression chases as an enormous outlier. Pass `--target-range 0 21` for
+# those two; the *_category columns need nothing, their text never codes.
 #
 #   -> outputs/bstm_selection/task=movie/target=$Y/summary.csv
 #      outputs/bstm_selection/task=rest/ target=$Y/summary.csv

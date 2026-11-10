@@ -358,18 +358,63 @@ sbatch slurm/brain_states_transitions.sbatch -- --window-s 30 60 120 300 -1
 
 Then, once that finishes:
 
+**Four targets, not two.** Each HADS subscale exists in two forms in Cam-CAN's
+table, and they are different claims about the same answers:
+
+| target | levels | what a model is asked to do |
+|---|---|---|
+| `additional_HADS_anx_category` | 4 (`Normal Mild Moderate Severe`) | order people into four bands |
+| `additional_HADS_anxiety` | 22 (0–21) | order people on the scale itself |
+| `additional_HADS_dep_category` | 4 | as above |
+| `additional_HADS_depression` | 22 (0–21) | as above |
+
+Both are fitted as **regressions** — the category column is coded 0,1,2,3 by
+`--ordinal-levels` and then treated as a number, so the only difference is how
+coarse the truth is. The raw column gives the model far more to rank, so a
+signal that is real should rank **better** on it; a signal that only appears on
+the category may be the banding doing the work. That comparison is the reason
+to run all four rather than pick one.
+
+The raw columns need `--target-range 0 21`: Cam-CAN codes "no answer" as
+**9999** in `additional_HADS_depression`, invisible while the target was the
+text column and an enormous outlier the moment the raw one is fitted. The
+`*_category` columns need nothing — text never codes to a number.
+
 ```bash
-for Y in additional_HADS_anx_category additional_HADS_dep_category; do
-  sbatch --time=06:00:00 slurm/model_selection.sbatch $Y -- \
-    --cohort camcan --task movie --pheno "${PHENO[@]}"
+# the two forms, with the sentinel guard each needs
+declare -A RANGE=(
+  [additional_HADS_anx_category]="" [additional_HADS_dep_category]=""
+  [additional_HADS_anxiety]="--target-range 0 21"
+  [additional_HADS_depression]="--target-range 0 21"
+)
+
+for Y in "${!RANGE[@]}"; do
+  for COND in movie:Movie rest:Rest; do
+    sbatch --time=06:00:00 slurm/model_selection.sbatch $Y -- \
+      --cohort camcan --keep-tasks "${COND#*:}" --task "${COND%%:*}" \
+      --pheno "${PHENO[@]}" ${RANGE[$Y]}
+  done
 done
 ```
+
+That is **8 jobs** (4 targets × 2 conditions), and the same loop over
+`slurm/fcm_selection.sbatch` — with `--cohorts` rather than `--cohort` — is 8
+more. If the category pair has already run, drop it from `RANGE` and submit
+only the 4 raw jobs; `select-bstm` **wipes its own `task=`/`target=` directory
+and only that one**, so a raw run cannot touch the category ranking beside it.
 
 `--cohort`, `--task` and `--pheno` are all required and none has a default: a
 stage that spans cohorts must not name one, and a path into one person's
 scratch space only works for one project. `--task` is the hive partition the
 result lands under, so this writes
 `outputs/bstm_selection/task=movie/target=$Y/`.
+
+**Cam-CAN is one cohort with two conditions.** `--keep-tasks` is the ROW filter
+and takes the BIDS labels as the data spells them (`Movie`, `Rest`); `--task`
+is only the output partition and is yours to name. Without `--keep-tasks` a
+cohort holding two conditions is refused rather than silently doubled. Older
+copies of these commands said `--cohort camcan_rest`, which is **not a
+cohort** — `tools/migrate_cohort.py` folded it into `camcan task=Rest`.
 
 Everything after `--` goes straight to `select-bstm`, so another cohort needs no
 edit to the script:
@@ -797,7 +842,19 @@ ATLASES="harvardoxford yeo7 networks"
 TRAIN="--train ds002837 cneuromod"
 PROJ="--project camcan"
 POL="--censor-policy motion"
-TARGETS="additional_HADS_anx_category additional_HADS_dep_category"
+# FOUR targets: each subscale in both forms. The *_category columns are the
+# 4-band version and the raw ones are 0-21, and both are fitted as
+# regressions -- the category is coded 0,1,2,3 and treated as a number, so the
+# only difference is how coarse the truth is. A signal that is real should rank
+# BETTER on the raw. RANGE carries the sentinel guard each form needs: Cam-CAN
+# codes "no answer" as 9999 in additional_HADS_depression, which only matters
+# once a raw column is the target.
+declare -A RANGE=(
+  [additional_HADS_anx_category]="" [additional_HADS_dep_category]=""
+  [additional_HADS_anxiety]="--target-range 0 21"
+  [additional_HADS_depression]="--target-range 0 21"
+)
+TARGETS="${!RANGE[*]}"
 # Only for a tree whose latents were written before 2026-10-08 -- see
 # "THE HASH BRIDGE" below. Empty on a tree written since.
 BRIDGE="--legacy-project-hash"
@@ -849,17 +906,22 @@ else
       set -- $ARM
       sbatch --kill-on-invalid-dep=yes --dependency=afterok:$T \
         --time=12:00:00 --mem=32G slurm/model_selection.sbatch $Y -- \
-          --cohort camcan --task $1 --keep-tasks $2 --pheno "${PHENO[@]}"
+          --cohort camcan --task $1 --keep-tasks $2 --pheno "${PHENO[@]}" \
+          ${RANGE[$Y]}
       sbatch --kill-on-invalid-dep=yes --dependency=afterok:$S \
         slurm/fcm_selection.sbatch $Y -- \
           --cohorts camcan --task $1 --keep-tasks $2 \
-          --atlas $ATLASES --pheno "${PHENO[@]}"
+          --atlas $ATLASES --pheno "${PHENO[@]}" ${RANGE[$Y]}
     done
   done
 fi
 
 squeue -u $USER -o "%.12i %.32j %.9T %.11M %R"
 ```
+
+That is **16 selection jobs** — 4 targets x 2 conditions x 2 trees — and it is
+the whole of stage 5b in one block. To add a cohort or a phenotype later,
+nothing in it changes but `RANGE` and `--pheno`.
 
 The two arms are independent after the rebuild and run side by side: the FC
 branch is one 3 h job and does not wait for the 24 h clustering. Only the
