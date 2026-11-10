@@ -541,6 +541,20 @@ def cmd_cluster(args) -> int:
     return cluster.run(args)
 
 
+def cmd_transfer(args) -> int:
+    """Stage 5d: fit on every subject of one cohort, score once on another.
+
+    A pipeline STAGE, which is why it is a subcommand now instead of a
+    script under tools/. Which cohorts, which columns and which task maps
+    come from a config under config/transfer/, so another pair -- a role swap,
+    a third cohort -- is a second YAML rather than an edit to a module every
+    other analysis imports.
+    """
+    from .supervised_model import transfer
+
+    return transfer.main_from_args(args)
+
+
 def cmd_select_bstm(args) -> int:
     """Stage 5b: rank state sets by how well their transitions predict a
     phenotype column. Parallel over (state set x model x fold seed)."""
@@ -778,6 +792,15 @@ def build_parser() -> argparse.ArgumentParser:
              "-- the other tree beside bstm_selection, same --task split")
     _fcm_selection.add_arguments(fs)
     fs.set_defaults(func=cmd_fcm_select)
+
+    from .supervised_model import transfer as _transfer
+
+    tx = sub.add_parser(
+        "transfer",
+        help="stage 5d: fit on every subject of one cohort, score once on "
+             "another -- the pair comes from config/transfer/<name>.yaml")
+    _transfer.add_arguments(tx)
+    tx.set_defaults(func=cmd_transfer)
 
     sm = sub.add_parser(
         "state-means",

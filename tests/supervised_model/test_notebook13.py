@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from fmri_decomposition.supervised_model import hads as ht  # noqa: E402
 from fmri_decomposition.supervised_model import transfer_tables as tt  # noqa: E402
 from test_pool_tasks import K  # noqa: E402
-from test_transfer_grid import camcan_tree, hcp_file  # noqa: E402
+from test_transfer import camcan_tree, hcp_file  # noqa: E402
 from test_transfer_wiring import write_summary, write_transitions  # noqa: E402
 from fmri_decomposition.io import tree_root
 
@@ -89,7 +89,7 @@ def tree(tmp_path_factory):
 @pytest.fixture(scope="module")
 def rows(tree):
     """What the cluster writes, read back the way the notebook reads it."""
-    import transfer_grid
+    from fmri_decomposition.supervised_model import transfer as transfer_grid
 
     base = ["--outputs", str(tree["root"]), "--camcan-pheno", str(tree["camcan"]),
             "--hcp-pheno", str(tree["hcp"]), "--out", str(tree["out"]),

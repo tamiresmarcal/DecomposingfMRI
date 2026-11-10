@@ -65,7 +65,7 @@ for target in $TARGETS; do
     echo "== pre-flight: ${target} / ${tree}"
     shards="$N_SHARDS"
     [[ "$tree" == "fcm" ]] && shards=1
-    TREE="$tree" "${RUN[@]}" tools/transfer_grid.py --target "$target" \
+    TREE="$tree" "${RUN[@]}" -m fmri_decomposition.supervised_model.transfer --target "$target" \
         --tree "$tree" --dry-run --n-shards "$shards" \
         ${EXTRA[@]+"${EXTRA[@]}"}
   done

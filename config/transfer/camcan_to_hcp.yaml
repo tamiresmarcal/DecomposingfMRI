@@ -1,0 +1,131 @@
+# Stage 5d: fit on every subject of one cohort, score once on another.
+#
+#   fmri-decomp transfer --config config/transfer/camcan_to_hcp.yaml \
+#       --target raw --shard 0 --n-shards 40
+#
+# EVERYTHING ABOUT THE PAIR IS HERE, in one file, because two callers need it
+# and they must not drift apart: this is what the cluster job computes the rows
+# from, and what notebook 13 draws the figures from. When they each built their
+# own, a figure could be drawn from rows produced under a different target
+# range, covariate spelling or task map, and nothing in the figure said so.
+#
+# IT IS A YAML AND NOT PYTHON so that swapping the roles -- Cam-CAN tested on
+# instead of trained on, which is the `v2` modelling version -- is a second
+# file, not an edit to a module every other analysis imports.
+
+name: camcan_to_hcp
+
+# --------------------------------------------------------------- the pair ---
+train:
+  # ONE cohort, TWO conditions. Cam-CAN's movie and rest are the same people,
+  # so two cohort values would make the output tree claim they were two
+  # samples (tests/test_camcan_one_cohort.py pins this). The rest data is
+  # `cohort=camcan task=Rest`; `tasks` below selects it.
+  #
+  # `camcan_rest` here matched nothing for a long time and was harmless,
+  # because cohorts are filtered with `in` and an absent name never hits. It
+  # became a hard failure the moment the fcm precondition started REQUIRING
+  # every listed cohort to have a static-FC table, and it cost two cluster
+  # jobs and a long diagnosis chasing a cohort that does not exist.
+  cohorts: [camcan]
+
+  # The hive `task=` values this cohort actually writes. The KEYS must match
+  # between train and test; each value is that cohort's own spelling.
+  tasks:
+    rest: Rest
+    movie: Movie
+  task_match: exact                 # one run per condition
+
+  # Both forms of each HADS subscale. They are DIFFERENT CLAIMS about the same
+  # answers, and both are fitted as regressions -- the category column is
+  # coded 0,1,2,3 by `ordinal_levels` and then treated as a number, so the only
+  # difference is how coarse the truth is. The raw gives the model 22 levels
+  # to rank against 4, so a signal that is real should rank BETTER on it; one
+  # that appears only on the category may be the banding doing the work.
+  # `--target` picks which set a run uses.
+  targets:
+    raw:
+      anxiety: additional_HADS_anxiety
+      depression: additional_HADS_depression
+    category:
+      anxiety: additional_HADS_anx_category
+      depression: additional_HADS_dep_category
+
+  # Only the RAW columns have a scale to be outside of. Cam-CAN codes "no
+  # answer" as 9999 in additional_HADS_depression while HADS runs 0-21:
+  # invisible while the target was the *_category column (text never codes)
+  # and an enormous outlier the moment the raw one is fitted. Applies to the
+  # target sets named here and no others.
+  target_range:
+    raw: [0, 21]
+
+  # Cam-CAN's own pair of phenotype files, found under `$CAMCAN_PHENO`. Left
+  # null because this cohort's reader already knows them; the test cohort
+  # below names its file explicitly because it is a different format.
+  pheno_files: null
+  pheno_id: CCID
+
+test:
+  cohorts: [hcp7t_fix]
+
+  # HCP's four movies are task=MOVIE1..MOVIE4 and its four rests
+  # task=REST1..REST4 -- four partitions of ONE condition, which no equality
+  # names. Hence `prefix`, and hence the pooling below: the models score one
+  # row per subject and will not average four.
+  tasks:
+    rest: REST
+    movie: MOVIE
+  task_match: prefix
+  pool_runs: true
+
+  # HCP's own instrument. DSM_Anxi pairs with HADS anxiety and DSM_Depr with
+  # HADS depression. The LABELS must match the train side; the COLUMNS need
+  # not, because Spearman only needs the two to order people the same way --
+  # which is why this transfer needs no equating of HADS against the ASR.
+  #
+  # One set, not one per --target: the test instrument does not change because
+  # the training column did.
+  targets:
+    anxiety: DSM_Anxi_Raw
+    depression: DSM_Depr_Raw
+
+  pheno_files:
+    - path: ${HCP_PHENO}
+      sep: ","
+  pheno_id: Subject
+
+  # HCP spells the covariates differently. `Age_in_Yrs` and NOT `Age`, because
+  # the same file also carries an `Age` holding the open-access age BAND
+  # ("26-30"), which is not a number -- so the alias has to WIN over a column
+  # that already has the canonical name, and it says so when it does.
+  covariate_aliases:
+    Sex: Gender
+    Age: Age_in_Yrs
+
+# -------------------------------------------------------------- the design ---
+covariates: [Age, Sex, n_transitions]
+baseline_covariates: [Age, Sex]       # what every model has to beat
+models: [ridge, hgb]
+
+# The VALUES, not only the column name. One-hot encoding names its columns
+# after the values each cohort happens to hold, so Cam-CAN's MALE/FEMALE and
+# HCP's M/F give DIFFERENT dummy columns from the same variable -- which the
+# column alignment then refuses (correctly) and no row is ever produced.
+# Mapped onto one spelling for BOTH cohorts. A value neither covers is refused
+# rather than guessed: `1` is male in Cam-CAN's tables and female in others,
+# and backwards flips every subject with nothing looking wrong.
+covariate_values:
+  Sex:
+    M: M
+    MALE: M
+    MAN: M
+    F: F
+    FEMALE: F
+    WOMAN: F
+
+# What the report's figures call the number and its spread. Their defaults say
+# "CV score" and "sd over seeds", and neither is true here: one fit on every
+# training subject, one score on the test cohort, and an interval from
+# resampling the TEST subjects.
+score_name: "transfer score, HCP (Spearman)"
+spread_name: "sd of the bootstrap over the test subjects"

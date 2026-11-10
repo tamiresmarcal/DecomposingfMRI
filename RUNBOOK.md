@@ -349,6 +349,57 @@ stage-6 ranking is attributable to it.
 appends to the same parquet, and parquet cannot append — the file is rewritten,
 so two array tasks would each rename over the other's columns.
 
+### THE TRANSFER IS A CONFIG FILE
+
+Stage 5d -- fit on every subject of one cohort, score once on another -- takes
+the whole cohort pair from a YAML under `config/transfer/`:
+
+```bash
+fmri-decomp transfer --config camcan_to_hcp --target raw \
+    --shard 0 --n-shards 40
+fmri-decomp transfer --config camcan_to_hcp --target raw --status
+```
+
+On the cluster the job scripts run it as a **module**, because the console
+script is not on PATH inside the container unless the package was
+pip-installed into it:
+
+```bash
+sbatch slurm/transfer.sbatch                 # one shard
+./slurm/transfer_grid.sh                     # the whole grid, pre-flighted
+```
+
+| config | trains on | scores on | targets |
+|---|---|---|---|
+| `camcan_to_hcp` | Cam-CAN (n=649) | HCP 7T (n=168) | `raw`, `category` |
+| `hcp_to_camcan` | HCP 7T (n=168) | Cam-CAN (n=649) | `hcp` |
+
+**The second one is the point.** Swapping which cohort trains used to be an
+edit to a Python module that notebook 13 and every transfer job import; it is
+now a second file, and nothing in the code changed to allow it. Writing it
+found two bugs the same afternoon: `pool_runs` and `target_range` were each
+wired on only the side the first pair happened to need them, and both are now
+per side.
+
+**A swap is a new modelling version.** `v0`'s manifest records
+`supervised_train: camcan`, so running the swap under `v0` is refused by name.
+It does not need a new state space, though -- the unsupervised fit is
+unchanged -- so give it `unsupervised_from: v0` and let it hold no
+`unsupervised_model/` of its own:
+
+```bash
+fmri-decomp transfer --config hcp_to_camcan --target hcp \
+    --modelling-version v2 --shard 0 --n-shards 40
+```
+
+**Phenotype paths come from the environment.** `${HCP_PHENO}` in a config is
+expanded at use. Unset, the config still LOADS -- so a caller that passes
+`--hcp-pheno` never needs the variable -- and the refusal, when the path is
+actually read, names the variable and the flag.
+
+`--target` picks which target SET of the config a run uses. A config offering
+one set does not ask.
+
 ### MIGRATING AN OLD `outputs/` (once, and only once)
 
 A tree written before the three-half split is flat -- `outputs/activation/`,
@@ -1310,7 +1361,7 @@ and the transfer claim quietly becomes something weaker.
 # try the chain on real data, writing NOTHING. `--no-write` exists because a
 # trial run with --shard/--n-shards writes a REAL shard file into the real
 # tree, where it reads as part of the array and poisons `n_shards`
-$RUN python3 tools/transfer_grid.py --target raw --n-shards 282 \
+$RUN python3 -m fmri_decomposition.supervised_model.transfer --target raw --n-shards 282 \
     --arms cells --models ridge --n-boot 50 --no-write
 ```
 
@@ -1404,7 +1455,7 @@ printing this command, rather than skipping every cell into an empty frame.
 tasks are gone, and a log that ends mid-run looks much like one that ended:
 
 ```bash
-$RUN python3 tools/transfer_grid.py --status --target raw    # shards on disk vs expected
+$RUN python3 -m fmri_decomposition.supervised_model.transfer --status --target raw    # shards on disk vs expected
 grep -L "done in" slurm_logs/transfer_*_*.out               # the tasks that did NOT finish
 ```
 
@@ -1593,7 +1644,7 @@ Each of these cost real time at least once.
 | `$RUN` opens an interactive `[mii] Please select a module` picker | `apptainer` is not loaded and `mii` offers to | `module load apptainer/1.3.5` first — the version the sbatch scripts use. Picking a `StdEnv/2026` entry also swaps gcc, MKL and FlexiBLAS under you |
 | array tasks die `Segmentation fault (core dumped)` inside `scipy.linalg.eigh`, the K=4 sets of a shard finishing and its K=27 sets not | a BLAS thread count **raised** mid-process: OpenBLAS sizes its per-thread buffers on first use, and `threadpool_limits(4)` in a process the image started at `OPENBLAS_NUM_THREADS=1` walks off the end of them. Only RidgeCV's n_features > n_samples branch calls `eigh`, hence only the high-K sets | raise the count in the **environment**, never at runtime: `APPTAINERENV_*`, because `apptainer exec --cleanenv` drops a plain export. `transfer_tables.usable_threads` now clamps instead of raising |
 | `export OMP_NUM_THREADS=4` in the job script, and python reports 1 | `apptainer exec --cleanenv` strips the host environment on the way in | `export APPTAINERENV_OMP_NUM_THREADS=4` (and `SINGULARITYENV_` for older builds) |
-| a crashed job's log says nothing about how far it got | block-buffered stdout is lost when a process dies on a signal | `export PYTHONUNBUFFERED=1` and `python3 -u`; `tools/transfer_grid.py` also installs `faulthandler` |
+| a crashed job's log says nothing about how far it got | block-buffered stdout is lost when a process dies on a signal | `export PYTHONUNBUFFERED=1` and `python3 -u`; ``fmri-decomp transfer`` also installs `faulthandler` |
 | `#SBATCH --cpus-per-task` etc. appear to be ignored | a command (an `export`, an assignment) sits above the `#SBATCH` block; SLURM stops reading directives at the first command | move it below `set -euo pipefail`; `tests/test_slurm_scripts.py` now checks every `.sbatch` |
 
 ---

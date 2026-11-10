@@ -1301,7 +1301,7 @@ def drop_degenerate(rows: "pd.DataFrame", log=print) -> "pd.DataFrame":
 # ------------------------------------------------------------------- on disk ---
 # The grid is ~9,000 fits on every training subject, which is hours in a
 # notebook kernel and minutes as a SLURM array. So the fits happen in
-# tools/transfer_grid.py, one shard per array task, and the notebook READS the
+# `fmri-decomp transfer`, one shard per array task, and the notebook READS the
 # rows and draws. The layout:
 #
 #   <root>/train=camcan/test=hcp7t_fix/targets=raw/tree=bstm/shard=07/rows.parquet
@@ -1498,7 +1498,7 @@ def read_transferred(root, target_set: str, train: str = "camcan",
                             for k, v in soft.items())
                 + ". Either a shard was run by hand with fewer of them, or "
                   "those cells were skipped -- the per-model counts in "
-                  "`transfer_grid.py --status` say which.")
+                  "`fmri-decomp transfer --status` say which.")
         n, have, gaps = inv["n_shards"], inv["have"], inv["gaps"]
         log(f"  tree={tree}: {len(d):,} row(s) from {len(have)}/{n} shard(s)"
             + (f"  MISSING {gaps}" if gaps else ""))
@@ -1508,7 +1508,7 @@ def read_transferred(root, target_set: str, train: str = "camcan",
     if not frames:
         raise SystemExit(
             f"no rows under {Path(root)} for targets={target_set}, tree(s) "
-            f"{list(trees)}: has tools/transfer_grid.py run?\n  "
+            f"{list(trees)}: has `fmri-decomp transfer` run?\n  "
             + "\n  ".join(missing))
     if missing and require_complete:
         raise SystemExit(

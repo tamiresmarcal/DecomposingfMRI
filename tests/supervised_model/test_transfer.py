@@ -1,7 +1,7 @@
 """The grid moved to the cluster: sharding, provenance, and the reader's refusals.
 
 The fits are ~9,000 on every training subject, so they happen in
-tools/transfer_grid.py as a SLURM array and the notebook reads parquet. That
+fmri-decomp transfer as a SLURM array and the notebook reads parquet. That
 buys three new ways to be quietly wrong, and each has a class here.
 
 1. A HALF-FINISHED ARRAY reads as a perfectly valid frame -- just a smaller
@@ -229,7 +229,7 @@ class TestWriteAndRead:
     def test_nothing_on_disk_at_all_says_to_run_the_script(self, tmp_path):
         with pytest.raises(SystemExit) as e:
             tt.read_transferred(tmp_path, "raw", log=lambda *_: None)
-        assert "transfer_grid.py" in str(e.value)
+        assert "fmri-decomp transfer" in str(e.value)
 
     def test_what_is_read_converts_for_the_figures(self, tmp_path):
         put(tmp_path, 0, 1)
@@ -313,13 +313,26 @@ def second_cohort(world, monkeypatch, name="camcan_rest"):
         for w in (-1.0, 30.0):
             write_transitions(world["root"], name, "Rest",
                               [f"CC{i:04d}" for i in range(40)], w, st)
-    monkeypatch.setattr(tc, "TRAIN_COHORTS", ["camcan", name])
+
+    # The train side now comes from a CONFIG, so a second cohort is added by
+    # wrapping the loader rather than by rebinding a module constant. Same
+    # injection, one level further out -- and it exercises the path a real
+    # second config would take.
+    real = tc.load
+
+    def with_extra(name_or_path=None):
+        cfg = real(name_or_path)
+        cfg["train"] = {**cfg["train"],
+                        "cohorts": [*cfg["train"]["cohorts"], name]}
+        return cfg
+
+    monkeypatch.setattr(tc, "load", with_extra)
     return name
 
 
 def run(world, *args):
-    import transfer_grid
-    return transfer_grid.main([
+    from fmri_decomposition.supervised_model import transfer as tgm
+    return tgm.main([
         "--outputs", str(world["root"]), "--camcan-pheno", str(world["camcan"]),
         "--hcp-pheno", str(world["hcp"]), "--out", str(world["out"]), *args])
 
@@ -529,8 +542,8 @@ class TestThreads:
     def test_the_cli_asks_for_one_thread_unless_told_otherwise(self, world):
         """Its old default was SLURM_CPUS_PER_TASK, which is how a raise came
         to be requested at all."""
-        import transfer_grid
-        ap = transfer_grid.build_parser()
+        from fmri_decomposition.supervised_model import transfer as tgm
+        ap = tgm.build_parser()
         assert ap.get_default("threads") == 1
         assert "CLAMPED" in ap.format_help()
 
@@ -597,8 +610,8 @@ class TestShardsThatDisagree:
 
     def test_the_status_report_points_at_the_odd_shard(self, tmp_path, capsys):
         self.contaminate(tmp_path)
-        import transfer_grid
-        transfer_grid.main(["--status", "--target", "raw", "--out", str(tmp_path)])
+        from fmri_decomposition.supervised_model import transfer as tgm
+        tgm.main(["--status", "--target", "raw", "--out", str(tmp_path)])
         out = capsys.readouterr().out
         assert "DISAGREE" in out and "the odd one out is shard(s) [0]" in out
         assert "rm -r" in out and "shard=00" in out
@@ -644,8 +657,8 @@ class TestEmptyShardFiles:
             pa.Table.from_pandas(d, preserve_index=False),
             tt.transfer_dir(tmp_path, "camcan", "hcp7t_fix", "raw", "fcm")
             / "shard=00" / "rows.parquet")
-        import transfer_grid
-        assert transfer_grid.main(["--status", "--target", "raw",
+        from fmri_decomposition.supervised_model import transfer as tgm
+        assert tgm.main(["--status", "--target", "raw",
                                    "--out", str(tmp_path)]) == 0
         assert "EMPTY FILE" in capsys.readouterr().out
 
@@ -666,8 +679,8 @@ class TestStatus:
     def test_it_names_the_missing_shards(self, world, capsys):
         for i in (0, 2):
             put(world["out"], i, 4)
-        import transfer_grid
-        transfer_grid.main(["--status", "--target", "raw",
+        from fmri_decomposition.supervised_model import transfer as tgm
+        tgm.main(["--status", "--target", "raw",
                             "--out", str(world["out"])])
         out = capsys.readouterr().out
         assert "2/4 shard(s)" in out and "MISSING [1, 3]" in out
@@ -676,21 +689,21 @@ class TestStatus:
     def test_a_complete_tree_says_so(self, world, capsys):
         put(world["out"], 0, 1)
         put(world["out"], 0, 1, tree="fcm")
-        import transfer_grid
-        transfer_grid.main(["--status", "--target", "raw",
+        from fmri_decomposition.supervised_model import transfer as tgm
+        tgm.main(["--status", "--target", "raw",
                             "--out", str(world["out"])])
         out = capsys.readouterr().out
         assert out.count("COMPLETE") == 2 and "MISSING" not in out
 
     def test_nothing_on_disk_is_reported_not_crashed(self, world, capsys):
-        import transfer_grid
-        assert transfer_grid.main(["--status", "--target", "raw",
+        from fmri_decomposition.supervised_model import transfer as tgm
+        assert tgm.main(["--status", "--target", "raw",
                                    "--out", str(world["out"])]) == 0
         assert "NOTHING under" in capsys.readouterr().out
 
     def test_it_fits_nothing(self, world):
-        import transfer_grid
-        transfer_grid.main(["--status", "--target", "raw",
+        from fmri_decomposition.supervised_model import transfer as tgm
+        tgm.main(["--status", "--target", "raw",
                             "--out", str(world["out"])])
         assert not list(world["out"].rglob("rows.parquet"))
 
@@ -721,8 +734,8 @@ class TestCoverageReport:
             n_boot=2000, seed=0, git_sha="x", written_at="t")
 
     def report(self, root, capsys):
-        import transfer_grid
-        transfer_grid.main(["--status", "--target", "raw", "--out", str(root)])
+        from fmri_decomposition.supervised_model import transfer as tgm
+        tgm.main(["--status", "--target", "raw", "--out", str(root)])
         return capsys.readouterr().out
 
     def test_it_counts_the_state_sets_each_model_reached(self, tmp_path, capsys):
@@ -780,8 +793,8 @@ class TestShortfallAccounting:
             written_at="t")
 
     def report(self, root, capsys):
-        import transfer_grid
-        transfer_grid.main(["--status", "--target", "raw", "--out", str(root)])
+        from fmri_decomposition.supervised_model import transfer as tgm
+        tgm.main(["--status", "--target", "raw", "--out", str(root)])
         return capsys.readouterr().out
 
     def test_a_shortfall_that_is_exactly_the_missing_shard_is_not_a_skip(
@@ -1121,10 +1134,15 @@ class TestThePreflightChecksWhatIsSubmitted:
     def test_the_submitter_preflights_each_tree_it_submits(self):
         t = (Path(__file__).resolve().parents[2] / "slurm"
              / "transfer_grid.sh").read_text()
+        # Sliced to the end of the loop, not to a byte count. It was
+        # `t[i:i + 500]`, and the first time a line inside the loop got longer
+        # the assertion fell off the end of the window and failed for a reason
+        # that had nothing to do with what it tests.
         i = t.index("pre-flight")
-        block = t[i:i + 500]
+        block = t[i:t.index("\ndone\n", i)]
         assert "for tree in $TREES" in block
         assert '--tree "$tree"' in block
+        assert "--dry-run" in block
 
 
 class TestStatusReportsTheFcmInputs:
@@ -1147,9 +1165,9 @@ class TestStatusReportsTheFcmInputs:
             / f"task={task}" / "subjects.parquet")
 
     def report(self, world, capsys):
-        import transfer_grid
+        from fmri_decomposition.supervised_model import transfer as tgm
         put(world["out"], 0, 1)
-        transfer_grid.main(["--status", "--target", "raw",
+        tgm.main(["--status", "--target", "raw",
                             "--out", str(world["out"]),
                             "--outputs", str(world["root"])])
         return capsys.readouterr().out
@@ -1158,7 +1176,7 @@ class TestStatusReportsTheFcmInputs:
         """A table for every cohort transfer_config lists on the train side --
         one, since Cam-CAN is one cohort with two conditions."""
         from fmri_decomposition.supervised_model import transfer_config as tc
-        for c in tc.TRAIN_COHORTS:
+        for c in tc.load(tc.DEFAULT_CONFIG)["train"]["cohorts"]:
             self.static_fc(root, atlas, c,
                            task="Rest" if c.endswith("rest") else "Movie", **kw)
 
@@ -1321,9 +1339,9 @@ class TestTheReportBuildsTheCommand:
             / f"task={task}" / "subjects.parquet")
 
     def report(self, world, capsys):
-        import transfer_grid
+        from fmri_decomposition.supervised_model import transfer as tgm
         put(world["out"], 0, 1)
-        transfer_grid.main(["--status", "--target", "raw",
+        tgm.main(["--status", "--target", "raw",
                             "--out", str(world["out"]),
                             "--outputs", str(world["root"])])
         return capsys.readouterr().out
@@ -1439,11 +1457,11 @@ class TestTheStateTreesPolicyIsReported:
             write_table_atomic(t.replace_schema_metadata(md), q)
 
     def report(self, world, capsys):
-        import transfer_grid
+        from fmri_decomposition.supervised_model import transfer as tgm
         tt.censor_policies.cache_clear() if hasattr(
             tt.censor_policies, "cache_clear") else None
         put(world["out"], 0, 1)
-        transfer_grid.main(["--status", "--target", "raw",
+        tgm.main(["--status", "--target", "raw",
                             "--out", str(world["out"]),
                             "--outputs", str(world["root"])])
         return capsys.readouterr().out
@@ -1587,7 +1605,7 @@ class TestTheConcession:
 
 
 class TestTheBareLoginNodePython:
-    """`$RUN python3 tools/transfer_grid.py --status` came back with
+    """`$RUN python3 fmri-decomp transfer --status` came back with
 
         ModuleNotFoundError: No module named 'pandas'
 
@@ -1599,34 +1617,34 @@ class TestTheBareLoginNodePython:
     def test_it_names_the_missing_module_and_the_env_file(self, monkeypatch):
         import importlib.util
 
-        import transfer_grid
+        from fmri_decomposition.supervised_model import transfer as tgm
         real = importlib.util.find_spec
         monkeypatch.setattr(importlib.util, "find_spec",
                             lambda m, *a, **k: None if m == "pandas"
                             else real(m, *a, **k))
         with pytest.raises(SystemExit) as e:
-            transfer_grid.require_runtime()
+            tgm.require_runtime()
         msg = str(e.value)
         assert "pandas" in msg
         assert "source slurm/env.sh" in msg
         assert "An unset $RUN does not fail" in msg
 
     def test_with_the_modules_present_it_says_nothing(self):
-        import transfer_grid
-        assert transfer_grid.require_runtime() is None
+        from fmri_decomposition.supervised_model import transfer as tgm
+        assert tgm.require_runtime() is None
 
     def test_main_checks_before_doing_anything(self, world, monkeypatch):
         """Before reading a tree or importing a Study -- the diagnosis is
         worth nothing after a traceback from somewhere else."""
         import importlib.util
 
-        import transfer_grid
+        from fmri_decomposition.supervised_model import transfer as tgm
         real = importlib.util.find_spec
         monkeypatch.setattr(importlib.util, "find_spec",
                             lambda m, *a, **k: None if m == "pyarrow"
                             else real(m, *a, **k))
         with pytest.raises(SystemExit) as e:
-            transfer_grid.main(["--status", "--target", "raw",
+            tgm.main(["--status", "--target", "raw",
                                 "--out", str(world["out"])])
         assert "pyarrow" in str(e.value)
 
@@ -1669,9 +1687,9 @@ class TestTheCommandUsesTheCohortsOwnPolicy:
                  b"censor_policy": f'"{policy}"'.encode()}), q)
 
     def report(self, world, capsys):
-        import transfer_grid
+        from fmri_decomposition.supervised_model import transfer as tgm
         put(world["out"], 0, 1)
-        transfer_grid.main(["--status", "--target", "raw",
+        tgm.main(["--status", "--target", "raw",
                             "--out", str(world["out"]),
                             "--outputs", str(world["root"])])
         return capsys.readouterr().out
@@ -1744,9 +1762,28 @@ class TestAStaleCohortName:
     def test_the_shipped_config_lists_one_camcan_cohort(self):
         from fmri_decomposition.supervised_model import transfer_config as tc
         from fmri_decomposition.supervised_model import hads as ht
-        assert tc.TRAIN_COHORTS == ["camcan"]
+        cfg = tc.load(tc.DEFAULT_CONFIG)
+        assert cfg["train"]["cohorts"] == ["camcan"]
         assert ht.Settings().cohorts == ["camcan"]
-        assert set(tc.CC_TASKS) == {"movie", "rest"}
+        assert set(cfg["train"]["tasks"]) == {"movie", "rest"}
+        assert set(cfg["test"]["tasks"]) == {"movie", "rest"}
+
+    def test_the_two_sides_agree_on_their_condition_labels(self):
+        """The KEYS of `tasks` are what a transfer joins on; the values are
+        each cohort's own spelling. Keys that differ silently produce no row
+        for the condition only one side names."""
+        from fmri_decomposition.supervised_model import transfer_config as tc
+        cfg = tc.load(tc.DEFAULT_CONFIG)
+        assert set(cfg["train"]["tasks"]) == set(cfg["test"]["tasks"])
+
+    def test_the_two_sides_agree_on_their_target_labels(self):
+        """Same rule for the phenotype: the LABELS must match, the columns
+        need not -- Spearman only needs the two to order people the same way,
+        which is why this transfer needs no equating of HADS against the ASR."""
+        from fmri_decomposition.supervised_model import transfer_config as tc
+        cfg = tc.load(tc.DEFAULT_CONFIG)
+        for name in tc.target_names(cfg):
+            assert set(tc.targets_for(cfg, name)) == set(cfg["test"]["targets"]), name
 
     def test_a_name_absent_from_every_tree_is_refused_as_stale(self, tmp_path):
         import pyarrow as pa

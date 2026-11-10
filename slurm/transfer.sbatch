@@ -1,5 +1,5 @@
 #!/bin/bash
-# One shard of the Cam-CAN -> HCP transfer grid (tools/transfer_grid.py).
+# One shard of the Cam-CAN -> HCP transfer grid (`fmri-decomp transfer`).
 #
 #   sbatch --array=0-39 slurm/transfer.sbatch raw 40
 #   TREE=fcm sbatch slurm/transfer.sbatch raw 1
@@ -12,7 +12,7 @@
 #   $2  how many shards the array has (must match --array)
 #   TREE=bstm|fcm     which tree. fcm has no state set to shard by, so it is
 #                     one job with n_shards=1.
-#   anything after a bare `--` is forwarded to transfer_grid.py verbatim.
+#   anything after a bare `--` is forwarded to the transfer verbatim.
 #
 # AN ARRAY, UNLIKE slurm/model_selection.sbatch. That one keeps the grid in one
 # process because every cell needs the same small tables in memory and joblib
@@ -24,7 +24,7 @@
 #
 # THREADS, AND WHY THE EXPORT IS PREFIXED. Two arrays died here with
 #
-#   Segmentation fault      (core dumped)   tools/transfer_grid.py
+#   Segmentation fault      (core dumped)   `fmri-decomp transfer`
 #
 # and faulthandler named the line: scipy.linalg.eigh inside RidgeCV's
 # `_eigen_decompose_gram`, its n_features > n_samples branch -- which is why
@@ -134,7 +134,7 @@ else
   RUN=(python3)
 fi
 
-"${RUN[@]}" -u tools/transfer_grid.py \
+"${RUN[@]}" -u -m fmri_decomposition.supervised_model.transfer \
     --target "${TARGET}" --tree "${TREE}" \
     --shard "${SHARD}" --n-shards "${N_SHARDS}" \
     --threads "${THREADS}" \

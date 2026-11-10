@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """One shard of the Cam-CAN -> HCP transfer grid. Fits, scores, writes parquet.
 
-    python tools/transfer_grid.py --target raw --shard 0 --n-shards 40
-    python tools/transfer_grid.py --target raw --tree fcm        # one job, no shards
+    python fmri-decomp transfer --target raw --shard 0 --n-shards 40
+    python fmri-decomp transfer --target raw --tree fcm        # one job, no shards
 
 WHY THIS IS A SCRIPT AND NOT A NOTEBOOK CELL
 --------------------------------------------
@@ -75,7 +75,7 @@ def say(*a):
     """print that reaches the log even if the next line segfaults."""
     print(*a, flush=True)
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(REPO / "notebooks"), str(REPO)]
 
 
@@ -87,10 +87,43 @@ def git_sha() -> str:
         return ""
 
 
+def pair(cfg) -> tuple[str, str]:
+    """(train cohort, test cohort) for the output path, from the config.
+
+    The hive keys `train=` and `test=` are a CLAIM about which cohort was
+    fitted and which was scored. These were hardcoded to camcan / hcp7t_fix,
+    which was true of the only config that existed and would have been a lie
+    for the second one -- rows from a role swap would have landed under the
+    old pair's keys and been indistinguishable from it.
+
+    A side with more than one cohort is joined with `+`, so the key still
+    names every cohort that went into it.
+    """
+    return ("+".join(cfg["train"]["cohorts"]),
+            "+".join(cfg["test"]["cohorts"]))
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--target", default="raw", choices=["raw", "category"],
+    add_arguments(ap)
+    return ap
+
+
+def add_arguments(ap) -> None:
+    """Every flag, on a parser the caller owns.
+
+    Split out so `fmri-decomp transfer` mounts the same flags as a subparser
+    rather than re-declaring them -- which is how the CLI and a standalone
+    invocation drift apart.
+    """
+    ap.add_argument("--config", default=None, metavar="NAME|PATH",
+                    help="the transfer config: a path, or a name under "
+                         "config/transfer/ (default: camcan_to_hcp). The pair "
+                         "of cohorts, their columns, task maps and covariates "
+                         "all come from it -- swapping which cohort trains is "
+                         "a second file, not an edit to the code.")
+    ap.add_argument("--target", default="raw",
                     help="which Cam-CAN target columns: the raw HADS score or "
                          "the banded category. Two different analyses; they are "
                          "written under separate `targets=` partitions.")
@@ -145,10 +178,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "missing, for both trees. The question an array leaves "
                          "behind is whether the tasks FINISHED or were killed, "
                          "and the queue cannot answer it.")
-    return ap
 
-
-def status(a, root_out) -> int:
+def status(a, root_out, cfg) -> int:
     """What is on disk, per tree: shards, gaps, and whether they AGREE.
 
     An array that has left the queue has either finished or been killed, and
@@ -166,13 +197,21 @@ def status(a, root_out) -> int:
     # from the other by string surgery on the path worked in the one layout
     # where they are siblings and silently looked in the wrong place anywhere
     # else.
+    # TWO FORMS, and they are not interchangeable. `tr_co`/`te_co` are the
+    # cohort LISTS, for the per-cohort checks below (censor policy, static-FC
+    # presence). `tr_key`/`te_key` are the hive KEYS `train=`/`test=` in the
+    # output path, which `pair` joins with `+`. Using the list where the key
+    # belongs made the inventory look under `train=['camcan']` and find
+    # nothing, and the report then said a complete tree was empty.
+    tr_co, te_co = cfg["train"]["cohorts"], cfg["test"]["cohorts"]
+    tr_key, te_key = pair(cfg)
     outputs = Path(a.outputs) if a.outputs else Path(os.environ.get(
         "FMRIDECOMP_OUTPUTS", "/project/6008063/tamires/DecomposingfMRI/outputs"))
     root = root_out or tree_root(outputs, "transferred_models")
     say(f"{root}")
     todo = []
     for tree in ("bstm", "fcm"):
-        inv = tt.inventory(root, a.target, "camcan", "hcp7t_fix", tree)
+        inv = tt.inventory(root, a.target, tr_key, te_key, tree)
         head = f"  targets={a.target} tree={tree}:"
         for f in inv["empty"]:
             say(f"{head} EMPTY FILE {f} -- nothing was scored; read that job's "
@@ -259,8 +298,6 @@ def status(a, root_out) -> int:
     # disk before anything is submitted. Printed here because this is where
     # the question gets asked.
     from fmri_decomposition.supervised_model import transfer_config as tc
-
-    tr_co, te_co = tc.TRAIN_COHORTS, tc.TEST_COHORTS
     fc_root = tree_root(outputs, "static_fc")
     recs, seen = {}, False
     for q in sorted(fc_root.rglob("subjects.parquet")):
@@ -433,12 +470,25 @@ def require_runtime() -> None:
         f"python and `$RUN` was empty -- it is set by sourcing the env file, "
         f"not by being in the repo:\n"
         f"    source slurm/env.sh\n"
-        f"    $RUN python3 tools/transfer_grid.py ...\n"
+        f"    $RUN fmri-decomp transfer ...\n"
         f"  An unset $RUN does not fail; it runs `python3` alone.")
 
 
+def main_from_args(a) -> int:
+    """The body of `main`, for a namespace the CLI already parsed.
+
+    `main` keeps parsing argv so `python -m
+    fmri_decomposition.supervised_model.transfer` still works on a cluster
+    where the console script is not on PATH -- the job scripts use that form.
+    """
+    return _run(a)
+
+
 def main(argv=None) -> int:
-    a = build_parser().parse_args(argv)
+    return _run(build_parser().parse_args(argv))
+
+
+def _run(a) -> int:
     require_runtime()
 
     import pandas as pd
@@ -447,11 +497,19 @@ def main(argv=None) -> int:
 
     t0 = time.time()
     root_out = Path(a.out) if a.out else None
+    # Before the --status branch: status prints the pair, so it needs the
+    # config too, and a typo in --config should fail here rather than after a
+    # tree walk.
+    cfg = tc.load(a.config or tc.DEFAULT_CONFIG)
     if a.status:
-        return status(a, root_out)
+        return status(a, root_out, cfg)
+    tr_co, te_co = pair(cfg)
+    say(f"transfer config {cfg['_path']}")
+    say(f"  train={tr_co} -> test={te_co}  "
+        f"target sets {tc.target_names(cfg) or '(one, fixed)'}")
     train, test, train_cfg, test_cfg = tc.studies(
         a.target, models=a.models, root=a.outputs, camcan=a.camcan_pheno,
-        hcp_pheno=a.hcp_pheno)
+        hcp_pheno=a.hcp_pheno, config=cfg)
     root_out = root_out or (tree_root(train_cfg.root, "transferred_models"))
     import numpy, sklearn
     say(f"target={a.target} tree={a.tree} shard={a.shard}/{a.n_shards} "
@@ -493,7 +551,7 @@ def main(argv=None) -> int:
     prov = dict(grid_hash=gh, n_sets_total=len(sets), n_boot=a.n_boot,
                 seed=a.seed, git_sha=git_sha(),
                 written_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
-    path = (tt.transfer_dir(root_out, "camcan", "hcp7t_fix", a.target, a.tree)
+    path = (tt.transfer_dir(root_out, tr_co, te_co, a.target, a.tree)
             / f"shard={a.shard:02d}" / "rows.parquet")
     # NOT before --dry-run. A pre-flight on a tree whose shard 0 is already
     # written took this path and returned, so it printed "exists, skipping"
@@ -578,7 +636,7 @@ def main(argv=None) -> int:
             f"best {rows['score'].max():+.3f}")
         say(f"done in {time.time() - t0:.0f}s")
         return 0
-    out = tt.write_transferred(rows, root_out, train="camcan", test="hcp7t_fix",
+    out = tt.write_transferred(rows, root_out, train=tr_co, test=te_co,
                                target_set=a.target, tree=a.tree, shard=a.shard,
                                n_shards=a.n_shards, **prov)
     say(f"{len(rows):,} row(s) -> {out}")

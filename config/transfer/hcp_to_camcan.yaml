@@ -1,0 +1,98 @@
+# The roles swapped: fit on HCP 7T, score once on Cam-CAN.
+#
+#   fmri-decomp transfer --config hcp_to_camcan --target hcp \
+#       --modelling-version v2 --shard 0 --n-shards 40
+#
+# THIS FILE IS THE ARGUMENT FOR THE CONFIG BEING A FILE. Nothing in the code
+# changed to make this possible; every cohort, column, task map and covariate
+# that differs is below. Under the old arrangement this was an edit to a module
+# that notebook 13 and every transfer job import.
+#
+# IT IS A NEW MODELLING VERSION, not a variant of v0. v0's supervised half
+# records `supervised_train: camcan`, so a run of this under v0 is REFUSED by
+# name -- the tree would be called v0 and hold two different claims. Pass
+# `--modelling-version v2`.
+#
+# The state space does NOT change: the unsupervised fit is the same cneuromod +
+# ds002837 PCA, and the same latents and transitions. So v2's manifest should
+# say `unsupervised_from: v0` and v2 should hold no unsupervised_model/ of its
+# own -- the latents would be identical bytes, and copying them is hours of
+# refit for nothing.
+#
+# WHAT THIS ANSWERS THAT v0 CANNOT. v0 asks whether a model trained on a large
+# ageing cohort transfers to a young one. This asks the reverse, and the two
+# together separate "the signal generalises" from "Cam-CAN is simply the bigger
+# training set" -- n=168 fitting and n=649 scoring is the harder direction, so
+# a score here is the stronger claim and a null here is weaker evidence than a
+# null in v0.
+
+name: hcp_to_camcan
+
+train:
+  cohorts: [hcp7t_fix]
+  # HCP's four movies are task=MOVIE1..4 and its four rests task=REST1..4, so
+  # the TRAIN side is now the one that needs prefix matching and pooling --
+  # which is the whole reason `task_match` and `pool_runs` are per-side
+  # settings rather than one flag for the transfer.
+  tasks:
+    rest: REST
+    movie: MOVIE
+  task_match: prefix
+  pool_runs: true
+
+  # HCP's instrument, as the single target set. The ASR/DSM-oriented scales
+  # have no 4-band form to compare against, so there is one `--target` choice
+  # here where Cam-CAN had two. A config offering one set does not ask.
+  targets:
+    hcp:
+      anxiety: DSM_Anxi_Raw
+      depression: DSM_Depr_Raw
+
+  pheno_files:
+    - path: ${HCP_PHENO}
+      sep: ","
+  pheno_id: Subject
+  covariate_aliases:
+    Sex: Gender
+    Age: Age_in_Yrs
+
+test:
+  cohorts: [camcan]
+  tasks:
+    rest: Rest
+    movie: Movie
+  task_match: exact
+
+  # Scored against the RAW HADS, not the 4-band form: Spearman on four bands
+  # over 649 subjects is mostly ties, and ties are where a rank correlation
+  # loses the most resolution. The training instrument is already coarse here,
+  # so the test side should not add to it.
+  targets:
+    anxiety: additional_HADS_anxiety
+    depression: additional_HADS_depression
+
+  pheno_files: null              # Cam-CAN's own pair, under $CAMCAN_PHENO
+  pheno_id: CCID
+
+  # The 9999 "no answer" sentinel in additional_HADS_depression. It is on the
+  # TEST side here, which v0 never had to handle -- there the raw columns were
+  # the training target. A sentinel in the test column would be scored as a
+  # real value by Spearman and drag the correlation toward zero.
+  target_range:
+    hcp: [0, 21]
+
+covariates: [Age, Sex, n_transitions]
+baseline_covariates: [Age, Sex]
+models: [ridge, hgb]
+
+covariate_values:
+  Sex:
+    M: M
+    MALE: M
+    MAN: M
+    F: F
+    FEMALE: F
+    WOMAN: F
+
+score_name: "transfer score, Cam-CAN (Spearman)"
+spread_name: "sd of the bootstrap over the test subjects"
