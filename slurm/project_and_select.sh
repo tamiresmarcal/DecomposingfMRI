@@ -108,7 +108,7 @@ train, apertures = sys.argv[3].split(), sys.argv[4].split()
 # only a problem while nothing restores it; saying so again once the bridge is
 # there would make the check impossible to satisfy.
 bridged = "--legacy-hash-from" in (sys.argv[5] if len(sys.argv) > 5 else "")
-root = Path("outputs/latents")
+root = Path("outputs/modelling/version=v0/unsupervised_model/latents")
 problems, notes = [], []
 for w in apertures:
     ref = root / f"atlas={atlas}" / f"window_s={w}" / f"cohort={train[0]}"
@@ -170,7 +170,7 @@ echo "   jobid ${T_ID}"
 
 if [[ "$STOP_AFTER" == "transitions" ]]; then
   echo "== STOP_AFTER=transitions: stage 5b not submitted"
-  echo "   transitions land under outputs/transitions/.../cohort=${COHORT}/"
+  echo "   transitions land under outputs/modelling/version=v0/unsupervised_model/transitions/.../cohort=${COHORT}/"
   exit 0
 fi
 
@@ -216,6 +216,6 @@ other cohorts listed as '(already at this fit_hash)':
   grep -cE 'reusing the cached fit' slurm_logs/cluster_${C_ID}.out
 
 the four tables per condition, when it is done:
-  outputs/bstm_selection${OUT_SUFFIX}/task=<cond>/target=<y>/summary.csv
-  outputs/fcm_selection${OUT_SUFFIX}/ task=<cond>/target=<y>/summary.csv
+  outputs/modelling/version=v0/supervised_model/bstm_selection${OUT_SUFFIX}/task=<cond>/target=<y>/summary.csv
+  outputs/modelling/version=v0/supervised_model/fcm_selection${OUT_SUFFIX}/ task=<cond>/target=<y>/summary.csv
 EOF

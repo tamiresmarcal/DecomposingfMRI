@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from fmri_decomposition.activation import RunRef
+from fmri_decomposition.extractions.activation import RunRef
 from fmri_decomposition.cli import _path_collisions
 from fmri_decomposition.config import config_from_dict
 

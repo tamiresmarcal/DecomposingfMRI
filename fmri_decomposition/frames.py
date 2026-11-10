@@ -360,7 +360,6 @@ def read_cohort(root: Path, atlas: str, cohort: str, features: list[str],
     TRs is read correctly: see `cohort_tr`, which refuses rather than picking
     one when it is omitted and the shards disagree.
     """
-    from .decompose import IDENT, _DERIVED
 
     paths = shard_paths(root, atlas, cohort, task)
     if not paths:
@@ -379,7 +378,9 @@ def read_cohort(root: Path, atlas: str, cohort: str, features: list[str],
             continue
         by_sub.setdefault((keys["task"], keys["sub"]), []).append(p)
 
-    ident_cols = [c for c in IDENT if c not in _DERIVED]
+    from .io import LATENTS_DERIVED, LATENTS_IDENT
+
+    ident_cols = [c for c in LATENTS_IDENT if c not in LATENTS_DERIVED]
     stats = {"runs": 0, "runs_filtered": 0, "runs_too_short": 0,
              "boundary_frames": 0, "bad_frames": 0, "censored_windows": 0}
     idents, blocks = [], []

@@ -1,0 +1,1606 @@
+#!/usr/bin/env python3
+"""Stage 4 -- fit a latent decomposition on some cohorts, project it onto others.
+
+    fmri-decomp decompose --atlas harvardoxford --window-s 30 60 120 300
+
+THIS STAGE PRODUCES EMBEDDINGS. IT DOES NOT DEFINE STATES
+---------------------------------------------------------
+PCA and UMAP are fitted here; every way of turning those coordinates into a
+discrete state label lives in `cluster` (stage 4b), threshold included.
+
+The quantile thresholding used to be here, and having it here while every other
+clusterer was in `cluster` was the wrong seam in two concrete ways. One method
+got re-fitted on every stage 4 re-run while the others did not, so the cheapest
+state definition was the most expensive to change. And it wrote
+`ThresholdCluster_pca3_*` columns with no entry in the schema's `clusterers`
+provenance, because that block is written by stage 4b -- which is exactly why
+`transitions.n_states_for` needs a fallback that reads K out of a column NAME.
+One owner, one provenance record, one place to add the next method.
+
+`--bins` is therefore gone; `cluster --methods threshold --k 8 27` is where it
+went, and it reproduces the same columns (K = bins**3, quantile edges fitted on
+the training rows).
+
+WHICH COHORT IS FIT AND WHICH IS PROJECTED
+------------------------------------------
+`--train` and `--project`, and nothing else. No cohort YAML owns this stage:
+a decomposition spans cohorts by definition, so the split cannot live in a
+per-cohort config the way `tr` or `atlases` does. Defaults are
+`--train ds002837 cneuromod --project camcan`, which is the design the camcan
+symptom analysis needs -- camcan is never seen by any `fit`, only by
+`transform`.
+
+The split is recorded in three places so a file can never be orphaned from it:
+`role` and `model_hash` are COLUMNS in every latents file, the full fit
+description is in that file's parquet schema metadata, and the fitted objects
+plus a manifest sit under `meta/models/`.
+
+`model_hash` is a short digest of everything that changes the fit -- atlas,
+window, train cohorts, n_latents, seed, umap rows, package version and
+the edge list. Two files with the same hash came from the same fit; two with
+different hashes are not comparable, whatever the filenames say. It is the
+same idea as `config_hash` on the stage 2 and 3 shards.
+
+writes, per window size,
+
+    outputs/modelling/version=v0/unsupervised_model/latents/atlas=<a>/window_s=<w>/cohort=<c>/data.parquet
+    outputs/modelling/version=v0/unsupervised_model/meta/models/decompose_atlas-<a>_window-<w>.joblib
+
+This is `notebooks/05_decompose.ipynb` as a batch job. The notebook holds every
+cohort's edges in memory at once, which is fine at yeo7's 21 edges and not fine
+at Harvard-Oxford's 6,105: 124k training windows x 6,105 edges is 3.0 GB in
+float32 and 6.1 GB in float64, and the notebook made several copies of it.
+
+WHAT THIS DOES DIFFERENTLY, AND WHY IT FITS WHERE THE NOTEBOOK DID NOT
+----------------------------------------------------------------------
+* float32 end to end. The edges are written as float32 and nothing here needs
+  more; it halves every array. sklearn preserves the dtype.
+* The training matrix is built once and scaled IN PLACE (`StandardScaler(
+  copy=False)`), instead of being converted to an array twice and copied again
+  by `transform`. That alone was three simultaneous copies in the notebook.
+* Two passes. Fitting needs the training cohorts in memory together; writing
+  does not, so each cohort is re-read, transformed, written and freed one at a
+  time. Re-reading costs IO and saves a whole cohort's worth of peak RSS.
+* Each window size is an independent fit, so `--window-s` loops rather than
+  pooling -- and a SLURM array can put one window size per task.
+
+Peak memory is roughly `n_train_rows x n_edges x 4 bytes x 1.6`. Print it
+before committing an allocation:
+
+    python tools/decompose.py --atlas harvardoxford --window-s 30 --dry-run
+
+WHAT IS STILL MISSING
+---------------------
+The window grid comes from the command line rather than from `windows.sizes_s`.
+Worth closing; not a reason to keep this outside the package, since it is the
+stage that turns features into the latents every later analysis reads.
+"""
+
+from __future__ import annotations
+
+import argparse
+import gc
+import hashlib
+import json
+import os
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+# Identity and QC carried into the latents. Everything else in a dfc file is
+# either an edge (dropped -- it is already in dfc/) or a partition key.
+from ..io import (LATENTS_DERIVED, LATENTS_IDENT, PASSTHROUGH_MAX_FEATURES,
+                 RAW_PREFIX, announce_version, claim_version, dfc_root,
+                 latents_root,
+                 meta_dir, read_file, read_subject_list,
+                 subject_list_digest)
+
+#: Stored beside the fit description but describing the FILE, not the fit, so
+#: never carried into a hash by --legacy-hash-from. `tasks` is the conditions
+#: one cell happens to cover, which is per-file by construction.
+_NEVER_CARRIED = frozenset({"tasks"})
+
+
+
+def log(msg: str) -> None:
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def shard_paths(root: Path, atlas: str, window_s, cohort: str,
+                task: str | None = None) -> list[Path]:
+    # Through dfc_root rather than a `root.glob("dfc/...")` literal: the stem
+    # moved under `extractions/` and this glob was the one place that spelled
+    # it as a relative pattern instead of asking io for the directory. It read
+    # as a filter on the keys below it and was also an assertion about where
+    # the tree starts.
+    t = task if task else "*"
+    return sorted(dfc_root(root, atlas, window_s, cohort)
+                  .glob(f"task={t}/sub=*/data.parquet"))
+
+
+# --------------------------------------------------------- feature sources ---
+# A source answers three questions and nothing else: where its shards are, what
+# its feature columns are called, and how to turn a cohort into (identity,
+# matrix). Everything after that -- scaling, PCA, UMAP, the threshold grid,
+# model_hash, the two-pass write -- is shared, because the aperture is the only
+# thing that differs. Adding a third source is an entry here, not a new stage.
+ACTIVATION_WINDOW = "-1"
+
+
+def source_shard_paths(root: Path, atlas: str, window_s, cohort: str,
+                       source: str, task: str | None = None) -> list[Path]:
+    if source == "activation":
+        from .. import frames
+        return frames.shard_paths(root, atlas, cohort, task)
+    return shard_paths(root, atlas, window_s, cohort, task)
+
+
+def source_feature_columns(path: Path, source: str) -> list[str]:
+    if source == "activation":
+        from .. import frames
+        return frames.feature_columns(path)
+    return edge_columns(path)
+
+
+def source_read_cohort(root: Path, atlas: str, window_s, cohort: str,
+                       features: list[str], args, censor: dict | None,
+                       task: str | None = None):
+    """-> (identity frame, float32 matrix, stride_s, indep_factor).
+
+    `stride_s` and `indep_factor` describe the time axis of the rows and are
+    written to the latents for stage 5a: at this aperture the step between
+    consecutive rows is the cohort's TR, which decompose cannot derive from
+    `window_s` the way it can for a sliding window. They are None for dfc, where
+    stage 5a's own `--n-overlaps` already gives it both.
+    """
+    if source_of(args) == "activation":
+        from .. import frames
+        ident, X, tr = frames.read_cohort(
+            root, atlas, cohort, features, censor=censor,
+            band=args.match_bandpass, zscore=args.zscore_runs, log=log,
+            task=task)
+        # Frames do not overlap, so one row IS one independent sample.
+        return ident, X, float(tr), 1
+    ident, X = read_cohort(root, atlas, window_s, cohort, features,
+                           censor=censor, task=task)
+    return ident, X, None, None
+
+
+def source_of(args) -> str:
+    return getattr(args, "source", "dfc")
+
+
+def edge_columns(path: Path) -> list[str]:
+    """Edge names from one shard's schema, without reading a row group."""
+    import pyarrow.parquet as pq
+
+    names = pq.ParquetFile(path).schema_arrow.names
+    edges = [n for n in names if "__" in n]
+    if not edges:
+        raise SystemExit(
+            f"{path} has no NodeA__NodeB columns. This atlas packs its edges "
+            f"into a single `edges` list column, which this script does not "
+            f"unpack -- all three configured atlases are below the packing "
+            f"threshold, so check --atlas.")
+    return edges
+
+
+def read_cohort(root: Path, atlas: str, window_s, cohort: str, edges: list[str],
+                want_edges: bool = True, censor: dict | None = None,
+                task: str | None = None):
+    """One cohort -> (identity frame, float32 edge matrix or None).
+
+    Reads the identity columns and the edge columns in one pass but keeps them
+    apart, so the edge block is a contiguous float32 array and never a
+    DataFrame with 6,105 columns of object-dtype partition keys beside it.
+    """
+    paths = shard_paths(root, atlas, window_s, cohort, task)
+    if not paths:
+        raise SystemExit(f"no dfc shards for cohort={cohort}"
+                         + (f" task={task}" if task else "")
+                         + f" at atlas={atlas} window_s={window_s}")
+    ident_cols = [c for c in LATENTS_IDENT if c not in LATENTS_DERIVED]
+    idents, blocks = [], []
+    n_dropped_subs = n_dropped_windows = 0
+    for p in paths:
+        keys = dict(s.split("=", 1) for s in p.parts if "=" in s)
+
+        # A censored subject is skipped before the file is opened: the rows are
+        # never read, never scaled and never counted toward peak RSS. That is
+        # the whole reason this filter belongs here rather than after the
+        # concat, where 6,105 float32 edge columns would already be resident.
+        if censor is not None and (keys["task"], keys["sub"]) not in censor["subjects"]:
+            n_dropped_subs += 1
+            continue
+
+        cols = ident_cols + (edges if want_edges else [])
+        df = pd.read_parquet(p, columns=cols)
+
+        if censor is not None and censor["windows"] is not None:
+            wid = df["window_id"].astype("int64")
+            mask = np.array([(keys["task"], keys["sub"], w) in censor["windows"]
+                             for w in wid], dtype=bool)
+            if not mask.all():
+                n_dropped_windows += int((~mask).sum())
+                df = df.loc[mask]
+            if df.empty:
+                del df
+                continue
+
+        ident = df[ident_cols].copy()
+        for k in ("cohort", "task", "sub"):
+            ident[k] = keys[k]
+        idents.append(ident)
+        if want_edges:
+            blocks.append(df[edges].to_numpy(dtype=np.float32))
+        del df
+
+    if censor is not None and (n_dropped_subs or n_dropped_windows):
+        log(f"  censor[{censor['policy']}] {cohort}: dropped {n_dropped_subs} "
+            f"subject-shard(s), {n_dropped_windows:,} further window(s)")
+    if not idents:
+        raise SystemExit(
+            f"censor policy {censor['policy']!r} kept nothing for cohort="
+            f"{cohort} at atlas={atlas} window_s={window_s} -- check the "
+            f"thresholds before running the fit")
+
+    ident = pd.concat(idents, ignore_index=True)
+    X = np.vstack(blocks) if want_edges else None
+    del idents, blocks
+    gc.collect()
+    return ident, X
+
+
+def drop_nan_rows(ident: pd.DataFrame, X: np.ndarray):
+    """A window with any NaN edge cannot be scaled or decomposed.
+
+    Windows flagged rank_deficient are KEPT: the correlation matrix is
+    singular, but each edge in it is an ordinary two-variable correlation, and
+    dropping them would delete whole window sizes for the coarse-TR cohort.
+    """
+    keep = ~np.isnan(X).any(axis=1)
+    if keep.all():
+        return ident, X
+    return ident[keep].reset_index(drop=True), X[keep]
+
+
+def model_hash(meta: dict, features: list[str]) -> str:
+    """Short digest of everything that changes the fit.
+
+    Same role as `config_hash` on the stage 2 and 3 shards: two latents files
+    with the same hash came from one fit and are comparable; two with different
+    hashes are not, however alike the paths look. The feature list is included
+    because a different atlas revision with the same name is a different model.
+
+    The payload keys are still called `n_edges` and `edges_digest` under the
+    activation source, where the features are parcels rather than edges. The
+    names are wrong there and kept anyway: renaming them would change every dfc
+    hash already on disk, and a digest's key names are not read by anything.
+    `meta["source"]` is what distinguishes the two.
+    """
+    from .. import __version__
+
+    payload = json.dumps({**meta, "package_version": __version__,
+                          "n_edges": len(features),
+                          "edges_digest": hashlib.sha256(
+                              "\n".join(features).encode()).hexdigest()[:16]},
+                         sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _reference_for_aperture(path: Path, window_s) -> Path:
+    """The `--legacy-hash-from` cell for THIS aperture.
+
+    `window_s` is in the hash payload, and unlike `--pca-latents` it is not a
+    flag anybody can forget: it is the aperture the task is processing. So a
+    reference from another aperture is not a mistake to report, it is a path to
+    resolve -- and it HAS to be resolved here, because one
+    `sbatch --array=0-3 ... 30 60 120 300` cannot carry four reference paths.
+
+    Only the `window_s=` key is substituted. Everything else about the path is
+    taken as given, and the clash check still runs on whatever comes back, so
+    pointing at the wrong atlas is still refused by name.
+    """
+    want = f"window_s={window_s}"
+    parts = [want if p.startswith("window_s=") else p for p in path.parts]
+    out = Path(*parts)
+    if out == path:
+        return out
+    if not out.exists():
+        raise SystemExit(
+            f"--legacy-hash-from {path} is for another aperture, and this "
+            f"run's one does not exist:\n"
+            f"  looked for {out}\n"
+            f"  `window_s` is part of the fit description, so the reference "
+            f"has to describe the same aperture. Only that key is "
+            f"substituted; point it at a cell whose atlas and cohort are the "
+            f"ones you mean.")
+    return out
+
+
+def _umap_latents(args) -> list[int]:
+    """Which component counts UMAP is fitted at. Defaults to --n-latents.
+
+    They were one list, and that became a trap once `--n-latents 14` existed to
+    get a lossless rotation for the raw-dimension arm: UMAP was then fitted at
+    14 components too, which costs most of the stage's walltime and is not an
+    embedding anything asks for. UMAP's defaults are tuned for 2-3 components.
+    """
+    want = getattr(args, "umap_latents", None)
+    return list(want) if want else list(args.n_latents)
+
+
+def keep_train_tasks(train_cells, train_tasks, window_s, atlas,
+                    source: str = "dfc"):
+    """Narrow the training cells to `--train-tasks`, or refuse.
+
+    `--train` names COHORTS and takes every task they have, so without this
+    "fit on movie only" and "fit on movie and rest" are not two commands --
+    they are the same command before and after the rest shards appear on disk.
+
+    Both refusals exist because `train_tasks` goes into `model_hash`. A pinned
+    task with no shards must not be dropped quietly: the run would look like it
+    worked, and every output would carry a fit description naming a condition
+    the fit never saw. That is a worse failure than not running.
+    """
+    if not train_tasks:
+        return train_cells
+    want = {str(t) for t in train_tasks}
+    have = sorted({str(t) for _, t in train_cells})
+    kept = [(c, t) for c, t in train_cells if str(t) in want]
+    if not kept:
+        raise SystemExit(
+            f"window_s={window_s}: --train-tasks {' '.join(sorted(want))} "
+            f"matches none of the tasks the training cohorts have at "
+            f"atlas={atlas}.\n"
+            f"  on disk: {', '.join(have) or '(none)'}\n"
+            f"  Task labels are the BIDS labels as the data spells them, so "
+            f"they are case-sensitive here exactly as in --keep-tasks.")
+    missing = sorted(want - {str(t) for _, t in kept})
+    if missing:
+        raise SystemExit(
+            f"window_s={window_s}: --train-tasks names {', '.join(missing)}, "
+            f"which has no {source} shards for any training cohort at "
+            f"atlas={atlas}.\n"
+            f"  on disk: {', '.join(have)}\n"
+            f"  Refusing rather than fitting on the rest: `train_tasks` is in "
+            f"model_hash, so going ahead would stamp every output with a fit "
+            f"description naming a condition the fit never saw.\n"
+            f"  Run the stage that writes them, or drop it from "
+            f"--train-tasks.")
+    return kept
+
+
+def check_train_composition(saved, now, mhash: str, window_s) -> None:
+    """Refuse a saved fit whose training composition is no longer what is here.
+
+    THE SILENT CASE. `train_cohorts` names cohorts and the training cells take
+    all of their tasks, so a training cohort that GAINED a condition changes
+    the training rows without changing any key in the fit description -- the
+    saved fit would be reused under a hash that now means something else.
+    `--train-tasks` pins the answer and lands in the hash; this catches the
+    case where nobody pinned it.
+
+    A fit saved before `train_cells` was recorded has nothing to compare, so
+    the old behaviour stands rather than refusing every tree written earlier.
+    """
+    if saved is None or sorted(saved) == sorted(now):
+        return
+    saved, now = sorted(saved), sorted(now)
+    gained = sorted(set(now) - set(saved))
+    lost = sorted(set(saved) - set(now))
+
+    def tasks_of(cells) -> str:
+        """The `--train-tasks` pin that reproduces a set of cells. The pin is
+        about CONDITIONS, so the same condition in two cohorts is one name."""
+        return " ".join(sorted({c.split("/", 1)[-1] for c in cells}))
+    raise SystemExit(
+        f"window_s={window_s}: the saved fit for model_hash {mhash} was "
+        f"fitted on\n"
+        f"    {', '.join(saved)}\n"
+        f"  but the training cohorts now have\n"
+        f"    {', '.join(now)}\n"
+        + (f"  gained: {', '.join(gained)}\n" if gained else "")
+        + (f"  lost:   {', '.join(lost)}\n" if lost else "")
+        + f"  Those are different training rows under one model_hash, which "
+        f"is the one thing the hash must not allow. Say which you mean:\n"
+        f"    --train-tasks {tasks_of(saved)}\n"
+        f"        keep the fit that is on disk -- a new hash, but the same "
+        f"rows it was fitted on.\n"
+        f"    --train-tasks {tasks_of(now)}\n"
+        f"        fit on everything now present -- a new hash and a new fit, "
+        f"beside the old one.\n"
+        f"    --overwrite\n"
+        f"        refit in place under the SAME hash, destroying the old fit "
+        f"and every state column derived from it.")
+
+
+def train_subjects(args) -> set[str] | None:
+    """The `--train-subjects` set, or None when the fit is not restricted.
+
+    Read once and memoised on `args`. `fit_meta` runs per aperture inside one
+    invocation and the answer cannot change between apertures -- re-reading
+    would let a file edited while the command runs produce two different
+    `model_hash` values in the same run, which is the one thing a hash is for.
+    """
+    path = getattr(args, "train_subjects", None)
+    if not path:
+        return None
+    cached = getattr(args, "_train_subjects_set", None)
+    if cached is None:
+        cached = read_subject_list(path, flag="--train-subjects")
+        args._train_subjects_set = cached
+    return cached
+
+
+def fit_meta(args, window_s, features: list[str]) -> dict:
+    """The fit description carried into every output of this run.
+
+    The `--source activation` keys are added ONLY for that source, and this is
+    deliberate rather than tidy. Everything in here feeds `model_hash`, so
+    writing `"source": "dfc"` into the default payload would change the hash of
+    every dfc fit ever written -- turning latents, transitions and selection
+    outputs that are perfectly valid into files whose hash no longer matches a
+    re-run. Absent keys mean the default, which is the only way to extend a hash
+    payload without invalidating what it has already stamped.
+    """
+    # `project_cohorts` is NOT here, deliberately, and this is the same rule
+    # `stride_s` follows (see write_latents): a per-INVOCATION quantity does not
+    # belong in a description of the fit. Only `--train` feeds the fit -- the
+    # scaler, the PCA and the UMAP never see a projected cohort -- so two runs
+    # that differ only in who else was projected produce the SAME model, and a
+    # hash that said otherwise made them look incomparable. It is written
+    # beside the hash instead, where it is still recoverable.
+    #
+    # This one removal DOES move every hash already on disk, which the
+    # present-only-when-non-default rule above exists to avoid. It is accepted
+    # once, because the alternative is permanent: while the project list is
+    # hashed, adding a cohort to a cell always changes the hash, so no cohort
+    # can ever be skipped and every addition rewrites and re-clusters the whole
+    # cell.
+    meta = {"stage": "latents", "atlas": args.atlas, "window_s": str(window_s),
+            "train_cohorts": list(args.train),
+            "n_latents": list(args.n_latents),
+            "umap_fit_rows": int(args.umap_fit_rows), "no_umap": bool(args.no_umap),
+            # In the fit description, therefore in model_hash: a PCA fit on
+            # censored rows is not the same model as one fit on all of them,
+            # and two latents files that differ only by policy must not be
+            # able to claim the same hash.
+            "censor_policy": args.censor_policy or None,
+            "censor_policy_hash": censor_policy_hash(args),
+            "seed": int(args.seed)}
+    # Both of these follow the same rule as `source` above: present only when
+    # they differ from the default, so adding them does NOT move the hash of any
+    # fit already on disk. An absent key means the default.
+    if getattr(args, "passthrough_features", False):
+        meta["passthrough_features"] = True
+    if _umap_latents(args) != list(args.n_latents):
+        meta["umap_latents"] = _umap_latents(args)
+    # WHICH CONDITIONS AND WHICH SUBJECTS THE FIT SAW.
+    #
+    # `train_cohorts` is too coarse on its own. `train_cells` takes EVERY task
+    # of every training cohort (see run), so the day a training cohort gains a
+    # condition the fit changes and `train_cohorts` does not -- two genuinely
+    # different models under one model_hash, with nothing saying so. A fit
+    # restricted to some of a cohort's subjects is a different model again, and
+    # nothing recorded it at all.
+    #
+    # Present only when the flag is given, the same rule the keys above follow:
+    # an absent key means "every task" / "every subject", so adding these moves
+    # no hash already on disk. Pinning the tasks explicitly is what makes
+    # "movie only" and "movie + rest" two hashes instead of one; `run` refuses
+    # the remaining case, where neither is pinned and the rows changed anyway.
+    if getattr(args, "train_tasks", None):
+        meta["train_tasks"] = sorted(str(t) for t in args.train_tasks)
+    subs = train_subjects(args)
+    if subs is not None:
+        # The DIGEST, never the list -- see io.subject_list_digest.
+        meta["train_subjects"] = subject_list_digest(subs)
+    if getattr(args, "source", "dfc") != "dfc":
+        meta.update({
+            "source": args.source,
+            # Both are transforms applied to the frames before the fit, so both
+            # change the model -- see frames.py's docstring for why a per-TR
+            # pattern needs them and a correlation does not.
+            "match_bandpass": (list(args.match_bandpass)
+                               if args.match_bandpass else None),
+            "zscore_runs": bool(args.zscore_runs),
+        })
+    # The bridge for a tree written before `project_cohorts` left this payload.
+    # Those files' model_hash was computed WITH it, so the current code reads
+    # every one of them as a different fit -- which is the break the removal
+    # accepted up front. Adding the key back reproduces the old payload exactly
+    # (`model_hash` sorts the keys, so position is irrelevant), and nothing else
+    # about the fit is touched. Opt-in, and never the default: the removal is
+    # the right end state, and this only lets an existing tree be extended
+    # without re-clustering it to get there.
+    if getattr(args, "legacy_project_hash", False):
+        meta["project_cohorts"] = list(args.project)
+    # The general form of the same bridge. `project_cohorts` is not the only key
+    # that has left this payload -- `bins` left when quantile thresholding moved
+    # out of this stage into `cluster` -- and a key that left cannot be restored
+    # by any flag, because there is no flag left to set. So instead of one
+    # --legacy-* option per removal, this reads the fit description an existing
+    # cell was WRITTEN with and carries over the keys the current code no longer
+    # emits at all. Keys both descriptions carry must AGREE: a difference there
+    # is a genuinely different fit, and matching its hash anyway would stamp
+    # this run's output with a claim about a model it did not use.
+    ref = getattr(args, "legacy_hash_from", None)
+    if ref:
+        ref = _reference_for_aperture(Path(ref), window_s)
+        stored, _ = latents_fit_description(Path(ref))
+        if not stored:
+            raise SystemExit(
+                f"--legacy-hash-from {ref}: no fit description in that file.\n"
+                f"  Point it at a latents data.parquet that this run would "
+                f"otherwise read as stale.")
+        clash = {k: (stored[k], meta[k]) for k in sorted(meta)
+                 if k in stored and stored[k] != meta[k]}
+        if clash:
+            lines = [f"--legacy-hash-from {ref} describes a DIFFERENT fit, so "
+                     f"its hash cannot be reproduced by carrying keys:"]
+            lines += [f"      {k}: {was!r} (stored) vs {now!r} (this run)"
+                      for k, (was, now) in clash.items()]
+            lines += [
+                "  Each line is a flag this command is missing or has changed."
+                " Add it back and the rest of the payload will line up.",
+                "  This bridge only restores keys the current code no longer "
+                "writes; it will not paper over a flag you did not pass.",
+            ]
+            raise SystemExit("\n".join(lines))
+        meta.update({k: v for k, v in stored.items()
+                     if k not in _NOT_FIT_KEYS and k not in _NEVER_CARRIED
+                     and k not in meta})
+    return meta
+
+
+def _censor_policy(value: str):
+    """`none` -> None, at PARSE time rather than in run().
+
+    It has to be here and not in `run`, because `fit_meta` is reachable without
+    going through `run` and the literal string "none" in its payload is a
+    DIFFERENT model_hash from None -- so an uncensored fit would stop matching
+    every uncensored latents file already on disk, for no reason but spelling.
+    Normalising at the boundary makes `args.censor_policy is None` mean "no
+    censoring" everywhere, with no caller able to see the other spelling.
+    """
+    return None if value.strip().lower() == "none" else value
+
+
+def censor_policy_hash(args) -> str | None:
+    """The hash `censor` stamped on its own output, read back from the summary.
+
+    Taken from the written summary rather than re-hashing the YAML: the claim
+    being recorded is "these rows were filtered by that run", and the YAML on
+    disk may have been edited since.
+    """
+    if not args.censor_policy:
+        return None
+    root = Path(args.output_root) if args.output_root else None
+    if root is None:
+        return None
+    summary = (meta_dir(root, "extractions") / "censor"
+               / f"policy={args.censor_policy}.json")
+    if not summary.exists():
+        return None
+    return json.loads(summary.read_text()).get("policy_hash")
+
+
+def fit_models(X_train: np.ndarray, edges: list[str], args, meta: dict) -> dict:
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    # copy=False scales the training matrix in place -- there is no second
+    # 3 GB array, and X_train is not needed in raw units again.
+    scaler = StandardScaler(copy=False).fit(X_train)
+    Z = scaler.transform(X_train)
+    log(f"scaled in place: {Z.shape} {Z.dtype} "
+        f"({Z.nbytes / 1e9:.2f} GB)")
+
+    # `meta` first, working containers second, so a key in both resolves to the
+    # container rather than to the scalar `meta` recorded it as.
+    models = {**meta, "scaler": scaler, "pca": {}, "umap": {}, "edges": edges}
+
+    # Checked here, where `edges` is known, rather than in argparse, which
+    # cannot see how wide a row is until the shards have been read.
+    models["passthrough"] = bool(getattr(args, "passthrough_features", False))
+    if models["passthrough"] and len(edges) > PASSTHROUGH_MAX_FEATURES:
+        raise SystemExit(
+            f"--passthrough-features on {len(edges):,} features, over the "
+            f"{PASSTHROUGH_MAX_FEATURES} cap.\n"
+            f"  It writes every input feature into the latents table as a "
+            f"column, so this would add {len(edges):,} per row.\n"
+            f"  It is meant for --source activation, where a row is 7, 14 or "
+            f"111 parcels. Here a row is {len(edges):,} "
+            f"{'edges' if getattr(args, 'source', 'dfc') == 'dfc' else 'features'}.\n"
+            f"  Drop the flag, or use --source activation.")
+    if models["passthrough"]:
+        log(f"passthrough: {len(edges)} feature column(s) will be written as "
+            f"{RAW_PREFIX}<name>, SCALED (post-StandardScaler) so that "
+            f"raw{len(edges)} and pca{len(edges)} differ by a rotation only")
+
+    for n in args.n_latents:
+        if n > len(edges):
+            # sklearn's own message names `min(n_samples, n_features)` without
+            # saying which, and on the activation source "n_features" is the
+            # atlas's parcel count -- the one thing the caller can act on.
+            raise SystemExit(
+                f"--n-latents {n} on an atlas with only {len(edges)} "
+                f"feature(s).\n"
+                f"  PCA cannot produce more components than the input has "
+                f"columns. {len(edges)} components IS the whole space "
+                f"(a lossless rotation), so {n} is asking for more "
+                f"information than exists.\n"
+                f"  Use --n-latents 3 {len(edges)} for this atlas.")
+        models["pca"][n] = PCA(n_components=n, random_state=args.seed,
+                               svd_solver="randomized").fit(Z)
+        evr = models["pca"][n].explained_variance_ratio_
+        log(f"pca {n}: cumulative explained {evr.sum():.3f}  {evr.round(3)}")
+
+    models["umap_fitted"] = False
+    if not args.no_umap:
+        try:
+            import umap
+        except ImportError:
+            # Used to warn and carry on. That was wrong: the latents file then
+            # recorded `no_umap: false` -- the REQUEST -- while containing no
+            # umap columns, and carried the same model_hash as a run that had
+            # them. The notebook's only symptom was "umap0/3 not in the
+            # latents", with nothing on disk saying why.
+            raise SystemExit(
+                "umap-learn is not importable, but --no-umap was not passed.\n"
+                "Refusing to write latents that silently lack UMAP columns.\n"
+                "  * PCA only:   add --no-umap\n"
+                "  * with UMAP:  use a container that has umap-learn "
+                "(containers/stage45.def pins 0.5.7)")
+        else:
+            models["umap_fitted"] = True
+            rng = np.random.default_rng(args.seed)
+            idx = (rng.choice(len(Z), args.umap_fit_rows, replace=False)
+                   if args.umap_fit_rows and len(Z) > args.umap_fit_rows
+                   else np.arange(len(Z)))
+            log(f"fitting UMAP on {len(idx):,} of {len(Z):,} rows")
+            for n in _umap_latents(args):
+                t0 = time.time()
+                models["umap"][n] = umap.UMAP(n_components=n,
+                                              random_state=args.seed).fit(Z[idx])
+                log(f"  umap {n}: {time.time() - t0:.0f}s")
+
+    # Nothing here defines a STATE. This stage produces embeddings; `cluster`
+    # turns them into labels -- see the module docstring on why the quantile
+    # thresholding that used to live here moved there.
+    if 3 not in args.n_latents:
+        raise SystemExit("every clusterer in stage 4b is defined on a 3-D "
+                         "embedding; include 3 in --n-latents")
+    del Z
+    gc.collect()
+    return models
+
+
+def latents_for(ident: pd.DataFrame, X: np.ndarray, models: dict,
+                role: str) -> pd.DataFrame:
+    """Identity + every embedding, for one cohort. No state labels.
+
+    `role` and `model_hash` are COLUMNS, not just schema metadata, because
+    pandas drops parquet key-value metadata on read -- a provenance field only
+    a pyarrow user can see is one nobody checks.
+    """
+    Z = models["scaler"].transform(X)
+    out = ident.copy()
+    out["role"] = role
+    out["model_hash"] = models["model_hash"]
+    for kind in ("pca", "umap"):
+        for n, model in models[kind].items():
+            arr = model.transform(Z)
+            for j in range(n):
+                out[f"{kind}{j}/{n}"] = arr[:, j].astype(np.float32)
+    if models.get("passthrough"):
+        # Z, not X: the SCALED features. PCA is fitted on Z, so writing Z here
+        # makes `raw<N>` and `pca<N>` differ by exactly an orthonormal rotation
+        # (measured round-trip error ~1e-14), which is what lets a
+        # full-covariance HMM on one be the same model as on the other. Writing
+        # X instead would leave the two arms differing by a scaling as well,
+        # and the equivalence would no longer be exact.
+        #
+        # The scaler was fitted on the TRAIN cohorts and is applied to every
+        # cohort, projected ones included -- one transform everywhere, which is
+        # what makes a state mean comparable across cohorts at all.
+        for j, name in enumerate(models["edges"]):
+            out[f"{RAW_PREFIX}{name}"] = Z[:, j].astype(np.float32)
+    return out[[c for c in LATENTS_IDENT if c in out.columns]
+               + [c for c in out.columns if c not in LATENTS_IDENT]]
+
+
+def write_latents(lat: pd.DataFrame, path: Path, models: dict, cohort: str) -> None:
+    """Write then rename, with the fit description in the schema metadata.
+
+    Mirrors what stage 2 and 3 do to every shard, so a latents file opened on
+    its own is still self-identifying.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from .. import __version__
+
+    table = pa.Table.from_pandas(lat, preserve_index=False)
+    # Written BESIDE fit_meta, not into it: `stride_s` is the cohort's TR under
+    # the activation source, and a TR differs per cohort inside one fit. A
+    # per-cohort quantity in the fit description would make model_hash differ
+    # between two files that came from the same model -- exactly the thing the
+    # hash exists to rule out. Stage 5a reads it from here.
+    axis = {k: v for k, v in (("stride_s", models.get("stride_s")),
+                              ("indep_factor", models.get("indep_factor")))
+            if v is not None}
+    meta = {k.encode(): json.dumps(v, default=str).encode()
+            for k, v in {**models["fit_meta"], **axis, "cohort": cohort,
+                         # From the FRAME, not from a per-cohort map: the
+                         # `role` column was set per cell by `role_for`, and a
+                         # footer that disagreed with the column it sits beside
+                         # would be worse than either alone. Same reason
+                         # `tasks` below is read off the rows.
+                         "role": (sorted(lat["role"].astype(str).unique())[0]
+                                  if "role" in lat.columns and len(lat)
+                                  else models["role_of"][cohort]),
+                         "model_hash": models["model_hash"],
+                         # Which CONDITIONS this file covers. One cohort can
+                         # hold several -- Cam-CAN's Movie and Rest are the
+                         # same people -- and without this the per-cohort skip
+                         # below cannot tell "already at this model_hash" from
+                         # "already at this model_hash, for only half the
+                         # tasks". Recorded, so the check costs a footer read.
+                         "tasks": sorted(
+                             lat["task"].astype(str).unique().tolist())
+                         if "task" in lat.columns else [],
+                         # What actually happened, beside what was asked for.
+                         "umap_fitted": bool(models.get("umap_fitted")),
+                         "n_umap_components": sorted(models["umap"]),
+                         "n_train_rows": models["n_train_rows"],
+                         # The resolved training composition, so a latents file
+                         # opened on its own says which conditions and how many
+                         # subjects its fit was fitted on -- the two things
+                         # `train_cohorts` cannot say. Beside fit_meta, so
+                         # neither is in model_hash; listed in _NOT_FIT_KEYS so
+                         # neither shows up in a staleness diff.
+                         "train_cells": models.get("train_cells"),
+                         "n_train_subjects": models.get("n_train_subjects"),
+                         "package_version": __version__,
+                         "written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                      time.gmtime())}.items()}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        pq.write_table(table.replace_schema_metadata(meta), tmp, compression="zstd")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def latents_model_hash(path: Path) -> str | None:
+    """The `model_hash` a latents file already carries, or None.
+
+    Read from the schema metadata without touching a row group, so deciding
+    whether a cohort needs rewriting costs one small read per cohort.
+    """
+    if not path.exists():
+        return None
+    import pyarrow.parquet as pq
+
+    md = pq.ParquetFile(path).schema_arrow.metadata or {}
+    raw = md.get(b"model_hash")
+    if raw is None:
+        return None
+    # write_latents json.dumps() EVERY metadata value, so the hash is on disk
+    # as `"abc123"` with the quotes, not as `abc123`. Comparing the raw bytes
+    # therefore never matches and every cohort looks stale -- which silently
+    # turns the per-cohort skip back into the cell-wide rewrite it replaced.
+    # Decoded the same way transitions._meta_value does, falling back to the
+    # bare string so a file written by some other path still reads.
+    try:
+        return json.loads(raw.decode())
+    except ValueError:
+        return raw.decode()
+
+
+def latents_fit_description(path: Path) -> tuple[dict, list[str]]:
+    """(the fit_meta a latents file was written with, its state columns).
+
+    Both come from the schema metadata, so this costs one small read. The
+    state columns are the `clusterers` block stage 4b writes -- what a rewrite
+    of this file would destroy.
+    """
+    if not path.exists():
+        return {}, []
+    import pyarrow.parquet as pq
+
+    schema = pq.ParquetFile(path).schema_arrow
+    md = schema.metadata or {}
+    stored = {}
+    for k, v in md.items():
+        key = k.decode()
+        if key in ("clusterers", "ARROW:schema", "pandas"):
+            continue
+        try:
+            stored[key] = json.loads(v.decode())
+        except ValueError:
+            stored[key] = v.decode()
+    cols = sorted(json.loads((md.get(b"clusterers") or b"{}").decode()))
+    return stored, cols
+
+
+# Written into a latents file BESIDE the fit description (see write_latents),
+# so they are not part of it and must not appear in a diff of it. Without this
+# the one useful line -- the flag that moved -- is buried under ten entries
+# reading `-> '(absent)'` for things that were never in `fit_meta` to begin
+# with. Keep in step with write_latents' metadata block.
+_NOT_FIT_KEYS = frozenset({
+    "cohort", "role", "model_hash", "umap_fitted", "n_umap_components",
+    "n_train_rows", "package_version", "written_utc", "stride_s",
+    "indep_factor", "train_cells", "n_train_subjects",
+})
+
+
+def _fit_differences(stored: dict, meta: dict) -> list[str]:
+    """Which keys of the fit description changed, as readable lines.
+
+    The point is to name the FLAG that moved. A bare "the hash differs" sends
+    you to diff two 16-character strings; "n_latents: [3, 7] -> [2, 3, 5]"
+    says you forgot `--n-latents 3 7`.
+
+    A key in `stored` but absent from `meta` is kept, not filtered: that is
+    exactly the forgotten-flag case, because `fit_meta` writes a key only when
+    it differs from its default. `passthrough_features: True -> (absent)` is
+    the message someone needs most.
+    """
+    out = []
+    for key in sorted((set(stored) | set(meta)) - _NOT_FIT_KEYS):
+        was, now = stored.get(key, "(absent)"), meta.get(key, "(absent)")
+        if was != now:
+            out.append(f"      {key}: {was!r} -> {now!r}")
+    # In the hash payload but not in fit_meta, so the loop above cannot see it.
+    from .. import __version__
+
+    if stored.get("package_version") not in (None, __version__):
+        out.append(f"      package_version: "
+                   f"{stored['package_version']!r} -> {__version__!r}")
+    return out
+
+
+def cell_path(out_dir: Path, cohort: str, task: str) -> Path:
+    """The one latents file for (cohort, task), under a cell's out_dir."""
+    return out_dir / f"cohort={cohort}" / f"task={task}" / "data.parquet"
+
+
+def _cells(cells) -> str:
+    """(cohort, task) pairs for a log line."""
+    return ", ".join(f"{c}/{t}" for c, t in cells)
+
+
+def latents_tasks(path: Path) -> set[str] | None:
+    """The tasks a latents file covers, or None if it has none recorded.
+
+    From the schema metadata when it is there -- a footer read -- and from the
+    `task` column when it is not, because files written before `tasks` was
+    stamped are still on disk and a silent `set()` would read as "covers
+    nothing" and force a rewrite of every one of them.
+    """
+    if not path.exists():
+        return None
+    import pyarrow.parquet as pq
+
+    f = pq.ParquetFile(path)
+    md = f.schema_arrow.metadata or {}
+    raw = md.get(b"tasks")
+    if raw is not None:
+        try:
+            got = json.loads(raw.decode())
+        except ValueError:
+            got = None
+        if isinstance(got, list) and got:
+            return {str(t) for t in got}
+    if "task" not in f.schema_arrow.names:
+        return None
+    return {str(t) for t in
+            f.read(columns=["task"]).column("task").to_pylist()}
+
+
+def source_tasks(root: Path, atlas: str, window_s, cohort: str,
+                 source: str) -> set[str]:
+    """The tasks this cohort has shards for, from the partition directories.
+
+    A directory listing, so it costs nothing. `task=` sits directly under
+    `cohort=` in both stage 1 and stage 2 layouts.
+    """
+    from ..io import activation_root, dfc_root
+
+    base = (activation_root(root, atlas, cohort) if source == "activation"
+            else dfc_root(root, atlas, window_s, cohort))
+    if not base.is_dir():
+        return set()
+    return {d.name.split("=", 1)[1] for d in base.iterdir()
+            if d.is_dir() and d.name.startswith("task=")}
+
+
+def refuse_to_destroy_states(out_dir: Path, stale, meta: dict,
+                             window_s) -> None:
+    """Stop before rewriting a cell whose state columns would be lost.
+
+    `stale` is (cohort, task) pairs. Per CELL rather than per cohort since the
+    task level: a cohort gaining a condition no longer puts its existing
+    condition at risk, because the new one is its own file.
+
+    A rewrite here is not recoverable by re-running: `cluster` would have to
+    refit, and HMM2 at K=27 measured hours per cell. The commonest cause is a
+    FORGOTTEN FLAG -- omit `--passthrough-features` or `--n-latents 3 7` when
+    adding a cohort and the model_hash moves, every existing cohort looks
+    stale, and all of them are rewritten. So the refusal names the difference
+    rather than the hash.
+    """
+    at_risk = {}
+    for cohort, task in stale:
+        stored, cols = latents_fit_description(cell_path(out_dir, cohort, task))
+        if cols:
+            at_risk[f"{cohort}/{task}"] = (stored, cols)
+    if not at_risk:
+        return
+    first = next(iter(at_risk.values()))[0]
+    diff = _fit_differences(first, meta)
+    lines = [
+        f"window_s={window_s}: refusing to rewrite "
+        f"{len(at_risk)} (cohort, task) cell(s) that carry brain-state "
+        f"columns.",
+        "",
+        "  Rewriting a latents file REMOVES those columns -- parquet cannot "
+        "append, so stage 4b's labels live inside the file -- and getting them "
+        "back means re-fitting, which for HMM2 is hours per cell.",
+        "",
+    ]
+    for c, (_, cols) in at_risk.items():
+        lines.append(f"    {c}: {len(cols)} state set(s), e.g. {cols[:4]}")
+    lines += ["", "  They are stale because this run describes a DIFFERENT "
+                  "fit:"]
+    lines += diff or ["      (no readable difference -- the stored fit "
+                      "description is older than this provenance block)"]
+    lines += [
+        "",
+        "  If a flag above is missing from this command, add it back: the fit "
+        "is defined by the flags, so omitting one is a different model.",
+    ]
+    # The one difference no flag of this run can account for: these files were
+    # written while `project_cohorts` was part of the payload. Say so, because
+    # otherwise the advice above sends someone hunting for a flag they did not
+    # forget, and the only other suggestion costs them the re-cluster.
+    if any(line.lstrip().startswith("project_cohorts:") for line in diff):
+        lines += [
+            "  `project_cohorts` is NOT one of those flags. It LEFT this "
+            "payload deliberately, so a tree written before that reads as a "
+            "different fit however the command is spelled.",
+            "  To extend such a tree without rewriting it, pass "
+            "--legacy-project-hash (with the same --project as the run that "
+            "wrote it). The hash then matches what is on disk, the saved fit "
+            "is reused rather than re-fitted, and the cached clusterers still "
+            "accept the new cell.",
+        ]
+    lines += [
+        "  If the change is intended, pass --overwrite to accept losing the "
+        "state columns and re-cluster afterwards.",
+    ]
+    raise SystemExit("\n".join(lines))
+
+
+def reuse_models(stem: Path, mhash: str, log=print) -> dict | None:
+    """The saved fit for this cell, if it is the SAME fit. Else None.
+
+    The manifest beside the models is what makes this checkable without
+    unpickling: it records the `model_hash` and the library versions the
+    objects were pickled under. A hash match says the fit is the one wanted;
+    the version check is separate because a pickled sklearn estimator is not
+    guaranteed to behave across versions, and silently applying one that does
+    not is worse than refitting.
+    """
+    manifest = stem.parent / f"{stem.name}_manifest.json"
+    if not manifest.exists():
+        return None
+    try:
+        man = json.loads(manifest.read_text())
+    except (ValueError, OSError):
+        return None
+    if man.get("model_hash") != mhash:
+        return None
+    from ..io import _versions
+
+    want = {k: v for k, v in _versions().items() if k in ("numpy",)}
+    try:
+        import sklearn
+
+        want["sklearn"] = sklearn.__version__
+    except ImportError:
+        pass
+    have = man.get("library_versions") or {}
+    drift = {k: (have.get(k), v) for k, v in want.items() if have.get(k) != v}
+    if drift:
+        log(f"  saved fit matches model_hash {mhash} but was pickled under "
+            f"different libraries {drift} -- refitting rather than trusting it")
+        return None
+    for suffix in (".joblib", ".pkl"):
+        path = stem.with_suffix(suffix)
+        if not path.exists():
+            continue
+        try:
+            if suffix == ".joblib":
+                import joblib
+
+                return joblib.load(path)
+            import pickle
+
+            return pickle.loads(path.read_bytes())
+        except Exception as e:                       # a truncated or stale file
+            log(f"  could not load {path.name} ({type(e).__name__}) -- refitting")
+            return None
+    return None
+
+
+def dump_models(models: dict, path_stem: Path) -> Path:
+    try:
+        import joblib
+        path = path_stem.with_suffix(".joblib")
+        joblib.dump(models, path)
+    except ImportError:
+        import pickle
+        path = path_stem.with_suffix(".pkl")
+        path.write_bytes(pickle.dumps(models))
+    return path
+
+
+def run_one(root: Path, window_s, args) -> None:
+    atlas = args.atlas
+    out_dir = latents_root(root, atlas, window_s)
+    models_dir = meta_dir(root, "unsupervised") / "models"
+    # KEYED BY (atlas, window) AND NOT BY model_hash, unlike stage 4b's
+    # clusterer cache. So one output root holds ONE fit per cell: changing
+    # `--train` overwrites the previous fit's objects rather than sitting
+    # beside them.
+    #
+    # That is safe, not silent -- `reuse_models` compares the manifest's
+    # model_hash and refits on a mismatch, and every latents file carries the
+    # hash it was written with, so nothing can read a model that did not make
+    # it. What it costs is co-residency: two training splits at one (atlas,
+    # aperture) cannot both keep their artefacts here, and each run evicts the
+    # other's. Use a separate --output-root for a second split. Adding the hash
+    # to this name would fix it and would also move where `state_means` looks
+    # (state_means.load_models builds the same stem), so it is a change to make
+    # deliberately rather than in passing.
+    stem = models_dir / f"decompose_atlas-{atlas}_window-{window_s}"
+
+    cohorts = list(dict.fromkeys(args.train + args.project))
+    source = source_of(args)
+
+    # ONE OUTPUT FILE PER (cohort, task), which is what makes the single
+    # `stride_s` each file records a true claim: stride_s is the TR of the rows
+    # in it, and one cohort can hold two TRs (Cam-CAN movie 2.47s, rest 1.97s,
+    # the same people). It also makes the skip below per (cohort, task), so a
+    # cohort that GAINS a condition writes a new file instead of rewriting the
+    # one it has -- the state columns stage 4b wrote into the existing
+    # condition survive, and `--overwrite` is not needed to add a condition.
+    cells = [(c, t) for c in cohorts
+             for t in sorted(source_tasks(root, atlas, window_s, c, source))]
+    if not cells:
+        raise SystemExit(
+            f"window_s={window_s}: no {source} shards for any of "
+            f"{', '.join(cohorts)} at atlas={atlas} -- nothing to decompose.")
+    train_cells = [(c, t) for c, t in cells if c in set(args.train)]
+    if not train_cells:
+        raise SystemExit(
+            f"window_s={window_s}: no {source} shards for any TRAINING cohort "
+            f"({', '.join(args.train)}) at atlas={atlas}. The fit has nothing "
+            f"to be fitted on.")
+    train_cells = keep_train_tasks(train_cells, getattr(args, "train_tasks",
+                                                        None),
+                                   window_s, atlas, source)
+
+    first = source_shard_paths(root, atlas, window_s, *train_cells[0][:1],
+                               source, train_cells[0][1])
+    if not first:
+        raise SystemExit(f"no {source} shards for the first training cell "
+                         f"{train_cells[0]!r} at atlas={atlas} "
+                         f"window_s={window_s}")
+    features = source_feature_columns(first[0], source)
+
+    # The hash is computed from the config and the feature list alone, so WHICH
+    # cohorts need writing is known before a single row is read. That is what
+    # makes adding one cohort to a cell cheap: the others are left exactly as
+    # they are, rather than rewritten identically and stripped of the state
+    # columns stage 4b put in them.
+    meta = fit_meta(args, window_s, features)
+    mhash = model_hash(meta, features)
+    on_disk = {k: latents_model_hash(cell_path(out_dir, *k)) for k in cells}
+    todo = [k for k in cells if args.overwrite or on_disk[k] != mhash]
+    keep = [k for k in cells if k not in todo]
+    # A cell with NO file is new and free to write. One with a DIFFERENT hash
+    # is the dangerous case: it exists, it may carry state columns, and a
+    # rewrite deletes them. A cohort gaining a TASK is no longer one of these
+    # cases at all -- the new condition is its own file.
+    if not args.overwrite:
+        refuse_to_destroy_states(
+            out_dir, [k for k in todo if on_disk[k] is not None], meta,
+            window_s)
+
+    unit = "parcels" if source == "activation" else "edges"
+    log(f"window_s={window_s}  source={source}  {len(features)} {unit}  "
+        f"model_hash {mhash}")
+    if keep:
+        log(f"  already at this model_hash, left untouched: {_cells(keep)}")
+    if not todo:
+        log(f"  nothing to write (--overwrite to redo)")
+        return
+    log(f"  to write: {_cells(todo)}")
+
+    # Refit only when the saved fit for this cell is not the one wanted. The
+    # scaler/PCA/UMAP depend on `--train` and the settings, never on who is
+    # projected, so projecting a new cohort onto an existing fit needs no fit
+    # at all -- which is the difference between minutes and an hour at
+    # harvardoxford, on top of not disturbing the other cohorts.
+    models = None if args.overwrite else reuse_models(stem, mhash, log=log)
+    read_cells = list(dict.fromkeys(
+        todo if models is not None else train_cells + todo))
+
+    counts = {f"{c}/{t}": len(source_shard_paths(root, atlas, window_s, c,
+                                                 source, t))
+              for c, t in read_cells}
+    log(f"  shards: {counts}")
+    if source == "activation":
+        log(f"  frames: bandpass="
+            f"{tuple(args.match_bandpass) if args.match_bandpass else 'as extracted'}"
+            f"  zscore_runs={args.zscore_runs}  (both are in model_hash)")
+
+    # Acted on, not just printed. This used to be a log line only, so a cohort
+    # with 0 shards was visible on line 2 and discovered on line 20 -- after a
+    # full fit, and after the training cohorts had already been written. That
+    # left window sizes half-done, which is worse than not starting.
+    empty = [c for c, n in counts.items() if n == 0]
+    if empty:
+        fix = ("    fmri-decomp extract config/<cohort>.yaml --atlas "
+               f"{atlas}\n" if source == "activation" else
+               f"    fmri-decomp dfc config/<cohort>.yaml --window-s {window_s}\n")
+        raise SystemExit(
+            f"window_s={window_s}: no {source} shards for {', '.join(empty)} at "
+            f"atlas={atlas}.\n"
+            f"Nothing is written for this window size. Either run the stage "
+            f"that writes them:\n" + fix +
+            f"or drop {window_s} from --window-s.")
+
+    # Per COHORT, not per cell: one censor decision covers every task of a
+    # cohort, because its table is keyed (sub, task) inside one file. The read
+    # is per cell, but the gate it is filtered through is shared.
+    from ..extractions.censor import load_censor
+
+    censors = {c: load_censor(root, args.censor_policy, atlas, window_s, c)
+               for c in dict.fromkeys(c for c, _ in read_cells)}
+    if args.censor_policy:
+        for c, cen in censors.items():
+            gate = "subjects+windows" if cen["windows"] is not None else "subjects only"
+            log(f"censor[{args.censor_policy}] {c}: "
+                f"{cen['n_subject_kept']}/{cen['n_subject_rows']} subjects kept "
+                f"({gate})")
+    else:
+        log("WARNING: no --censor-policy. Every window in every shard enters "
+            "the fit, including subjects `censor` would have dropped.")
+
+    # PER CELL, not per cohort, and that is the whole point of --train-tasks:
+    # once a cohort can be in --train for only some of its conditions, "is this
+    # cohort training data" has no single answer, and the old per-cohort map
+    # would have labelled a projected rest file `train`. `role` is reported by
+    # `status` and nothing branches on it, so a third value is safe -- and
+    # `train_subset` is the honest label for a cell whose cohort fed the fit
+    # through --train-subjects, where the file holds both the subjects that
+    # were fitted on and the ones deliberately held out of it.
+    train_cell_set = set(train_cells)
+    _restricted = train_subjects(args) is not None
+
+    def role_for(cohort: str, task) -> str:
+        if (cohort, task) not in train_cell_set:
+            return "projected"
+        return "train_subset" if _restricted else "train"
+
+    role_of = {c: ("train" if c in args.train else "projected") for c in cohorts}
+
+    # WHICH COHORTS IN WHICH ROLE **IS** THE MODELLING VERSION. Recorded on
+    # the version's own manifest the first time it is written, and verified
+    # against it on every later run -- so `version=v0` cannot end up named for
+    # one composition and filled with two. The refusal names both and points
+    # at --modelling-version.
+
+    train_composition = sorted(f"{c}/{t}" for c, t in train_cells)
+
+    if models is not None:
+        # THE SILENT CASE, refused. `train_cohorts` names cohorts and
+        # `train_cells` takes all of their tasks, so a training cohort that
+        # GAINED a condition changes the training rows without changing any key
+        # in the fit description -- the saved fit would be reused under a hash
+        # that now means something else. `--train-tasks` pins the answer and
+        # lands in the hash; this catches the case where nobody pinned it.
+        #
+        # A fit saved before this key existed has no composition recorded, so
+        # there is nothing to compare and the old behaviour stands.
+        check_train_composition(models.get("train_cells"), train_composition,
+                                mhash, window_s)
+        log(f"reusing the saved fit for model_hash {mhash} -- no refit, and "
+            f"the training cohorts are not re-read")
+        # role_of is per-invocation and the saved copy was written by the run
+        # that fitted, which may not have known about today's cohorts. Refresh
+        # it so a newly projected cohort is labelled `projected` rather than
+        # raising a KeyError in write_latents.
+        models["role_of"] = {**models.get("role_of", {}), **role_of}
+        n_train = int(models.get("n_train_rows") or 0)
+    else:
+        log("loading training cohorts")
+        keep_subs = train_subjects(args)
+        if keep_subs is not None:
+            log(f"  --train-subjects: {len(keep_subs):,} id(s), digest "
+                f"{subject_list_digest(keep_subs)}")
+        idents, blocks, fitted_subs = [], [], set()
+        stride_s = indep_factor = None
+        for cohort, task in train_cells:
+            ident, X, stride_s, indep_factor = source_read_cohort(
+                root, atlas, window_s, cohort, features, args,
+                censors[cohort], task)
+            ident, X = drop_nan_rows(ident, X)
+            if keep_subs is not None:
+                # Filtered HERE and not inside read_cohort on purpose: the
+                # projection pass below reads the same cohorts unfiltered, so a
+                # cohort can be in --train for some of its subjects and still
+                # get latents for all of them. That is the whole point of a
+                # subject-level split -- the embedding never sees the half the
+                # supervised stage will score.
+                m = (ident["sub"].astype(str).str.strip().str.upper()
+                     .isin(keep_subs).to_numpy())
+                dropped = int(len(m) - m.sum())
+                ident, X = ident.loc[m], X[m]
+                if dropped:
+                    log(f"  {cohort}/{task}: --train-subjects dropped "
+                        f"{dropped:,} of {len(m):,} row(s)")
+            if not len(X):
+                log(f"  {cohort}/{task}: no rows left, not in the fit")
+                continue
+            fitted_subs.update(ident["sub"].astype(str).str.upper())
+            log(f"  {cohort}/{task}: {len(X):,} rows, "
+                f"{ident['sub'].nunique()} subs, {X.nbytes / 1e9:.2f} GB")
+            idents.append(ident)
+            blocks.append(X)
+        if not blocks:
+            raise SystemExit(
+                f"window_s={window_s}: no training row survived. "
+                + (f"--train-subjects {args.train_subjects} matched none of "
+                   f"the subjects in {_cells(train_cells)} -- check that its "
+                   f"ids are spelled as the shards spell them."
+                   if keep_subs is not None else
+                   f"Every training cell came back empty after dropping NaN "
+                   f"rows, which means the shards exist and hold nothing "
+                   f"usable."))
+        X_train = np.vstack(blocks) if len(blocks) > 1 else blocks[0]
+        n_train = len(X_train)
+        del idents, blocks
+        gc.collect()
+        log(f"training matrix {X_train.shape} = {X_train.nbytes / 1e9:.2f} GB")
+        log(f"model_hash {mhash}  roles {role_of}")
+
+        models = fit_models(X_train, features, args, meta={
+            **meta, "n_train_rows": int(n_train), "model_hash": mhash,
+            "fit_meta": meta, "role_of": role_of,
+            # BESIDE fit_meta, not in it, so they do not enter model_hash: the
+            # resolved composition is what the fit actually saw, and the guard
+            # above compares it against the next run's. Recording it is what
+            # turns "the hash cannot see this" into "the hash does not have to".
+            "train_cells": train_composition,
+            "n_train_subjects": len(fitted_subs),
+            "stride_s": stride_s, "indep_factor": indep_factor})
+        del X_train
+        gc.collect()
+
+        models_dir.mkdir(parents=True, exist_ok=True)
+        model_path = dump_models(models, stem)
+        log(f"models -> {model_path.relative_to(root)}")
+
+        # A manifest beside the models, in the same spirit as io.write_manifest:
+        # readable without unpickling anything, and the place to look when two
+        # latents files disagree. `library_versions` is what lets a later run
+        # decide whether the pickle beside it can be trusted.
+        from .. import __version__
+        from ..io import _versions
+
+        libs = {"numpy": _versions()["numpy"]}
+        try:
+            import sklearn
+
+            libs["sklearn"] = sklearn.__version__
+        except ImportError:
+            pass
+        (stem.parent / f"{stem.name}_manifest.json").write_text(json.dumps({
+            **meta, "model_hash": mhash, "n_train_rows": int(n_train),
+            "project_cohorts": list(args.project),
+            "umap_fitted": bool(models.get("umap_fitted")),
+            "n_umap_components": sorted(models["umap"]),
+            "n_features": len(features), "role_of": role_of,
+            "train_cells": train_composition,
+            "n_train_subjects": len(fitted_subs),
+            "train_subjects_file": getattr(args, "train_subjects", None),
+            "shards": counts, "models_file": model_path.name,
+            "package_version": __version__, "library_versions": libs,
+            "written_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }, indent=2))
+
+    # Second pass: one cohort in memory at a time. Only the cohorts that need
+    # it -- an untouched cohort keeps its file, and with it every state column
+    # stage 4b wrote into it.
+    for cohort, task in todo:
+        ident, X, stride_s, indep_factor = source_read_cohort(
+            root, atlas, window_s, cohort, features, args,
+            censors[cohort], task)
+        ident, X = drop_nan_rows(ident, X)
+        # Per CELL, because the TR is -- and one file records one stride_s. See
+        # write_latents on why this sits outside fit_meta and therefore outside
+        # model_hash.
+        models["stride_s"], models["indep_factor"] = stride_s, indep_factor
+        lat = latents_for(ident, X, models, role_for(cohort, task))
+        del ident, X
+        gc.collect()
+        path = cell_path(out_dir, cohort, task)
+        write_latents(lat, path, models, cohort)
+        log(f"  {cohort}/{task:<12} {role_for(cohort, task):<14} {len(lat):>9,} rows "
+            f"x {lat.shape[1]} cols "
+            f"-> {path.relative_to(root)}")
+        del lat
+        gc.collect()
+
+
+def dry_run(root: Path, args) -> None:
+    source = source_of(args)
+    unit = "parcels" if source == "activation" else "edges"
+    print(f"{'window':>7}  {unit:>7}  {'train rows':>11}  {'peak GB':>8}  shards")
+    for w in args.window_s:
+        paths = {c: source_shard_paths(root, args.atlas, w, c, source)
+                 for c in dict.fromkeys(args.train + args.project)}
+        first = next((p for c in args.train for p in paths[c]), None)
+        if first is None:
+            print(f"{w:>7}  (no shards)")
+            continue
+        n_edges = len(source_feature_columns(first, source))
+        import pyarrow.parquet as pq
+        rows = {c: sum(pq.ParquetFile(p).metadata.num_rows for p in ps)
+                for c, ps in paths.items()}
+        n_train = sum(rows[c] for c in args.train)
+        peak = n_train * n_edges * 4 * 1.6 / 1e9
+        print(f"{w:>7}  {n_edges:>7}  {n_train:>11,}  {peak:>8.2f}  "
+              + "  ".join(f"{c}:{len(ps)}({rows[c]:,})" for c, ps in paths.items()))
+    print("\npeak GB is the training matrix x1.6 for scaler and PCA workspace; "
+          "ask for at least double.")
+    if source == "activation":
+        print("rows are counted from the parquet footers, so they INCLUDE the "
+              "frames that will be dropped as not good or as a run boundary -- "
+              "an upper bound, which is the safe direction for an allocation.")
+    if args.censor_policy:
+        print(f"rows are UNCENSORED counts -- --censor-policy "
+              f"{args.censor_policy} will remove some, so this is an upper "
+              f"bound on memory, which is the safe direction for an allocation.")
+
+
+def add_arguments(p) -> None:
+    """Shared by `fmri-decomp decompose` and `python -m ...decompose`."""
+    # One source of truth for the band, imported here because argparse evaluates
+    # the default when the parser is built rather than when the module loads.
+    from ..frames import DEFAULT_BANDPASS
+    p.add_argument("--atlas", required=True)
+    p.add_argument("--source", choices=["dfc", "activation"], default="dfc",
+                   help="dfc: windowed edges, one fit per --window-s. "
+                        "activation: per-TR parcel patterns, written to "
+                        f"window_s={ACTIVATION_WINDOW} -- one fit, because a "
+                        "frame has no window to vary.")
+    p.add_argument("--window-s", nargs="+", default=None,
+                   help="one fit per window size; they are independent. Not "
+                        "accepted with --source activation, which has exactly "
+                        f"one aperture and names it {ACTIVATION_WINDOW}.")
+    p.add_argument("--match-bandpass", nargs=2, type=float, metavar=("LOW", "HIGH"),
+                   default=list(DEFAULT_BANDPASS),
+                   help="--source activation only: band-pass every cohort's "
+                        "frames onto this band before the fit, so one cohort's "
+                        "wider preprocessing band does not make its states "
+                        "flicker faster than another's. Default %(default)s.")
+    p.add_argument("--no-match-bandpass", dest="match_bandpass",
+                   action="store_const", const=None,
+                   help="leave the frequency content as extracted. A different "
+                        "analysis, and recorded as one in model_hash.")
+    p.add_argument("--no-zscore-runs", dest="zscore_runs", action="store_false",
+                   help="--source activation only: do NOT centre and scale each "
+                        "parcel within each run. Off-by-default because without "
+                        "it the fit is dominated by between-scanner signal "
+                        "scale -- see frames.py.")
+    p.set_defaults(zscore_runs=True)
+    p.add_argument("--train", nargs="+", default=["ds002837", "cneuromod"])
+    # DEFAULT: nothing. Train-only is then just `--train A B`, with no flag
+    # saying "no" -- which is how it should read.
+    #
+    # It used to default to `["camcan"]`, and that was wrong on this stage's own
+    # terms: the module docstring says no cohort YAML owns stage 4 because a
+    # decomposition spans cohorts, and then the default named one cohort. A
+    # target cohort belongs in the command, not in a default.
+    p.add_argument("--project", nargs="*", default=[],
+                   help="cohorts the fit is APPLIED to. Omit it and only "
+                        "--train is written.")
+    p.add_argument("--train-tasks", nargs="+", default=None, metavar="LABEL",
+                   help="restrict the fit to these CONDITIONS of the training "
+                        "cohorts. --train names cohorts and takes every task "
+                        "they have, so this is the only way to say 'fit on "
+                        "movie only' once a cohort also has rest on disk. "
+                        "Case-sensitive, like --keep-tasks: the BIDS labels as "
+                        "the data spells them. Goes into model_hash, so a "
+                        "pinned task with no shards is refused rather than "
+                        "quietly dropped. Omitted: every task of every "
+                        "training cohort, and the run refuses if that set has "
+                        "changed under an existing hash.")
+    p.add_argument("--train-subjects", default=None, metavar="FILE",
+                   help="restrict the fit to these subjects -- one id per "
+                        "line, or a CSV with a `sub` column, the same format "
+                        "--restrict-subjects takes. The cohort is still "
+                        "PROJECTED in full, so this is how a cohort "
+                        "contributes its scanner and its age range to the "
+                        "state space while the half that will be scored stays "
+                        "out of the fit. A digest of the ids goes into "
+                        "model_hash; the ids themselves never do.")
+    p.add_argument("--legacy-hash-from", metavar="LATENTS", default=None,
+                   help="reproduce the model_hash of an existing cell by "
+                        "carrying over the payload keys this version no longer "
+                        "writes (`bins`, `project_cohorts`). The general form "
+                        "of --legacy-project-hash, and the only way to match a "
+                        "tree written before a key was REMOVED, since no flag "
+                        "sets a key that is gone. Point it at one latents "
+                        "data.parquet the run reports as stale. Keys both "
+                        "descriptions carry must agree, so a flag you actually "
+                        "forgot is still refused and named.")
+    p.add_argument("--legacy-project-hash", action="store_true",
+                   help="include --project in model_hash, as runs before "
+                        "2026-10-08 did. A BRIDGE, not a setting: latents "
+                        "written then carry a hash computed with the project "
+                        "list in it, so without this every such cell reads as "
+                        "a different fit and cannot be skipped -- and the only "
+                        "other way forward is --overwrite, which drops the "
+                        "brain-state columns and costs the re-cluster. Pass "
+                        "the same --project the original run used, or the hash "
+                        "will not match either.")
+    # `dest` stays `n_latents` while the FLAG is `--pca-latents`: that string
+    # is a KEY in the model_hash payload, so renaming it would move every hash
+    # on disk for a cosmetic change. The flag is the interface; the key is
+    # provenance, and they are allowed to differ.
+    p.add_argument("--pca-latents", dest="n_latents",
+                   nargs="+", type=int, default=[2, 3, 5],
+                   help="PCA component counts to fit. Must include 3: every "
+                        "stage 4b clusterer works on a 3-D embedding. Pair it "
+                        "with the atlas's own width for a lossless rotation, "
+                        "which is what `--passthrough-features` needs -- "
+                        "`--pca-latents 3 14 --umap-latents 3` on a "
+                        "14-network atlas.")
+    p.add_argument("--umap-fit-rows", type=int, default=30_000,
+                   help="0 fits UMAP on every training row")
+    p.add_argument("--umap-latents", nargs="+", type=int, default=None,
+                   metavar="N",
+                   help="component counts to fit UMAP at. Default: the same as "
+                        "--n-latents. Set it when --n-latents carries a count "
+                        "that only PCA needs -- `--n-latents 3 14 "
+                        "--umap-latents 3` fits UMAP once, at 3, instead of "
+                        "also spending most of the stage on a 14-component "
+                        "UMAP nothing reads.")
+    p.add_argument("--no-umap", action="store_true")
+    p.add_argument("--passthrough-features", action="store_true",
+                   help="also write the input features themselves into the "
+                        "latents table, as `raw/<name>` columns, scaled the "
+                        "same way PCA sees them. Stage 4b can then fit a "
+                        "clusterer on the NAMED parcels -- `raw/AM`, "
+                        "`raw/Motor` -- so a state mean is readable as a "
+                        "network pattern rather than a point in PC space. "
+                        f"Refused above {PASSTHROUGH_MAX_FEATURES} features; "
+                        "intended for --source activation.")
+    p.add_argument("--censor-policy", required=True, metavar="NAME",
+                   type=_censor_policy,
+                   help="apply the stage 3.5 decision written by `fmri-decomp "
+                        "censor --policy config/censor/NAME.yaml`. REQUIRED: "
+                        "pass `none` to fit on every window, which is a "
+                        "different analysis and is recorded as one. There is no "
+                        "default, because the default was silently `none` and "
+                        "one aperture got built that way while the others were "
+                        "censored -- a warning in a 30-line log is not a guard.")
+    p.add_argument("--output-root",
+                   help="default: $FMRIDECOMP_OUTPUTS, else output_root "
+                        "from the cohort configs in config/")
+    # Every command that reads or writes a versioned tree takes this, and the
+    # resolved value is PRINTED -- a default that is never said out loud is how
+    # a v1 run lands in v0.
+    p.add_argument("--modelling-version", default=None, metavar="V",
+                   help="which modelling version's trees to use, e.g. v1 "
+                        "(default: $FMRIDECOMP_MODELLING_VERSION, else v0). A "
+                        "version is which cohorts play which role; it is "
+                        "recorded in modelling/version=<v>/version.json and a "
+                        "run whose composition differs is refused.")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print rows, edges and the memory estimate, fit nothing")
+
+
+def run(args) -> int:
+    from ..io import default_output_root
+
+    root = Path(args.output_root) if args.output_root else default_output_root()
+    if not root.is_dir():
+        raise SystemExit(f"output_root does not exist: {root}")
+    # Write the resolved root back, so anything downstream of here (censor
+    # lookup, fit_meta) sees a path rather than the None the user passed.
+    args.output_root = str(root)
+    log(f"output_root {root}")
+
+    # BEFORE ANY EARLY RETURN. This sat inside run_one, which is per window
+    # size and sits BEHIND the "already at this model_hash, left untouched"
+    # skip -- so a run whose cohort composition had changed but which had
+    # nothing to write never reached the check, and the version kept its old
+    # claim while the command exited 0. A check that the common path skips is
+    # not a check.
+    #
+    # Also before --dry-run returns: a dry run should say which version it
+    # would write into, and should refuse a composition that version cannot
+    # hold, which is the cheapest place to find that out.
+    announce_version(root, getattr(args, "modelling_version", None), log=log)
+    claim_version(root, getattr(args, "modelling_version", None),
+                  write=not args.dry_run,
+                  unsupervised_train=sorted(args.train),
+                  unsupervised_project=sorted(args.project))
+
+    # The aperture is a property of the source, not a free parameter, so it is
+    # resolved here once rather than trusted from the command line. Silently
+    # overriding a --window-s the user typed would write the fit to a path they
+    # did not ask for, so it is an error instead.
+    if source_of(args) == "activation":
+        if args.window_s and list(args.window_s) != [ACTIVATION_WINDOW]:
+            raise SystemExit(
+                f"--source activation has one aperture, written as "
+                f"window_s={ACTIVATION_WINDOW} (a frame is one TR, and the TR "
+                f"differs per cohort). Drop --window-s {' '.join(args.window_s)}.")
+        args.window_s = [ACTIVATION_WINDOW]
+    elif not args.window_s:
+        raise SystemExit("--window-s is required with --source dfc")
+
+    if args.dry_run:
+        dry_run(root, args)
+        return 0
+
+    # Each window size is an independent fit, so one failing is not a reason to
+    # abandon the others -- and a bare loop meant a missing cohort at the FIRST
+    # size silently cancelled the remaining four.
+    failed = {}
+    for w in args.window_s:
+        try:
+            run_one(root, w, args)
+        except SystemExit as exc:
+            failed[w] = str(exc)
+            log(f"window_s={w} FAILED, continuing with the remaining sizes")
+
+    done = [w for w in args.window_s if w not in failed]
+    log(f"done: {len(done)}/{len(args.window_s)} window size(s) written"
+        + (f" {done}" if done else ""))
+    if failed:
+        print(f"\n{len(failed)} window size(s) did not run:", flush=True)
+        for w, msg in failed.items():
+            print(f"\n  --- window_s={w} ---\n  " + msg.replace("\n", "\n  "),
+                  flush=True)
+        return 1
+    return 0
+
+
+def main(argv=None) -> int:
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_arguments(p)
+    return run(p.parse_args(argv))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -71,6 +71,242 @@ def leaf_filename(ses: str | None = None, run: str | None = None,
     return "data" + suffix
 
 
+# ------------------------------------------------- the three output trees ---
+# `outputs/` has three halves, and which half a tree belongs to is decided by
+# ONE question: does its content change when a different cohort plays a
+# different role in the analysis?
+#
+#   outputs/extractions/                         no  -- shared by every version
+#       activation/ dfc/ censor/ static_fc/ meta/
+#   outputs/modelling/version=<v>/unsupervised_model/   yes -- WHICH cohorts fit
+#       latents/ transitions/ meta/
+#   outputs/modelling/version=<v>/supervised_model/     yes -- which cohort is
+#       bstm_selection/ fcm_selection/ transferred_models/ meta/     the target
+#
+# A parcel timeseries, a windowed correlation matrix, a censor mask and a
+# static-FC matrix are the same bytes whichever cohort trains -- so they sit
+# OUTSIDE the version and are never recomputed or re-stored for one. Everything
+# fitted sits inside it.
+#
+# `version=` IS A HIVE KEY, like every other level of this tree. That buys
+# `outputs/modelling/version=*/...` as the glob that lists every version at
+# once, and lets `hive_key` read it with no new parsing -- which is the whole
+# reason it is not the flat name `modelling_v0`.
+EXTRACTION_TREES = ("activation", "dfc", "censor", "static_fc")
+UNSUPERVISED_TREES = ("latents", "transitions")
+SUPERVISED_TREES = ("bstm_selection", "fcm_selection", "transferred_models")
+
+#: The version used when nothing says otherwise. A string, not a number: it is
+#: a hive value and it appears in paths.
+DEFAULT_MODELLING_VERSION = "v0"
+
+
+def modelling_version(version: str | None = None) -> str:
+    """Which modelling version this call means.
+
+    Explicit argument, else `$FMRIDECOMP_MODELLING_VERSION`, else `v0`.
+
+    A silent default is how a v1 run writes into v0's tree, so every command
+    that resolves one PRINTS it (see `cli`), and the version manifest refuses a
+    run whose cohort composition does not match what the version already
+    holds. The default exists because v0 is what every current path means; it
+    is not a licence to leave it unsaid.
+    """
+    import os
+
+    # `version is None` means "nobody said", which falls through to the
+    # environment and then to v0. An EXPLICIT empty string is someone saying it
+    # badly -- `--modelling-version ""` or a shell variable that expanded to
+    # nothing -- and silently treating that as v0 is exactly the accident this
+    # whole mechanism exists to prevent. So only None falls through.
+    if version is None:
+        version = os.environ.get("FMRIDECOMP_MODELLING_VERSION")
+    v = str(version if version is not None
+            else DEFAULT_MODELLING_VERSION).strip()
+    if not v or "/" in v or "=" in v:
+        raise SystemExit(
+            f"modelling version {v!r} is not usable as a hive value: it "
+            f"becomes the directory `version={v}`, so it cannot be empty or "
+            f"contain '/' or '='.")
+    return v
+
+
+def announce_version(output_root: str | Path, version: str | None = None,
+                     log=print) -> str:
+    """Print which modelling version this run resolved, and what it holds.
+
+    Called once per command that touches a versioned tree. The point is that
+    nobody should ever have to GUESS which version a log belongs to: a default
+    that is never said out loud is how a v1 run lands in v0 and is discovered
+    weeks later from the figures.
+    """
+    v = modelling_version(version)
+    man = read_version_manifest(output_root, v) or {}
+    held = ", ".join(f"{k}={'+'.join(man[k])}" for k in VERSION_KEYS
+                     if man.get(k))
+    how = "explicit" if version else (
+        "$FMRIDECOMP_MODELLING_VERSION" if os.environ.get(
+            "FMRIDECOMP_MODELLING_VERSION") else "default")
+    # PINNED INTO THE ENVIRONMENT, deliberately. The version is a fact about
+    # the whole run, and the path builders resolve it per call -- so without
+    # this, threading `version=` through every internal function would be the
+    # only thing keeping them in agreement, and ONE missed call site reads the
+    # wrong version with nothing saying so.
+    #
+    # It also reaches joblib's loky workers, which re-read the environment on
+    # import: parent and children then agree by construction. That is the same
+    # class of bug as a worker re-importing different code mid-fit, and the
+    # same fix.
+    os.environ["FMRIDECOMP_MODELLING_VERSION"] = v
+    log(f"modelling version {v} ({how}) -> "
+        f"{modelling_root(output_root, v)}")
+    log(f"  version holds: {held}" if held
+        else "  version holds: nothing recorded yet -- this run will claim it")
+    return v
+
+
+def extractions_root(output_root: str | Path) -> Path:
+    """Where the stage 1-3b trees live -- outside every modelling version."""
+    return Path(output_root) / "extractions"
+
+
+def modelling_root(output_root: str | Path, version: str | None = None) -> Path:
+    """One modelling version's root: `outputs/modelling/version=<v>/`."""
+    return (Path(output_root) / "modelling"
+            / f"version={_key(modelling_version(version))}")
+
+
+def unsupervised_root(output_root: str | Path, version: str | None = None) -> Path:
+    return modelling_root(output_root, version) / "unsupervised_model"
+
+
+def supervised_root(output_root: str | Path, version: str | None = None) -> Path:
+    return modelling_root(output_root, version) / "supervised_model"
+
+
+def tree_root(output_root: str | Path, tree: str,
+              version: str | None = None) -> Path:
+    """The root of one named tree, wherever its half puts it.
+
+    The ONE place that maps a tree name to a location. Every stage used to
+    spell `root / "transitions"` inline -- about forty sites across the package,
+    the notebooks' modules and tools/ -- so the shape of the tree was a fact
+    repeated forty times instead of stated once, and changing it meant finding
+    all forty.
+    """
+    if tree in EXTRACTION_TREES:
+        return extractions_root(output_root) / tree
+    if tree in UNSUPERVISED_TREES:
+        return unsupervised_root(output_root, version) / tree
+    if tree in SUPERVISED_TREES:
+        return supervised_root(output_root, version) / tree
+    raise SystemExit(
+        f"unknown output tree {tree!r}. Known: "
+        f"{', '.join(EXTRACTION_TREES + UNSUPERVISED_TREES + SUPERVISED_TREES)}."
+        f"\n  A selection written under its own --output-name is addressed by "
+        f"`supervised_root(root, version) / name`, not through here.")
+
+
+# ------------------------------------------- what a modelling version IS ---
+# `version=v0` is a directory name, and a directory name is not a claim anyone
+# can check. Six months on, "v0" says nothing about which cohorts were fitted
+# or which was transferred to -- and worse, a job run with a different
+# composition writes into v0 and the tree keeps the old name over new content.
+#
+# So a version records its own composition, once, and every later run under it
+# is CHECKED against that record. The first run writes the manifest; a run
+# whose composition differs is refused by name, with the two compositions
+# printed. That is the same failure this project has already paid for twice --
+# a path claiming something the data did not support.
+VERSION_MANIFEST = "version.json"
+
+#: The fields that DEFINE a version, in the order they are reported. Anything
+#: not here (an atlas, an aperture, a model list, a seed) is a knob INSIDE a
+#: version and may differ between runs without making a new one.
+VERSION_KEYS = ("unsupervised_train", "unsupervised_project",
+                "supervised_train", "supervised_test", "unsupervised_from")
+
+
+def version_manifest_path(output_root: str | Path,
+                          version: str | None = None) -> Path:
+    return modelling_root(output_root, version) / VERSION_MANIFEST
+
+
+def read_version_manifest(output_root: str | Path,
+                          version: str | None = None) -> dict | None:
+    """What this version says it is, or None if nothing has claimed it yet."""
+    p = version_manifest_path(output_root, version)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except (ValueError, OSError):
+        return None
+
+
+def _as_list(v):
+    if v is None:
+        return None
+    return [str(x) for x in (v if isinstance(v, (list, tuple, set)) else [v])]
+
+
+def claim_version(output_root: str | Path, version: str | None = None,
+                  *, write: bool = True, **composition) -> dict:
+    """Record or verify what a modelling version holds. Returns the manifest.
+
+    Pass whichever of `VERSION_KEYS` the calling stage knows: an unsupervised
+    run knows `unsupervised_train` / `unsupervised_project`, a supervised one
+    knows `supervised_train` / `supervised_test`. A key the caller does not
+    pass is left alone, so the two halves fill in their own half and neither
+    overwrites the other's.
+
+    `unsupervised_from` is how a version reuses another's state space: v2 that
+    only swaps the supervised roles sets it to "v0" and holds no
+    unsupervised_model/ of its own. Saying so is what makes the reuse readable
+    instead of a mystery empty directory.
+
+    `write=False` verifies without writing -- for a reader, or a --dry-run.
+    """
+    v = modelling_version(version)
+    given = {k: _as_list(composition[k]) for k in composition
+             if composition[k] is not None}
+    bad = sorted(set(given) - set(VERSION_KEYS))
+    if bad:
+        raise SystemExit(
+            f"claim_version got {bad}, which do not define a version. The "
+            f"fields that do: {', '.join(VERSION_KEYS)}. An atlas, an "
+            f"aperture, a model or a seed is a knob INSIDE a version.")
+
+    have = read_version_manifest(output_root, v) or {}
+    clash = {k: (have[k], given[k]) for k in given
+             if k in have and have[k] is not None and have[k] != given[k]}
+    if clash:
+        detail = "\n".join(
+            f"    {k}:\n      version holds: {was}\n      this run has:  {now}"
+            for k, (was, now) in sorted(clash.items()))
+        raise SystemExit(
+            f"modelling version {v!r} already holds a DIFFERENT composition:\n"
+            f"{detail}\n"
+            f"  {version_manifest_path(output_root, v)}\n"
+            f"  A version is which cohorts play which role. Writing this run "
+            f"into {v!r} would leave the tree named for one composition and "
+            f"filled with two.\n"
+            f"  Run it under a new version instead -- pass "
+            f"--modelling-version or set FMRIDECOMP_MODELLING_VERSION -- or, "
+            f"if the composition recorded in {v!r} is simply wrong, edit that "
+            f"file deliberately.")
+
+    merged = {**have, **given, "version": v}
+    if write and merged != {**have, "version": v} or (write and not have):
+        import time as _time
+        merged["updated_utc"] = _time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                               _time.gmtime())
+        p = version_manifest_path(output_root, v)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")
+    return merged
+
+
 def activation_root(output_root: str | Path, atlas: str,
                     cohort: str | None = None) -> Path:
     """The shallowest schema-homogeneous root: one atlas, any number of cohorts.
@@ -80,7 +316,7 @@ def activation_root(output_root: str | Path, atlas: str,
     a schema, so this path can be handed straight to `pyarrow.dataset`. Pass a
     cohort to narrow to one; omit it to pool across cohorts in a single read.
     """
-    p = Path(output_root) / "activation" / f"atlas={_key(atlas)}"
+    p = tree_root(output_root, "activation") / f"atlas={_key(atlas)}"
     return p if cohort is None else p / f"cohort={_key(cohort)}"
 
 
@@ -93,7 +329,7 @@ def dfc_root(output_root: str | Path, atlas: str, window_s: float | None = None,
     actually runs. It changes row count, never column count, so it is safe
     anywhere below atlas.
     """
-    p = Path(output_root) / "dfc" / f"atlas={_key(atlas)}"
+    p = tree_root(output_root, "dfc") / f"atlas={_key(atlas)}"
     if window_s is not None:
         p = p / f"window_s={_key(_fmt_window(window_s))}"
     return p if cohort is None else p / f"cohort={_key(cohort)}"
@@ -122,7 +358,8 @@ def dfc_path(output_root: str | Path, cohort: str, atlas: str, window_s: float,
 
 
 def latents_root(output_root: str | Path, atlas: str, window_s=None,
-                 cohort: str | None = None, task: str | None = None) -> Path:
+                 cohort: str | None = None, task: str | None = None,
+                 version: str | None = None) -> Path:
     """Stage 3 output. Same key order as `dfc_root`, deliberately.
 
     Latents are written per (atlas, window_s, cohort, task) because each window
@@ -142,7 +379,7 @@ def latents_root(output_root: str | Path, atlas: str, window_s=None,
     that GAINS a condition writes a new file instead of rewriting the one it
     has, so the state columns stage 4 wrote into the existing condition survive.
     """
-    p = Path(output_root) / "latents" / f"atlas={_key(atlas)}"
+    p = tree_root(output_root, "latents", version) / f"atlas={_key(atlas)}"
     if window_s is not None:
         w = window_s if isinstance(window_s, str) else _fmt_window(window_s)
         p = p / f"window_s={_key(w)}"
@@ -152,15 +389,15 @@ def latents_root(output_root: str | Path, atlas: str, window_s=None,
     return p if task is None else p / f"task={_key(task)}"
 
 
-def latents_cells(output_root: str | Path, atlas: str,
-                  window_s) -> dict[tuple[str, str], Path]:
+def latents_cells(output_root: str | Path, atlas: str, window_s,
+                  version: str | None = None) -> dict[tuple[str, str], Path]:
     """{(cohort, task): latents file} for one (atlas, aperture) cell.
 
     The one enumerator for stage 3's output, because stage 4 and stage 5a both
     walk it and a second copy is how the two drift. Keyed by the PAIR since
     `decompose` writes one file per (cohort, task).
     """
-    d = latents_root(output_root, atlas, window_s)
+    d = latents_root(output_root, atlas, window_s, version=version)
     if not d.is_dir():
         return {}
     out = {}
@@ -173,15 +410,15 @@ def latents_cells(output_root: str | Path, atlas: str,
 
 def transitions_root(output_root: str | Path, atlas: str | None = None,
                      window_s=None, states: str | None = None,
-                     cohort: str | None = None,
-                     task: str | None = None) -> Path:
+                     cohort: str | None = None, task: str | None = None,
+                     version: str | None = None) -> Path:
     """Stage 5a output, narrowed by as many keys as are given.
 
     Built here rather than inline in transitions.py so that adding a key -- as
     `task` was -- is one edit instead of one per stage. The keys above `cohort`
     select a state SET; `cohort` and `task` select whose dynamics.
     """
-    p = Path(output_root) / "transitions"
+    p = tree_root(output_root, "transitions", version)
     for name, v in (("atlas", atlas), ("window_s", window_s),
                     ("states", states), ("cohort", cohort), ("task", task)):
         if v is None:
@@ -200,7 +437,7 @@ def static_fc_root(output_root: str | Path, atlas: str | None = None,
     No `window_s`: one matrix per subject over every usable frame, which is the
     whole point of the arm -- it is the `window_s=-1` aperture's static twin.
     """
-    p = Path(output_root) / "static_fc"
+    p = tree_root(output_root, "static_fc")
     for name, v in (("atlas", atlas), ("cohort", cohort), ("task", task)):
         if v is None:
             return p
@@ -217,7 +454,7 @@ def censor_root(output_root: str | Path, policy: str | None = None,
     gate hangs off the same policy root under its own atlas=/window_s= keys and
     is built by censor.py, which owns that shape.
     """
-    p = Path(output_root) / "censor"
+    p = tree_root(output_root, "censor")
     for name, v in (("policy", policy), ("cohort", cohort), ("task", task)):
         if v is None:
             return p
@@ -286,6 +523,20 @@ STATE_COLUMN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*_[a-z]+\d*_\d+$")
 # string column and quietly destroys Cam-CAN's `CC110033` and NNDb's leading
 # zeros. The path is the single source of truth; `read_shard` puts them back
 # when a single file is opened on its own.
+# The identity columns of a LATENTS file: what `decompose` carries through from
+# the shards, plus what it adds once the fit exists. A schema contract, which
+# is what this module is for -- it lived in decompose.py, and `frames.py`
+# (shared by extraction, the unsupervised fit and the contextualisation arm)
+# had to import the unsupervised model to learn the shape of its own output.
+LATENTS_IDENT = ["cohort", "role", "model_hash", "task", "sub", "window_id",
+                 "start_s", "stimulus_start_s", "n_tr_effective",
+                 "frac_good_frames", "rank_deficient", "crosses_run_boundary"]
+
+# Kept out of read_cohort's projection: added after the fit, not read from the
+# dfc shard.
+LATENTS_DERIVED = ("cohort", "task", "sub", "role", "model_hash")
+
+
 PARTITION_KEYS = {
     "activation": ["atlas", "cohort", "task", "sub"],
     "dfc": ["atlas", "window_s", "cohort", "task", "sub"],
@@ -429,9 +680,45 @@ def default_output_root() -> Path:
     return Path(next(iter(roots)))
 
 
-def meta_dir(output_root: str | Path) -> Path:
-    """Atlas- and model-level metadata: valid for every cohort."""
-    return Path(output_root) / "meta"
+#: Which half of the tree each `meta/` subtree belongs to. Metadata follows the
+#: data it describes, for the same reason the data splits: a cohort's stage-2
+#: manifest and its atlas labels are true whatever is fitted on them, a fitted
+#: PCA and a clusterer are true of ONE version, and a selection's design note
+#: is true of one version's supervised run.
+META_STAGE = {
+    "cohorts": "extractions", "censor": "extractions",
+    "static_fc.json": "extractions", "atlas_labels": "extractions",
+    "models": "unsupervised", "clusterers": "unsupervised",
+    "cluster": "unsupervised", "transitions": "unsupervised",
+    "bstm_selection": "supervised", "fcm_selection": "supervised",
+    "transferred_models": "supervised",
+}
+
+
+def meta_dir(output_root: str | Path, stage: str = "extractions",
+             version: str | None = None) -> Path:
+    """The `meta/` of one half of the tree.
+
+    `stage` is "extractions", "unsupervised" or "supervised" -- NOT optional in
+    meaning, only in syntax: it defaults to extractions because that is where
+    the cohort manifests and atlas labels live, which is most of the callers.
+    `META_STAGE` maps a subtree name to its stage, so a caller holding a name
+    rather than a stage can look it up instead of deciding again.
+
+    One `outputs/meta/` for everything was the old shape, and it put a fitted
+    clusterer (true of one version) in the same directory as a cohort's
+    stage-2 manifest (true of all of them).
+    """
+    if stage == "extractions":
+        return extractions_root(output_root) / "meta"
+    if stage == "unsupervised":
+        return unsupervised_root(output_root, version) / "meta"
+    if stage == "supervised":
+        return supervised_root(output_root, version) / "meta"
+    raise SystemExit(
+        f"meta_dir stage must be 'extractions', 'unsupervised' or "
+        f"'supervised', not {stage!r}. For a subtree name, look it up in "
+        f"META_STAGE.")
 
 
 def cohort_meta_dir(output_root: str | Path, cohort: str) -> Path:
@@ -441,12 +728,14 @@ def cohort_meta_dir(output_root: str | Path, cohort: str) -> Path:
     subtree of its own. This is where its provenance lives instead, keyed the
     same hive way so it can be discovered by the same walk.
     """
-    return meta_dir(output_root) / "cohorts" / f"cohort={_key(cohort)}"
+    return (meta_dir(output_root, "extractions") / "cohorts"
+            / f"cohort={_key(cohort)}")
 
 
 def atlas_labels_path(output_root: str | Path, atlas: str) -> Path:
     """Atlas label tables are cohort-independent: one file, shared by all."""
-    return meta_dir(output_root) / f"atlas-{_key(atlas)}_labels.csv"
+    return (meta_dir(output_root, "extractions")
+            / f"atlas-{_key(atlas)}_labels.csv")
 
 
 # --------------------------------------------------------------- writes ---
@@ -506,10 +795,15 @@ class ManifestEntry:
 def write_manifest(output_root: str | Path, entries: Iterable[ManifestEntry],
                    config: dict[str, Any] | None = None,
                    name: str = "manifest.json", extra: dict | None = None,
-                   cohort: str | None = None) -> Path:
+                   cohort: str | None = None, stage: str = "extractions",
+                   version: str | None = None) -> Path:
     from . import __version__
 
-    d = meta_dir(output_root) if cohort is None else cohort_meta_dir(output_root, cohort)
+    # Every current caller is a stage-2/3 manifest, hence the default; a
+    # modelling stage passes its own, so the record lands beside the data it
+    # describes rather than in a tree that outlives it.
+    d = (meta_dir(output_root, stage, version) if cohort is None
+         else cohort_meta_dir(output_root, cohort))
     d.mkdir(parents=True, exist_ok=True)
     payload = {
         "package_version": __version__,

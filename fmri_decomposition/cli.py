@@ -33,7 +33,8 @@ def _atlases(cfg):
 
 
 def _refs(cfg, strict=True):
-    from .cohort import attach_participants, discover_runs, load_participants, validate_cohort
+    from .cohort import (attach_participants, discover_runs,
+                         load_participants, validate_cohort)
 
     refs = discover_runs(cfg)
     if cfg.participants is None:
@@ -67,42 +68,6 @@ def _manifest_name(stage: str, shard) -> str:
         return f"manifest_{stage}.json"
     i, n = shard
     return f"shards/manifest_{stage}_shard-{i:04d}-of-{n:04d}.json"
-
-
-def _attach_sidecar(cfg, refs, glob_pat, attr):
-    """Attach one per-run sidecar file (censor or confounds) to each RunRef."""
-    if not glob_pat:
-        return refs
-    for ref in refs:
-        hits = sorted(Path(ref.bold).parent.glob(glob_pat))
-        entities = {f"sub-{ref.sub}", f"task-{ref.task}"}
-        for k, v in (("ses", ref.ses), ("run", ref.run), ("acq", ref.acq)):
-            if v:
-                entities.add(f"{k}-{v}")
-        # Every entity this run carries must appear in the sidecar's name, so a
-        # sibling session or run cannot be picked up by accident.
-        hits = [h for h in hits if all(e in h.name for e in entities)]
-        if hits:
-            setattr(ref, attr, hits[0])
-    return refs
-
-
-def _attach_censor(cfg, refs):
-    return _attach_sidecar(cfg, refs, cfg.confounds.censor_glob, "censor")
-
-
-def _attach_confounds(cfg, refs):
-    return _attach_sidecar(cfg, refs, cfg.confounds.confounds_glob, "confounds")
-
-
-def _attach_motion(cfg, refs):
-    """Motion regressor sidecars, for subject-level QC only (see motion.py).
-
-    Never called by `extract`: nothing in stage 2 or 3 reads this file. It is
-    attached by `qc.motion_qc`, which turns it into mean_fd in
-    participants_qc.csv.
-    """
-    return _attach_sidecar(cfg, refs, cfg.confounds.motion_glob, "motion")
 
 
 # ------------------------------------------------------------- commands ---
@@ -164,12 +129,13 @@ def cmd_validate(args) -> int:
 def cmd_extract(args) -> int:
     from joblib import Parallel, delayed
 
-    from .activation import process_run
+    from .cohort import attach_censor, attach_confounds
+    from .extractions.activation import process_run
     from .io import atlas_labels_path, write_manifest
 
     cfg = _load(args.config)
     refs, _ = _refs(cfg, strict=not args.no_strict)
-    refs = _attach_confounds(cfg, _attach_censor(cfg, refs))
+    refs = attach_confounds(cfg, attach_censor(cfg, refs))
     atlases = _atlases(cfg)
     if args.limit:
         refs = refs[: args.limit]
@@ -381,7 +347,7 @@ def _warn_excluded_shards(cfg, plan) -> None:
 def cmd_dfc(args) -> int:
     from joblib import Parallel, delayed
 
-    from .dfc import process_activation_file
+    from .extractions.dfc import process_activation_file
     from .io import write_manifest
 
     cfg = _load(args.config)
@@ -428,8 +394,8 @@ def cmd_diagnose(args) -> int:
     re-running any of this.
     """
     from .io import activation_root
-    from .qc import collect_qc, qc_frame
-    from .validate import (coverage_table, isc_gate, lr_correlation_diagnostic,
+    from .extractions.qc import collect_qc, qc_frame
+    from .extractions.validate import (coverage_table, isc_gate, lr_correlation_diagnostic,
                            write_diagnostic)
 
     cfg = _load(args.config)
@@ -544,7 +510,7 @@ def cmd_censor(args) -> int:
     of thresholds; this applies them, and does so under a policy name that is
     hashed into every row it writes.
     """
-    from . import censor
+    from .extractions import censor
 
     if args.stage == "dfc" and not (args.atlas and args.window_s):
         raise SystemExit("--stage dfc needs --atlas and --window-s")
@@ -552,7 +518,7 @@ def cmd_censor(args) -> int:
 
 
 def cmd_decompose(args) -> int:
-    from . import decompose
+    from .unsupervised_model import decompose
 
     return decompose.run(args)
 
@@ -570,7 +536,7 @@ def cmd_cluster(args) -> int:
     Separate from `decompose` because the embeddings do not need refitting --
     a sixth state definition must not mean redoing the five that work.
     """
-    from . import cluster
+    from .unsupervised_model import cluster
 
     return cluster.run(args)
 
@@ -578,7 +544,7 @@ def cmd_cluster(args) -> int:
 def cmd_select_bstm(args) -> int:
     """Stage 5b: rank state sets by how well their transitions predict a
     phenotype column. Parallel over (state set x model x fold seed)."""
-    from . import bstm_selection
+    from .supervised_model import bstm_selection
 
     return bstm_selection.run(args)
 
@@ -591,7 +557,7 @@ def cmd_static_fc(args) -> int:
     point: it makes the gap between fcm_selection and bstm_selection a gap
     between models rather than between preprocessing.
     """
-    from . import static_fc
+    from .extractions import static_fc
 
     return static_fc.run(args)
 
@@ -609,7 +575,7 @@ def cmd_fcm_select(args) -> int:
     Only this one is separate code; its features come from stage 3b rather
     than stage 5a.
     """
-    from . import fcm_selection
+    from .supervised_model import fcm_selection
 
     return fcm_selection.run(args)
 
@@ -620,7 +586,7 @@ def cmd_transitions(args) -> int:
     Separate from `decompose` because the grid is different: one decomposition
     produces several state definitions, and each is its own state set.
     """
-    from . import transitions
+    from .unsupervised_model import transitions
 
     return transitions.run(args)
 
@@ -738,7 +704,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Like `decompose`, no `config` positional: a policy is applied across
     # cohorts at once, and lives in config/censor/ rather than a cohort YAML.
-    from . import censor as _censor
+    from .extractions import censor as _censor
 
     c = sub.add_parser(
         "censor",
@@ -749,7 +715,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # No `config` positional: a decomposition spans cohorts, so the train /
     # project split cannot live in a per-cohort YAML.
-    from . import decompose as _decompose
+    from .unsupervised_model import decompose as _decompose
 
     dec = sub.add_parser(
         "decompose",
@@ -766,7 +732,7 @@ def build_parser() -> argparse.ArgumentParser:
     _status.add_arguments(st)
     st.set_defaults(func=cmd_status)
 
-    from . import cluster as _cluster
+    from .unsupervised_model import cluster as _cluster
 
     cl = sub.add_parser(
         "cluster",
@@ -774,7 +740,7 @@ def build_parser() -> argparse.ArgumentParser:
     _cluster.add_arguments(cl)
     cl.set_defaults(func=cmd_cluster)
 
-    from . import bstm_selection as _bstm_selection
+    from .supervised_model import bstm_selection as _bstm_selection
 
     # `select-bstm` and `select-fcm`, a matched pair naming the two models
     # being ranked. `select` alone did not say select WHAT, and `select-model`
@@ -787,7 +753,7 @@ def build_parser() -> argparse.ArgumentParser:
     _bstm_selection.add_arguments(sel)
     sel.set_defaults(func=cmd_select_bstm)
 
-    from . import transitions as _transitions
+    from .unsupervised_model import transitions as _transitions
 
     t = sub.add_parser(
         "transitions",
@@ -795,7 +761,7 @@ def build_parser() -> argparse.ArgumentParser:
     _transitions.add_arguments(t)
     t.set_defaults(func=cmd_transitions)
 
-    from . import static_fc as _static_fc
+    from .extractions import static_fc as _static_fc
 
     sf = sub.add_parser(
         "static-fc",
@@ -804,7 +770,7 @@ def build_parser() -> argparse.ArgumentParser:
     _static_fc.add_arguments(sf)
     sf.set_defaults(func=cmd_static_fc)
 
-    from . import fcm_selection as _fcm_selection
+    from .supervised_model import fcm_selection as _fcm_selection
 
     fs = sub.add_parser(
         "select-fcm",
@@ -816,7 +782,7 @@ def build_parser() -> argparse.ArgumentParser:
     sm = sub.add_parser(
         "state-means",
         help="what each brain state looks like, in named network units")
-    from . import state_means as _state_means
+    from .unsupervised_model import state_means as _state_means
     _state_means.add_arguments(sm)
     sm.set_defaults(func=lambda a: _state_means.run(a))
 

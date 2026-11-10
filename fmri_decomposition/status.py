@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .io import RAW_PREFIX, STATE_COLUMN_RE, STATE_K_BAND
+from .io import RAW_PREFIX, STATE_COLUMN_RE, STATE_K_BAND, tree_root
 
 STATE_RE = STATE_COLUMN_RE
 EMBEDDINGS = {"pca3": "pca0/3", "umap3": "umap0/3"}
@@ -96,7 +96,7 @@ from .io import hive_key as _key          # noqa: E402  (re-export, used below)
 # ------------------------------------------------------------------ stages ---
 def activation(root: Path) -> pd.DataFrame:
     rows = []
-    for d in sorted((root / "activation").glob("atlas=*/cohort=*")):
+    for d in sorted(tree_root(root, "activation").glob("atlas=*/cohort=*")):
         rows.append({"atlas": _key(d, "atlas"), "cohort": _key(d, "cohort"),
                      "shards": sum(1 for _ in d.rglob("*.parquet"))})
     return pd.DataFrame(rows)
@@ -104,7 +104,8 @@ def activation(root: Path) -> pd.DataFrame:
 
 def dfc(root: Path) -> pd.DataFrame:
     rows = []
-    for d in sorted((root / "dfc").glob("atlas=*/window_s=*/cohort=*")):
+    for d in sorted(tree_root(root, "dfc")
+                    .glob("atlas=*/window_s=*/cohort=*")):
         rows.append({"atlas": _key(d, "atlas"), "window_s": _key(d, "window_s"),
                      "cohort": _key(d, "cohort"),
                      "shards": sum(1 for _ in d.rglob("*.parquet"))})
@@ -122,7 +123,7 @@ def static_fc(root: Path) -> pd.DataFrame:
     that stage will refuse until it is given --keep-tasks.
     """
     rows = []
-    for sp in sorted((root / "static_fc")
+    for sp in sorted(tree_root(root, "static_fc")
                      .glob("atlas=*/cohort=*/task=*/subjects.parquet")):
         n = subs = -1
         tasks = ""
@@ -152,7 +153,7 @@ def static_fc(root: Path) -> pd.DataFrame:
 
 def censor(root: Path) -> pd.DataFrame:
     rows = []
-    for d in sorted((root / "censor").glob("policy=*")):
+    for d in sorted(tree_root(root, "censor").glob("policy=*")):
         # The window gate is written only for the (atlas, aperture) `censor` was
         # given --stage dfc for. Subjects-only is the normal first-pass state, so
         # this reports which it is rather than treating absence as a fault.
@@ -174,9 +175,9 @@ def censor(root: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def latents(root: Path) -> pd.DataFrame:
+def latents(root: Path, version: str | None = None) -> pd.DataFrame:
     rows = []
-    for p in sorted((root / "latents")
+    for p in sorted(tree_root(root, "latents", version)
                     .glob("atlas=*/window_s=*/cohort=*/task=*/data.parquet")):
         n, cols = _footer(p)
         states = sorted(c for c in cols if STATE_RE.match(c))
@@ -193,7 +194,8 @@ def latents(root: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def transitions(root: Path, deep: bool = True) -> pd.DataFrame:
+def transitions(root: Path, deep: bool = True,
+                version: str | None = None) -> pd.DataFrame:
     """One row per table. `rows` is (task, sub) pairs; `subs` is PEOPLE.
 
     The two are not the same and the difference matters: cneuromod is 5 people
@@ -204,7 +206,8 @@ def transitions(root: Path, deep: bool = True) -> pd.DataFrame:
     command touches a row group.
     """
     rows = []
-    for p in sorted((root / "transitions").rglob("subjects.parquet")):
+    for p in sorted(tree_root(root, "transitions", version)
+                    .rglob("subjects.parquet")):
         n, cols = _footer(p)
         subs = None
         if deep:
@@ -223,7 +226,7 @@ def transitions(root: Path, deep: bool = True) -> pd.DataFrame:
 SELECTION_TREES = ("bstm_selection", "fcm_selection")
 
 
-def selection(root: Path) -> pd.DataFrame:
+def selection(root: Path, version: str | None = None) -> pd.DataFrame:
     """One row per selection RUN: (tree, task, target).
 
     Both trees, because `select-fcm` is the control `select-bstm` has to beat
@@ -235,7 +238,8 @@ def selection(root: Path) -> pd.DataFrame:
     """
     rows = []
     for tree in SELECTION_TREES:
-        for d in sorted((root / tree).glob("task=*/target=*")):
+        for d in sorted(tree_root(root, tree, version)
+                        .glob("task=*/target=*")):
             sc = d / "scores.csv"
             rows.append({"tree": tree.replace("_selection", ""),
                          "task": _key(d, "task"),
@@ -482,6 +486,15 @@ def add_arguments(p) -> None:
                    help="skip the one column read that counts distinct PEOPLE "
                         "per transition table; footers only")
     p.add_argument("--output-root")
+    # Every command that reads or writes a versioned tree takes this, and the
+    # resolved value is PRINTED -- a default that is never said out loud is how
+    # a v1 run lands in v0.
+    p.add_argument("--modelling-version", default=None, metavar="V",
+                   help="which modelling version's trees to use, e.g. v1 "
+                        "(default: $FMRIDECOMP_MODELLING_VERSION, else v0). A "
+                        "version is which cohorts play which role; it is "
+                        "recorded in modelling/version=<v>/version.json and a "
+                        "run whose composition differs is refused.")
 
 
 def main(argv=None) -> int:

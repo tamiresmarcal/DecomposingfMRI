@@ -17,10 +17,10 @@
 # TWO TREES, FOUR TABLES, ONE SHAPE, read side by side -- each tree partitioned
 # by condition, not duplicated under a second name:
 #
-#   outputs/bstm_selection/task=movie/   slurm/model_selection.sbatch
-#   outputs/bstm_selection/task=rest/      -- --keep-tasks Rest  --task rest
-#   outputs/fcm_selection/ task=movie/   this, --keep-tasks Movie --task movie
-#   outputs/fcm_selection/ task=rest/    this, --keep-tasks Rest  --task rest
+#   outputs/modelling/version=v0/supervised_model/bstm_selection/task=movie/   slurm/model_selection.sbatch
+#   outputs/modelling/version=v0/supervised_model/bstm_selection/task=rest/      -- --keep-tasks Rest  --task rest
+#   outputs/modelling/version=v0/supervised_model/fcm_selection/ task=movie/   this, --keep-tasks Movie --task movie
+#   outputs/modelling/version=v0/supervised_model/fcm_selection/ task=rest/    this, --keep-tasks Rest  --task rest
 #
 # --cohorts, --task and --pheno are all REQUIRED and none of them has a default:
 # a job script that names a cohort, or a path into one person's scratch space,

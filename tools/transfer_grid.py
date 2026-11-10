@@ -49,6 +49,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from fmri_decomposition.io import tree_root
 
 # A segfault in a C extension leaves nothing but "Segmentation fault" in the
 # shell's log -- which is exactly what the first real array produced, forty
@@ -158,7 +159,7 @@ def status(a, root_out) -> int:
     import pandas as pd
     import pyarrow.parquet as pq
 
-    import transfer_tables as tt
+    from fmri_decomposition.supervised_model import transfer_tables as tt
 
     # The two trees are located INDEPENDENTLY: `--out` says where the transfer
     # rows are, `--outputs` says where the pipeline's tree is. Deriving one
@@ -167,7 +168,7 @@ def status(a, root_out) -> int:
     # else.
     outputs = Path(a.outputs) if a.outputs else Path(os.environ.get(
         "FMRIDECOMP_OUTPUTS", "/project/6008063/tamires/DecomposingfMRI/outputs"))
-    root = root_out or outputs / "transferred_models"
+    root = root_out or tree_root(outputs, "transferred_models")
     say(f"{root}")
     todo = []
     for tree in ("bstm", "fcm"):
@@ -257,10 +258,10 @@ def status(a, root_out) -> int:
     # half is whether its two inputs are comparable, and that is knowable from
     # disk before anything is submitted. Printed here because this is where
     # the question gets asked.
-    import transfer_config as tc
+    from fmri_decomposition.supervised_model import transfer_config as tc
 
     tr_co, te_co = tc.TRAIN_COHORTS, tc.TEST_COHORTS
-    fc_root = outputs / "static_fc"
+    fc_root = tree_root(outputs, "static_fc")
     recs, seen = {}, False
     for q in sorted(fc_root.rglob("subjects.parquet")):
         seen = True
@@ -441,8 +442,8 @@ def main(argv=None) -> int:
     require_runtime()
 
     import pandas as pd
-    import transfer_config as tc
-    import transfer_tables as tt
+    from fmri_decomposition.supervised_model import transfer_config as tc
+    from fmri_decomposition.supervised_model import transfer_tables as tt
 
     t0 = time.time()
     root_out = Path(a.out) if a.out else None
@@ -451,7 +452,7 @@ def main(argv=None) -> int:
     train, test, train_cfg, test_cfg = tc.studies(
         a.target, models=a.models, root=a.outputs, camcan=a.camcan_pheno,
         hcp_pheno=a.hcp_pheno)
-    root_out = root_out or (train_cfg.root / "transferred_models")
+    root_out = root_out or (tree_root(train_cfg.root, "transferred_models"))
     import numpy, sklearn
     say(f"target={a.target} tree={a.tree} shard={a.shard}/{a.n_shards} "
         f"threads={a.threads}")
@@ -528,7 +529,7 @@ def main(argv=None) -> int:
             # the fcm grid is atlases x tasks x targets x 2 arms x models, and
             # the atlases are the ones BOTH cohorts have a static_fc table for
             pres = {}
-            for q in (train_cfg.root / "static_fc").rglob("subjects.parquet"):
+            for q in (tree_root(train_cfg.root, "static_fc")).rglob("subjects.parquet"):
                 pres.setdefault(tt.hive(q, "atlas"), set()).add(tt.hive(q, "cohort"))
             # ALL cohorts of each side, as `fcm_transfer_rows` requires:
             # `_fc_cell` reads one table per cohort and concatenates before

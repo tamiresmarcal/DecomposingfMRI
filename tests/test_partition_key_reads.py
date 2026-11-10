@@ -52,13 +52,15 @@ import pyarrow.parquet as pq
 import pytest
 import yaml
 
-from fmri_decomposition import censor as C
-from fmri_decomposition import static_fc as S
-from fmri_decomposition.decompose import load_censor
+from fmri_decomposition.extractions import censor as C
+from fmri_decomposition.extractions import static_fc as S
+from fmri_decomposition.extractions.censor import load_censor
 from fmri_decomposition.io import parse_hive_keys, read_file
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools import migrate_cohort as M  # noqa: E402
+from fmri_decomposition.io import tree_root
+from fmri_decomposition.io import cohort_meta_dir
 
 
 def offending_keys(source) -> list[str]:
@@ -114,7 +116,7 @@ def as_pyarrow_18(monkeypatch):
 class TestTheEmulatorHasTeeth:
     def test_a_path_to_a_file_that_repeats_a_column_raises(
             self, tmp_path, as_pyarrow_18):
-        d = tmp_path / "censor" / "policy=motion" / "cohort=camcan" / "task=Movie"
+        d = tree_root(tmp_path, "censor") / "policy=motion" / "cohort=camcan" / "task=Movie"
         d.mkdir(parents=True)
         f = d / "subjects.parquet"
         pq.write_table(pa.table({"sub": ["S1"], "task": ["Movie"],
@@ -125,7 +127,7 @@ class TestTheEmulatorHasTeeth:
     def test_a_shard_carrying_no_key_as_a_column_reads_fine(
             self, tmp_path, as_pyarrow_18):
         # The stage 1/2 convention: keys live in the path and nowhere else.
-        d = tmp_path / "dfc" / "atlas=mini" / "cohort=c" / "task=T" / "sub=S1"
+        d = tree_root(tmp_path, "dfc") / "atlas=mini" / "cohort=c" / "task=T" / "sub=S1"
         d.mkdir(parents=True)
         f = d / "data.parquet"
         pq.write_table(pa.table({"window_id": [0, 1], "run_key": ["a", "a"]}), f)
@@ -133,7 +135,7 @@ class TestTheEmulatorHasTeeth:
         assert len(pd.read_parquet(f)) == 2
 
     def test_read_file_is_never_stopped_by_it(self, tmp_path, as_pyarrow_18):
-        d = tmp_path / "censor" / "policy=motion" / "cohort=c" / "task=T"
+        d = tree_root(tmp_path, "censor") / "policy=motion" / "cohort=c" / "task=T"
         d.mkdir(parents=True)
         f = d / "subjects.parquet"
         pq.write_table(pa.table({"sub": ["S1"], "task": ["T"],
@@ -147,7 +149,7 @@ class TestWhyPandasGetsAwayWithIt:
     nothing but the migration tool ever broke."""
 
     def test_pandas_hands_pyarrow_a_handle_and_not_a_path(self, tmp_path):
-        d = tmp_path / "censor" / "policy=motion" / "cohort=camcan"
+        d = tree_root(tmp_path, "censor") / "policy=motion" / "cohort=camcan"
         d.mkdir(parents=True)
         f = d / "subjects.parquet"
         pq.write_table(pa.table({"sub": ["S1"], "policy": ["motion"]}), f)
@@ -192,7 +194,7 @@ QC = pd.DataFrame([
 
 @pytest.fixture
 def censored(tmp_path):
-    qc_dir = tmp_path / "meta" / "cohorts" / "cohort=camcan"
+    qc_dir = cohort_meta_dir(tmp_path, "camcan")
     qc_dir.mkdir(parents=True)
     QC.to_csv(qc_dir / "participants_qc.csv", index=False)
     pol = tmp_path / "motion.yaml"
@@ -206,7 +208,7 @@ def censored(tmp_path):
 class TestTheCensorTableIsStillReadable:
     def test_the_written_file_does_duplicate_its_keys(self, censored):
         # Not hypothetical: this is what makes the rest of the class matter.
-        f = next((censored / "censor").rglob("subjects.parquet"))
+        f = next((tree_root(censored, "censor")).rglob("subjects.parquet"))
         assert offending_keys(f) == ["policy", "task"]
 
     def test_load_censor_survives_the_cluster_reader(self, censored,
@@ -235,7 +237,7 @@ class TestTheStaticFcTableIsStillReadable:
         return tmp_path
 
     def test_the_written_file_does_duplicate_its_keys(self, table):
-        f = next((table / "static_fc").rglob("subjects.parquet"))
+        f = next((tree_root(table, "static_fc")).rglob("subjects.parquet"))
         assert offending_keys(f) == ["atlas", "cohort", "task"]
 
     def test_the_whole_table_survives_the_cluster_reader(self, table,
@@ -265,7 +267,7 @@ class TestTheSplitSurvivesTheClusterReader:
     @pytest.fixture
     def tree(self, tmp_path):
         """A censor table at the pre-split depth, with its `policy` column."""
-        d = tmp_path / "censor" / "policy=motion" / "cohort=camcan"
+        d = tree_root(tmp_path, "censor") / "policy=motion" / "cohort=camcan"
         d.mkdir(parents=True)
         pq.write_table(
             pa.table({"sub": ["S1", "S2", "S1"],
@@ -279,14 +281,14 @@ class TestTheSplitSurvivesTheClusterReader:
     def test_it_splits_a_file_that_repeats_its_own_key(self, tree,
                                                        as_pyarrow_18):
         assert M.do_split(tree, apply=True) == 0
-        base = tree / "censor" / "policy=motion" / "cohort=camcan"
+        base = tree_root(tree, "censor") / "policy=motion" / "cohort=camcan"
         assert (base / "task=Movie" / "subjects.parquet").exists()
         assert (base / "task=Rest" / "subjects.parquet").exists()
         assert not (base / "subjects.parquet").exists()
 
     def test_every_row_lands_in_its_own_task(self, tree, as_pyarrow_18):
         M.do_split(tree, apply=True)
-        base = tree / "censor" / "policy=motion" / "cohort=camcan"
+        base = tree_root(tree, "censor") / "policy=motion" / "cohort=camcan"
         movie = pq.ParquetFile(base / "task=Movie" / "subjects.parquet").read()
         rest = pq.ParquetFile(base / "task=Rest" / "subjects.parquet").read()
         assert movie.num_rows == 2 and rest.num_rows == 1
@@ -306,7 +308,7 @@ class TestTheSplitSurvivesTheClusterReader:
         tool never reached is untouched and a re-run finds it. Nothing is
         half-written and nothing is lost.
         """
-        second = tree / "censor" / "policy=strict" / "cohort=camcan"
+        second = tree_root(tree, "censor") / "policy=strict" / "cohort=camcan"
         second.mkdir(parents=True)
         pq.write_table(pa.table({"sub": ["S1"], "task": ["Movie"],
                                  "policy": ["strict"]}),

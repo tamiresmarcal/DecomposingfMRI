@@ -407,7 +407,7 @@ and only that one**, so a raw run cannot touch the category ranking beside it.
 stage that spans cohorts must not name one, and a path into one person's
 scratch space only works for one project. `--task` is the hive partition the
 result lands under, so this writes
-`outputs/bstm_selection/task=movie/target=$Y/`.
+`outputs/modelling/version=v0/supervised_model/bstm_selection/task=movie/target=$Y/`.
 
 **Cam-CAN is one cohort with two conditions.** `--keep-tasks` is the ROW filter
 and takes the BIDS labels as the data spells them (`Movie`, `Rest`); `--task`
@@ -446,7 +446,7 @@ Back up a result you care about first.
 ```bash
 $RUN python3 -m fmri_decomposition.cli status | sed -n '/^======/,$p'
 column -s, -t \
-  outputs/bstm_selection/task=movie/target=additional_HADS_anx_category/summary.csv \
+  outputs/modelling/version=v0/supervised_model/bstm_selection/task=movie/target=additional_HADS_anx_category/summary.csv \
   | head -12
 ```
 
@@ -770,7 +770,7 @@ Then check both tasks are there under one cohort:
 
 ```bash
 $RUN python3 -m fmri_decomposition.cli status | sed -n '/^1  ACTIV/,/^3 /p'
-ls outputs/activation/atlas=yeo7/cohort=camcan/          # task=Movie  task=Rest
+ls outputs/extractions/activation/atlas=yeo7/cohort=camcan/          # task=Movie  task=Rest
 ```
 
 The shards' own schema metadata still records `cohort: camcan_rest` and the old
@@ -782,7 +782,7 @@ rewriting ~2,000 files to correct a string no consumer opens would be churn.
 in the fit before you do:
 
 ```bash
-ls -d outputs/latents/atlas=yeo7/window_s=-1/cohort=*      # expect no ccfrail
+ls -d outputs/modelling/version=v0/unsupervised_model/latents/atlas=yeo7/window_s=-1/cohort=*      # expect no ccfrail
 find outputs -type d -name 'cohort=camcan_ccfrail' -prune -print
 find outputs -type d -name 'cohort=camcan_ccfrail' -prune -exec rm -rf {} +
 ```
@@ -983,7 +983,7 @@ $RUN python3 tools/drop_state_columns.py --states HMM_pca3_8 HMM_pca3_27 \
 $RUN python3 tools/drop_state_columns.py --states ... --apply
 ```
 
-**`rm -rf outputs/transitions/.../states=X` on its own does not hold.**
+**`rm -rf outputs/modelling/version=v0/unsupervised_model/transitions/.../states=X` on its own does not hold.**
 `transitions` builds its plan from the state COLUMNS inside the latents, so the
 next run regenerates exactly what was deleted. The columns are the source and
 the transitions tables are derived, so the tool removes the columns first and
@@ -1021,7 +1021,7 @@ over whatever this version no longer emits, `bins` and `project_cohorts` alike:
 for A in harvardoxford yeo7 networks; do
   sbatch --array=0-3 slurm/decomposition.sbatch $A 30 60 120 300 \
     -- $TRAIN $PROJ $POL --pca-latents 3 \
-       --legacy-hash-from outputs/latents/atlas=$A/window_s=300/cohort=camcan/task=Movie/data.parquet
+       --legacy-hash-from outputs/modelling/version=v0/unsupervised_model/latents/atlas=$A/window_s=300/cohort=camcan/task=Movie/data.parquet
 done
 ```
 
@@ -1175,7 +1175,7 @@ four can be concatenated and still say which is which:
 
 ```bash
 Y=additional_HADS_anx_category
-head -1 outputs/bstm_selection/task=movie/target=$Y/summary.csv > all.csv
+head -1 outputs/modelling/version=v0/supervised_model/bstm_selection/task=movie/target=$Y/summary.csv > all.csv
 for T in bstm_selection fcm_selection; do for K in movie rest; do
   tail -n +2 outputs/$T/task=$K/target=$Y/summary.csv >> all.csv
 done; done
@@ -1271,7 +1271,7 @@ $RUN python3 tools/transfer_grid.py --target raw --n-shards 282 \
     --arms cells --models ridge --n-boot 50 --no-write
 ```
 
-`-> outputs/transferred_models/train=camcan/test=hcp7t_fix/targets=<raw|category>/`
+`-> outputs/modelling/version=v0/supervised_model/transferred_models/train=camcan/test=hcp7t_fix/targets=<raw|category>/`
 
 **An array here, unlike stage 5b.** There the grid stays in one process because
 every cell needs the same small tables in memory and joblib owns the
@@ -1288,7 +1288,7 @@ differ in preprocessing as well as in model:
 
 ```bash
 # which atlases and cohorts the tree already has
-find outputs/static_fc -name subjects.parquet \
+find outputs/extractions/static_fc -name subjects.parquet \
   | sed 's#.*/atlas=\([^/]*\)/cohort=\([^/]*\)/.*#\1 \2#' | sort -u
 
 # the policy `decompose` was given for this cohort, from its own footer --
@@ -1373,7 +1373,7 @@ on demand:
 
 ```bash
 scancel --signal=USR1 <jobid>_<task>        # then read slurm_logs/transfer_*.err
-grep -c . outputs/transferred_models/train=camcan/test=hcp7t_fix/targets=raw/tree=bstm/shard=*/rows.parquet 2>/dev/null | wc -l
+grep -c . outputs/modelling/version=v0/supervised_model/transferred_models/train=camcan/test=hcp7t_fix/targets=raw/tree=bstm/shard=*/rows.parquet 2>/dev/null | wc -l
 ```
 
 `THREADS` is the knob, and it must not exceed `--cpus-per-task` — the script
@@ -1506,18 +1506,18 @@ What is safe to delete, cheapest to rebuild first:
 
 | delete | rebuild cost | rebuild with |
 |---|---|---|
-| `outputs/bstm_selection/` | ~90 min | stage 6 |
-| `outputs/transitions/` | minutes | stage 5 |
-| `outputs/latents/` | ~1 h per atlas | stages 3 **and** 4 |
-| `outputs/censor/` | seconds | stage 2.5 |
-| `outputs/dfc/` | hours | stage 2 |
-| `outputs/activation/` | many hours | stage 1 |
+| `outputs/modelling/version=v0/supervised_model/bstm_selection/` | ~90 min | stage 6 |
+| `outputs/modelling/version=v0/unsupervised_model/transitions/` | minutes | stage 5 |
+| `outputs/modelling/version=v0/unsupervised_model/latents/` | ~1 h per atlas | stages 3 **and** 4 |
+| `outputs/extractions/censor/` | seconds | stage 2.5 |
+| `outputs/extractions/dfc/` | hours | stage 2 |
+| `outputs/extractions/activation/` | many hours | stage 1 |
 
-Deleting `outputs/latents/` also destroys the state columns stage 4 added — they
+Deleting `outputs/modelling/version=v0/unsupervised_model/latents/` also destroys the state columns stage 4 added — they
 live **inside** the latents files, so stage 3 and stage 4 always rebuild
 together.
 
-Never delete `config/` or `outputs/meta/cohorts/*/`: the first is hand-written,
+Never delete `config/` or `outputs/extractions/meta/cohorts/*/`: the first is hand-written,
 the second is provenance you cannot regenerate without re-running the stage.
 
 A full wipe is just:
@@ -1579,7 +1579,7 @@ Check it for any new cohort before trusting a wide aperture:
 $RUN python3 -c "
 import pandas as pd
 for w in ('30','60','120','300','-1'):
-    d = pd.read_parquet(f'outputs/transitions/atlas=yeo7/window_s={w}/'
+    d = pd.read_parquet(f'outputs/modelling/version=v0/unsupervised_model/transitions/atlas=yeo7/window_s={w}/'
                         f'states=HMM1_pca3_8/cohort=<cohort>/subjects.parquet',
                         columns=['n_transitions'])
     print(f'{w:>4}s  {d.n_transitions.mean():6.1f} +/- {d.n_transitions.std():.2f}')"

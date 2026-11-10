@@ -167,10 +167,10 @@ submitted. watch with:
 
 per-subject QC (motion, timing, coverage, scrubbing, registration) is written by
 the activation finalize -- no separate step:
-  outputs/meta/cohorts/cohort=<cohort>/participants_qc.csv
+  outputs/extractions/meta/cohorts/cohort=<cohort>/participants_qc.csv
 It is measurement only. The threshold is applied by the censor job above, under
 a policy that is named and hashed:
-  outputs/censor/policy=<name>/cohort=<cohort>/subjects.parquet
+  outputs/extractions/censor/policy=<name>/cohort=<cohort>/subjects.parquet
   grep -E 'kept|policy' slurm_logs/censor_${CENSOR_ID}.out
 
 to re-gate later, copy the policy and run ONLY the censor step -- nothing

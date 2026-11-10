@@ -75,6 +75,14 @@ import shutil
 import sys
 from pathlib import Path
 
+# The repo root, so `fmri_decomposition` imports from a checkout with no
+# install. At module scope, not inside main(): the path helpers below are used
+# by functions this module exposes, not only by the command line.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from fmri_decomposition.io import (cohort_meta_dir, default_output_root,
+                                   tree_root)
+
 #: Stages whose leaves are immutable per-subject shards: safe to move.
 MOVABLE = ("activation", "dfc")
 
@@ -87,7 +95,7 @@ META_MOVABLE = ("shards",)
 
 
 def cohort_dirs(root: Path, stage: str, cohort: str) -> list[Path]:
-    return sorted(p for p in (root / stage).rglob(f"cohort={cohort}")
+    return sorted(p for p in tree_root(root, stage).rglob(f"cohort={cohort}")
                   if p.is_dir())
 
 
@@ -106,12 +114,12 @@ def plan(root: Path, src: str, dst: str):
             for f in leftovers:
                 to = target_cohort / f.name
                 (collisions if to.exists() else moves).append((f, to))
-    meta_src = root / "meta" / "cohorts" / f"cohort={src}"
+    meta_src = cohort_meta_dir(root, src)
     for name in META_MOVABLE:
         d = meta_src / name
         if not d.exists():
             continue
-        to = root / "meta" / "cohorts" / f"cohort={dst}" / name
+        to = cohort_meta_dir(root, dst) / name
         if not to.exists():
             moves.append((d, to))
             continue
@@ -148,7 +156,7 @@ def unsplit_leaves(root: Path) -> list[Path]:
     """
     out = []
     for tree in ("latents", "transitions", "static_fc", "censor"):
-        base = root / tree
+        base = tree_root(root, tree)
         if not base.is_dir():
             continue
         for leaf in LEAVES:
@@ -288,8 +296,6 @@ def main(argv=None) -> int:
     if a.output_root:
         root = Path(a.output_root)
     else:
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from fmri_decomposition.io import default_output_root
         root = default_output_root()
     if not root.is_dir():
         raise SystemExit(f"output_root does not exist: {root}")

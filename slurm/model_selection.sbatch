@@ -24,8 +24,8 @@
 # regression chases as an enormous outlier. Pass `--target-range 0 21` for
 # those two; the *_category columns need nothing, their text never codes.
 #
-#   -> outputs/bstm_selection/task=movie/target=$Y/summary.csv
-#      outputs/bstm_selection/task=rest/ target=$Y/summary.csv
+#   -> outputs/modelling/version=v0/supervised_model/bstm_selection/task=movie/target=$Y/summary.csv
+#      outputs/modelling/version=v0/supervised_model/bstm_selection/task=rest/ target=$Y/summary.csv
 #
 # Static connectivity is slurm/fcm_selection.sbatch, under the same split. All
 # four are separate RUNS on whoever each has, so if a gap between their

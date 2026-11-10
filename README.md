@@ -56,17 +56,17 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      transitions predict a phenotype column,
                                      against non-transition controls. One run
                                      per condition, named by --task
-                                     -> outputs/bstm_selection/task=<k>/target=<t>/
+                                     -> outputs/modelling/version=v0/supervised_model/bstm_selection/task=<k>/target=<t>/
 
 3b   static_fc.sbatch                parcel timeseries -> ONE correlation
                                      matrix per subject. Reads stage 2 through
                                      the same function the window_s=-1 state
                                      arm reads, so the two differ only in the
-                                     MODEL. -> outputs/static_fc/
+                                     MODEL. -> outputs/extractions/static_fc/
 5b'  fcm_selection.sbatch            rank STATIC connectivity models the way
                                      5b ranks state sets, a condition's cohorts
                                      in one `cohort` column
-                                     -> outputs/fcm_selection/task=<k>/target=<t>/
+                                     -> outputs/modelling/version=v0/supervised_model/fcm_selection/task=<k>/target=<t>/
 
 5d   transfer_grid.sh                TRAIN on one cohort, TEST on the other:
                                      one fit on every Cam-CAN subject, one
@@ -75,7 +75,7 @@ fmri-decomp dfc       config/ds002837.yaml --n-jobs 8 --window-s 15 30 60 120 30
                                      rather than four fifths of it -- ~9,000 fits
                                      over the grid. 5b's within-cohort CV stays
                                      the primary result; this is confirmation.
-                                     -> outputs/transferred_models/
+                                     -> outputs/modelling/version=v0/supervised_model/transferred_models/
 
 any  fmri-decomp status              read-only: what every stage holds, and the
                                      disagreements that span two of them
@@ -91,14 +91,94 @@ versioned and hashed into every row it writes — see below.
 
 ---
 
+## Package structure
+
+The package mirrors `outputs/`, by the same question: the folder that writes
+`outputs/<half>/` is `fmri_decomposition/<half>/`.
+
+```
+fmri_decomposition/
+├── cli.py                    the one entry point
+├── io.py config.py cohort.py frames.py windows.py timing.py
+├── fixtures.py status.py atlases/
+│                             shared infrastructure: anything used across the
+│                             three halves. `frames.py` is read by an
+│                             extraction, by the unsupervised fit and by the
+│                             contextualisation arm, so forcing it into one of
+│                             them would make the split decorative.
+│
+├── extractions/              images and confounds -> tables; no model fitted
+│   activation dfc censor static_fc qc motion validate inventory
+│
+├── unsupervised_model/       the state space, no phenotype in the room
+│   decompose cluster transitions state_means cohort_tables
+│   └── contextualization/    what a state MEANS: correlations, refmaps
+│
+├── supervised_model/         everything that reads a phenotype
+│   bstm_selection fcm_selection transfer_tables transfer_config hads symptoms
+│
+└── figures/                  the presentation layer over all three
+    hads cohorts states symptoms
+```
+
+The dependency runs one way: `extractions` knows nothing about what is fitted
+on it, `unsupervised_model` may read `extractions`, `supervised_model` may read
+both, and nothing imports `figures`. Each package's `__init__.py` states its
+own rule, including which direction it may import.
+
+`figures/` is the one package with no matching folder under `outputs/`, and
+that is deliberate: a figure is a presentation layer over all three stages —
+notebook 13's panels read the supervised transfer *and* the cohort tables — and
+it lands wherever the notebook that asked for it saves it.
+
+`tests/` mirrors the same four, with the cross-cutting files at the top level.
+
 ## Output structure
 
-Hive-partitioned parquet. Partition keys are **directory names**; the dataset
-exists only at read time, when pyarrow walks the tree and reconstructs the keys.
-Nothing is ever appended to — each worker owns one leaf and writes one file.
+`outputs/` has **three halves**, split by one question: does this tree's
+content change when a different cohort plays a different role in the analysis?
 
 ```
 outputs/
+├── extractions/              NO  — shared by every modelling version
+│   activation/ dfc/ censor/ static_fc/ meta/
+│
+└── modelling/version=v0/     YES — one version per cohort composition
+    ├── unsupervised_model/   latents/ transitions/ meta/
+    └── supervised_model/     bstm_selection/ fcm_selection/
+                              transferred_models/ meta/
+```
+
+A parcel timeseries, a windowed correlation matrix, a censor mask and a static
+FC matrix are the same bytes whichever cohort trains, so they sit **outside**
+the version and are never recomputed or re-stored for one. Everything fitted
+sits inside it.
+
+`version=` is a **hive key**, like every other level, so
+`outputs/modelling/version=*/` lists every version and `hive_key` reads it with
+no new parsing. **A version is which cohorts play which role**, recorded in
+`modelling/version=<v>/version.json` by the first run under it and *checked* on
+every later one: a run whose composition differs is refused by name rather than
+filling a tree named for something else. `v0` is the current analysis — state
+space on cneuromod + ds002837, supervised models trained on Cam-CAN,
+transferred to HCP 7T.
+
+A version that only swaps the supervised roles sets `unsupervised_from` to the
+version whose state space it reuses, and holds no `unsupervised_model/` of its
+own: the latents are identical bytes, so copying them would be hours of refit
+for nothing.
+
+Every stage takes `--modelling-version` (default `$FMRIDECOMP_MODELLING_VERSION`,
+else `v0`) and **prints** the one it resolved — a default that is never said out
+loud is how a `v1` run lands in `v0`.
+
+Hive-partitioned parquet throughout. Partition keys are **directory names**;
+the dataset exists only at read time, when pyarrow walks the tree and
+reconstructs the keys. Nothing is ever appended to — each worker owns one leaf
+and writes one file.
+
+```
+outputs/extractions/
 ├── activation/                                   STAGE 2 — one file per run per atlas
 │   └── atlas=harvardoxford/
 │       ├── cohort=ds002837/task=500daysofsummer/sub=1/data.parquet
@@ -123,6 +203,18 @@ outputs/
 │       movie and fail it lying still, and one `keep` per subject per cohort
 │       would have to pick one of those answers for both.
 │
+├── static_fc/                                    STAGE 3b — one FC per subject
+│   └── atlas=harvardoxford/cohort=camcan/task=Movie/subjects.parquet
+│       `task=pooled` instead under `--pool cohort`, which averages a
+│       subject's conditions into one FC: the key always says which it is.
+│       Edge columns named <parcel_i>__<parcel_j>, stage 3's convention, plus
+│       n_tr_used / frac_good_frames: the reliability of the row AND the
+│       data-quantity covariate stage 5c controls on.
+│
+```
+
+```
+outputs/modelling/version=v0/unsupervised_model/
 ├── latents/                                      STAGE 4 — coordinates, + STAGE 4b labels
 │   └── atlas=yeo7/window_s=30/cohort=camcan/task=Movie/data.parquet
 │       window_s=-1 is the per-TR aperture. The state-label columns stage 4b
@@ -153,14 +245,10 @@ outputs/
 │                      object is reused, so the discovered K cannot drift
 │                      between runs.
 │
-├── static_fc/                                    STAGE 3b — one FC per subject
-│   └── atlas=harvardoxford/cohort=camcan/task=Movie/subjects.parquet
-│       `task=pooled` instead under `--pool cohort`, which averages a
-│       subject's conditions into one FC: the key always says which it is.
-│       Edge columns named <parcel_i>__<parcel_j>, stage 3's convention, plus
-│       n_tr_used / frac_good_frames: the reliability of the row AND the
-│       data-quantity covariate stage 5c controls on.
-│
+```
+
+```
+outputs/modelling/version=v0/supervised_model/
 ├── bstm_selection/                               STAGE 5b — the state ranking
 │   ├── task=movie/target=additional_HADS_anx_category/
 │   └── task=rest/ target=additional_HADS_anx_category/
@@ -193,7 +281,7 @@ outputs/
 │       Shards are sets[i::n] of the grid sorted by (atlas, window_s, states),
 │       and every row carries `grid_hash` -- so a reader can tell shards cut
 │       from two different grids, which is what stage 5a finishing another
-│       cohort mid-array would produce. notebooks/transfer_tables.py
+│       cohort mid-array would produce. supervised_model/transfer_tables.py
 │       read_transferred() REFUSES a half-finished grid: a smaller multiverse
 │       reads as a valid one.
 │
@@ -272,7 +360,7 @@ One caveat that is quiet rather than loud: a key is recovered from the path
 column of **nulls** — `open_dataset(dfc_root(out, "harvardoxford", 30))` has no
 `atlas` and no `window_s`, and a filter on either matches zero rows without
 raising. Narrow with a filter, not with a deeper root, or backfill the keys the
-root swallowed (`notebooks/nbtools.py` does the latter).
+root swallowed (`fmri_decomposition/extractions/inventory.py` does the latter).
 
 Every file also carries `cohort`, `task`, `sub`, `atlas` in its parquet
 key-value metadata, so a shard opened by hand is still self-identifying.
@@ -313,11 +401,11 @@ df = d.to_table(filter=(ds.field("cohort") == "ds002837")).to_pandas()
 qc = d.to_table(columns=["window_id", "n_tr_effective", "frac_good_frames"]).to_pandas()
 ```
 
-`notebooks/` opens both stages this way: `01_activation.ipynb` for stage 2,
-`02_dfc.ipynb` for stage 3, sharing the loaders in `notebooks/nbtools.py`
-(inventory, partition-pruned reads, footer-based size estimates, and the
-participants / QC / phenotype join). `notebooks/README.md` has the container
-recipe and the memory arithmetic.
+`fmri_decomposition/extractions/inventory.py` is the loader layer that does
+this — inventory, partition-pruned reads, footer-based size estimates, and the
+participants / QC / phenotype join. `03_qc.ipynb` uses it; the two notebooks
+that opened stages 2 and 3 directly are retired (see `notebooks/README.md`,
+which also has the container recipe and the memory arithmetic).
 
 ### The window grid is atlas-conditional
 
@@ -476,9 +564,9 @@ and consumers select by `--censor-policy <name>`, so re-gating never re-extracts
 anything. It writes:
 
 ```
-outputs/censor/policy=<name>/cohort=<c>/task=<k>/subjects.parquet
-outputs/censor/policy=<name>/atlas=<a>/window_s=<w>/cohort=<c>/task=<k>/windows.parquet
-outputs/meta/censor/policy=<name>.json          # counts + what was skipped
+outputs/extractions/censor/policy=<name>/cohort=<c>/task=<k>/subjects.parquet
+outputs/extractions/censor/policy=<name>/atlas=<a>/window_s=<w>/cohort=<c>/task=<k>/windows.parquet
+outputs/extractions/meta/censor/policy=<name>.json          # counts + what was skipped
 ```
 
 Every row carries `keep`, a human-readable `reason` for the drops, and

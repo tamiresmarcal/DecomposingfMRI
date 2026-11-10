@@ -15,6 +15,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools import migrate_cohort as M        # noqa: E402
+from fmri_decomposition.io import tree_root
+from fmri_decomposition.io import cohort_meta_dir
 
 
 def tree(root: Path, cohort: str, task: str, subs=("01", "02"),
@@ -22,18 +24,18 @@ def tree(root: Path, cohort: str, task: str, subs=("01", "02"),
     """An output tree shaped like the real one."""
     for atlas in atlases:
         for sub in subs:
-            p = (root / "activation" / f"atlas={atlas}" / f"cohort={cohort}"
+            p = (tree_root(root, "activation") / f"atlas={atlas}" / f"cohort={cohort}"
                  / f"task={task}" / f"sub={sub}" / "data.parquet")
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(b"a")
         for w in windows:
             for sub in subs:
-                p = (root / "dfc" / f"atlas={atlas}" / f"window_s={w}"
+                p = (tree_root(root, "dfc") / f"atlas={atlas}" / f"window_s={w}"
                      / f"cohort={cohort}" / f"task={task}" / f"sub={sub}"
                      / "data.parquet")
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(b"d")
-    meta = root / "meta" / "cohorts" / f"cohort={cohort}"
+    meta = cohort_meta_dir(root, cohort)
     (meta / "shards").mkdir(parents=True, exist_ok=True)
     # Named by ARRAY TASK INDEX, exactly as cli.py:69 writes them -- which is
     # why two runs of one stage collide on the name while describing different
@@ -46,7 +48,7 @@ def tree(root: Path, cohort: str, task: str, subs=("01", "02"),
             % (cohort, task, i))
     (meta / "manifest_activation.json").write_text('{"cohort": "%s"}' % cohort)
     (meta / "participants_qc.csv").write_text(f"sub,task\n01,{task}\n")
-    cen = root / "censor" / "policy=motion" / f"cohort={cohort}"
+    cen = tree_root(root, "censor") / "policy=motion" / f"cohort={cohort}"
     cen.mkdir(parents=True, exist_ok=True)
     (cen / "subjects.parquet").write_bytes(b"c")
 
@@ -58,7 +60,7 @@ class TestTheMove:
         assert M.main(["--from", "camcan_rest", "--to", "camcan",
                        "--output-root", str(tmp_path), "--apply"]) == 0
 
-        act = tmp_path / "activation" / "atlas=yeo7"
+        act = tree_root(tmp_path, "activation") / "atlas=yeo7"
         assert (act / "cohort=camcan" / "task=Rest" / "sub=01"
                 / "data.parquet").exists()
         assert (act / "cohort=camcan" / "task=Movie" / "sub=01"
@@ -71,7 +73,7 @@ class TestTheMove:
         M.main(["--from", "camcan_rest", "--to", "camcan",
                 "--output-root", str(tmp_path), "--apply"])
         for w in ("30", "60"):
-            assert (tmp_path / "dfc" / "atlas=yeo7" / f"window_s={w}"
+            assert (tree_root(tmp_path, "dfc") / "atlas=yeo7" / f"window_s={w}"
                     / "cohort=camcan" / "task=Rest" / "sub=02"
                     / "data.parquet").exists()
 
@@ -80,7 +82,7 @@ class TestTheMove:
         tree(tmp_path, "camcan_rest", "Rest")
         M.main(["--from", "camcan_rest", "--to", "camcan",
                 "--output-root", str(tmp_path), "--apply"])
-        assert (tmp_path / "activation" / "atlas=yeo7" / "cohort=camcan"
+        assert (tree_root(tmp_path, "activation") / "atlas=yeo7" / "cohort=camcan"
                 / "task=Rest" / "sub=01" / "data.parquet").exists()
 
 
@@ -89,9 +91,9 @@ class TestItLooksBeforeItMoves:
         tree(tmp_path, "camcan_rest", "Rest")
         assert M.main(["--from", "camcan_rest", "--to", "camcan",
                        "--output-root", str(tmp_path)]) == 0
-        assert (tmp_path / "activation" / "atlas=yeo7"
+        assert (tree_root(tmp_path, "activation") / "atlas=yeo7"
                 / "cohort=camcan_rest").exists()
-        assert not (tmp_path / "activation" / "atlas=yeo7"
+        assert not (tree_root(tmp_path, "activation") / "atlas=yeo7"
                     / "cohort=camcan").exists()
 
     def test_a_colliding_task_is_refused_not_overwritten(self, tmp_path):
@@ -104,7 +106,7 @@ class TestItLooksBeforeItMoves:
                        "--output-root", str(tmp_path), "--apply"]) == 1
         # nothing moved, both still intact
         for c in ("camcan", "camcan_rest"):
-            assert (tmp_path / "activation" / "atlas=yeo7" / f"cohort={c}"
+            assert (tree_root(tmp_path, "activation") / "atlas=yeo7" / f"cohort={c}"
                     / "task=Rest" / "sub=01" / "data.parquet").exists()
 
     def test_the_same_cohort_twice_is_refused(self, tmp_path):
@@ -122,7 +124,7 @@ class TestWhatItDeliberatelyLeaves:
         tree(tmp_path, "camcan_rest", "Rest")
         M.main(["--from", "camcan_rest", "--to", "camcan",
                 "--output-root", str(tmp_path), "--apply"])
-        movie_meta = tmp_path / "meta" / "cohorts" / "cohort=camcan"
+        movie_meta = cohort_meta_dir(tmp_path, "camcan")
         # the movie's own tables survive untouched
         assert '"camcan"' in (movie_meta / "manifest_activation.json").read_text()
         assert "Movie" in (movie_meta / "participants_qc.csv").read_text()
@@ -132,7 +134,7 @@ class TestWhatItDeliberatelyLeaves:
         tree(tmp_path, "camcan_rest", "Rest")
         M.main(["--from", "camcan_rest", "--to", "camcan",
                 "--output-root", str(tmp_path), "--apply"])
-        assert (tmp_path / "censor" / "policy=motion" / "cohort=camcan_rest"
+        assert (tree_root(tmp_path, "censor") / "policy=motion" / "cohort=camcan_rest"
                 / "subjects.parquet").exists()
 
     def test_a_clashing_shard_manifest_is_renamed_not_refused(self, tmp_path):
@@ -144,7 +146,7 @@ class TestWhatItDeliberatelyLeaves:
         tree(tmp_path, "camcan_rest", "Rest")
         assert M.main(["--from", "camcan_rest", "--to", "camcan",
                        "--output-root", str(tmp_path), "--apply"]) == 0
-        shards = tmp_path / "meta" / "cohorts" / "cohort=camcan" / "shards"
+        shards = cohort_meta_dir(tmp_path, "camcan") / "shards"
         assert {p.name for p in shards.iterdir()} == {
             "manifest_dfc_shard-0000-of-0002.json",
             "manifest_dfc_shard-0001-of-0002.json",
@@ -164,7 +166,7 @@ class TestWhatItDeliberatelyLeaves:
         tree(tmp_path, "camcan_rest", "Rest")
         M.main(["--from", "camcan_rest", "--to", "camcan",
                 "--output-root", str(tmp_path), "--apply"])
-        shards = tmp_path / "meta" / "cohorts" / "cohort=camcan" / "shards"
+        shards = cohort_meta_dir(tmp_path, "camcan") / "shards"
         files = sorted(shards.glob("manifest_dfc_shard-*.json"))
         assert len(files) == 4
         tasks = {e["task"] for f in files
@@ -216,7 +218,7 @@ class TestSplitByTask:
                       "train_cohorts": ["ds002837", "cneuromod"],
                       "params": {"n_iter": 100}} for st in states}).encode(),
         }
-        p = (root / "latents" / "atlas=yeo7" / "window_s=-1"
+        p = (tree_root(root, "latents") / "atlas=yeo7" / "window_s=-1"
              / f"cohort={cohort}" / "data.parquet")
         p.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(t.replace_schema_metadata({**(t.schema.metadata or {}),
@@ -298,15 +300,15 @@ class TestSplitByTask:
         """latents, transitions, static_fc and BOTH censor tables -- a leaf
         whose parent is a cohort= key has not been split. One rule, so there is
         no per-tree pattern list to keep in step with io.py."""
-        for rel, leaf in (
-                ("latents/atlas=yeo7/window_s=-1/cohort=c", "data.parquet"),
-                ("transitions/atlas=yeo7/window_s=-1/states=S/cohort=c",
+        for tree, rel, leaf in (
+                ("latents", "atlas=yeo7/window_s=-1/cohort=c", "data.parquet"),
+                ("transitions", "atlas=yeo7/window_s=-1/states=S/cohort=c",
                  "subjects.parquet"),
-                ("static_fc/atlas=yeo7/cohort=c", "subjects.parquet"),
-                ("censor/policy=motion/cohort=c", "subjects.parquet"),
-                ("censor/policy=motion/atlas=yeo7/window_s=30/cohort=c",
+                ("static_fc", "atlas=yeo7/cohort=c", "subjects.parquet"),
+                ("censor", "policy=motion/cohort=c", "subjects.parquet"),
+                ("censor", "policy=motion/atlas=yeo7/window_s=30/cohort=c",
                  "windows.parquet")):
-            d = tmp_path / rel
+            d = tree_root(tmp_path, tree) / rel
             d.mkdir(parents=True)
             pd.DataFrame({"task": ["m"], "sub": ["S0"]}).to_parquet(
                 d / leaf, index=False)
@@ -315,7 +317,7 @@ class TestSplitByTask:
         assert M.unsplit_leaves(tmp_path) == []
 
     def test_a_leaf_already_under_a_task_key_is_not_a_candidate(self, tmp_path):
-        d = tmp_path / "latents/atlas=yeo7/window_s=-1/cohort=c/task=Movie"
+        d = tree_root(tmp_path, "latents") / "atlas=yeo7/window_s=-1/cohort=c/task=Movie"
         d.mkdir(parents=True)
         pd.DataFrame({"task": ["Movie"], "sub": ["S0"]}).to_parquet(
             d / "data.parquet", index=False)

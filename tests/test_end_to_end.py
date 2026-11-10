@@ -7,8 +7,10 @@ import pytest
 from fmri_decomposition.atlases.registry import get_atlas
 from fmri_decomposition.cli import main
 from fmri_decomposition.config import load_config
-from fmri_decomposition.dfc import read_edges
+from fmri_decomposition.extractions.dfc import read_edges
 from fmri_decomposition.fixtures import make_fixture
+from fmri_decomposition.io import tree_root
+from fmri_decomposition.io import meta_dir, cohort_meta_dir
 
 pytest.importorskip("nibabel")
 
@@ -26,14 +28,14 @@ def built(tmp_path_factory):
 def test_activation_shards_exist_for_every_subject_and_atlas(built):
     cfg = load_config(built["config"])
     for atlas in cfg.atlases:
-        files = sorted((cfg.output_root / "activation" / f"atlas={atlas}"
+        files = sorted((tree_root(cfg.output_root, "activation") / f"atlas={atlas}"
                         / "cohort=fixture").rglob("*.parquet"))
         assert len(files) == built["n_subs"], f"{atlas}: {files}"
 
 
 def test_activation_contract_columns(built):
     cfg = load_config(built["config"])
-    f = next((cfg.output_root / "activation").rglob("*.parquet"))
+    f = next((tree_root(cfg.output_root, "activation")).rglob("*.parquet"))
     df = pd.read_parquet(f)
     for col in ("t", "time_s", "stimulus_time_s", "good_frame", "run_idx", "run_key"):
         assert col in df.columns
@@ -49,7 +51,7 @@ def test_censored_frames_are_marked_and_dilated(built):
     cfg = load_config(built["config"])
     from fmri_decomposition.io import read_shard
 
-    f = sorted((cfg.output_root / "activation" / "atlas=fixture_labels"
+    f = sorted((tree_root(cfg.output_root, "activation") / "atlas=fixture_labels"
                 / "cohort=fixture").rglob("*.parquet"))[0]
     df = read_shard(f)
     sub = str(df["sub"].iloc[0])
@@ -63,7 +65,7 @@ def test_dfc_shards_exist_for_every_window_size(built):
     cfg = load_config(built["config"])
     for w in cfg.windows.sizes_s:
         wk = int(w)
-        files = sorted((cfg.output_root / "dfc" / "atlas=fixture_labels"
+        files = sorted((tree_root(cfg.output_root, "dfc") / "atlas=fixture_labels"
                         / f"window_s={wk}" / "cohort=fixture").rglob("*.parquet"))
         assert len(files) == built["n_subs"], f"window {wk}: {files}"
 
@@ -71,7 +73,7 @@ def test_dfc_shards_exist_for_every_window_size(built):
 def test_window_ids_align_across_subjects(built):
     """The structural promise of the stimulus grid."""
     cfg = load_config(built["config"])
-    files = sorted((cfg.output_root / "dfc" / "atlas=fixture_labels" / "window_s=30"
+    files = sorted((tree_root(cfg.output_root, "dfc") / "atlas=fixture_labels" / "window_s=30"
                     / "cohort=fixture").rglob("*.parquet"))
     frames = [pd.read_parquet(f) for f in files]
     ref = frames[0].set_index("window_id")["stimulus_start_s"]
@@ -86,7 +88,7 @@ def test_window_count_matches_the_grid(built):
     cfg = load_config(built["config"])
     from fmri_decomposition.windows import make_stimulus_grid
 
-    df = pd.read_parquet(sorted((cfg.output_root / "dfc" / "atlas=fixture_labels"
+    df = pd.read_parquet(sorted((tree_root(cfg.output_root, "dfc") / "atlas=fixture_labels"
                                  / "window_s=30" / "cohort=fixture").rglob("*.parquet"))[0])
     expected = len(make_stimulus_grid(240.0, 30.0, cfg.windows.n_overlaps))
     assert len(df) == expected
@@ -94,7 +96,7 @@ def test_window_count_matches_the_grid(built):
 
 def test_qc_columns_travel_with_the_edges(built):
     cfg = load_config(built["config"])
-    df = pd.read_parquet(sorted((cfg.output_root / "dfc" / "atlas=fixture_labels"
+    df = pd.read_parquet(sorted((tree_root(cfg.output_root, "dfc") / "atlas=fixture_labels"
                                  / "window_s=60" / "cohort=fixture").rglob("*.parquet"))[0])
     for col in ("n_tr_nominal", "n_tr_effective", "frac_good_frames",
                 "crosses_run_boundary", "rank_deficient"):
@@ -108,7 +110,7 @@ def test_edges_recover_the_planted_network_structure(built):
     """Parcels 1-4 share latent A, 5-8 share latent B: within > between."""
     cfg = load_config(built["config"])
     atlas = get_atlas("fixture_labels", **cfg.atlas_params["fixture_labels"])
-    f = sorted((cfg.output_root / "dfc" / "atlas=fixture_labels" / "window_s=120"
+    f = sorted((tree_root(cfg.output_root, "dfc") / "atlas=fixture_labels" / "window_s=120"
                 / "cohort=fixture").rglob("*.parquet"))[0]
     edges = read_edges(f, atlas)
     names = atlas.edge_names()
@@ -122,7 +124,7 @@ def test_edges_recover_the_planted_network_structure(built):
 def test_labels_csv_is_written_next_to_the_data(built):
     cfg = load_config(built["config"])
     for atlas in cfg.atlases:
-        p = cfg.output_root / "meta" / f"atlas-{atlas}_labels.csv"
+        p = meta_dir(cfg.output_root, "extractions") / f"atlas-{atlas}_labels.csv"
         assert p.exists()
         tbl = pd.read_csv(p)
         assert {"index", "name", "hemi", "x", "y", "z", "network", "column"} <= set(tbl.columns)
@@ -130,7 +132,7 @@ def test_labels_csv_is_written_next_to_the_data(built):
 
 def test_manifests_are_written_by_the_parent_only(built):
     cfg = load_config(built["config"])
-    cm = cfg.output_root / "meta" / "cohorts" / "cohort=fixture"
+    cm = cohort_meta_dir(cfg.output_root, "fixture")
     assert (cm / "manifest_activation.json").exists()
     assert (cm / "manifest_dfc.json").exists()
     assert not list(cfg.output_root.rglob("_metadata"))
@@ -139,8 +141,8 @@ def test_manifests_are_written_by_the_parent_only(built):
 def test_atlas_labels_stay_cohort_independent(built):
     """Label tables describe the atlas, not the cohort: one copy, shared."""
     cfg = load_config(built["config"])
-    assert (cfg.output_root / "meta" / "atlas-fixture_labels_labels.csv").exists()
-    assert not (cfg.output_root / "meta" / "cohorts" / "cohort=fixture"
+    assert (meta_dir(cfg.output_root, "extractions") / "atlas-fixture_labels_labels.csv").exists()
+    assert not (cohort_meta_dir(cfg.output_root, "fixture")
                 / "atlas-fixture_labels_labels.csv").exists()
 
 
@@ -166,7 +168,7 @@ def test_rerun_is_free(built):
 
     cfg = load_config(built["config"])
     assert main(["dfc", str(built["config"]), "--n-jobs", "1"]) == 0
-    payload = json.loads((cfg.output_root / "meta" / "cohorts" / "cohort=fixture"
+    payload = json.loads((cohort_meta_dir(cfg.output_root, "fixture")
                           / "manifest_dfc.json").read_text())
     assert all(e["status"] == "skipped" for e in payload["entries"])
 
@@ -175,7 +177,7 @@ def test_masker_per_window_equivalence(built):
     """Slicing the parquet == re-fitting a masker per window, to float noise."""
     import nibabel as nib
 
-    from fmri_decomposition.validate import equivalence_check
+    from fmri_decomposition.extractions.validate import equivalence_check
 
     cfg = load_config(built["config"])
     atlas = get_atlas("fixture_labels", **cfg.atlas_params["fixture_labels"])
@@ -187,7 +189,7 @@ def test_masker_per_window_equivalence(built):
 
 def test_sphere_atlas_produces_the_configured_number_of_networks(built):
     cfg = load_config(built["config"])
-    df = pd.read_parquet(next((cfg.output_root / "activation" / "atlas=fixture_spheres"
+    df = pd.read_parquet(next((tree_root(cfg.output_root, "activation") / "atlas=fixture_spheres"
                                / "cohort=fixture").rglob("*.parquet")))
     atlas = get_atlas("fixture_spheres", **cfg.atlas_params["fixture_spheres"])
     assert atlas.n_nodes == 2
@@ -197,5 +199,5 @@ def test_sphere_atlas_produces_the_configured_number_of_networks(built):
 def test_diagnose_writes_its_artifacts(built):
     cfg = load_config(built["config"])
     main(["diagnose", str(built["config"])])
-    assert (cfg.output_root / "meta" / "cohorts" / "cohort=fixture"
+    assert (cohort_meta_dir(cfg.output_root, "fixture")
             / "coverage.parquet").exists()

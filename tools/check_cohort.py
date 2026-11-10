@@ -66,14 +66,14 @@ def _load(cfg_path: str):
 
 
 def _refs(cfg):
-    from fmri_decomposition.cli import _attach_censor, _attach_confounds
+    from fmri_decomposition.cohort import attach_censor, attach_confounds
     from fmri_decomposition.cohort import (attach_participants, discover_runs,
                                            load_participants)
 
     refs = discover_runs(cfg)
     if cfg.participants is not None and Path(cfg.participants).exists():
         refs = attach_participants(refs, load_participants(cfg), cfg)
-    return _attach_confounds(cfg, _attach_censor(cfg, refs))
+    return attach_confounds(cfg, attach_censor(cfg, refs))
 
 
 def _atlases(cfg):
@@ -215,7 +215,7 @@ def check_outputs(cfg, atlas_names) -> bool:
     import pandas as pd
     import pyarrow.parquet as pq
 
-    from fmri_decomposition.activation import META_COLUMNS
+    from fmri_decomposition.extractions.activation import META_COLUMNS
     from fmri_decomposition.io import PARTITION_KEYS, activation_root
 
     _hdr("3. written-output contract")
@@ -288,7 +288,7 @@ def check_parallel(cfg, refs, atlas_names, n_jobs: int, limit: int) -> bool:
     import pandas as pd
     from joblib import Parallel, delayed
 
-    from fmri_decomposition.activation import process_run
+    from fmri_decomposition.extractions.activation import process_run
     from fmri_decomposition.io import activation_path
 
     _hdr(f"4. serial vs parallel determinism (n-jobs=1 vs n-jobs={n_jobs})")

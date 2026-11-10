@@ -13,6 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from fmri_decomposition import status as S
+from fmri_decomposition.io import tree_root
 
 
 def args(**kw):
@@ -31,7 +32,7 @@ def latents(root, atlas="yeo7", w="30", cohorts=("a", "b"), states=(),
             d[e] = 0.0
         for st in states:
             d[st] = 0
-        p = (root / "latents" / f"atlas={atlas}" / f"window_s={w}"
+        p = (tree_root(root, "latents") / f"atlas={atlas}" / f"window_s={w}"
              / f"cohort={c}" / "task=m" / "data.parquet")
         p.parent.mkdir(parents=True, exist_ok=True)
         md = {b"censor_policy": json.dumps(censor).encode(),
@@ -46,7 +47,7 @@ def trans(root, atlas="yeo7", w="30", state="HMM_pca3_8", cohorts=("a", "b")):
     for c in cohorts:
         d = pd.DataFrame({"task": "m", "sub": ["01", "02"],
                           "0->0": 1.0, "0->1": 0.0, "n_states": 8})
-        p = (root / "transitions" / f"atlas={atlas}" / f"window_s={w}"
+        p = (tree_root(root, "transitions") / f"atlas={atlas}" / f"window_s={w}"
              / f"states={state}" / f"cohort={c}" / "task=m"
              / "subjects.parquet")
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -57,7 +58,7 @@ class TestInventory:
     def test_counts_activation_shards_per_cohort(self, tmp_path):
         for c, n in (("a", 3), ("b", 5)):
             for i in range(n):
-                p = (tmp_path / "activation" / "atlas=yeo7" / f"cohort={c}"
+                p = (tree_root(tmp_path, "activation") / "atlas=yeo7" / f"cohort={c}"
                      / "task=m" / f"sub={i:02d}" / "data.parquet")
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(b"")
@@ -72,7 +73,7 @@ class TestInventory:
         assert d["n_states"].unique().tolist() == [1]
 
     def test_censor_says_subjects_only_when_there_is_no_window_gate(self, tmp_path):
-        p = (tmp_path / "censor" / "policy=motion" / "cohort=a" / "task=m"
+        p = (tree_root(tmp_path, "censor") / "policy=motion" / "cohort=a" / "task=m"
              / "subjects.parquet")
         p.parent.mkdir(parents=True)
         pq.write_table(pa.Table.from_pandas(
@@ -100,7 +101,7 @@ class TestStaticFcInventory:
                           "task": [r[1] for r in rows]})
         for i in range(n_edges):
             d[f"P{i}__P{i + 1}"] = 0.5
-        p = (root / "static_fc" / f"atlas={atlas}" / f"cohort={cohort}"
+        p = (tree_root(root, "static_fc") / f"atlas={atlas}" / f"cohort={cohort}"
              / f"task={task}" / "subjects.parquet")
         p.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(pa.Table.from_pandas(d, preserve_index=False), p)
@@ -155,7 +156,7 @@ class TestSelectionInventory:
 
     @staticmethod
     def _run(root, tree, task, target, figures=2, scores=True):
-        d = root / tree / f"task={task}" / f"target={target}"
+        d = tree_root(root, tree) / f"task={task}" / f"target={target}"
         (d / "figures").mkdir(parents=True)
         (d / "DESIGN.md").write_text("x")
         for i in range(figures):
@@ -181,7 +182,7 @@ class TestSelectionInventory:
         """The pre-`task=` layout. It is not migrated silently: a path with no
         condition in it cannot say which ranking it is, so the inventory must
         not claim it as one."""
-        d = tmp_path / "bstm_selection" / "target=hads"
+        d = tree_root(tmp_path, "bstm_selection") / "target=hads"
         (d / "figures").mkdir(parents=True)
         assert S.selection(tmp_path).empty
 
@@ -313,7 +314,7 @@ class TestTransitionPeopleCount:
         d = pd.DataFrame({"task": ["e1", "e2", "e3"] * 2,
                           "sub": ["s1"] * 3 + ["s2"] * 3,
                           "0->0": 1.0, "n_states": 8})
-        p = (tmp_path / "transitions" / "atlas=yeo7" / "window_s=30"
+        p = (tree_root(tmp_path, "transitions") / "atlas=yeo7" / "window_s=30"
              / "states=HMM_pca3_8" / "cohort=cneuromod" / "task=m"
              / "subjects.parquet")
         p.parent.mkdir(parents=True)
@@ -379,16 +380,16 @@ class TestRenamedMethodsStillParse:
     def test_transitions_uses_the_same_pattern(self):
         import re
 
-        from fmri_decomposition.transitions import STATE_SUFFIX_RE
+        from fmri_decomposition.unsupervised_model.transitions import STATE_SUFFIX_RE
 
         for n in self.NAMES:
             assert re.match(STATE_SUFFIX_RE, n), n
 
     def test_cluster_finds_them_as_existing_state_columns(self, tmp_path):
-        from fmri_decomposition import cluster as C
+        from fmri_decomposition.unsupervised_model import cluster as C
 
         latents(tmp_path, states=self.NAMES)
-        p = next((tmp_path / "latents").rglob("data.parquet"))
+        p = next((tree_root(tmp_path, "latents")).rglob("data.parquet"))
         assert set(C._state_columns(p)) == set(self.NAMES)
 
     def test_every_generated_column_name_parses(self):
@@ -396,8 +397,8 @@ class TestRenamedMethodsStillParse:
         real clusterers, on every embedding in the default grid."""
         import re
 
-        from fmri_decomposition import cluster as C
-        from fmri_decomposition.transitions import STATE_SUFFIX_RE
+        from fmri_decomposition.unsupervised_model import cluster as C
+        from fmri_decomposition.unsupervised_model.transitions import STATE_SUFFIX_RE
 
         for method in C.CLUSTERERS:
             for emb in list(C.EMBEDDINGS) + ["raw7", "raw14", "raw111"]:

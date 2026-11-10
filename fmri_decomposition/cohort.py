@@ -8,16 +8,47 @@ worst, a discovery function -- never touching stages 2-4.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
-from .activation import RunRef
 from .config import CohortConfig, ConfigError
 from .timing import RunSegment
 
 PARTICIPANT_REQUIRED = ["participant_id", "sub", "cohort", "task", "excluded"]
 
+
+
+@dataclass
+class RunRef:
+    """One unit of stage-2 work. The only object that knows a filesystem path."""
+
+    cohort: str
+    sub: str
+    task: str
+    bold: Path
+    mask: Path | None = None
+    ses: str | None = None
+    run: str | None = None
+    acq: str | None = None
+    confounds: Path | None = None
+    censor: Path | None = None
+    # Subject-level motion QC only; stage 2 never reads it. See motion.py.
+    motion: Path | None = None
+    segments: list[RunSegment] = field(default_factory=list)
+    timing_source: str = "identity"
+    trim_end_s: float | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def run_key(self) -> str:
+        bits = [f"cohort-{self.cohort}", f"sub-{self.sub}", f"task-{self.task}"]
+        for k, v in (("ses", self.ses), ("run", self.run), ("acq", self.acq)):
+            if v:
+                bits.append(f"{k}-{v}")
+        return "_".join(bits)
 
 class ValidationError(RuntimeError):
     pass
@@ -223,3 +254,46 @@ def validate_cohort(cfg: CohortConfig, refs: list[RunRef],
     if problems and strict:
         raise ValidationError("cohort validation failed:\n  - " + "\n  - ".join(problems))
     return problems
+
+
+# ------------------------------------------------------------- sidecars ---
+# These used to live in cli.py, which meant `qc.py` imported two private names
+# from the command-line entry point to do its own work -- a stage reaching up
+# into the program that calls it. They attach a per-run file to a RunRef, and
+# RunRef and discovery both live here, so this is where they belong. Public,
+# because two modules outside cli now call them.
+
+def attach_sidecar(cfg, refs, glob_pat, attr):
+    """Attach one per-run sidecar file (censor or confounds) to each RunRef."""
+    if not glob_pat:
+        return refs
+    for ref in refs:
+        hits = sorted(Path(ref.bold).parent.glob(glob_pat))
+        entities = {f"sub-{ref.sub}", f"task-{ref.task}"}
+        for k, v in (("ses", ref.ses), ("run", ref.run), ("acq", ref.acq)):
+            if v:
+                entities.add(f"{k}-{v}")
+        # Every entity this run carries must appear in the sidecar's name, so a
+        # sibling session or run cannot be picked up by accident.
+        hits = [h for h in hits if all(e in h.name for e in entities)]
+        if hits:
+            setattr(ref, attr, hits[0])
+    return refs
+
+
+def attach_censor(cfg, refs):
+    return attach_sidecar(cfg, refs, cfg.confounds.censor_glob, "censor")
+
+
+def attach_confounds(cfg, refs):
+    return attach_sidecar(cfg, refs, cfg.confounds.confounds_glob, "confounds")
+
+
+def attach_motion(cfg, refs):
+    """Motion regressor sidecars, for subject-level QC only (see motion.py).
+
+    Never called by `extract`: nothing in stage 2 or 3 reads this file. It is
+    attached by `qc.motion_qc`, which turns it into mean_fd in
+    participants_qc.csv.
+    """
+    return attach_sidecar(cfg, refs, cfg.confounds.motion_glob, "motion")

@@ -11,7 +11,7 @@ A state set that only some cells carry is a permanent nuisance: `transitions
 `bstm_selection` ranks it for the conditions that have it, so one condition's
 summary.csv gets rows the other cannot.
 
-The obvious move -- `rm -rf outputs/transitions/.../states=X` -- does not hold.
+The obvious move -- `rm -rf outputs/modelling/version=v0/unsupervised_model/transitions/.../states=X` -- does not hold.
 `transitions` builds its plan from the state COLUMNS inside the latents files,
 so the next run regenerates exactly what was deleted. The columns are the
 source; the transitions tables are derived. So this removes the columns first
@@ -37,12 +37,19 @@ import shutil
 import sys
 from pathlib import Path
 
+# The repo root, so `fmri_decomposition` imports from a checkout with no
+# install. At module scope, not inside main(): the path helpers below are used
+# by functions this module exposes, not only by the command line.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from fmri_decomposition.io import default_output_root, tree_root
+
 LEAF = "data.parquet"
 
 
 def latents_files(root: Path) -> list[Path]:
     """Every latents leaf, at whatever depth the tree has."""
-    base = root / "latents"
+    base = tree_root(root, "latents")
     return sorted(base.rglob(LEAF)) if base.is_dir() else []
 
 
@@ -103,7 +110,7 @@ def drop_from(path: Path, states: list[str]) -> None:
 
 def transitions_dirs(root: Path, states: list[str]) -> list[Path]:
     """The derived tables for these state sets, at whatever depth."""
-    base = root / "transitions"
+    base = tree_root(root, "transitions")
     if not base.is_dir():
         return []
     want = {f"states={s}" for s in states}
@@ -132,8 +139,6 @@ def main(argv=None) -> int:
     if a.output_root:
         root = Path(a.output_root)
     else:
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from fmri_decomposition.io import default_output_root
         root = default_output_root()
     if not root.is_dir():
         raise SystemExit(f"output_root does not exist: {root}")

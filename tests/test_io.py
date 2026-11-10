@@ -5,14 +5,14 @@ import pytest
 
 from fmri_decomposition.io import (activation_path, activation_root, cleanup_stale_tmp,
                                    cohort_meta_dir, dfc_path, dfc_root, leaf_filename,
-                                   should_skip, write_manifest, write_table_atomic,
-                                   ManifestEntry)
+                                   meta_dir, should_skip, write_manifest,
+                                   write_table_atomic, ManifestEntry)
 
 
 class TestPaths:
     def test_activation_layout(self):
         p = activation_path("/out", "ds002837", "harvardoxford", "500daysofsummer", "1")
-        assert p == Path("/out/activation/atlas=harvardoxford/cohort=ds002837/"
+        assert p == Path("/out/extractions/activation/atlas=harvardoxford/cohort=ds002837/"
                          "task=500daysofsummer/sub=1/data.parquet")
 
     def test_dfc_layout_inserts_window_between_atlas_and_cohort(self):
@@ -53,7 +53,7 @@ class TestPaths:
 
     def test_cohort_meta_is_keyed_the_same_hive_way(self):
         d = cohort_meta_dir("/out", "ds002837")
-        assert d == Path("/out/meta/cohorts/cohort=ds002837")
+        assert d == Path("/out/extractions/meta/cohorts/cohort=ds002837")
 
     def test_task_sits_above_sub(self):
         """A fixed convention, chosen for the majority case where task count is 1.
@@ -163,7 +163,7 @@ class TestManifest:
         entries = [ManifestEntry("dfc", "c", "a", "t", "1", "/p", "ok", n_rows=10,
                                  window_s=30)]
         path = write_manifest(tmp_path, entries, {"cohort": "c", "tr": 1.0})
-        assert path.parent == tmp_path / "meta"
+        assert path.parent == meta_dir(tmp_path, "extractions")
         payload = json.loads(path.read_text())
         assert payload["config"]["tr"] == 1.0
         assert "pyarrow" in payload["versions"]
@@ -173,4 +173,4 @@ class TestManifest:
         entries = [ManifestEntry("dfc", "ds002837", "a", "t", "1", "/p", "ok")]
         path = write_manifest(tmp_path, entries, {}, name="manifest_dfc.json",
                               cohort="ds002837")
-        assert path == tmp_path / "meta" / "cohorts" / "cohort=ds002837" / "manifest_dfc.json"
+        assert path == cohort_meta_dir(tmp_path, "ds002837") / "manifest_dfc.json"

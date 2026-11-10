@@ -20,12 +20,13 @@ import pyarrow.parquet as pq
 import pytest
 
 from fmri_decomposition.io import read_file
+from fmri_decomposition.io import tree_root
 
 
 @pytest.fixture
 def latents(tmp_path):
     """A latents file where `cohort` is both a path key and a real column."""
-    p = (tmp_path / "latents" / "atlas=yeo7" / "window_s=30"
+    p = (tree_root(tmp_path, "latents") / "atlas=yeo7" / "window_s=30"
          / "cohort=camcan" / "data.parquet")
     p.parent.mkdir(parents=True)
     d = pd.DataFrame({"cohort": ["camcan"] * 6, "task": "m", "sub": "01",
@@ -85,7 +86,7 @@ class TestCallersUseIt:
     def test_append_columns_round_trips_on_a_partitioned_path(self, latents):
         import numpy as np
 
-        from fmri_decomposition.cluster import append_columns
+        from fmri_decomposition.unsupervised_model.cluster import append_columns
 
         append_columns(latents, {"HMM_pca3_8": np.arange(6) % 8},
                        {"HMM_pca3_8": {"method": "hmm", "k": 8}})
@@ -100,7 +101,7 @@ class TestCallersUseIt:
 
         import numpy as np
 
-        from fmri_decomposition.cluster import append_columns
+        from fmri_decomposition.unsupervised_model.cluster import append_columns
 
         append_columns(latents, {"ThresholdCluster_pca3_8": np.zeros(6, int)},
                        {"ThresholdCluster_pca3_8": {"k": 8}})
@@ -111,7 +112,7 @@ class TestCallersUseIt:
             t.schema.metadata[b"clusterers"].decode())
 
     def test_read_embedding_works_on_a_partitioned_path(self, latents):
-        from fmri_decomposition.cluster import read_embedding
+        from fmri_decomposition.unsupervised_model.cluster import read_embedding
 
         d = read_embedding(latents, ["pca0/3"])
         assert d is not None and len(d) == 6
@@ -131,7 +132,7 @@ class TestKeysAreReadByNameNotByPosition:
     def test_hive_key_finds_each_key_wherever_it_sits(self):
         from fmri_decomposition.io import hive_key
 
-        p = Path("/o/transitions/atlas=yeo7/window_s=-1/states=HMM2_pca3_8"
+        p = Path("/o/modelling/version=v0/unsupervised_model/transitions/atlas=yeo7/window_s=-1/states=HMM2_pca3_8"
                  "/cohort=camcan/task=Rest/subjects.parquet")
         assert hive_key(p, "atlas") == "yeo7"
         assert hive_key(p, "window_s") == "-1"
@@ -142,7 +143,7 @@ class TestKeysAreReadByNameNotByPosition:
     def test_a_missing_key_is_none_not_a_wrong_answer(self):
         from fmri_decomposition.io import hive_key
 
-        p = Path("/o/static_fc/atlas=yeo7/cohort=camcan/subjects.parquet")
+        p = Path("/o/extractions/static_fc/atlas=yeo7/cohort=camcan/subjects.parquet")
         assert hive_key(p, "task") is None
         assert hive_key(p, "window_s") is None
 
@@ -151,9 +152,9 @@ class TestKeysAreReadByNameNotByPosition:
         same answers before and after a new level appears."""
         from fmri_decomposition.io import hive_key
 
-        before = Path("/o/transitions/atlas=yeo7/window_s=30/states=S"
+        before = Path("/o/modelling/version=v0/unsupervised_model/transitions/atlas=yeo7/window_s=30/states=S"
                       "/cohort=camcan/subjects.parquet")
-        after = Path("/o/transitions/atlas=yeo7/window_s=30/states=S"
+        after = Path("/o/modelling/version=v0/unsupervised_model/transitions/atlas=yeo7/window_s=30/states=S"
                      "/cohort=camcan/task=Movie/subjects.parquet")
         for key in ("atlas", "window_s", "states", "cohort"):
             assert hive_key(before, key) == hive_key(after, key), key
@@ -162,7 +163,7 @@ class TestKeysAreReadByNameNotByPosition:
         """Stated as a fact rather than left implicit: the old code read
         parts[-5:-2], and after the insertion those four positions hold the
         WRONG keys while still splitting cleanly on '='."""
-        after = Path("/o/transitions/atlas=yeo7/window_s=30/states=S"
+        after = Path("/o/modelling/version=v0/unsupervised_model/transitions/atlas=yeo7/window_s=30/states=S"
                      "/cohort=camcan/task=Movie/subjects.parquet")
         positional = [after.parts[i].split("=") for i in (-5, -4, -3, -2)]
         assert [k for k, _ in positional] == [
@@ -179,13 +180,13 @@ class TestEveryTreeHasOnePathBuilder:
                                            static_fc_root, transitions_root)
 
         assert latents_root("/o", "yeo7", -1, "c", "Movie").as_posix() == (
-            "/o/latents/atlas=yeo7/window_s=-1/cohort=c/task=Movie")
+            "/o/modelling/version=v0/unsupervised_model/latents/atlas=yeo7/window_s=-1/cohort=c/task=Movie")
         assert transitions_root("/o", "yeo7", -1, "S", "c", "Rest").as_posix() == (
-            "/o/transitions/atlas=yeo7/window_s=-1/states=S/cohort=c/task=Rest")
+            "/o/modelling/version=v0/unsupervised_model/transitions/atlas=yeo7/window_s=-1/states=S/cohort=c/task=Rest")
         assert static_fc_root("/o", "yeo7", "c", "Movie").as_posix() == (
-            "/o/static_fc/atlas=yeo7/cohort=c/task=Movie")
+            "/o/extractions/static_fc/atlas=yeo7/cohort=c/task=Movie")
         assert censor_root("/o", "motion", "c", "Rest").as_posix() == (
-            "/o/censor/policy=motion/cohort=c/task=Rest")
+            "/o/extractions/censor/policy=motion/cohort=c/task=Rest")
 
     def test_each_stops_at_the_first_key_not_given(self):
         """So one builder serves both 'narrow to one leaf' and 'glob a level'."""

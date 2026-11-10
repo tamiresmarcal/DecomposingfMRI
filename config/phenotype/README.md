@@ -12,9 +12,9 @@ metadata follows:
 | file | owner | carries |
 |---|---|---|
 | `config/*_participants.csv` | human | curation — who is in, who was removed, why |
-| `outputs/meta/cohorts/cohort=*/participants_qc.csv` | pipeline | measurement — motion, coverage, scrubbing |
+| `outputs/extractions/meta/cohorts/cohort=*/participants_qc.csv` | pipeline | measurement — motion, coverage, scrubbing |
 | `config/phenotype/*_phenotype.csv` | human | **who the person is** — age, sex, clinical status |
-| `outputs/meta/cohorts/cohort=camcan/participants_scores.csv` | script | Cam-CAN's behavioural battery, consolidated from `cc700-scored/` |
+| `outputs/extractions/meta/cohorts/cohort=camcan/participants_scores.csv` | script | Cam-CAN's behavioural battery, consolidated from `cc700-scored/` |
 
 `make_participants.py` builds the first from what discovery finds on disk, so
 it can only ever contain facts about files. Age is not a fact about a file.
@@ -85,7 +85,7 @@ uploaded `TOT/release001` summary: 617 of the 648 subjects in `camcan` have a
 TOT score, and **0 of the 55 in `camcan_ccfrail` do**. So the cognitive scores
 belong to CC700, and `preprocessing/camcan/03_build_participants_scores.py`
 consolidates them into
-`outputs/meta/cohorts/cohort=camcan/participants_scores.csv` rather than into a
+`outputs/extractions/meta/cohorts/cohort=camcan/participants_scores.csv` rather than into a
 phenotype file — they are a battery, not a demographic, and they are
 regenerated from the archive rather than curated by hand.
 
