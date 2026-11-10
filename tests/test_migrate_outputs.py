@@ -253,3 +253,38 @@ class TestRunningItTwice:
         capsys.readouterr()
         M.main(["--output-root", str(root)])
         assert "unsupervised_train=cneuromod" in capsys.readouterr().out
+
+
+class TestTheMetaSubtreesItLearnedAbout:
+    """`--output-name` on both selections means META_SPLIT can never be
+    complete. The historical default is known; anything else is reported with
+    a hint rather than moved, because naming a destination for a folder whose
+    stage cannot be established is the guess this whole tool avoids."""
+
+    def test_the_pre_rename_selection_folder_is_supervised(self, tmp_path):
+        """A tree that ran stage 5b before `selection` became
+        `bstm_selection` has `meta/selection/`, with no `task=` level under
+        it. It was left behind, which is how it was found."""
+        root = old_tree(tmp_path / "outputs", extras=("meta/selection",))
+        (root / "meta" / "selection" / "target=hads.json").write_text("{}")
+        M.main(["--output-root", str(root), "--apply"])
+        moved = io.meta_dir(root, "supervised", "v0") / "selection"
+        assert (moved / "target=hads.json").exists()
+
+    def test_another_output_name_is_reported_with_the_reason(self, tmp_path,
+                                                            capsys):
+        root = old_tree(tmp_path / "outputs", extras=("meta/pilot_selection",))
+        M.main(["--output-root", str(root), "--apply"])
+        out = capsys.readouterr().out
+        assert "meta/pilot_selection" in out
+        assert "--output-name" in out and "supervised provenance" in out
+        # and it is still NOT moved
+        assert (root / "meta" / "pilot_selection").is_dir()
+
+    def test_something_that_is_not_a_selection_gets_no_hint(self, tmp_path,
+                                                            capsys):
+        root = old_tree(tmp_path / "outputs", extras=("meta/my_notes",))
+        M.main(["--output-root", str(root), "--apply"])
+        out = capsys.readouterr().out
+        line = next(ln for ln in out.splitlines() if "meta/my_notes" in ln)
+        assert "--output-name" not in line

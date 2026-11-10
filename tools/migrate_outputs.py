@@ -77,7 +77,21 @@ META_SPLIT = {
     "bstm_selection": "supervised",
     "fcm_selection": "supervised",
     "transferred_models": "supervised",
+    # The pre-rename name of the bstm selection's output folder (commit
+    # "bstm_selection: rename the output folder"). A tree that ran stage 5b
+    # before that rename has `meta/selection/`, and it is supervised
+    # provenance like the two above.
+    "selection": "supervised",
 }
+
+#: `--output-name` on both selections means META_SPLIT can never be complete:
+#: a run under any other name writes `meta/<that name>/`. So an unknown entry
+#: directly under the old flat `meta/` is far more likely to be one of those
+#: than something of the user's, and the report says so instead of leaving
+#: them to guess. Anything matching this is still NOT moved -- naming a
+#: destination for a folder whose stage this tool cannot establish would be
+#: the guess the whole tool avoids.
+META_LIKELY_SELECTION = ("select", "_selection")
 
 #: Files directly under the old `outputs/meta/` that are not in META_SPLIT. The
 #: atlas label tables are the only ones, and they are extraction-side: they
@@ -125,7 +139,13 @@ def plan(root: Path, version: str):
                     META_FILE_PREFIX_EXTRACTIONS):
                 stage = "extractions"
             if stage is None:
-                unknown.append(f"meta/{p.name}")
+                hint = ("  <- looks like a selection run under its own "
+                        "--output-name; it is supervised provenance, so "
+                        "move it under modelling/version=<v>/"
+                        "supervised_model/meta/ or delete it"
+                        if any(k in p.name for k in META_LIKELY_SELECTION)
+                        else "")
+                unknown.append(f"meta/{p.name}{hint}")
                 continue
             base = {"extractions": extractions_root(root),
                     "unsupervised": unsupervised_root(root, version),
