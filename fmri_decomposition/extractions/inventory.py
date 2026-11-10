@@ -73,6 +73,11 @@ DFC_ENTITY_COLUMNS = ["ses", "run", "acq", "run_key"]
 
 _STAGE_ROOT = {"activation": activation_root, "dfc": dfc_root}
 
+# The checkout root: inventory.py -> extractions -> fmri_decomposition -> repo.
+# Was `parent.parent` back when this was notebooks/nbtools.py; the move into
+# the package dropped the definition and every config lookup raised NameError.
+REPO = Path(__file__).resolve().parents[2]
+
 
 # ------------------------------------------------------------------ paths ---
 def output_root(explicit: str | Path | None = None) -> Path:
