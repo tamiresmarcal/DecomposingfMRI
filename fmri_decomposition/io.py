@@ -168,10 +168,11 @@ def announce_version(output_root: str | Path, version: str | None = None,
 def reference_maps_dir() -> Path:
     """Where the contextualisation arm's reference maps live, ~285 MB.
 
-    `$FMRIDECOMP_REFMAPS`, else `<repo>/.refmaps` -- gitignored, the same
-    arrangement as `.nilearn_data`. ON A CLUSTER, EXPORT IT: the default sits
-    beside the checkout, which on a home filesystem is the wrong place for a
-    quarter of a gigabyte.
+    `$FMRIDECOMP_REFMAPS`, else `<repo>/reference_atlases` -- gitignored, the
+    same arrangement as `.nilearn_data`. Not hidden, because unlike a cache
+    this is a quarter of a gigabyte somebody fetched on purpose and will want
+    to find. EXPORT IT if the checkout is on a filesystem that should not hold
+    285 MB.
 
     NOT under `outputs/`: these are an INPUT, downloaded from elsewhere, in
     the same class as an atlas or the BIDS data -- nothing in the pipeline
@@ -183,7 +184,7 @@ def reference_maps_dir() -> Path:
     v = os.environ.get("FMRIDECOMP_REFMAPS")
     if v:
         return Path(v)
-    return Path(__file__).resolve().parent.parent / ".refmaps"
+    return Path(__file__).resolve().parent.parent / "reference_atlases"
 
 
 def extractions_root(output_root: str | Path) -> Path:

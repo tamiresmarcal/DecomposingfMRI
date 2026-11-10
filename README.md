@@ -223,7 +223,7 @@ outputs/modelling/version=v0/unsupervised_model/
 │       from when the arm was a pilot beside the notebook that drew it.
 │       Its INPUT, the ~285 MB of reference maps, is NOT here: nothing in the
 │       pipeline produces them and no version owns them, so they sit at
-│       $FMRIDECOMP_REFMAPS (else <repo>/.refmaps), like an atlas.
+│       $FMRIDECOMP_REFMAPS (else <repo>/reference_atlases), like an atlas.
 │
 ├── cache/                                        slow tables, regenerable
 │   Keyed by a stamp built from THIS version's tables, which is why it is

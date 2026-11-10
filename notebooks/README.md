@@ -20,7 +20,7 @@ here; every path that wrote them now points elsewhere:
 | was | is now | why |
 |---|---|---|
 | `notebooks/state_maps_results/` | `outputs/modelling/version=<v>/unsupervised_model/contextualization/` | it is the OUTPUT of one fit, so it belongs to that fit's version |
-| `notebooks/state_maps_data/` | `$FMRIDECOMP_REFMAPS`, else `<repo>/.refmaps/` | ~285 MB of reference maps — an INPUT, like an atlas, so not under `outputs/` at all |
+| `notebooks/state_maps_data/` | `$FMRIDECOMP_REFMAPS`, else `<repo>/reference_atlases/` | ~285 MB of reference maps — an INPUT, like an atlas, so not under `outputs/` at all |
 | `notebooks/cache/` | `outputs/modelling/version=<v>/supervised_model/cache/` | the stamp it is keyed by is built from that version's tables |
 | `notebooks/iframe_figures/` | — | plotly scratch; delete it |
 
@@ -37,8 +37,18 @@ Saved figures go to `<repo>/figures/<notebook>/` (gitignored) — a deliverable
 rather than data, hence a folder of its own rather than a place in the output
 tree. Every notebook that saves takes a `SAVE_DIR`.
 
-`tools/migrate_outputs.py` moves `state_maps_results/` for you; the other
-three are regenerated on demand, so an old copy can simply be deleted.
+`tools/migrate_outputs.py` moves `state_maps_results/` for you -- run it in
+the container, a login node's bare python cannot import the package:
+
+```bash
+source slurm/env.sh
+apptainer exec --bind /project,/scratch,/home --pwd $PWD $FMRIDECOMP_SIF45 \
+    python3 tools/migrate_outputs.py --apply
+```
+
+The other three are regenerated on demand, so an old copy can be deleted --
+except `state_maps_data/`, which is a 285 MB download: move it rather than
+re-fetch it.
 
 Nothing here writes to `outputs/` directly — the modules do.
 

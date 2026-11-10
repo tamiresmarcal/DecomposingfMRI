@@ -351,3 +351,58 @@ class TestDataThatWasNeverUnderOutputs:
         M.main(["--output-root", str(root)])
         assert (repo / "notebooks" / "state_maps_results" / "real"
                 / "harvardoxford" / "correlations.csv").exists()
+
+
+class TestRunningItWithoutTheStack:
+    """It is run by hand on a login node, once, before anything else works.
+
+    `fmri_decomposition.io` imports pyarrow at module level, so a bare
+    `python tools/migrate_outputs.py` there died on a traceback whose top
+    frame was the import and whose cause was six lines down -- the worst
+    possible place for a message that does not say what to do. It cost a round
+    trip the first time it happened.
+    """
+
+    def test_it_names_the_module_and_the_container_command(self):
+        """A subprocess with pyarrow made unimportable -- the real condition
+        on a login node, reproduced deterministically rather than by hoping
+        some interpreter happens to lack it.
+
+        A meta_path finder that raises for one name, installed BEFORE the
+        script runs: `sys.modules['pyarrow'] = None` would not do it, because
+        that makes the import raise ImportError, not ModuleNotFoundError, and
+        the guard catches the narrower one on purpose."""
+        import subprocess
+        import sys
+
+        script = Path(M.__file__).resolve()
+        blocker = (
+            "import sys\n"
+            "class Block:\n"
+            "    def find_module(self, name, path=None):\n"
+            "        return self if name.split('.')[0] == 'pyarrow' else None\n"
+            "    def find_spec(self, name, path=None, target=None):\n"
+            "        if name.split('.')[0] == 'pyarrow':\n"
+            "            raise ModuleNotFoundError(name=name)\n"
+            "        return None\n"
+            "sys.meta_path.insert(0, Block())\n"
+            "import runpy\n"
+            f"sys.argv = [{str(script)!r}]\n"
+            # runpy, not exec: the script reads `__file__` to find the repo
+            # root, and exec() does not define it.
+            f"runpy.run_path({str(script)!r}, run_name='__main__')\n")
+        out = subprocess.run([sys.executable, "-c", blocker],
+                             capture_output=True, text=True,
+                             cwd=str(script.parent.parent))
+        both = out.stdout + out.stderr
+        assert "Traceback" not in both, both
+        assert "this needs pyarrow" in both, both
+        assert "apptainer exec" in both and "FMRIDECOMP_SIF45" in both
+        assert out.returncode != 0
+
+    def test_the_guard_is_in_the_source_at_all(self):
+        """Belt and braces for the test above, which depends on how a
+        subprocess happens to fail: the message has to exist."""
+        src = Path(M.__file__).read_text()
+        assert "except ModuleNotFoundError" in src
+        assert "apptainer exec" in src and "FMRIDECOMP_SIF45" in src

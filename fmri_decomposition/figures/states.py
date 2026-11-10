@@ -697,7 +697,7 @@ def main(argv=None) -> int:
     p.add_argument("--overview", action="store_true", help="also the heat-strip overview")
     p.add_argument("--data", type=Path, default=None,
                    help="the reference maps (default: $FMRIDECOMP_REFMAPS, "
-                        "else <repo>/.refmaps)")
+                        "else <repo>/reference_atlases)")
     a = p.parse_args(argv)
     draw(a.run_dir, a.atlases, a.families, a.bn_levels, data=a.data, cards=a.cards,
          overview=a.overview, panels=a.panels, top=a.top, positive_only=a.positive_only)

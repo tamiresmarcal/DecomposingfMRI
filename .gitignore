@@ -267,8 +267,10 @@ iframe_figures/
 
 # Reference maps for the contextualisation arm (fetch_reference_maps.sh),
 # ~285 MB. An INPUT, like an atlas -- nothing in the pipeline produces them --
-# so they are not under outputs/. Default location; $FMRIDECOMP_REFMAPS moves
-# it, and on a cluster it should be moved to /project.
+# so they are not under outputs/. $FMRIDECOMP_REFMAPS moves it; this is the
+# default. Not a dotted name: unlike a cache, this is a quarter of a gigabyte
+# somebody fetched on purpose and will want to find.
+reference_atlases/
 .refmaps/
 
 # Saved figures. A deliverable rather than data, hence a folder of its own

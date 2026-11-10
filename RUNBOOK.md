@@ -408,11 +408,18 @@ A tree written before the three-half split is flat -- `outputs/activation/`,
 the reorganisation, **`fmri-decomp status` reads empty** until this runs. That
 is a lookup failure, not a data loss.
 
+**Through the container.** A login node's bare `python` cannot import this
+package -- `io` needs pyarrow -- so the migration runs in the image like every
+other stage. It refuses with this command if you forget.
+
 ```bash
-squeue -u $USER                              # must be empty; see below
-python tools/migrate_outputs.py              # look first -- touches nothing
-python tools/migrate_outputs.py --apply
-fmri-decomp status | head -20                # should find everything again
+source slurm/env.sh
+RUN="apptainer exec --bind /project,/scratch,/home --pwd $PWD $FMRIDECOMP_SIF45"
+
+squeue -u $USER                                   # must be empty; see below
+$RUN python3 tools/migrate_outputs.py             # look first -- touches nothing
+$RUN python3 tools/migrate_outputs.py --apply
+$RUN python3 -m fmri_decomposition.cli status | head -20
 ```
 
 **It renames, it does not copy.** Every move is `os.rename` of a directory

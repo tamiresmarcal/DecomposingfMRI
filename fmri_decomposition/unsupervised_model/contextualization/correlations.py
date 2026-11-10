@@ -598,7 +598,7 @@ def main(argv=None) -> int:
     # --output-root and --modelling-version, which argparse has not read yet.
     p.add_argument("--data", type=Path, default=None,
                    help="the reference maps (default: $FMRIDECOMP_REFMAPS, "
-                        "else <repo>/.refmaps). ~285 MB, fetched by "
+                        "else <repo>/reference_atlases). ~285 MB, fetched by "
                         "fetch_reference_maps.sh -- an INPUT, so it is not "
                         "under outputs/.")
     p.add_argument("--out", type=Path, default=None,

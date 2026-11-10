@@ -55,12 +55,31 @@ from pathlib import Path
 # module exposes, not only by the command line.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fmri_decomposition.io import (EXTRACTION_TREES, SUPERVISED_TREES,
-                                   UNSUPERVISED_TREES, claim_version,
-                                   default_output_root, extractions_root,
-                                   modelling_version, read_version_manifest,
-                                   supervised_root, tree_root,
-                                   unsupervised_root, version_manifest_path)
+# THIS TOOL IS RUN ON A LOGIN NODE, where the scientific stack is usually not
+# installed -- and `fmri_decomposition.io` imports pyarrow at module level, so
+# the bare `python tools/migrate_outputs.py` dies on a traceback whose top
+# frame is this import and whose cause is six lines down. The migration is the
+# one job that has to be run by hand, once, before anything else works, so it
+# is the worst possible place for a message that does not say what to do.
+try:
+    from fmri_decomposition.io import (EXTRACTION_TREES, SUPERVISED_TREES,
+                                       UNSUPERVISED_TREES, claim_version,
+                                       default_output_root, extractions_root,
+                                       modelling_version,
+                                       read_version_manifest, supervised_root,
+                                       tree_root, unsupervised_root,
+                                       version_manifest_path)
+except ModuleNotFoundError as exc:
+    sys.exit(
+        f"this needs {exc.name}, and the interpreter running it does not have "
+        f"it:\n"
+        f"  {sys.executable}\n\n"
+        f"Run it inside the analysis container, which does:\n\n"
+        f"  source slurm/env.sh\n"
+        f"  apptainer exec --bind /project,/scratch,/home --pwd $PWD \\\n"
+        f"      $FMRIDECOMP_SIF45 python3 tools/migrate_outputs.py\n\n"
+        f"A login node's bare python cannot import this package -- that is "
+        f"normal and is why every stage runs through the image.")
 
 #: `meta/` splits with the data it describes. The KEY is the subdirectory (or
 #: file) directly under the old flat `outputs/meta/`; the value is which half

@@ -2,7 +2,7 @@
 # Reference maps for the brain-state x maps pilot.
 #
 #   fmri_decomposition/unsupervised_model/contextualization/fetch_reference_maps.sh [DATA_DIR]
-#   (default: $FMRIDECOMP_REFMAPS, else <repo>/.refmaps)
+#   (default: $FMRIDECOMP_REFMAPS, else <repo>/reference_atlases)
 #
 # Every file comes from a host that serves plain HTTPS -- TemplateFlow's S3
 # bucket and raw.githubusercontent.com -- so this runs where OSF, NITRC,
@@ -26,7 +26,7 @@
 #               medial wall is the cortex mask, from TemplateFlow
 set -euo pipefail
 
-# $FMRIDECOMP_REFMAPS, else <repo>/.refmaps -- the same default the Python
+# $FMRIDECOMP_REFMAPS, else <repo>/reference_atlases -- the same default the Python
 # side uses (io.reference_maps_dir). NOT `$(dirname $0)/state_maps_data`,
 # which this was: that is inside the installed package now, so a fetch would
 # have put 285 MB into site-packages.
@@ -35,7 +35,7 @@ if [[ -n "${1:-}" ]]; then
 elif [[ -n "${FMRIDECOMP_REFMAPS:-}" ]]; then
   DATA="$FMRIDECOMP_REFMAPS"
 else
-  DATA="$(cd "$(dirname "$0")/../../.." && pwd)/.refmaps"
+  DATA="$(cd "$(dirname "$0")/../../.." && pwd)/reference_atlases"
 fi
 TF=https://templateflow.s3.amazonaws.com
 HR=https://raw.githubusercontent.com/netneurolab/hansen_receptors/main/data/PET_nifti_images
