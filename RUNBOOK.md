@@ -349,6 +349,49 @@ stage-6 ranking is attributable to it.
 appends to the same parquet, and parquet cannot append — the file is rewritten,
 so two array tasks would each rename over the other's columns.
 
+### MIGRATING AN OLD `outputs/` (once, and only once)
+
+A tree written before the three-half split is flat -- `outputs/activation/`,
+`outputs/latents/`, `outputs/meta/` -- and the current code looks under
+`outputs/extractions/` and `outputs/modelling/version=v0/`. So after pulling
+the reorganisation, **`fmri-decomp status` reads empty** until this runs. That
+is a lookup failure, not a data loss.
+
+```bash
+squeue -u $USER                              # must be empty; see below
+python tools/migrate_outputs.py              # look first -- touches nothing
+python tools/migrate_outputs.py --apply
+fmri-decomp status | head -20                # should find everything again
+```
+
+**It renames, it does not copy.** Every move is `os.rename` of a directory
+inside one filesystem: a 300 GB tree moves in milliseconds and needs no free
+space. If source and destination are ever on different filesystems the tool
+stops and says so rather than falling back to a copy it might not finish.
+
+**Run it with nothing in the queue.** The move is atomic per directory, but a
+job holding an open file under the old path keeps reading the old inode while
+every new process resolves the new one -- so a run spanning the migration can
+read two different trees.
+
+**A tree it does not recognise is reported and left alone.** Anything under
+`outputs/` that is not one of the eleven known stems is more likely yours than
+the pipeline's, and moving it would be a guess.
+
+**The version's composition is read off the data.** Every latents row carries
+`cohort` and `role` as columns, so which cohorts were fitted and which were
+projected is already in the files being moved; the supervised cohort comes
+from the selections' own `summary.csv`. That is what lands in
+`modelling/version=v0/version.json`, and every later run is checked against
+it. A key the tool cannot read is left unset rather than guessed -- the next
+run of that stage claims it from its own arguments.
+
+It also rewrites the absolute paths stored inside the stage-2/3 manifests.
+Nothing locates data by them (both readers ignore the field), but provenance
+that is wrong is worse than provenance that is missing.
+
+Running it twice is a no-op that prints what the version holds.
+
 ### PHASE 3 — ANALYSE (the cohort with phenotype)
 
 ```bash
