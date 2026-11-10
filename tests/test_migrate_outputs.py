@@ -60,7 +60,12 @@ class TestItMovesEachTreeToItsOwnHalf:
     def test_the_fitted_trees_land_inside_one(self, tmp_path):
         root = old_tree(tmp_path / "outputs")
         M.main(["--output-root", str(root), "--apply"])
-        for tree in io.UNSUPERVISED_TREES:
+        # `contextualization` is excluded on purpose: it is an unsupervised
+        # tree, but it never existed under the flat `outputs/` -- it was
+        # written into notebooks/, and TestDataThatWasNeverUnderOutputs covers
+        # it. Looping over UNSUPERVISED_TREES here would demand that this
+        # fixture invent a tree the old shape did not have.
+        for tree in set(io.UNSUPERVISED_TREES) - {"contextualization"}:
             assert io.tree_root(root, tree, "v0").is_dir(), tree
         for tree in io.SUPERVISED_TREES:
             assert io.tree_root(root, tree, "v0").is_dir(), tree
@@ -288,3 +293,61 @@ class TestTheMetaSubtreesItLearnedAbout:
         out = capsys.readouterr().out
         line = next(ln for ln in out.splitlines() if "meta/my_notes" in ln)
         assert "--output-name" not in line
+
+
+class TestDataThatWasNeverUnderOutputs:
+    """The contextualisation arm wrote into `notebooks/state_maps_results/`,
+    because it began as a pilot beside the notebook that drew it. It reads the
+    state means ONE fit produced, so it belongs to that fit's modelling
+    version -- and `notebooks/` is for notebooks."""
+
+    def _repo(self, tmp_path, monkeypatch, content=True):
+        repo = tmp_path / "repo"
+        d = repo / "notebooks" / "state_maps_results" / "real" / "harvardoxford"
+        d.mkdir(parents=True)
+        if content:
+            (d / "correlations.csv").write_text("a,b\n1,2\n")
+        monkeypatch.setattr(M, "__file__", str(repo / "tools" / "m.py"))
+        return repo
+
+    def test_it_moves_into_the_version(self, tmp_path, monkeypatch):
+        repo = self._repo(tmp_path, monkeypatch)
+        root = old_tree(tmp_path / "outputs")
+        M.main(["--output-root", str(root), "--apply"])
+        moved = io.tree_root(root, "contextualization", "v0")
+        assert (moved / "real" / "harvardoxford" / "correlations.csv").exists()
+        assert not (repo / "notebooks" / "state_maps_results").exists()
+
+    def test_an_empty_one_is_not_reported_as_work(self, tmp_path, monkeypatch,
+                                                  capsys):
+        self._repo(tmp_path, monkeypatch, content=False)
+        root = old_tree(tmp_path / "outputs")
+        M.main(["--output-root", str(root)])
+        assert "not under outputs/" not in capsys.readouterr().out
+
+    def test_a_cross_filesystem_move_COPIES_here(self, tmp_path, monkeypatch):
+        """The opposite of the rule for the trees, deliberately. The source is
+        in the checkout and the destination usually is not, so this rename
+        often crosses a filesystem -- and this is megabytes, not the hundreds
+        of GB that make a silent copy dangerous."""
+        repo = self._repo(tmp_path, monkeypatch)
+        root = old_tree(tmp_path / "outputs")
+        real = M.os.rename
+
+        def exdev(src, dst):
+            if "state_maps_results" in str(src):
+                raise OSError(18, "Invalid cross-device link")
+            return real(src, dst)
+
+        monkeypatch.setattr(M.os, "rename", exdev)
+        M.main(["--output-root", str(root), "--apply"])
+        moved = io.tree_root(root, "contextualization", "v0")
+        assert (moved / "real" / "harvardoxford" / "correlations.csv").exists()
+        assert not (repo / "notebooks" / "state_maps_results").exists()
+
+    def test_the_dry_run_moves_nothing(self, tmp_path, monkeypatch):
+        repo = self._repo(tmp_path, monkeypatch)
+        root = old_tree(tmp_path / "outputs")
+        M.main(["--output-root", str(root)])
+        assert (repo / "notebooks" / "state_maps_results" / "real"
+                / "harvardoxford" / "correlations.csv").exists()

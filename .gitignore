@@ -253,10 +253,27 @@ slurm/env.sh
 # exclusion reasons are facts about files, not about people.
 config/phenotype/*.csv
 
-# notebooks/09 and hads_tables.py (notebook 10) cache their slow tables here (regenerated on demand)
+# NOTHING BUT .ipynb BELONGS UNDER notebooks/ ANY MORE. These four are where
+# data used to land before the reorganisation; the paths that wrote them now
+# point elsewhere (see below), and these entries stay only so a leftover
+# directory on an old checkout is not offered up as something to commit.
 notebooks/cache/
-# reference maps for 08_state_maps (fetch_reference_maps.sh), ~285 MB
 notebooks/state_maps_data/
+notebooks/state_maps_results/
+# plotly dumps a copy of every figure here when a notebook calls fig.show()
+# with the iframe renderer. Pure scratch.
+notebooks/iframe_figures/
+iframe_figures/
+
+# Reference maps for the contextualisation arm (fetch_reference_maps.sh),
+# ~285 MB. An INPUT, like an atlas -- nothing in the pipeline produces them --
+# so they are not under outputs/. Default location; $FMRIDECOMP_REFMAPS moves
+# it, and on a cluster it should be moved to /project.
+.refmaps/
+
+# Saved figures. A deliverable rather than data, hence a folder of its own
+# rather than a place in the output tree.
+figures/
 
 # --------------------------------------------------- scratch and binaries ---
 # Container IMAGES. Built or copied next to the repo for convenience; they are
@@ -276,12 +293,11 @@ containers/*
 # Jupyter's default name for a notebook nobody has named yet.
 notebooks/Untitled*.ipynb
 
-# State-map output. The `simulated/` example under it is TRACKED and stays so
-# -- gitignore does not touch a file already in the index -- but a run on REAL
-# data writes `subject_correlations.parquet` here, which is per-subject derived
-# data under the same rule as `outputs/`: Cam-CAN and CNeuroMod do not permit
-# redistributing participant-level data, and this repository is pushed.
-notebooks/state_maps_results/
+# The contextualisation results moved into the output tree, which `outputs*`
+# already covers. They include `subject_correlations.parquet` -- per-subject
+# derived data under the same rule as everything else there: Cam-CAN and
+# CNeuroMod do not permit redistributing participant-level data, and this
+# repository is pushed.
 
 # The HCP participants table. `config/*_participants.csv` is tracked on purpose
 # for the cohorts whose (sub, task) mapping is a published constant, but this

@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from fmri_decomposition.unsupervised_model.contextualization import refmaps as rm
+from fmri_decomposition.io import reference_maps_dir
 from fmri_decomposition.unsupervised_model.contextualization.correlations import BN_LEVELS, FAMILIES
 
 # Diverging blue <-> red with a neutral grey midpoint.
@@ -499,8 +500,8 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
 
 # --------------------------------------------- reference x reference matrix ---
 def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str = "behavioural",
-                     *, out: Path = HERE / "state_maps_results" / "reference_matrix",
-                     data: Path = HERE / "state_maps_data", taxonomy: str = "brainmap",
+                     *, out: Path | None = None,
+                     data: Path | None = None, taxonomy: str = "brainmap",
                      behavioural_csv="neurosynth", n_nulls: int = 10000, null: str = "moran",
                      seed: int = 7, drop_other: bool = True) -> Path:
     """How two reference families relate to each other, in one atlas.
@@ -516,6 +517,12 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
 
     from fmri_decomposition.unsupervised_model.contextualization.correlations import reference_families
 
+    # Resolved here, not in the signature: the old default was
+    # `Path(__file__).parent / "state_maps_data"`, which followed this module
+    # into the package. `out` hangs off the run directory it draws from, so it
+    # needs no output root.
+    data = Path(data) if data is not None else reference_maps_dir()
+    out = Path(out) if out is not None else Path.cwd() / "reference_matrix"
     ref = rm.reference_grid(data)
     refs = reference_families(data, ref, [rows, cols], behavioural_csv, seed, taxonomy)
     spec, src = rm.state_atlas(atlas, data)
@@ -613,7 +620,7 @@ def load_results(atlas_dir: Path, families) -> tuple[pd.DataFrame, dict, dict]:
 
 
 def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
-         data: Path = HERE / "state_maps_data", cards: bool = False, overview: bool = False,
+         data: Path | None = None, cards: bool = False, overview: bool = False,
          panels=("yeo7", "behavioural"), top: int = 7, positive_only=()) -> list:
     """Draw every atlas under `run_dir`; return the figure paths.
 
@@ -628,6 +635,7 @@ def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
     if not (cards or overview):          # the states figure needs its panels only
         chosen = list(panels)
     chosen = [f for f in FAMILIES if f in chosen or f in panels]
+    data = Path(data) if data is not None else reference_maps_dir()
     ref = rm.reference_grid(data)
     surf = rm.load_surface(data)
     deep = sum(rm.subcortical_structures(data, ref).values())
@@ -687,7 +695,9 @@ def main(argv=None) -> int:
                    help="panels that show only positive r (e.g. behavioural)")
     p.add_argument("--cards", action="store_true", help="also one card per state")
     p.add_argument("--overview", action="store_true", help="also the heat-strip overview")
-    p.add_argument("--data", type=Path, default=HERE / "state_maps_data")
+    p.add_argument("--data", type=Path, default=None,
+                   help="the reference maps (default: $FMRIDECOMP_REFMAPS, "
+                        "else <repo>/.refmaps)")
     a = p.parse_args(argv)
     draw(a.run_dir, a.atlases, a.families, a.bn_levels, data=a.data, cards=a.cards,
          overview=a.overview, panels=a.panels, top=a.top, positive_only=a.positive_only)

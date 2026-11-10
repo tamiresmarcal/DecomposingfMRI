@@ -79,7 +79,7 @@ def leaf_filename(ses: str | None = None, run: str | None = None,
 #   outputs/extractions/                         no  -- shared by every version
 #       activation/ dfc/ censor/ static_fc/ meta/
 #   outputs/modelling/version=<v>/unsupervised_model/   yes -- WHICH cohorts fit
-#       latents/ transitions/ meta/
+#       latents/ transitions/ contextualization/ meta/
 #   outputs/modelling/version=<v>/supervised_model/     yes -- which cohort is
 #       bstm_selection/ fcm_selection/ transferred_models/ meta/     the target
 #
@@ -93,7 +93,7 @@ def leaf_filename(ses: str | None = None, run: str | None = None,
 # once, and lets `hive_key` read it with no new parsing -- which is the whole
 # reason it is not the flat name `modelling_v0`.
 EXTRACTION_TREES = ("activation", "dfc", "censor", "static_fc")
-UNSUPERVISED_TREES = ("latents", "transitions")
+UNSUPERVISED_TREES = ("latents", "transitions", "contextualization")
 SUPERVISED_TREES = ("bstm_selection", "fcm_selection", "transferred_models")
 
 #: The version used when nothing says otherwise. A string, not a number: it is
@@ -163,6 +163,27 @@ def announce_version(output_root: str | Path, version: str | None = None,
     log(f"  version holds: {held}" if held
         else "  version holds: nothing recorded yet -- this run will claim it")
     return v
+
+
+def reference_maps_dir() -> Path:
+    """Where the contextualisation arm's reference maps live, ~285 MB.
+
+    `$FMRIDECOMP_REFMAPS`, else `<repo>/.refmaps` -- gitignored, the same
+    arrangement as `.nilearn_data`. ON A CLUSTER, EXPORT IT: the default sits
+    beside the checkout, which on a home filesystem is the wrong place for a
+    quarter of a gigabyte.
+
+    NOT under `outputs/`: these are an INPUT, downloaded from elsewhere, in
+    the same class as an atlas or the BIDS data -- nothing in the pipeline
+    produces them and no modelling version owns them. And not beside the
+    module either, which is where they ended up when contextualization moved
+    into the package and its `Path(__file__).parent` default came along: a
+    fetch script would then write 285 MB into site-packages.
+    """
+    v = os.environ.get("FMRIDECOMP_REFMAPS")
+    if v:
+        return Path(v)
+    return Path(__file__).resolve().parent.parent / ".refmaps"
 
 
 def extractions_root(output_root: str | Path) -> Path:

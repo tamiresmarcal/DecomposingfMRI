@@ -193,7 +193,8 @@ def _has_column(path: Path, col: str) -> bool:
 def latent_files(root: Path, atlas: str, window_s, cohorts=None) -> list:
     """Every latents file of one (atlas, aperture) cell, in either layout:
     `cohort=<c>/data.parquet` or `cohort=<c>/task=<t>/data.parquet`."""
-    from fmri_decomposition.io import latents_root, tree_root
+    from fmri_decomposition.io import (latents_root, reference_maps_dir,
+                                   tree_root)
 
     cell = latents_root(root, atlas, window_s)
     out = []
@@ -394,7 +395,7 @@ def _read_frames(root, atlas, cohort, feats, band, zscore, kept):
     from fmri_decomposition import frames
 
     tag = f"{atlas}_{cohort}_band-{'none' if not band else '-'.join(map(str, band))}_z-{int(zscore)}"
-    cache = Path(__file__).resolve().parent / "state_maps_data" / "cache" / f"frames_{tag}.npz"
+    cache = reference_maps_dir() / "cache" / f"frames_{tag}.npz"
     if cache.exists():
         z = np.load(cache, allow_pickle=True)
         ident = pd.DataFrame({c: z[f"ident_{c}"] for c in z["ident_cols"]})
@@ -476,12 +477,25 @@ def reference_families(data: Path, ref, families, behavioural_csv=None, seed: in
 
 # ------------------------------------------------------------------- run ---
 def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
-            out: Path = HERE / "state_maps_results", data: Path = HERE / "state_maps_data",
+            out: Path | None = None, data: Path | None = None,
             output_root=None, window_s=None, cohorts=None, behavioural_csv="neurosynth",
             n_nulls: int = 10000, null: str = "moran", seed: int = 7,
             taxonomy: str = "brainmap",
             verbose: bool = True) -> dict:
     """Write the tables for every atlas; return {atlas: its directory}."""
+    # RESOLVED HERE, not in the signature. Both used to default to
+    # `Path(__file__).parent / ...`, and when this module moved into the
+    # package that became a path inside the installed package -- so a run
+    # would have written its results, and a 285 MB reference-map cache, into
+    # site-packages. (It was worse than that: the `HERE` they were built from
+    # went away with the sys.path bootstrap the move replaced, so both
+    # defaults raised NameError at import.)
+    data = Path(data) if data is not None else reference_maps_dir()
+    if out is None:
+        from fmri_decomposition.io import default_output_root
+        root = Path(output_root) if output_root else default_output_root()
+        out = tree_root(root, "contextualization")
+    out = Path(out)
     families = [f for f in FAMILIES if f in families]
     ref = rm.reference_grid(data)
     refs = reference_families(data, ref, families, behavioural_csv, seed, taxonomy)
@@ -580,8 +594,18 @@ def main(argv=None) -> int:
                    help="surrogates per map; the smallest p is 1/(n+1), and BH over 114 "
                         "molecular tests needs it well under .05/114")
     p.add_argument("--null", choices=rm.NULLS, default="moran")
-    p.add_argument("--data", type=Path, default=HERE / "state_maps_data")
-    p.add_argument("--out", type=Path, default=HERE / "state_maps_results")
+    # Defaults resolved in `compute`, not here: one of them depends on
+    # --output-root and --modelling-version, which argparse has not read yet.
+    p.add_argument("--data", type=Path, default=None,
+                   help="the reference maps (default: $FMRIDECOMP_REFMAPS, "
+                        "else <repo>/.refmaps). ~285 MB, fetched by "
+                        "fetch_reference_maps.sh -- an INPUT, so it is not "
+                        "under outputs/.")
+    p.add_argument("--out", type=Path, default=None,
+                   help="where the tables and figures go (default: "
+                        "<outputs>/modelling/version=<v>/unsupervised_model/"
+                        "contextualization/). It reads the state means ONE "
+                        "fit produced, so it belongs to that fit's version.")
     p.add_argument("--seed", type=int, default=7)
     a = p.parse_args(argv)
     compute(a.states, a.atlases, a.families, out=a.out, data=a.data,

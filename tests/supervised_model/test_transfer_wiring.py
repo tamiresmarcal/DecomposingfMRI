@@ -55,7 +55,11 @@ def write_transitions(root, cohort, task, subs, win=WIN, states=STATES,
 
 
 def write_summary(root, tree, task, target):
-    d = root / f"{tree}_selection" / f"task={task}" / f"target={target}"
+    # Through tree_root: the stem is interpolated, so the pass that moved
+    # every literal `root / "<tree>"` never matched this one -- and it agreed
+    # with the reader only because the reader had the same bug.
+    d = (tree_root(root, f"{tree}_selection")
+         / f"task={task}" / f"target={target}")
     d.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([{"model": "ridge", "arm": "all [cond]", "atlas": ATLAS,
                    "window_s": WIN, "states": STATES, "mean": .1, "std": .01,

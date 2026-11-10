@@ -14,7 +14,33 @@ testable:
 | `tools/symptom_distribution.py` | `fmri_decomposition/supervised_model/symptoms.py` |
 | `*_plots.py`, `state_figures.py` | `fmri_decomposition/figures/` |
 
-Nothing here writes to `outputs/`.
+**And nothing but notebooks, either.** Four directories used to collect data
+here; every path that wrote them now points elsewhere:
+
+| was | is now | why |
+|---|---|---|
+| `notebooks/state_maps_results/` | `outputs/modelling/version=<v>/unsupervised_model/contextualization/` | it is the OUTPUT of one fit, so it belongs to that fit's version |
+| `notebooks/state_maps_data/` | `$FMRIDECOMP_REFMAPS`, else `<repo>/.refmaps/` | ~285 MB of reference maps — an INPUT, like an atlas, so not under `outputs/` at all |
+| `notebooks/cache/` | `outputs/modelling/version=<v>/supervised_model/cache/` | the stamp it is keyed by is built from that version's tables |
+| `notebooks/iframe_figures/` | — | plotly scratch; delete it |
+
+**On a cluster, export the reference maps somewhere with space:**
+
+```bash
+export FMRIDECOMP_REFMAPS=/project/6008063/tamires/refmaps
+```
+
+The default sits beside the checkout, which is the wrong place for a quarter
+of a gigabyte on a home filesystem.
+
+Saved figures go to `<repo>/figures/<notebook>/` (gitignored) — a deliverable
+rather than data, hence a folder of its own rather than a place in the output
+tree. Every notebook that saves takes a `SAVE_DIR`.
+
+`tools/migrate_outputs.py` moves `state_maps_results/` for you; the other
+three are regenerated on demand, so an old copy can simply be deleted.
+
+Nothing here writes to `outputs/` directly — the modules do.
 
 | file | what it opens |
 |---|---|

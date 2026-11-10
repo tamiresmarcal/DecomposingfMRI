@@ -103,6 +103,36 @@ def _half(root: Path, tree: str, version: str) -> Path:
     return tree_root(root, tree, version)
 
 
+#: Directories OUTSIDE `outputs/` that the reorganisation gave a home inside
+#: it. The contextualisation arm wrote into `notebooks/state_maps_results/`,
+#: because it began as a pilot beside the notebook that drew it; it reads the
+#: state means ONE fit produced, so it belongs to that fit's version.
+#:
+#: Keyed by the path relative to the REPO, since that is where they are.
+STRAYS = {"notebooks/state_maps_results": "contextualization"}
+
+
+def stray_plan(repo: Path, root: Path, version: str):
+    """[(source, destination)] for data that was never under `outputs/`.
+
+    Separate from `plan` because the source is outside the output tree, so
+    the "already in the new shape" and "unknown tree" rules do not apply and
+    the rename may well cross a filesystem -- `notebooks/` is in the checkout
+    and `outputs/` often is not. That one is allowed to fall back to a copy,
+    unlike the trees, because it is megabytes rather than hundreds of GB.
+    """
+    out = []
+    for rel, tree in sorted(STRAYS.items()):
+        src = repo / rel
+        # ANY FILE, at any depth. `any(src.iterdir())` saw a leftover
+        # skeleton of empty subdirectories as content worth moving, which is a
+        # pointless move reported as work.
+        if not src.is_dir() or not any(f.is_file() for f in src.rglob("*")):
+            continue
+        out.append((src, tree_root(root, tree, version)))
+    return out
+
+
 def plan(root: Path, version: str):
     """-> (moves, meta_moves, unknown, already, notes).
 
@@ -294,6 +324,8 @@ def main(argv=None) -> int:
           f"(the existing fitted trees become this)")
 
     moves, meta_moves, unknown, already, notes = plan(root, version)
+    repo = Path(__file__).resolve().parent.parent
+    strays = stray_plan(repo, root, version)
 
     if already:
         print(f"\nalready in the new shape: {', '.join(already)}/")
@@ -305,7 +337,12 @@ def main(argv=None) -> int:
     for n in notes:
         print(n)
 
-    if not moves and not meta_moves:
+    if strays:
+        print(f"\nnot under outputs/ at all, and now has a home there:")
+        for src, dst in strays:
+            print(f"  {src.relative_to(repo)}/  ->  {_rel(dst, root)}/")
+
+    if not moves and not meta_moves and not strays:
         print(f"\nnothing to move under {root}")
         man = read_version_manifest(root, version)
         if man:
@@ -314,8 +351,9 @@ def main(argv=None) -> int:
             print(f"  version {version} holds: {held or '(nothing recorded)'}")
         return 0
 
-    print(f"\n{len(moves)} tree(s) and {len(meta_moves)} meta entry/entries "
-          f"to move:")
+    if moves or meta_moves:
+        print(f"\n{len(moves)} tree(s) and {len(meta_moves)} meta "
+              f"entry/entries to move:")
     for src, dst in moves + meta_moves:
         # The trailing slash only where it is true: two entries under meta/
         # are FILES (static_fc.json and the atlas label tables), and printing
@@ -338,8 +376,23 @@ def main(argv=None) -> int:
 
     apply_moves(moves, root)
     apply_moves(meta_moves, root)
+    for src, dst in strays:
+        # A COPY IS ALLOWED HERE, unlike for the trees: the source is in the
+        # checkout and the destination usually is not, so this rename often
+        # crosses a filesystem -- and this is megabytes, not hundreds of GB.
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.rename(src, dst)
+        except OSError as exc:
+            if getattr(exc, "errno", None) != 18:                # EXDEV
+                raise
+            import shutil
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+            shutil.rmtree(src)
+        print(f"  moved {src.relative_to(repo)} -> {_rel(dst, root)}")
     n_man = fix_manifest_paths(root, apply=True)
     print(f"\nmoved {len(moves)} tree(s), {len(meta_moves)} meta entry/entries,"
+          f" {len(strays)} stray director{'y' if len(strays) == 1 else 'ies'},"
           f" rewrote {n_man} manifest(s)")
 
     meta = root / "meta"

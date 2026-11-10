@@ -177,7 +177,16 @@ class Settings:
     dyn_icon: float | str = 1.0                        # D3 / E3: its symbols' size, x the font; "fit" = span the diagram
     save_dir: Path | None = None
     # running
-    cache_dir: Path | None = Path(__file__).resolve().parent / "cache"
+    # None = `<root>/modelling/version=<v>/supervised_model/cache/`, resolved
+    # lazily by `cache_root` below. It used to be `Path(__file__).parent /
+    # "cache"`, which was `notebooks/cache/` and became a directory INSIDE the
+    # installed package when this module moved -- so the slow tables would
+    # have been cached into site-packages.
+    #
+    # Under the VERSION, because the stamp it is keyed by is built from that
+    # version's tables: two versions' caches are different answers and must
+    # not share a directory. Set it to False to disable caching entirely.
+    cache_dir: Path | None | bool = None
     n_jobs: int = field(default_factory=_cores)
 
     @property
@@ -350,9 +359,13 @@ class Study:
     def _summaries(self):
         c, frames = self.cfg, []
         for tree in ("bstm", "fcm"):
-            files = sorted((c.root / f"{tree}_selection").glob("task=*/target=*/summary.csv"))
+            # Through tree_root: the stem is INTERPOLATED here, so the pass
+            # that moved every `root / "transitions"` to io never matched this
+            # one and it kept reading the pre-split location.
+            base = tree_root(c.root, f"{tree}_selection", c.modelling_version)
+            files = sorted(base.glob("task=*/target=*/summary.csv"))
             if not files:
-                raise SystemExit(f"no summary.csv under {c.root / f'{tree}_selection'}")
+                raise SystemExit(f"no summary.csv under {base}")
             frames += [pd.read_csv(p).assign(tree=tree, task=hive(p, "task"), target=hive(p, "target"))
                        for p in files]
         label_of = {col: lab for lab, col in c.targets.items()}
@@ -508,11 +521,27 @@ class Study:
         return hashlib.md5((s.to_csv(index=False) + self.sets().to_csv(index=False)
                             + self.pheno.to_csv(index=False)).encode()).hexdigest()
 
-    def _cached(self, name, key, compute, pickle=False):
+    @property
+    def cache_root(self) -> Path | None:
+        """Where the slow tables are cached, or None if caching is off.
+
+        `cache_dir=False` turns it off; a path uses that path; None -- the
+        default -- puts it under the modelling version whose tables the
+        cache's own stamp is built from.
+        """
         c = self.cfg
-        if not c.cache_dir:
+        if c.cache_dir is False:
+            return None
+        if c.cache_dir is not None:
+            return Path(c.cache_dir)
+        return tree_root(c.root, "bstm_selection",
+                         c.modelling_version).parent / "cache"
+
+    def _cached(self, name, key, compute, pickle=False):
+        root = self.cache_root
+        if root is None:
             return compute()
-        p = Path(c.cache_dir) / f"{name}_{hashlib.md5(repr((self.stamp, key)).encode()).hexdigest()[:12]}"
+        p = root / f"{name}_{hashlib.md5(repr((self.stamp, key)).encode()).hexdigest()[:12]}"
         p = p.with_suffix(".joblib" if pickle else ".parquet")
         if p.exists():
             print(f"{name}: read {p}")

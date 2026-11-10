@@ -215,6 +215,20 @@ outputs/extractions/
 
 ```
 outputs/modelling/version=v0/unsupervised_model/
+├── contextualization/                            what a state MEANS (notebook 08)
+│   └── <states>/<atlas>/correlations.csv  state_means.csv  *.png
+│       Correlations of each state's map against reference maps and other
+│       parcellations. An OUTPUT of one fit, so it lives under that fit's
+│       version -- it used to be written into `notebooks/state_maps_results/`,
+│       from when the arm was a pilot beside the notebook that drew it.
+│       Its INPUT, the ~285 MB of reference maps, is NOT here: nothing in the
+│       pipeline produces them and no version owns them, so they sit at
+│       $FMRIDECOMP_REFMAPS (else <repo>/.refmaps), like an atlas.
+│
+├── cache/                                        slow tables, regenerable
+│   Keyed by a stamp built from THIS version's tables, which is why it is
+│   inside the version rather than beside the code.
+│
 ├── latents/                                      STAGE 4 — coordinates, + STAGE 4b labels
 │   └── atlas=yeo7/window_s=30/cohort=camcan/task=Movie/data.parquet
 │       window_s=-1 is the per-TR aperture. The state-label columns stage 4b
