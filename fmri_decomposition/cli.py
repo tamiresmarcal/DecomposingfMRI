@@ -824,7 +824,23 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except BrokenPipeError:
+        # `fmri-decomp status | head -20` is the normal way to read a long
+        # report, and `head` closes the pipe as soon as it has its lines. The
+        # next print then raises here, and python's default is a traceback --
+        # so a command that did exactly what was asked ends in six frames of
+        # noise that look like a failure of the command.
+        #
+        # stdout is redirected to devnull before returning because the
+        # interpreter FLUSHES it at exit, outside this handler, and that flush
+        # raises again: "Exception ignored in: <_io.TextIOWrapper ...>" on
+        # stderr, which is the same noise one layer further out.
+        import os
+
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
 
 
 if __name__ == "__main__":

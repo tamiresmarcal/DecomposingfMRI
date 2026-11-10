@@ -103,6 +103,13 @@ META_SPLIT = {
     "selection": "supervised",
 }
 
+#: Directories that are somebody else's scratch, not a tree of hers and not
+#: one of ours. Reported as safe to delete rather than as "more likely yours
+#: than ours", which is what `.ipynb_checkpoints` got and is misleading: it is
+#: Jupyter's, it appears wherever a notebook is opened, and it holds nothing.
+KNOWN_JUNK = (".ipynb_checkpoints", "__pycache__", ".DS_Store",
+              ".pytest_cache", "iframe_figures")
+
 #: `--output-name` on both selections means META_SPLIT can never be complete:
 #: a run under any other name writes `meta/<that name>/`. So an unknown entry
 #: directly under the old flat `meta/` is far more likely to be one of those
@@ -169,7 +176,8 @@ def plan(root: Path, version: str):
         if name == "meta":
             continue                              # handled below, it splits
         if name not in known:
-            unknown.append(name)
+            unknown.append(name + ("  <- scratch from another tool, safe to "
+                                   "delete" if name in KNOWN_JUNK else ""))
             continue
         dst = _half(root, name, version)
         if dst.exists():
@@ -349,8 +357,9 @@ def main(argv=None) -> int:
     if already:
         print(f"\nalready in the new shape: {', '.join(already)}/")
     if unknown:
-        print(f"\nNOT MOVED -- this tool does not know these, and a tree it "
-              f"has never heard of is more likely yours than ours:")
+        print(f"\nNOT MOVED -- this tool does not know these. A tree it has "
+              f"never heard of is more likely yours than ours, so it is left "
+              f"alone; the annotated ones are the exceptions:")
         for u in unknown:
             print(f"  {u}")
     for n in notes:

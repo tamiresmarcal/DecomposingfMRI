@@ -406,3 +406,31 @@ class TestRunningItWithoutTheStack:
         src = Path(M.__file__).read_text()
         assert "except ModuleNotFoundError" in src
         assert "apptainer exec" in src and "FMRIDECOMP_SIF45" in src
+
+
+class TestItDistinguishesJunkFromHers:
+    """"More likely yours than ours" is right for an unrecognised tree and
+    wrong for `.ipynb_checkpoints`, which is Jupyter's, appears wherever a
+    notebook is opened, and holds nothing. Saying the same thing about both
+    leaves her deciding whether her own data is safe to delete."""
+
+    def test_jupyters_scratch_is_marked_safe_to_delete(self, tmp_path, capsys):
+        root = old_tree(tmp_path / "outputs", extras=(".ipynb_checkpoints",))
+        M.main(["--output-root", str(root), "--apply"])
+        line = next(ln for ln in capsys.readouterr().out.splitlines()
+                    if ".ipynb_checkpoints" in ln)
+        assert "safe to delete" in line
+
+    def test_something_of_hers_is_not(self, tmp_path, capsys):
+        root = old_tree(tmp_path / "outputs", extras=("my_own_analysis",))
+        M.main(["--output-root", str(root), "--apply"])
+        line = next(ln for ln in capsys.readouterr().out.splitlines()
+                    if "my_own_analysis" in ln)
+        assert "safe to delete" not in line
+
+    def test_neither_is_moved(self, tmp_path):
+        root = old_tree(tmp_path / "outputs",
+                        extras=(".ipynb_checkpoints", "my_own_analysis"))
+        M.main(["--output-root", str(root), "--apply"])
+        assert (root / ".ipynb_checkpoints").is_dir()
+        assert (root / "my_own_analysis").is_dir()

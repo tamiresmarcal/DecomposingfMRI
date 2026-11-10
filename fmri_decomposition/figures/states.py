@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from fmri_decomposition.unsupervised_model.contextualization import refmaps as rm
-from fmri_decomposition.io import reference_maps_dir
+from fmri_decomposition.io import require_reference_maps
 from fmri_decomposition.unsupervised_model.contextualization.correlations import BN_LEVELS, FAMILIES
 
 # Diverging blue <-> red with a neutral grey midpoint.
@@ -521,7 +521,7 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
     # `Path(__file__).parent / "state_maps_data"`, which followed this module
     # into the package. `out` hangs off the run directory it draws from, so it
     # needs no output root.
-    data = Path(data) if data is not None else reference_maps_dir()
+    data = Path(data) if data is not None else require_reference_maps()
     out = Path(out) if out is not None else Path.cwd() / "reference_matrix"
     ref = rm.reference_grid(data)
     refs = reference_families(data, ref, [rows, cols], behavioural_csv, seed, taxonomy)
@@ -635,7 +635,7 @@ def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
     if not (cards or overview):          # the states figure needs its panels only
         chosen = list(panels)
     chosen = [f for f in FAMILIES if f in chosen or f in panels]
-    data = Path(data) if data is not None else reference_maps_dir()
+    data = Path(data) if data is not None else require_reference_maps()
     ref = rm.reference_grid(data)
     surf = rm.load_surface(data)
     deep = sum(rm.subcortical_structures(data, ref).values())

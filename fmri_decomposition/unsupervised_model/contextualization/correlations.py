@@ -41,6 +41,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from fmri_decomposition.io import (default_output_root, latents_root,
+                                   reference_maps_dir,
+                                   require_reference_maps, tree_root)
+
 from . import refmaps as rm
 
 ATLASES = ["harvardoxford", "networks_nodes", "networks", "yeo7"]
@@ -193,9 +197,6 @@ def _has_column(path: Path, col: str) -> bool:
 def latent_files(root: Path, atlas: str, window_s, cohorts=None) -> list:
     """Every latents file of one (atlas, aperture) cell, in either layout:
     `cohort=<c>/data.parquet` or `cohort=<c>/task=<t>/data.parquet`."""
-    from fmri_decomposition.io import (latents_root, reference_maps_dir,
-                                   tree_root)
-
     cell = latents_root(root, atlas, window_s)
     out = []
     for p in sorted(cell.rglob("data.parquet")):
@@ -233,8 +234,6 @@ def where_is(root: Path, state_col: str, atlas: str, window_s, cohorts=None) -> 
 
 def find_window(root: Path, atlas: str, state_col: str):
     """The aperture whose latents carry `state_col`, when WINDOW_S is not given."""
-    from fmri_decomposition.io import latents_root
-
     found = []
     for wdir in sorted(latents_root(root, atlas).glob("window_s=*")):
         w = wdir.name.split("=", 1)[1]
@@ -490,9 +489,8 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
     # site-packages. (It was worse than that: the `HERE` they were built from
     # went away with the sys.path bootstrap the move replaced, so both
     # defaults raised NameError at import.)
-    data = Path(data) if data is not None else reference_maps_dir()
+    data = Path(data) if data is not None else require_reference_maps()
     if out is None:
-        from fmri_decomposition.io import default_output_root
         root = Path(output_root) if output_root else default_output_root()
         out = tree_root(root, "contextualization")
     out = Path(out)

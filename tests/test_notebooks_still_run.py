@@ -135,3 +135,64 @@ class TestNoDefaultPathPointsIntoThePackage:
             with pytest.raises(SystemExit) as e:      # --help exits 0
                 mod.main(["--help"])
             assert e.value.code == 0, mod.__name__
+
+
+class TestTheReferenceMapsRefuseByName:
+    """They are an input she may keep outside the repo -- shared between
+    projects -- so the one thing that must not happen is a FileNotFoundError
+    on some .nii.gz deep inside a loader, which says nothing about a 285 MB
+    download or an environment variable."""
+
+    def test_the_refusal_names_the_path_the_variable_and_the_fetcher(
+            self, tmp_path, monkeypatch):
+        from fmri_decomposition.io import require_reference_maps
+        monkeypatch.setenv("FMRIDECOMP_REFMAPS", str(tmp_path / "nope"))
+        with pytest.raises(SystemExit) as e:
+            require_reference_maps()
+        msg = str(e.value)
+        assert str(tmp_path / "nope") in msg
+        assert "FMRIDECOMP_REFMAPS" in msg
+        assert "fetch_reference_maps.sh" in msg
+        assert "slurm/env.sh" in msg
+
+    def test_it_says_when_the_variable_is_not_even_set(self, monkeypatch):
+        from fmri_decomposition.io import require_reference_maps
+        monkeypatch.delenv("FMRIDECOMP_REFMAPS", raising=False)
+        with pytest.raises(SystemExit) as e:
+            require_reference_maps()
+        assert "not set" in str(e.value)
+
+    def test_an_empty_directory_is_not_a_directory_of_maps(self, tmp_path,
+                                                           monkeypatch):
+        from fmri_decomposition.io import require_reference_maps
+        d = tmp_path / "reference_atlases"
+        d.mkdir()
+        monkeypatch.setenv("FMRIDECOMP_REFMAPS", str(d))
+        with pytest.raises(SystemExit):
+            require_reference_maps()
+        (d / "MNI152.nii.gz").write_bytes(b"")
+        assert require_reference_maps() == d
+
+
+class TestPipingToHeadIsNotAnError:
+    """`fmri-decomp status | head -20` is how a long report is read, and
+    `head` closes the pipe as soon as it has its lines. The default is a
+    six-frame traceback that looks like the command failed."""
+
+    def test_the_cli_handles_a_closed_stdout(self):
+        import subprocess
+        import sys
+
+        out = subprocess.run(
+            f"{sys.executable} -m fmri_decomposition.cli --help | head -2",
+            shell=True, capture_output=True, text=True, cwd=str(REPO))
+        assert "BrokenPipeError" not in out.stderr, out.stderr
+        assert "Exception ignored" not in out.stderr, out.stderr
+        assert out.stderr.strip() == "", out.stderr
+
+    def test_the_handler_is_in_main_not_in_one_command(self):
+        """Every command can be piped, so it belongs at the top level. It was
+        `status` that hit it first, which is not a reason to fix it there."""
+        src = (REPO / "fmri_decomposition" / "cli.py").read_text()
+        i = src.index("def main(")
+        assert "except BrokenPipeError" in src[i:]

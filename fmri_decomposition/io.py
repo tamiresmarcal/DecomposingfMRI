@@ -182,9 +182,33 @@ def reference_maps_dir() -> Path:
     fetch script would then write 285 MB into site-packages.
     """
     v = os.environ.get("FMRIDECOMP_REFMAPS")
-    if v:
-        return Path(v)
-    return Path(__file__).resolve().parent.parent / "reference_atlases"
+    return (Path(v) if v
+            else Path(__file__).resolve().parent.parent / "reference_atlases")
+
+
+def require_reference_maps() -> Path:
+    """`reference_maps_dir()`, refused by name if it is not there.
+
+    Without this the failure lands inside whichever loader asked for a file
+    first -- a FileNotFoundError on `MNI152.nii.gz` deep in refmaps.py, which
+    says nothing about a 285 MB download or an environment variable. The
+    directory is the thing that is missing, so the directory is what the
+    message is about.
+    """
+    d = reference_maps_dir()
+    if d.is_dir() and any(d.iterdir()):
+        return d
+    where = ("$FMRIDECOMP_REFMAPS" if os.environ.get("FMRIDECOMP_REFMAPS")
+             else "the default, since FMRIDECOMP_REFMAPS is not set")
+    raise SystemExit(
+        f"no reference maps at\n  {d}\n({where})\n\n"
+        f"They are ~285 MB and are fetched once:\n"
+        f"  fmri_decomposition/unsupervised_model/contextualization/"
+        f"fetch_reference_maps.sh\n\n"
+        f"If they are already somewhere else -- shared between projects, say "
+        f"-- point this at it instead of fetching again:\n"
+        f"  export FMRIDECOMP_REFMAPS=/path/to/reference_atlases\n"
+        f"and put that line in slurm/env.sh so every run has it.")
 
 
 def extractions_root(output_root: str | Path) -> Path:
