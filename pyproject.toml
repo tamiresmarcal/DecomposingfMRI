@@ -37,6 +37,9 @@ include = ["fmri_decomposition*"]
 # The coordinate atlas has no fetcher: the CSV is the parcellation, so it must
 # survive installation or get_atlas("networks") breaks off a checkout.
 "fmri_decomposition.atlases" = ["data/*.csv"]
+# Brainnetome's 246 subregions, derived from the atlas xlsx and shipped so the
+# contextualisation needs no Excel engine.
+"fmri_decomposition.unsupervised_model.contextualization" = ["data/*.csv"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

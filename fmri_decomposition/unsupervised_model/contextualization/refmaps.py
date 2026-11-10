@@ -48,6 +48,7 @@ sys.path.insert(0, str(REPO))
 from fmri_decomposition.atlases.registry import AtlasSpec, get_atlas  # noqa: E402
 
 HEMIS = ("L", "R")
+BRAINNETOME_CSV = Path(__file__).resolve().parent / "data" / "brainnetome_subregions.csv"
 MIN_PARCELS_FOR_NULL = 30
 
 # Harvard-Oxford cortical labels in atlas order (TemplateFlow's HOCPAL table
@@ -339,8 +340,10 @@ def network14_maps(ref) -> ReferenceMaps:
 def brainnetome_table(data: Path) -> pd.DataFrame:
     """The 246 BNA subregions: bn_index, hemi, gyrus (abbrev.), short name."""
     # Shipped as CSV (derived from BNA_subregions.xlsx by `_brainnetome_from_xlsx`)
-    # so reading it needs no Excel engine on the cluster.
-    return pd.read_csv(Path(__file__).parent / "brainnetome_subregions.csv")
+    # so reading it needs no Excel engine on the cluster. It lives in the
+    # package's data/ (committed, 7 KB, derived here) and NOT in
+    # reference_atlases/ (gitignored, downloaded): a fresh checkout must have it.
+    return pd.read_csv(BRAINNETOME_CSV)
 
 
 def _brainnetome_from_xlsx(data: Path) -> pd.DataFrame:
