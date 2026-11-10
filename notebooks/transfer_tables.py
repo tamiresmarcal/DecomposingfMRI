@@ -494,10 +494,12 @@ def pool_tasks(d: "pd.DataFrame", n_states: int, log=print) -> "pd.DataFrame":
 
     The two that are NOT exact, and are reported rather than hidden:
 
-      stride_s     not a column. It is recovered per run from
-                   switches_per_min, and the runs of one subject must agree:
-                   a pooled rate over runs sampled at different strides is not
-                   a rate. Mixed strides REFUSE.
+      stride_s     a COLUMN, written by transitions.py as provenance. The
+                   runs of one subject must agree: a pooled rate over runs
+                   sampled at different strides is not a rate, and mixed
+                   strides REFUSE. (Only a table written before that column
+                   existed falls back to inverting switches_per_min, which is
+                   0/0 for a subject who never switched.)
       dispersion   the mean distance from the subject's centroid in latent
                    space, which needs the latents, not this table. Pooled as a
                    mean weighted by n_windows, which is the centroid of each
@@ -521,18 +523,35 @@ def pool_tasks(d: "pd.DataFrame", n_states: int, log=print) -> "pd.DataFrame":
         M = counts.reshape(n_states, n_states)
         n_change = tot_tr - np.trace(M)
 
-        # the stride each run was sampled at, recovered and required to agree
+        # THE STRIDE IS A COLUMN. `transitions.py` writes `stride_s` into every
+        # row as provenance ("what was actually used, which is not n_overlaps
+        # at every aperture"), so it never has to be inferred.
+        #
+        # This used to recover it by inverting switches_per_min:
+        #     stride = switches / switches_per_min * 60 / n_windows
+        # which is 0/0 for a subject whose runs record no switch at all. That
+        # produced a NaN stride, hence NaN mean_dwell_s and switches_per_min,
+        # hence two of the three columns the transfer then had to impute --
+        # for a quantity that was sitting in the frame the whole time. The
+        # inversion survives only for a table written before the column
+        # existed.
         sw = (g["switch_rate"].to_numpy(float) * ntr)       # switches per run
-        spm = g["switches_per_min"].to_numpy(float)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            stride = np.where(spm > 0, sw / spm * 60 / np.where(w > 0, w, np.nan),
-                              np.nan)
+        if "stride_s" in g:
+            stride = pd.to_numeric(g["stride_s"], errors="coerce").to_numpy(float)
+            how = "the stride_s column"
+        else:
+            spm = g["switches_per_min"].to_numpy(float)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                stride = np.where(spm > 0,
+                                  sw / spm * 60 / np.where(w > 0, w, np.nan),
+                                  np.nan)
+            how = "switches_per_min, inverted (this table predates stride_s)"
         ok = np.isfinite(stride)
         if ok.sum() and not np.allclose(stride[ok], stride[ok][0], rtol=1e-3):
             raise SystemExit(
                 f"sub={sub}: the runs being pooled were sampled at different "
-                f"strides ({np.unique(np.round(stride[ok], 3))}). A rate "
-                f"pooled across them is not a rate. Pool only runs of one "
+                f"strides ({np.unique(np.round(stride[ok], 3))}), per {how}. A "
+                f"rate pooled across them is not a rate. Pool only runs of one "
                 f"condition at one aperture.")
         s = float(stride[ok][0]) if ok.sum() else np.nan
 

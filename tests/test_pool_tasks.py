@@ -145,3 +145,69 @@ class TestShape:
         got = tt.pool_tasks(d, K, log=lambda *_: None).iloc[0]
         assert got["task"] == "MOVIE1+MOVIE2"
         assert got["n_runs_pooled"] == 2
+
+
+class TestTheStrideComesFromItsColumn:
+    """`transitions.py` writes `stride_s` into every row. Pooling used to
+    recover it by inverting switches_per_min instead:
+
+        stride = switches / switches_per_min * 60 / n_windows
+
+    which is 0/0 for a subject whose runs record NO switch. That gave a NaN
+    stride, hence NaN mean_dwell_s and switches_per_min, hence two of the
+    three columns the transfer then had to impute -- for a quantity sitting
+    in the frame the whole time.
+    """
+
+    def frozen(self, stride=2.0, column=True):
+        """A subject whose two runs never leave state 0: switches_per_min = 0,
+        so the inversion has nothing to invert."""
+        A = np.zeros((K, K)); A[0, 0] = 20
+        B = np.zeros((K, K)); B[0, 0] = 15
+        d = pd.DataFrame([row_from_counts("S1", "MOVIE1", A, 40, stride),
+                          row_from_counts("S1", "MOVIE2", B, 30, stride)])
+        assert (d["switches_per_min"] == 0).all()
+        if column:
+            d["stride_s"] = stride
+        return d
+
+    def test_a_subject_who_never_switched_still_gets_its_dwell(self):
+        out = tt.pool_tasks(self.frozen(), K, log=lambda *_: None)
+        assert len(out) == 1
+        r = out.iloc[0]
+        assert np.isfinite(r["mean_dwell_s"]), "mean_dwell_s is still NaN"
+        assert np.isfinite(r["switches_per_min"])
+        # 70 windows, one episode per run -> 70 / 2 episodes x 2 s
+        assert r["mean_dwell_s"] == pytest.approx(70 / 2 * 2.0)
+        assert r["switches_per_min"] == pytest.approx(0.0)
+
+    def test_without_the_column_it_is_still_nan(self):
+        """The old behaviour, kept only for a table that predates stride_s."""
+        out = tt.pool_tasks(self.frozen(column=False), K, log=lambda *_: None)
+        assert np.isnan(out.iloc[0]["mean_dwell_s"])
+
+    def test_the_column_wins_over_the_inversion(self):
+        """If the two disagreed, the recorded value is the one that is not a
+        reconstruction."""
+        d, A, B = two_runs()
+        d["stride_s"] = 3.0                      # the rows were built at 1.0
+        out = tt.pool_tasks(d, K, log=lambda *_: None)
+        w = d["n_windows"].sum()
+        sw = (d["switch_rate"] * d["n_transitions"]).sum()
+        assert out.iloc[0]["mean_dwell_s"] == pytest.approx(w / (sw + 2) * 3.0)
+
+    def test_mixed_strides_still_refuse(self):
+        d, _, _ = two_runs()
+        d["stride_s"] = [1.0, 2.0]
+        with pytest.raises(SystemExit) as e:
+            tt.pool_tasks(d, K, log=lambda *_: None)
+        assert "different" in str(e.value) and "stride_s column" in str(e.value)
+
+    def test_a_normal_subject_is_unchanged_by_the_switch(self):
+        """The column and the inversion agree where the inversion works, so
+        nothing about an ordinary subject moves."""
+        d, _, _ = two_runs()
+        without = tt.pool_tasks(d.copy(), K, log=lambda *_: None)
+        with_col = tt.pool_tasks(d.assign(stride_s=1.0), K, log=lambda *_: None)
+        for c in ("mean_dwell_s", "switches_per_min", "entropy_rate_bits"):
+            assert without.iloc[0][c] == pytest.approx(with_col.iloc[0][c])

@@ -688,3 +688,82 @@ class TestTheTrendLine:
         marks = {ln.get_marker() for ax in plt.gcf().axes for ln in ax.get_lines()}
         assert "_" not in marks
         plt.close("all")
+
+
+class TestThePick:
+    """Section 3's selector. The cell used to offer only `E1_MODEL`, so any
+    other choice -- an atlas, an aperture, one state set, the runner-up --
+    meant editing the filter by hand."""
+
+    def cell(self):
+        import json
+        nb = json.load(open(Path(__file__).resolve().parent.parent
+                            / "notebooks" / "13_camcan_to_hcp.ipynb"))
+        return next("".join(c["source"]) for c in nb["cells"]
+                    if c["cell_type"] == "code" and "PICK" in "".join(c["source"]))
+
+    def run(self, d, pick, rank=0):
+        """The cell's logic, over a frame, with display() stubbed."""
+        src = self.cell().replace("PICK = {}", f"PICK = {pick!r}") \
+                         .replace("RANK = 0", f"RANK = {rank}")
+        ns = {"rows": d, "display": lambda *_a, **_k: None, "print": lambda *_a: None}
+        exec(compile(src, "<cell>", "exec"), ns)
+        return ns["best"]
+
+    def test_it_defaults_to_the_best_bstm_row(self, rows):
+        _, d = rows
+        best = self.run(d, {})
+        assert best["tree"] == "bstm"
+        top = d[d["tree"] == "bstm"]
+        clears = top[top["lo"] > top["base_score"]]
+        want = (clears if len(clears) else top)["score"].max()
+        assert best["score"] == want
+
+    def test_pick_a_model(self, rows):
+        _, d = rows
+        assert self.run(d, {"model": "ridge"})["model"] == "ridge"
+
+    def test_pick_an_atlas_and_an_aperture(self, rows):
+        _, d = rows
+        b = self.run(d, {"atlas": "networks", "window_s": 30.0})
+        assert b["atlas"] == "networks" and b["window_s"] == 30.0
+
+    def test_pick_a_panel(self, rows):
+        _, d = rows
+        b = self.run(d, {"task": "rest", "phenotype": "depression"})
+        assert b["task"] == "rest" and b["phenotype"] == "depression"
+
+    def test_rank_walks_down_the_list(self, rows):
+        _, d = rows
+        first, second = self.run(d, {}, 0), self.run(d, {}, 1)
+        assert first["score"] >= second["score"]
+        assert not first.equals(second)
+
+    def test_an_fcm_row_is_never_chosen(self, rows):
+        """Section 3 is about a state set; an fcm row has none to be about."""
+        _, d = rows
+        assert self.run(d, {})["tree"] == "bstm"
+        with pytest.raises(SystemExit) as e:
+            self.run(d, {"tree": "fcm"})
+        assert "nothing left after" in str(e.value)
+
+    def test_an_impossible_pick_says_what_was_available(self, rows):
+        _, d = rows
+        with pytest.raises(SystemExit) as e:
+            self.run(d, {"atlas": "nosuchatlas"})
+        assert "Present at this point" in str(e.value)
+        assert "yeo7" in str(e.value)
+
+    def test_an_unknown_column_names_the_ones_worth_picking_on(self, rows):
+        _, d = rows
+        with pytest.raises(SystemExit) as e:
+            self.run(d, {"nosuchcolumn": 1})
+        assert "model, arm, atlas, window_s, states, task, phenotype" in str(e.value)
+
+    def test_a_rank_past_the_end_is_refused(self, rows):
+        _, d = rows
+        with pytest.raises(SystemExit) as e:
+            self.run(d, {"states": "HMM1_pca3_3", "atlas": "yeo7",
+                         "window_s": -1.0, "arm": "cells", "model": "ridge",
+                         "task": "rest", "phenotype": "anxiety"}, rank=5)
+        assert "only 1 row(s) to choose from" in str(e.value)
