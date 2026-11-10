@@ -84,6 +84,69 @@ def test_every_module_a_notebook_imports_is_importable(nb):
 
 
 @pytest.mark.parametrize("nb", NOTEBOOKS, ids=lambda p: p.stem)
+def test_the_setup_cell_runs_the_way_a_kernel_runs_it(nb):
+    """From `notebooks/`, with the package NOT already importable.
+
+    THIS IS THE TEST THAT WAS MISSING. A Jupyter kernel starts with
+    sys.path[0] = the notebook's own directory, so `import fmri_decomposition`
+    fails from notebooks/ unless the cell puts the repo root on the path --
+    and the package is not pip-installed inside the analysis image. That line
+    was removed along with the `notebooks/` entry beside it, which was the
+    actual hack, and every notebook broke at cell 1 while
+    `test_every_module_a_notebook_imports_is_importable` stayed green: that
+    one runs from the repo root, where the import works for free.
+
+    So this runs the real cell, in a subprocess, with cwd=notebooks/ and the
+    repo root removed from the inherited path -- the kernel's conditions.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    src = code_cells(nb)[0]
+    # Everything up to the first non-import, non-assignment line: the setup,
+    # not the analysis, which would need the real output tree.
+    keep, lines = [], src.splitlines()
+    for ln in lines:
+        if ln.startswith(("import ", "from ", "#", " ", ")", "]", "}")) or \
+                not ln.strip() or "=" in ln.split("#")[0]:
+            keep.append(ln)
+        else:
+            break
+    setup = "\n".join(keep)
+    assert "import" in setup, f"{nb.name}: no imports found in cell 1"
+
+    out = subprocess.run(
+        [sys.executable, "-c", setup],
+        cwd=str(REPO / "notebooks"), capture_output=True, text=True,
+        # PYTHONPATH emptied AND -c run from notebooks/, so the only way the
+        # package is found is the cell's own bootstrap.
+        env={**{k: v for k, v in __import__("os").environ.items()
+                if k != "PYTHONPATH"},
+             "MPLBACKEND": "Agg"})
+    assert "No module named 'fmri_decomposition'" not in out.stderr, (
+        f"{nb.name} cannot import the package from notebooks/ -- its setup "
+        f"cell needs the repo root on sys.path:\n{out.stderr[-600:]}")
+    # Anything else that goes wrong here is about data or a missing optional
+    # dependency, which this test is not about.
+    if out.returncode != 0:
+        bad = ("ModuleNotFoundError: No module named 'fmri_decomposition",
+               "ImportError: cannot import name")
+        for b in bad:
+            assert b not in out.stderr, f"{nb.name}:\n{out.stderr[-600:]}"
+
+
+@pytest.mark.parametrize("nb", NOTEBOOKS, ids=lambda p: p.stem)
+def test_every_notebook_puts_the_repo_root_on_the_path(nb):
+    """Explicitly, because the subprocess test above can only prove the
+    import worked -- not that it worked for the right reason. An installed
+    copy of the package in the test environment would hide a missing
+    bootstrap."""
+    first = code_cells(nb)[0]
+    assert "sys.path.insert(0, str(REPO))" in first, nb.name
+
+
+@pytest.mark.parametrize("nb", NOTEBOOKS, ids=lambda p: p.stem)
 def test_no_notebook_still_inserts_the_old_sys_path(nb):
     """`sys.path.insert(... "notebooks")` was how these modules used to be
     importable. A leftover one hides a real ImportError behind a path that
@@ -196,3 +259,47 @@ class TestPipingToHeadIsNotAnError:
         src = (REPO / "fmri_decomposition" / "cli.py").read_text()
         i = src.index("def main(")
         assert "except BrokenPipeError" in src[i:]
+
+
+class TestNoNotebookBuildsATreePathByHand:
+    """Five sites across three notebooks read the pre-split locations after
+    the reorganisation, and found nothing without complaining.
+
+    `root / "meta" / "cohorts"`, `ROOT / "transitions"`, `ROOT /
+    f"{tree}_selection"` -- each one is an assertion about where a tree
+    starts, written where nobody would look for it. The whole point of
+    io.tree_root is that the shape is stated once.
+    """
+
+    STEMS = ("activation", "dfc", "latents", "transitions", "static_fc",
+             "censor", "bstm_selection", "fcm_selection",
+             "transferred_models", "contextualization")
+
+    @pytest.mark.parametrize("nb", NOTEBOOKS, ids=lambda p: p.stem)
+    def test_it_goes_through_io(self, nb):
+        import re
+
+        bad = []
+        for i, src in enumerate(code_cells(nb)):
+            for ln in src.splitlines():
+                code = ln.split("#")[0]
+                if "tree_root" in code or "meta_dir" in code:
+                    continue
+                for stem in self.STEMS:
+                    # `<something> / "<stem>"` or `/ f"{x}_selection"`.
+                    if re.search(rf'/\s*f?"{stem}"', code) or \
+                            re.search(r'/\s*f"\{\w+\}_selection"', code):
+                        bad.append(f"cell{i}: {ln.strip()}")
+                        break
+        assert not bad, (
+            f"{nb.name} builds a tree path by hand; use io.tree_root or "
+            f"io.meta_dir:\n  " + "\n  ".join(bad))
+
+    @pytest.mark.parametrize("nb", NOTEBOOKS, ids=lambda p: p.stem)
+    def test_nor_the_old_flat_meta(self, nb):
+        for i, src in enumerate(code_cells(nb)):
+            for ln in src.splitlines():
+                code = ln.split("#")[0]
+                if "meta_dir" in code:
+                    continue
+                assert '/ "meta"' not in code, f"{nb.name} cell{i}: {ln.strip()}"
