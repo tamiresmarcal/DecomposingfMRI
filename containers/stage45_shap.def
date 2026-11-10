@@ -79,12 +79,61 @@ From: rocker/r-ver:4.4.1
     # version.
     cat /etc/os-release | head -2
 
-    apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-dev python3-venv python3-pip \
-        build-essential gfortran git curl ca-certificates \
-        libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev \
-        libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev \
-        libtiff-dev libjpeg-dev
+    # APT, WITH RETRIES AND A HARD CHECK THAT THE INDEX ARRIVED.
+    #
+    # `apt-get update` WARNS and exits 0 when it cannot fetch one repository's
+    # index: "Some index files failed to download. They have been ignored, or
+    # old ones used instead." A real build on this cluster lost the BASE jammy
+    # index that way (jammy-updates, -backports and -security all arrived), and
+    # since build-essential and libfontconfig1-dev live in the base pocket, the
+    # failure surfaced at `install` as "has no installation candidate" -- which
+    # reads like a wrong package name, forty minutes of unpack and fifteen more
+    # of downloading later.
+    #
+    # So: retries on every fetch, and then `apt-get indextargets` is asked
+    # whether the base suite is actually present. If it is not, this stops HERE
+    # with the real reason, in seconds, instead of reporting a missing package.
+    APT_RETRY="-o Acquire::Retries=5 -o Acquire::http::Timeout=30"
+    for attempt in 1 2 3; do
+        apt-get $APT_RETRY update && break
+        echo "apt-get update failed (attempt ${attempt}/3); retrying in 20s"
+        sleep 20
+    done
+
+    APT_PKGS="python3 python3-dev python3-venv python3-pip
+              build-essential gfortran git curl ca-certificates
+              libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev
+              libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev
+              libtiff-dev libjpeg-dev"
+
+    # ASK APT THE QUESTION DIRECTLY, with --simulate: can every one of these be
+    # resolved? It downloads nothing and takes a second, and it is the actual
+    # question -- `apt-get indextargets` lists the targets apt is CONFIGURED
+    # with whether or not their index came down, so it answers a different
+    # one and would have passed on the very failure this exists for.
+    if ! apt-get install -y --no-install-recommends --simulate $APT_PKGS \
+            >/dev/null 2>&1; then
+        echo "ERROR: apt cannot resolve the build dependencies." >&2
+        echo >&2
+        apt-get install -y --no-install-recommends --simulate $APT_PKGS 2>&1 \
+            | tail -20 >&2
+        echo >&2
+        echo "       Almost always a repository index that did not download." >&2
+        echo "       \`apt-get update\` WARNS and exits 0 when one fails" >&2
+        echo "       ('Some index files failed to download. They have been" >&2
+        echo "       ignored'), and build-essential and libfontconfig1-dev" >&2
+        echo "       live in the BASE pocket -- so losing that one index" >&2
+        echo "       makes them read as wrong package names. Scroll up for a" >&2
+        echo "       'Failed to fetch' line to confirm." >&2
+        echo >&2
+        echo "       This is the mirror being unreachable from the build" >&2
+        echo "       host, not a problem with this definition. Retry; if it" >&2
+        echo "       persists, build where there is a working route to the" >&2
+        echo "       Ubuntu archive and copy the .sif over." >&2
+        exit 1
+    fi
+
+    apt-get $APT_RETRY install -y --no-install-recommends $APT_PKGS
     rm -rf /var/lib/apt/lists/*
 
     # ---- Python. A venv at a fixed path so PYTHONPATH leaking in from the
