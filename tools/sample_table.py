@@ -24,8 +24,9 @@ a cohort added later appears on the next run with nothing to edit here:
 The censor policy is read from the fit itself (decompose's description), so
 the table describes the QC the states were actually fitted under.
 
-Condition is `rest` when the task name matches --rest-pattern (default: any
-task containing "rest", any case), otherwise `movie`.
+Condition is `rest` when the task name STARTS with --rest-pattern (default
+"rest", any case: Rest, REST1), otherwise `movie`. Anchored on purpose: a
+film called "The Prestige" contains "rest".
 """
 from __future__ import annotations
 
@@ -48,6 +49,11 @@ from fmri_decomposition.io import (censor_root, default_output_root,  # noqa: E4
 #: printed under its directory name -- add a line rather than editing the table.
 LABELS = {"ds002837": "NNDb", "cneuromod": "CNeuroMod Friends",
           "camcan": "Cam-CAN", "hcp7t_fix": "HCP 7T"}
+
+#: Each cohort's role in the SUPERVISED analysis (the unsupervised role --
+#: train or projected -- is read from the latents). A cohort not listed takes
+#: no part in the supervised models.
+SUPERVISED_ROLES = {"camcan": "discovery", "hcp7t_fix": "external test"}
 
 
 def hive(path: Path, key: str) -> str:
@@ -86,7 +92,7 @@ def build(root: Path, atlas: str, window_s: str, rest_pattern: str,
           cohorts: list | None) -> pd.DataFrame:
     policy, files = fit_policy(root, atlas, window_s)
     cfgs = cohort_configs()
-    is_rest = re.compile(rest_pattern, re.I)
+    is_rest = re.compile(rf"^(?:{rest_pattern})", re.I)
 
     lat = []
     for f in files:
@@ -121,7 +127,8 @@ def build(root: Path, atlas: str, window_s: str, rest_pattern: str,
         tasks = sorted(g["task"].unique())
         row = dict(cohort=LABELS.get(cohort, cohort), cohort_dir=cohort,
                    condition=cond,
-                   role=(g["role"].iloc[0] if "role" in g else ""),
+                   unsupervised=(g["role"].iloc[0] if "role" in g else ""),
+                   supervised=SUPERVISED_ROLES.get(cohort, "--"),
                    tasks=len(tasks), TR_s=tr_of(cfg, tasks),
                    space=cfg.get("space", ""),
                    final=g["sub"].nunique(), windows=len(g))
@@ -137,18 +144,22 @@ def build(root: Path, atlas: str, window_s: str, rest_pattern: str,
                         .str.extract(r"^\|?([a-z_]+)")[0].value_counts())
             row["exclusion_reasons"] = "; ".join(f"{k} ({v})"
                                                  for k, v in reasons.items())
-            if "mean_fd" in c:
-                fd = c.loc[c["keep"]].groupby("sub")["mean_fd"].mean()
-                row["mean_fd"] = f"{fd.mean():.3f} ({fd.std():.3f})"
+            fd = (c.loc[c["keep"]].groupby("sub")["mean_fd"].mean().dropna()
+                  if "mean_fd" in c else pd.Series(dtype=float))
+            row["mean_fd"] = (f"{fd.mean():.3f} ({fd.std():.3f})" if len(fd)
+                              else "--")
+            if not len(fd):
+                print(f"  note: no mean_fd for {cohort}/{cond}; censor "
+                      f"columns: {sorted(c.columns)}")
         rows.append(row)
 
     out = pd.DataFrame(rows)
-    order = ["cohort", "condition", "role", "tasks", "TR_s", "space",
+    order = ["cohort", "condition", "unsupervised", "supervised", "tasks", "TR_s", "space",
              "scanned", "excluded", "final", "windows", "mean_fd",
              "exclusion_reasons", "cohort_dir"]
     out = out[[c for c in order if c in out]]
     out.attrs.update(policy=policy, atlas=atlas, window_s=window_s)
-    return out.sort_values(["role", "cohort", "condition"],
+    return out.sort_values(["unsupervised", "cohort", "condition"],
                            ascending=[False, True, True]).reset_index(drop=True)
 
 
@@ -185,7 +196,8 @@ def to_latex(t: pd.DataFrame) -> str:
             return "--"
         return str(v).replace("_", r"\_").replace("&", r"\&")
 
-    cols = [("cohort", "Cohort"), ("condition", "Condition"), ("role", "Role"),
+    cols = [("cohort", "Cohort"), ("condition", "Condition"),
+            ("unsupervised", "Unsupervised"), ("supervised", "Supervised"),
             ("tasks", "Runs"), ("TR_s", "TR (s)"), ("scanned", "Scanned"),
             ("excluded", "Excluded"), ("final", "Final $n$"),
             ("windows", "Windows"), ("mean_fd", "Mean FD (s.d.), mm")]
@@ -194,9 +206,13 @@ def to_latex(t: pd.DataFrame) -> str:
              r"\caption{Samples, acquisition and quality control. "
              + t.attrs.get("policy_text", "") +
              f" Windows: {t.attrs.get('window_s')}-s windows entering the "
-             r"brain-state analysis.}",
+             r"brain-state analysis. Unsupervised: role in the estimation of "
+             r"brain states (train, used to fit the model; projected, "
+             r"labelled by the fitted model only). Supervised: role in the "
+             r"brain state transition model (discovery, cross-validated "
+             r"models; external test, out-of-cohort transfer).}",
              r"\label{tab:samples}",
-             r"\begin{tabular}{" + "l" * 3 + "r" * (len(cols) - 3) + "}",
+             r"\begin{tabular}{" + "l" * 4 + "r" * (len(cols) - 4) + "}",
              r"\toprule", " & ".join(h for _, h in cols) + r" \\", r"\midrule"]
     for _, r in t.iterrows():
         lines.append(" & ".join(cell(r[k]) if k != "windows"
