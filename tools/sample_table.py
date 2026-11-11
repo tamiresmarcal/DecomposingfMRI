@@ -5,8 +5,9 @@
     apptainer exec --bind /project,/scratch,/home --pwd $PWD $FMRIDECOMP_SIF45 \
         python3 tools/sample_table.py -o figures/supplementary/sample_table
 
-writes <out>.csv (every number, for checking) and <out>.tex (a booktabs table
-to paste into the manuscript). Read-only on outputs/.
+writes <out>.csv (every number, for checking) and <out>.tex (a booktabs table,
+scaled to the text width, to paste into supplementary.tex; it needs the
+booktabs and graphicx packages). Read-only on outputs/.
 
 ONE ROW PER (cohort, condition). Everything is rebuilt from what is on disk, so
 a cohort added later appears on the next run with nothing to edit here:
@@ -212,13 +213,14 @@ def to_latex(t: pd.DataFrame) -> str:
              r"brain state transition model (discovery, cross-validated "
              r"models; external test, out-of-cohort transfer).}",
              r"\label{tab:samples}",
+             r"\resizebox{\textwidth}{!}{%",
              r"\begin{tabular}{" + "l" * 4 + "r" * (len(cols) - 4) + "}",
              r"\toprule", " & ".join(h for _, h in cols) + r" \\", r"\midrule"]
     for _, r in t.iterrows():
         lines.append(" & ".join(cell(r[k]) if k != "windows"
                                 else f"{int(r[k]):,}".replace(",", "{,}")
                                 for k, _ in cols) + r" \\")
-    lines += [r"\bottomrule", r"\end{tabular}", r"\end{table}"]
+    lines += [r"\bottomrule", r"\end{tabular}}", r"\end{table}"]
     return "\n".join(lines) + "\n"
 
 
