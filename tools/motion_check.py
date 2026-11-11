@@ -49,11 +49,14 @@ def via_pipeline(cfg) -> pd.DataFrame:
     return m[["sub", "task", "mean_fd"]] if "mean_fd" in m else pd.DataFrame()
 
 
-def via_files(cfg) -> pd.DataFrame:
-    root = Path(cfg.derivatives_root)
+def via_files(cfg, roots=None) -> pd.DataFrame:
     pat = cfg.confounds.confounds_glob or "*desc-confounds_timeseries.tsv"
-    files = sorted(root.rglob(pat))
-    print(f"[route 2] {len(files)} confounds file(s) matching {pat!r} under {root}")
+    files = []
+    for root in [Path(r) for r in (roots or [cfg.derivatives_root])]:
+        hit = sorted(root.rglob(pat))
+        print(f"[route 2] {len(hit)} confounds file(s) matching {pat!r} under "
+              f"{root}{'' if root.exists() else '  (DOES NOT EXIST)'}")
+        files += hit
     col = cfg.confounds.fd_column or "framewise_displacement"
     rows = []
     for f in files:
@@ -93,12 +96,16 @@ def main(argv=None) -> None:
     p.add_argument("--atlas", default="harvardoxford")
     p.add_argument("--window-s", default="30")
     p.add_argument("--output-root", default=None)
+    p.add_argument("--roots", nargs="+", default=None,
+                   help="fMRIPrep output trees to search instead of the "
+                        "config's derivatives_root -- e.g. the two original "
+                        "trees behind Cam-CAN's merged symlink view")
     a = p.parse_args(argv)
 
     cfg = load_config(a.config)
-    m = via_pipeline(cfg)
+    m = pd.DataFrame() if a.roots else via_pipeline(cfg)
     if m.empty or m["mean_fd"].notna().sum() == 0:
-        m = via_files(cfg)
+        m = via_files(cfg, a.roots)
     if m.empty:
         raise SystemExit("no FD found by either route; see the messages above")
     m["sub"] = m["sub"].astype(str).str.replace(r"^sub-", "", regex=True)
