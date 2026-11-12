@@ -118,7 +118,7 @@ REQS
     # instead of quietly reinstalling numpy under hmmlearn and numba.
     /opt/venv/bin/pip install --no-cache-dir -c /opt/requirements.txt \
         "neuromaps==0.0.5" \
-        "nimare==0.4.0" \
+        "nimare==0.22.1" \
         || echo "WARNING: neuromaps/nimare failed; figure 1 decoding will need them"
 
     # umap-learn pulls tensorflow-dependent ParametricUMAP at import if TF is

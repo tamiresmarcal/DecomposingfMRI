@@ -545,41 +545,39 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
                                  threshold: float = 0.001,
                                  labels: np.ndarray | None = None,
                                  key: str = "brainnetome") -> pd.DataFrame:
-    """Parcels x BrainMap categories, from Neurosynth (forward inference).
+    """Parcels x BrainMap categories from Neurosynth, by NiMARE's BrainMap decoder.
 
-    The regional behavioural analysis of BrainMap (Lancaster et al. 2012), run
-    on Neurosynth's studies: do the studies of a category report activation in
-    this parcel more often than studies in general? A study "activates" a
-    parcel when one of its peaks lies inside it or, failing that, when the
-    nearest parcel is within `radius_mm`. For category c with n studies, k of
-    which activate parcel r, against the base rate p0 of all studies
-    activating r: z = (k - n p0) / sqrt(n p0 (1 - p0)), the normal
-    approximation of the binomial test that analysis uses.
+    The regional behavioural analysis of BrainMap (Lancaster et al. 2012), as
+    implemented by the Neurosynth team in NiMARE (Salo et al. 2023;
+    `nimare.decode.discrete.brainmap_decode`), run on Neurosynth v7. For each
+    parcel, the studies with a peak in it (or, outside every parcel, whose
+    nearest parcel is within `radius_mm`) are the selection, and the decoder
+    returns, per category, the one-sided binomial forward test of enrichment
+    (`zForward`, >= 0). That z is the parcel's value.
 
-    `labels` is the parcellation to count in: an int volume on `ref`, 0 =
-    none, 1..P = parcel. PASS THE STATES' OWN ATLAS (`Parcellator.label_volume`)
-    so the profiles are counted in the very parcels the states are, with no
-    second atlas in between. Omitted, it falls back to the 246 Brainnetome
-    subregions (Fan et al. 2016, who ran the same analysis on BrainMap's
-    database), the earlier behaviour. The table's first column is `parcel`
-    (1..P), plus `bn_index` when the labels are Brainnetome's.
+    A category is a set of Neurosynth terms; a study carries it when any of
+    them has tf-idf >= `threshold` (NiMARE's frequency threshold).
 
-    `taxonomy` picks the categories: "brainmap" (BrainMap's) or "beam2021"
-    (Beam et al. 2021's data-driven domains).
-    Cached as neurosynth/<key>_neurosynth_<taxonomy>.csv; delete to recompute.
+    `labels` is the parcellation to count in: an int volume on `ref`, 0 = none,
+    1..P = parcel. Pass the states' own atlas (`Parcellator.label_volume`).
+    Omitted, it falls back to the 246 Brainnetome subregions. The table's
+    first column is `parcel` (1..P), plus `bn_index` for Brainnetome.
+    Cached as neurosynth/<key>_nimare_<taxonomy>.csv; delete to recompute.
     """
     import scipy.sparse as sp
+    from nimare.decode.discrete import brainmap_decode
     from scipy.ndimage import distance_transform_edt
 
     nsd = Path(data) / "neurosynth"
     if taxonomy not in TAXONOMIES:
         raise SystemExit(f"taxonomy must be one of {sorted(TAXONOMIES)}, got {taxonomy!r}")
     label, categories = TAXONOMIES[taxonomy]
-    cache = nsd / f"{key}_neurosynth_{taxonomy}.csv"
+    source = (f"Neurosynth v7, NiMARE BrainMap decoder (zForward), {label} taxonomy, "
+              f"counted in {key} parcels")
+    cache = nsd / f"{key}_nimare_{taxonomy}.csv"
     if cache.exists():
         out = pd.read_csv(cache)
-        out.attrs["source"] = (f"Neurosynth v7 forward inference (z), {label} taxonomy, "
-                               f"counted in {key} parcels")
+        out.attrs["source"] = source
         return out
     pre = nsd / "data-neurosynth_version-7_"
     if not (nsd / "data-neurosynth_version-7_coordinates.tsv.gz").exists():
@@ -606,35 +604,35 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     peak_lab = np.zeros(len(xyz), dtype=int)
     peak_lab[inside] = near[ijk[inside, 0], ijk[inside, 1], ijk[inside, 2]]
 
-    study = {sid: i for i, sid in enumerate(meta["id"])}
-    rows = coords["id"].map(study).to_numpy()
-    ok = peak_lab > 0
-    A = sp.csr_matrix((np.ones(ok.sum()), (rows[ok], peak_lab[ok] - 1)),
-                      shape=(len(meta), n_parcels))
-    A.data[:] = 1.0                                     # study x region, 0/1
-    act = (A > 0).astype(float)
-    p0 = np.asarray(act.mean(0)).ravel()                # base rate per region
-
-    out = pd.DataFrame({"parcel": np.arange(1, n_parcels + 1)})
-    if key == "brainnetome":
-        out["bn_index"] = out["parcel"]
+    # Annotations: one column per category, the max tf-idf over its terms, so
+    # ">= threshold" is "any of its terms passes" in the decoder's own binarizing.
+    ann = pd.DataFrame({"id": meta["id"].to_numpy()})
     n_studies = {}
     for cat, terms in categories.items():
         cols = [vocab.index(t) for t in terms if t in vocab]
         if not cols:
             continue
-        member = np.asarray((feats[:, cols] > threshold).sum(1)).ravel() > 0
-        n = int(member.sum())
-        k = np.asarray(act[member].sum(0)).ravel()
-        with np.errstate(invalid="ignore", divide="ignore"):
-            z = (k - n * p0) / np.sqrt(n * p0 * (1 - p0))
-        out[cat] = np.nan_to_num(z)
-        n_studies[cat] = n
+        ann[cat] = np.asarray(feats[:, cols].max(axis=1).todense()).ravel()
+        n_studies[cat] = int((ann[cat] >= threshold).sum())
+    cats = list(n_studies)
+    foci = coords[["id"]].copy()
+
+    out = pd.DataFrame({"parcel": np.arange(1, n_parcels + 1)})
+    if key == "brainnetome":
+        out["bn_index"] = out["parcel"]
+    z = np.zeros((n_parcels, len(cats)))
+    for r in range(1, n_parcels + 1):
+        ids = sorted(set(coords["id"].to_numpy()[peak_lab == r]))
+        if not ids:
+            continue
+        res = brainmap_decode(foci, ann, ids, features=cats,
+                              frequency_threshold=threshold, correction=None)
+        z[r - 1] = res.reindex(cats)["zForward"].to_numpy(float)
+    out[cats] = np.nan_to_num(z)
     out.to_csv(cache, index=False)
     pd.Series(n_studies, name="n_studies").to_csv(
-        nsd / f"{key}_neurosynth_{taxonomy}_n_studies.csv")
-    out.attrs["source"] = (f"Neurosynth v7 forward inference (z), {label} taxonomy, "
-                           f"counted in {key} parcels")
+        nsd / f"{key}_nimare_{taxonomy}_n_studies.csv")
+    out.attrs["source"] = source
     return out
 
 
