@@ -9,8 +9,8 @@ For each state atlas, the states' mean per parcel is correlated across parcels
 with every reference map, parcellated into the same parcels:
 
     molecular            19 PET receptor/transporter maps (neuromaps / Hansen 2022)
-    behavioural_domain   BrainMap's 5 domains over Brainnetome      } one table,
-    behavioural          BrainMap's subcategories over Brainnetome  } two depths
+    behavioural_domain   BrainMap's 5 domains        } one Neurosynth table, counted
+    behavioural          BrainMap's subcategories    } in the states' own parcels
     yeo7                 Yeo 2011's 7 networks
     networks14           this repo's 14 coordinate networks
 
@@ -438,20 +438,29 @@ def _all_subjects(paths) -> set:
 
 # ------------------------------------------------------------- reference ---
 def reference_families(data: Path, ref, families, behavioural_csv=None, seed: int = 7,
-                       taxonomy: str = "brainmap") -> dict:
-    """Voxel-level reference maps for the families asked for, built once and
-    shared across atlases (the PET resampling is the slow part)."""
+                       taxonomy: str = "brainmap", parc=None, atlas: str | None = None) -> dict:
+    """Voxel-level reference maps for the families asked for.
+
+    The molecular and network families are atlas-free and built once. The
+    behavioural profiles from Neurosynth are NOT: they are counted in the
+    parcels of the atlas the states live in, so pass that atlas's
+    `Parcellator` (and its name, for the cache) -- one atlas end to end, no
+    Brainnetome in between. Without `parc` they fall back to Brainnetome.
+    """
     out = {}
     if "molecular" in families:
         out["molecular"] = rm.receptor_maps(data, ref)
     if {"behavioural", "behavioural_domain"} & set(families):
+        labels = parc.label_volume() if parc is not None else None
         if behavioural_csv == "neurosynth":
-            table = rm.neurosynth_behavioural_table(data, ref, taxonomy)
+            table = rm.neurosynth_behavioural_table(
+                data, ref, taxonomy, labels=labels,
+                key=atlas if parc is not None else "brainnetome")
         elif behavioural_csv:
-            table = rm.load_behavioural_table(behavioural_csv)
+            table, labels = rm.load_behavioural_table(behavioural_csv), None
         else:
-            table = None
-        leaves = rm.behavioural_maps(data, ref, table, seed=seed)
+            table, labels = None, None
+        leaves = rm.behavioural_maps(data, ref, table, seed=seed, labels=labels)
         if "behavioural" in families:
             out["behavioural"] = leaves
         if "behavioural_domain" in families:
@@ -484,7 +493,9 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
     out = Path(out)
     families = [f for f in FAMILIES if f in families]
     ref = rm.reference_grid(data)
-    refs = reference_families(data, ref, families, behavioural_csv, seed, taxonomy)
+    behav = {"behavioural", "behavioural_domain"}
+    common = reference_families(data, ref, [f for f in families if f not in behav],
+                                behavioural_csv, seed, taxonomy)
     subcort = rm.subcortical_structures(data, ref)
     label = "simulated" if states == "simulate" else Path(states).stem
     if window_s is not None and states != "simulate" and Path(states).suffix != ".csv":
@@ -496,6 +507,11 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
     for atlas in atlases:
         spec, src = rm.state_atlas(atlas, data)
         parc = rm.Parcellator.build(spec, ref)
+        refs = dict(common)
+        if behav & set(families):
+            refs.update(reference_families(data, ref, [f for f in families if f in behav],
+                                           behavioural_csv, seed, taxonomy,
+                                           parc=parc, atlas=atlas))
         d = Path(out) / label / atlas
         d.mkdir(parents=True, exist_ok=True)
 

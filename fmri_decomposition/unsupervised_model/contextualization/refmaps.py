@@ -542,20 +542,31 @@ _ICBM_SPM2TAL = np.array([[0.9254, 0.0024, -0.0118, -1.0207],
 
 def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
                                  radius_mm: float = 6.0,
-                                 threshold: float = 0.001) -> pd.DataFrame:
-    """Brainnetome x BrainMap categories, from Neurosynth instead of BrainMap.
+                                 threshold: float = 0.001,
+                                 labels: np.ndarray | None = None,
+                                 key: str = "brainnetome") -> pd.DataFrame:
+    """Parcels x BrainMap categories, from Neurosynth (forward inference).
 
-    Same question Fan et al. 2016 asked of BrainMap (forward inference): do
-    the studies of a category report activation in this subregion more often
-    than studies in general? A study "activates" a subregion when one of its
-    peaks lies inside it or within `radius_mm` of it. For category c with n
-    studies, k of which activate region r, against the base rate p0 of all
-    studies activating r: z = (k - n p0) / sqrt(n p0 (1 - p0)), the normal
-    approximation of the binomial test BrainMap's behavioural analysis uses.
+    The regional behavioural analysis of BrainMap (Lancaster et al. 2012), run
+    on Neurosynth's studies: do the studies of a category report activation in
+    this parcel more often than studies in general? A study "activates" a
+    parcel when one of its peaks lies inside it or, failing that, when the
+    nearest parcel is within `radius_mm`. For category c with n studies, k of
+    which activate parcel r, against the base rate p0 of all studies
+    activating r: z = (k - n p0) / sqrt(n p0 (1 - p0)), the normal
+    approximation of the binomial test that analysis uses.
 
-    `taxonomy` picks the categories: "brainmap" (BrainMap's, as Brainnetome
-    reports them) or "beam2021" (Beam et al. 2021's data-driven domains).
-    Cached as neurosynth/brainnetome_neurosynth_<taxonomy>.csv; delete to recompute.
+    `labels` is the parcellation to count in: an int volume on `ref`, 0 =
+    none, 1..P = parcel. PASS THE STATES' OWN ATLAS (`Parcellator.label_volume`)
+    so the profiles are counted in the very parcels the states are, with no
+    second atlas in between. Omitted, it falls back to the 246 Brainnetome
+    subregions (Fan et al. 2016, who ran the same analysis on BrainMap's
+    database), the earlier behaviour. The table's first column is `parcel`
+    (1..P), plus `bn_index` when the labels are Brainnetome's.
+
+    `taxonomy` picks the categories: "brainmap" (BrainMap's) or "beam2021"
+    (Beam et al. 2021's data-driven domains).
+    Cached as neurosynth/<key>_neurosynth_<taxonomy>.csv; delete to recompute.
     """
     import scipy.sparse as sp
     from scipy.ndimage import distance_transform_edt
@@ -564,10 +575,11 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     if taxonomy not in TAXONOMIES:
         raise SystemExit(f"taxonomy must be one of {sorted(TAXONOMIES)}, got {taxonomy!r}")
     label, categories = TAXONOMIES[taxonomy]
-    cache = nsd / f"brainnetome_neurosynth_{taxonomy}.csv"
+    cache = nsd / f"{key}_neurosynth_{taxonomy}.csv"
     if cache.exists():
         out = pd.read_csv(cache)
-        out.attrs["source"] = f"Neurosynth v7 forward inference (z), {label} taxonomy"
+        out.attrs["source"] = (f"Neurosynth v7 forward inference (z), {label} taxonomy, "
+                               f"counted in {key} parcels")
         return out
     pre = nsd / "data-neurosynth_version-7_"
     if not (nsd / "data-neurosynth_version-7_coordinates.tsv.gz").exists():
@@ -577,12 +589,15 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     feats = sp.load_npz(f"{pre}vocab-terms_source-abstract_type-tfidf_features.npz").tocsc()
     vocab = open(f"{pre}vocab-terms_vocabulary.txt").read().strip().split("\n")
 
-    # Peaks to MNI, then to the nearest Brainnetome label within radius_mm.
+    # Peaks to MNI, then to the nearest label within radius_mm.
     space = coords["id"].map(meta.set_index("id")["space"])
     xyz = coords[["x", "y", "z"]].to_numpy(float)
     tal = (space == "TAL").to_numpy()
     xyz[tal] = nib.affines.apply_affine(np.linalg.inv(_ICBM_SPM2TAL), xyz[tal])
-    lab = brainnetome_labels(data, ref).reshape(ref.shape[:3])
+    if labels is None:
+        labels = brainnetome_labels(data, ref)
+    lab = np.asarray(labels).astype(int).reshape(ref.shape[:3])
+    n_parcels = int(lab.max())
     dist, idx = distance_transform_edt(lab == 0, return_indices=True,
                                        sampling=np.abs(np.diag(ref.affine)[:3]))
     near = np.where(dist <= radius_mm, lab[tuple(idx)], 0)
@@ -595,12 +610,14 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     rows = coords["id"].map(study).to_numpy()
     ok = peak_lab > 0
     A = sp.csr_matrix((np.ones(ok.sum()), (rows[ok], peak_lab[ok] - 1)),
-                      shape=(len(meta), 246))
+                      shape=(len(meta), n_parcels))
     A.data[:] = 1.0                                     # study x region, 0/1
     act = (A > 0).astype(float)
     p0 = np.asarray(act.mean(0)).ravel()                # base rate per region
 
-    out = pd.DataFrame({"bn_index": np.arange(1, 247)})
+    out = pd.DataFrame({"parcel": np.arange(1, n_parcels + 1)})
+    if key == "brainnetome":
+        out["bn_index"] = out["parcel"]
     n_studies = {}
     for cat, terms in categories.items():
         cols = [vocab.index(t) for t in terms if t in vocab]
@@ -615,8 +632,9 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
         n_studies[cat] = n
     out.to_csv(cache, index=False)
     pd.Series(n_studies, name="n_studies").to_csv(
-        nsd / f"brainnetome_neurosynth_{taxonomy}_n_studies.csv")
-    out.attrs["source"] = f"Neurosynth v7 forward inference (z), {label} taxonomy"
+        nsd / f"{key}_neurosynth_{taxonomy}_n_studies.csv")
+    out.attrs["source"] = (f"Neurosynth v7 forward inference (z), {label} taxonomy, "
+                           f"counted in {key} parcels")
     return out
 
 
@@ -631,13 +649,26 @@ def load_behavioural_table(path: Path) -> pd.DataFrame:
 
 
 def behavioural_maps(data: Path, ref, table: pd.DataFrame | None = None,
-                     seed: int = 0) -> ReferenceMaps:
-    bn = brainnetome_table(data)
+                     seed: int = 0, labels: np.ndarray | None = None) -> ReferenceMaps:
+    """The table painted onto voxels by the labels it was counted in.
+
+    With `labels` (the states' own atlas) the table must have a `parcel`
+    column, and parcellating the painted maps with the same atlas gives back
+    each parcel's value exactly. Without, the labels are Brainnetome's and the
+    table is keyed by `bn_index` (Fan et al.'s table, or the simulation).
+    """
     simulated = table is None
     if simulated:
-        table = simulate_behavioural_table(bn, seed=seed)
+        table = simulate_behavioural_table(brainnetome_table(data), seed=seed)
     cats = [c for c in table.columns if "." in c or c in ("Action", "Cognition", "Emotion",
                                                            "Interoception", "Perception")]
+    if labels is not None:
+        lab = np.asarray(labels).astype(int).reshape(-1)
+        lut = np.full((int(lab.max()) + 1, len(cats)), np.nan)
+        lut[table["parcel"].to_numpy(int)] = table[cats].to_numpy(float)
+        vox = lut[lab].T
+        return ReferenceMaps("behavioural", cats, vox, simulated=False,
+                             source=table.attrs.get("source", "Neurosynth v7 forward inference"))
     lut = np.full((247, len(cats)), np.nan)
     lut[table["bn_index"].to_numpy(int)] = table[cats].to_numpy(float)
     lab = brainnetome_labels(data, ref)

@@ -508,7 +508,7 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
 
     Each cell is the spatial correlation, across the atlas's parcels, between
     one map of `rows` (e.g. a Yeo network) and one of `cols` (e.g. a BrainMap
-    subcategory's Neurosynth activation profile on Brainnetome). Stars: the
+    subcategory's Neurosynth activation profile, counted in the same parcels). Stars: the
     same spatial null as the state figures -- surrogates of the column map
     that keep its spatial autocorrelation -- BH over the whole matrix.
     Writes reference_matrix_<atlas>_<rows>_x_<cols>.{png,csv}.
@@ -524,9 +524,10 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
     data = Path(data) if data is not None else require_reference_maps()
     out = Path(out) if out is not None else Path.cwd() / "reference_matrix"
     ref = rm.reference_grid(data)
-    refs = reference_families(data, ref, [rows, cols], behavioural_csv, seed, taxonomy)
     spec, src = rm.state_atlas(atlas, data)
     parc = rm.Parcellator.build(spec, ref)
+    refs = reference_families(data, ref, [rows, cols], behavioural_csv, seed, taxonomy,
+                              parc=parc, atlas=atlas)
     R, C = refs[rows], refs[cols]
     keep_c = [j for j, n in enumerate(C.names) if not (drop_other and n.endswith(".Other"))]
     A = parc.parcellate(R.voxels)
