@@ -79,6 +79,32 @@ def tr_of(cfg: dict, tasks) -> str:
     return " / ".join(f"{t:g}" for t in trs) if trs else ""
 
 
+def span_s(starts: pd.Series, window_s: float) -> float:
+    """Seconds covered by a run's analysed windows: first onset to last offset.
+    A gap left by censored windows inside the run is counted, so this is the
+    span of the run that entered the analysis, not the sum of kept windows."""
+    s = starts.dropna()
+    return float(s.max() - s.min() + window_s) if len(s) else 0.0
+
+
+def hours(g: pd.DataFrame, window_s: float, condition: str) -> dict:
+    """scanned_h: per (sub, task) span, summed over people and runs.
+    stimulus_h: per task the longest span on the STIMULUS clock across viewers,
+    summed over distinct tasks -- each film or episode counted once, however
+    many people watched it. Rest has no stimulus."""
+    out = {"scanned_h": float("nan"), "stimulus_h": float("nan")}
+    if "start_s" in g:
+        out["scanned_h"] = sum(span_s(x["start_s"], window_s)
+                               for _, x in g.groupby(["sub", "task"])) / 3600
+    if condition != "rest":
+        col = "stimulus_start_s" if "stimulus_start_s" in g else "start_s"
+        if col in g:
+            out["stimulus_h"] = sum(
+                max(span_s(x[col], window_s) for _, x in t.groupby("sub"))
+                for _, t in g.groupby("task")) / 3600
+    return out
+
+
 def fit_policy(root: Path, atlas: str, window_s: str):
     from fmri_decomposition.unsupervised_model.decompose import (
         latents_fit_description)
@@ -100,7 +126,8 @@ def build(root: Path, atlas: str, window_s: str, rest_pattern: str,
         cohort, task = hive(f, "cohort"), hive(f, "task")
         if cohorts and cohort not in cohorts:
             continue
-        cols = [c for c in ("sub", "role") if c in pq.read_schema(f).names]
+        cols = [c for c in ("sub", "role", "start_s", "stimulus_start_s")
+                if c in pq.read_schema(f).names]
         t = pd.read_parquet(f, columns=cols)
         lat.append(t.assign(cohort=cohort, task=task, sub=t["sub"].astype(str)))
     lat = pd.concat(lat, ignore_index=True)
@@ -122,6 +149,7 @@ def build(root: Path, atlas: str, window_s: str, rest_pattern: str,
         cen["condition"] = ["rest" if is_rest.search(t) else "movie"
                             for t in cen["task"]]
 
+    w = float(window_s)
     rows = []
     for (cohort, cond), g in lat.groupby(["cohort", "condition"], sort=True):
         cfg = cfgs.get(cohort, {})
@@ -133,6 +161,7 @@ def build(root: Path, atlas: str, window_s: str, rest_pattern: str,
                    tasks=len(tasks), TR_s=tr_of(cfg, tasks),
                    space=cfg.get("space", ""),
                    final=g["sub"].nunique(), windows=len(g))
+        row.update(hours(g, w, cond))
         c = (cen[(cen["cohort"] == cohort) & (cen["condition"] == cond)]
              if len(cen) else pd.DataFrame())
         if len(c):
@@ -155,11 +184,15 @@ def build(root: Path, atlas: str, window_s: str, rest_pattern: str,
         rows.append(row)
 
     out = pd.DataFrame(rows)
+    out.attrs["unique_participants"] = int(
+        lat.assign(k=lat["cohort"] + "/" + lat["sub"])["k"].nunique())
     order = ["cohort", "condition", "unsupervised", "supervised", "tasks", "TR_s", "space",
-             "scanned", "excluded", "final", "windows", "mean_fd",
+             "scanned", "excluded", "final", "windows", "scanned_h",
+             "stimulus_h", "mean_fd",
              "exclusion_reasons", "cohort_dir"]
     out = out[[c for c in order if c in out]]
-    out.attrs.update(policy=policy, atlas=atlas, window_s=window_s)
+    out.attrs.update(policy=policy, atlas=atlas, window_s=window_s,
+                     unique_participants=out.attrs["unique_participants"])
     return out.sort_values(["unsupervised", "cohort", "condition"],
                            ascending=[False, True, True]).reset_index(drop=True)
 
@@ -201,7 +234,8 @@ def to_latex(t: pd.DataFrame) -> str:
             ("unsupervised", "Unsupervised"), ("supervised", "Supervised"),
             ("tasks", "Runs"), ("TR_s", "TR (s)"), ("scanned", "Scanned"),
             ("excluded", "Excluded"), ("final", "Final $n$"),
-            ("windows", "Windows"), ("mean_fd", "Mean FD (s.d.), mm")]
+            ("windows", "Windows"), ("scanned_h", "Scan (h)"),
+            ("stimulus_h", "Stimulus (h)"), ("mean_fd", "Mean FD (s.d.), mm")]
     cols = [(k, h) for k, h in cols if k in t]
     lines = [r"\begin{table}[h]", r"\centering\small",
              r"\caption{Samples, acquisition and quality control. "
@@ -217,9 +251,13 @@ def to_latex(t: pd.DataFrame) -> str:
              r"\begin{tabular}{" + "l" * 4 + "r" * (len(cols) - 4) + "}",
              r"\toprule", " & ".join(h for _, h in cols) + r" \\", r"\midrule"]
     for _, r in t.iterrows():
-        lines.append(" & ".join(cell(r[k]) if k != "windows"
-                                else f"{int(r[k]):,}".replace(",", "{,}")
-                                for k, _ in cols) + r" \\")
+        def fmt(k):
+            if k == "windows":
+                return f"{int(r[k]):,}".replace(",", "{,}")
+            if k in ("scanned_h", "stimulus_h") and pd.notna(r[k]):
+                return f"{r[k]:.1f}"
+            return cell(r[k])
+        lines.append(" & ".join(fmt(k) for k, _ in cols) + r" \\")
     lines += [r"\bottomrule", r"\end{tabular}}", r"\end{table}"]
     return "\n".join(lines) + "\n"
 
@@ -249,6 +287,10 @@ def main(argv=None) -> None:
     with pd.option_context("display.width", 200, "display.max_columns", 20):
         print(t.drop(columns=["exclusion_reasons"], errors="ignore")
               .to_string(index=False))
+    print(f"\nTOTALS (abstract): {t.attrs['unique_participants']} unique "
+          f"participants; {t['scanned_h'].sum():.1f} h scanned; "
+          f"{t['stimulus_h'].sum():.1f} h of distinct stimuli "
+          f"({int(t['windows'].sum()):,} windows)")
     print(f"\ncensor policy: {t.attrs['policy']}\n"
           f"wrote {out.with_suffix('.csv')} and {out.with_suffix('.tex')}")
 
