@@ -154,8 +154,13 @@ def yeo7(thick: bool = True, data_dir: str | None = None) -> AtlasSpec:
     import nibabel as nib
     from nilearn.datasets import fetch_atlas_yeo_2011
 
-    yeo = fetch_atlas_yeo_2011(data_dir=data_dir)
-    maps = getattr(yeo, "thick_7" if thick else "thin_7", None) or yeo["thick_7"]
+    try:   # nilearn >= 0.12: one map per call; the thick_7/thin_7 keys are deprecated
+        yeo = fetch_atlas_yeo_2011(data_dir=data_dir, n_networks=7,
+                                   thickness="thick" if thick else "thin")
+        maps = yeo["maps"]
+    except TypeError:                                        # nilearn < 0.12
+        yeo = fetch_atlas_yeo_2011(data_dir=data_dir)
+        maps = getattr(yeo, "thick_7" if thick else "thin_7", None) or yeo["thick_7"]
     img = _as_nifti(maps)
     data = np.asarray(img.dataobj).astype(np.int16)
     if data.ndim == 4:                       # yeo ships as a 4D singleton
