@@ -28,14 +28,14 @@ From: rocker/r-ver:4.4.1
 #   cd /project/6008063/tamires/DecomposingfMRI
 #   module load apptainer
 #   apptainer build --fakeroot \
-#       /project/6008063/tamires/singularity/container.sif \
+#       /project/6008063/tamires/singularity/fmri_decomp_stage45_shap.sif \
 #       containers/stage45_shap.def
 #
 # A NEW .sif NAME, and containers/stage45.def left where it is, so the image
 # you are running today keeps matching its own definition and the sbatch
 # scripts stay quiet about it. When this one is built and tested:
 #
-#   export FMRIDECOMP_SIF45=.../container.sif   (slurm/env.sh)
+#   export FMRIDECOMP_SIF45=.../fmri_decomp_stage45_shap.sif   (slurm/env.sh)
 #
 # and once nothing points at the old .sif, delete it AND containers/stage45.def
 # -- a definition no image was built from is a definition nobody will keep
@@ -176,10 +176,7 @@ shap==0.46.0
 joblib==1.4.2
 PyYAML==6.0.2
 nibabel==5.3.2
-# 0.12.1, not 0.10.4: nimare 0.22.1 needs nilearn>=0.12,<0.14 (the
-# BrainMap decoder of the contextualisation). The pipeline's nilearn calls
-# (resample_to_img, signal.clean, fetch_atlas_yeo_2011) handle both APIs.
-nilearn==0.12.1
+nilearn==0.10.4
 hmmlearn==0.3.3
 umap-learn==0.5.7
 numba==0.61.2
@@ -202,9 +199,8 @@ REQS
     # instead of quietly reinstalling numpy under hmmlearn and numba.
     /opt/venv/bin/pip install --no-cache-dir -c /opt/requirements.txt \
         "neuromaps==0.0.5" \
-        "nimare==0.22.1"
-    # No `|| echo WARNING` any more: nimare is what the behavioural profiles
-    # are computed with, so an image without it must fail HERE, not in a job.
+        "nimare==0.4.0" \
+        || echo "WARNING: neuromaps/nimare failed; figure 1 decoding will need them"
 
     # umap-learn pulls tensorflow-dependent ParametricUMAP at import if TF is
     # present. It is not installed here, so the import is quiet.
@@ -300,22 +296,9 @@ print('shap TreeExplainer ok')
     /opt/venv/bin/python3 -c "
 import importlib.util
 opt = [m for m in ('neuromaps', 'nimare') if not importlib.util.find_spec(m)]
-import sys
-if opt:
-    sys.exit('MISSING (contextualisation): %s' % opt)
-from importlib.metadata import version
-print('nimare', version('nimare'), '| neuromaps', version('neuromaps'), '| nilearn', version('nilearn'))
-"
-    # The decoder the behavioural profiles use, on a toy selection.
-    /opt/venv/bin/python3 -c "
-import numpy as np, pandas as pd
-from nimare.decode.discrete import brainmap_decode
-ids = np.arange(1, 41)
-foci = pd.DataFrame({'id': ids})
-ann = pd.DataFrame({'id': ids, 'a': np.where(ids <= 20, .5, 0.), 'b': np.where(ids > 20, .5, 0.)})
-r = brainmap_decode(foci, ann, list(range(1, 16)), features=['a', 'b'], correction=None)
-assert r.loc['a', 'zForward'] > r.loc['b', 'zForward'] >= 0, r
-print('nimare BrainMap decoder ok')
+# Reported, never fatal: these pull heavy, fast-moving trees and only the
+# stage 5 decoding panel needs them.
+print('optional MISSING (stage 5 decoding panel only):', opt) if opt else print('optional ok')
 "
     Rscript -e 'ok <- all(sapply(c("brms","cmdstanr","posterior","arrow"), requireNamespace, quietly=TRUE)); if (!ok) quit(status=1); cat("R ok\n")'
     test -d "$(ls -d /opt/cmdstan/cmdstan-* 2>/dev/null | head -1)" \

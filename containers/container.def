@@ -1,0 +1,330 @@
+Bootstrap: docker
+From: rocker/r-ver:4.4.1
+
+# container.sif -- stage45_shap.def + nimare 0.22.1 (nilearn 0.12.1), for the
+# contextualisation's BrainMap decoder. Meant to replace fmri_decomp_stage45.sif
+# and fmri_decomp_stage45_shap.sif; once it is tested, delete both images and
+# their definitions (stage45.def, stage45_shap.def).
+#
+# Stage 4/5 image + shap: state sets, transitions, the crossed variance
+# decomposition, and the |SHAP| panels of E1/E2/E3 for the TREE models.
+#
+# WHAT IS DIFFERENT FROM containers/stage45.def, in the parts that build
+# anything: `shap==0.46.0` in the pin set, `shap` in the two import checks,
+# and a %test that explains a real tree (below). The rest of the difference is
+# the .sif name, the Purpose label and these comments. Nothing else changes --
+# the point of a second definition is to change one thing. Verify it with
+#
+#   diff <(grep -vE '^\s*#|^$' containers/stage45.def) \
+#        <(grep -vE '^\s*#|^$' containers/stage45_shap.def)
+#
+# WHY shap IS NEEDED AT ALL, AND ONLY SOMETIMES: ridge's SHAP is exact and
+# arithmetic (coefficient x standardised value), so hads_tables computes it
+# with numpy and no package. A boosted tree's is exact too but needs the
+# TreeExplainer, which is what shap provides. So an image without it draws
+# every ridge SHAP panel and refuses the hgb ones by name.
+#
+# SEPARATE FROM fmri_decomp.sif on purpose -- that one runs
+# stages 2 and 3 and has been stable for months, and adding Stan to it would
+# mean rebuilding the image every cohort re-run depends on.
+#
+# BUILD (login node -- needs network; compute nodes have none):
+#
+#   cd /project/6008063/tamires/DecomposingfMRI
+#   module load apptainer
+#   apptainer build --fakeroot \
+#       /project/6008063/tamires/singularity/container.sif \
+#       containers/container.def
+#
+# A NEW .sif NAME, and containers/stage45.def left where it is, so the image
+# you are running today keeps matching its own definition and the sbatch
+# scripts stay quiet about it. When this one is built and tested:
+#
+#   export FMRIDECOMP_SIF45=.../container.sif   (slurm/env.sh)
+#
+# and once nothing points at the old .sif, delete it AND containers/stage45.def
+# -- a definition no image was built from is a definition nobody will keep
+# true.
+#
+# Expect 20-40 minutes and ~6 GB. Most of it is Stan. If --fakeroot is refused
+# on this cluster, build on a machine where you have root and copy the .sif.
+#
+# WHY rocker/r-ver AND NOT A PLAIN UBUNTU: it ships with Posit Package Manager
+# configured, so install.packages() pulls prebuilt Linux binaries instead of
+# compiling from source. brms + its dependency tree is the difference between
+# minutes and hours.
+
+# The definition goes INTO the image so the image can say which definition built
+# it. Without that link the two are unconnected: a .sif built on 30 September
+# from the 10 September definition is indistinguishable from one built today, and
+# three commits' worth of changes -- including the lightgbm `select` needs -- were
+# invisible until a job failed for want of them.
+#
+# BUILD FROM THE REPOSITORY ROOT. %files sources resolve against the working
+# directory at build time, so `apptainer build ... containers/stage45.def` run
+# from inside containers/ cannot find this path and the build fails at the copy.
+# The comment lives out here because %files entries are parsed as `source dest`
+# pairs, and a commented line inside the section is not worth the risk on a
+# 40-minute build.
+%files
+    containers/stage45_shap.def /opt/stage45.def
+
+%labels
+    Purpose    DecomposingfMRI stage 4/5 + shap -- state sets, transitions, brms, SHAP
+    R          4.4.1
+    Python     whatever the base image ships (>= 3.10, checked at build)
+
+%post
+    set -eux
+    export DEBIAN_FRONTEND=noninteractive
+
+    # Record what we are actually building on. rocker/r-ver's base distro moves
+    # between R releases (jammy -> noble around R 4.4), and package names move
+    # with it -- which is why nothing below names a distro or a python minor
+    # version.
+    cat /etc/os-release | head -2
+
+    # APT, WITH RETRIES AND A HARD CHECK THAT THE INDEX ARRIVED.
+    #
+    # `apt-get update` WARNS and exits 0 when it cannot fetch one repository's
+    # index: "Some index files failed to download. They have been ignored, or
+    # old ones used instead." A real build on this cluster lost the BASE jammy
+    # index that way (jammy-updates, -backports and -security all arrived), and
+    # since build-essential and libfontconfig1-dev live in the base pocket, the
+    # failure surfaced at `install` as "has no installation candidate" -- which
+    # reads like a wrong package name, forty minutes of unpack and fifteen more
+    # of downloading later.
+    #
+    # So: retries on every fetch, and then `apt-get indextargets` is asked
+    # whether the base suite is actually present. If it is not, this stops HERE
+    # with the real reason, in seconds, instead of reporting a missing package.
+    APT_RETRY="-o Acquire::Retries=5 -o Acquire::http::Timeout=30"
+    for attempt in 1 2 3; do
+        apt-get $APT_RETRY update && break
+        echo "apt-get update failed (attempt ${attempt}/3); retrying in 20s"
+        sleep 20
+    done
+
+    APT_PKGS="python3 python3-dev python3-venv python3-pip
+              build-essential gfortran git curl ca-certificates
+              libcurl4-openssl-dev libssl-dev libxml2-dev libfontconfig1-dev
+              libharfbuzz-dev libfribidi-dev libfreetype6-dev libpng-dev
+              libtiff-dev libjpeg-dev"
+
+    # ASK APT THE QUESTION DIRECTLY, with --simulate: can every one of these be
+    # resolved? It downloads nothing and takes a second, and it is the actual
+    # question -- `apt-get indextargets` lists the targets apt is CONFIGURED
+    # with whether or not their index came down, so it answers a different
+    # one and would have passed on the very failure this exists for.
+    if ! apt-get install -y --no-install-recommends --simulate $APT_PKGS \
+            >/dev/null 2>&1; then
+        echo "ERROR: apt cannot resolve the build dependencies." >&2
+        echo >&2
+        apt-get install -y --no-install-recommends --simulate $APT_PKGS 2>&1 \
+            | tail -20 >&2
+        echo >&2
+        echo "       Almost always a repository index that did not download." >&2
+        echo "       \`apt-get update\` WARNS and exits 0 when one fails" >&2
+        echo "       ('Some index files failed to download. They have been" >&2
+        echo "       ignored'), and build-essential and libfontconfig1-dev" >&2
+        echo "       live in the BASE pocket -- so losing that one index" >&2
+        echo "       makes them read as wrong package names. Scroll up for a" >&2
+        echo "       'Failed to fetch' line to confirm." >&2
+        echo >&2
+        echo "       This is the mirror being unreachable from the build" >&2
+        echo "       host, not a problem with this definition. Retry; if it" >&2
+        echo "       persists, build where there is a working route to the" >&2
+        echo "       Ubuntu archive and copy the .sif over." >&2
+        exit 1
+    fi
+
+    apt-get $APT_RETRY install -y --no-install-recommends $APT_PKGS
+    rm -rf /var/lib/apt/lists/*
+
+    # ---- Python. A venv at a fixed path so PYTHONPATH leaking in from the
+    # host cannot shadow it -- see --cleanenv in the sbatch scripts.
+    #
+    # `python3`, not `python3.11`: the base image decides the minor version and
+    # noble ships 3.12, where apt has no python3.11 at all. Every pin below
+    # supports 3.10-3.12; the floor is checked rather than assumed.
+    python3 --version
+    python3 -c 'import sys; assert sys.version_info[:2] >= (3, 10), sys.version'
+    python3 -m venv /opt/venv
+    /opt/venv/bin/pip install --no-cache-dir --upgrade pip wheel
+
+    # Pinned: an unpinned image is not a reproducible one, and numpy 2 vs 1
+    # ABI mismatches are exactly what bit the ad-hoc /tmp install.
+    #
+    # A FILE, not a command line, for two reasons: the exact pin set stays
+    # inside the image where it can be audited later, and the same file then
+    # constrains the optional install below.
+    #
+    # numba is the package that pins numpy, not the other way round:
+    #   numba 0.60.0 -> numpy <2.1   (this was the conflict that failed a build)
+    #   numba 0.61.0 -> numpy <2.2
+    #   numba 0.61.2 -> numpy <2.3   <- chosen, so numpy 2.1.3 fits
+    # lightgbm asks only for numpy>=1.17, so it constrains nothing here --
+    # checked by resolving the whole set before adding it.
+    # scipy 1.14.1 also caps numpy at <2.3, so 2.1.3 is inside both.
+    cat > /opt/requirements.txt <<'REQS'
+numpy==2.1.3
+scipy==1.14.1
+pandas==2.2.3
+pyarrow==18.1.0
+scikit-learn==1.5.2
+lightgbm==4.5.0
+# TreeExplainer for the hgb |SHAP| panels. 0.46.0 asks for
+# numpy>=1.24 and scikit-learn>=0.24, so it resolves against the
+# pins above rather than moving them -- which is the whole reason
+# this file exists instead of a `pip install shap` in a job.
+shap==0.46.0
+joblib==1.4.2
+PyYAML==6.0.2
+nibabel==5.3.2
+# 0.12.1, not 0.10.4: nimare 0.22.1 needs nilearn>=0.12,<0.14 (the
+# BrainMap decoder of the contextualisation). The pipeline's nilearn calls
+# (resample_to_img, signal.clean, fetch_atlas_yeo_2011) handle both APIs.
+nilearn==0.12.1
+hmmlearn==0.3.3
+umap-learn==0.5.7
+numba==0.61.2
+matplotlib==3.9.2
+plotly==5.24.1
+statsmodels==0.14.4
+jupyterlab==4.3.4
+ipywidgets==8.1.5
+tqdm==4.67.1
+pytest==8.3.4
+REQS
+    /opt/venv/bin/pip install --no-cache-dir -r /opt/requirements.txt
+
+    # neuromaps for spin tests, nimare for Neurosynth decoding.
+    #
+    # `-c` makes "cannot move numpy" an enforced constraint rather than a
+    # hope about pip's upgrade behaviour. Both ask only for `numpy>=1.22`, so
+    # today they resolve against the pins; a future version that genuinely
+    # needs a different numpy now FAILS here -- which the `||` tolerates --
+    # instead of quietly reinstalling numpy under hmmlearn and numba.
+    /opt/venv/bin/pip install --no-cache-dir -c /opt/requirements.txt \
+        "neuromaps==0.0.5" \
+        "nimare==0.22.1"
+    # No `|| echo WARNING` any more: nimare is what the behavioural profiles
+    # are computed with, so an image without it must fail HERE, not in a job.
+
+    # umap-learn pulls tensorflow-dependent ParametricUMAP at import if TF is
+    # present. It is not installed here, so the import is quiet.
+
+    # ---- R. Binaries from Posit PPM, which rocker configures.
+    #
+    # Written to a file rather than passed with -e. A backslash-newline inside
+    # a single-quoted shell string is a LITERAL backslash, not a continuation,
+    # so the multi-line `-e '...'` this used to be handed R a script with
+    # stray backslashes in it and failed to parse -- 20 minutes into the build.
+    cat > /opt/install_r.R <<'RSCRIPT'
+install.packages(
+  c("brms", "cmdstanr", "posterior", "bayesplot",
+    "loo", "tidybayes", "data.table", "arrow"),
+  repos = c("https://stan-dev.r-universe.dev", getOption("repos"))
+)
+missing <- Filter(function(p) !requireNamespace(p, quietly = TRUE),
+                  c("brms", "cmdstanr", "posterior", "arrow"))
+if (length(missing)) stop("R packages failed to install: ",
+                          paste(missing, collapse = ", "))
+
+# CmdStan compiled once at build time so jobs never compile it.
+#
+# Into /opt, NOT the default ~/.cmdstan: apptainer runs as the invoking user,
+# /root is mode 700, and a CmdStan under /root would be unreadable by everyone
+# the image is built for.
+dir.create("/opt/cmdstan", recursive = TRUE, showWarnings = FALSE)
+cmdstanr::install_cmdstan(dir = "/opt/cmdstan", cores = 4)
+RSCRIPT
+    Rscript /opt/install_r.R
+    chmod -R a+rX /opt/cmdstan /opt/venv
+
+    # Provenance, written last so it only exists in an image that built fully.
+    # `def_sha256` is what the sbatch scripts compare against the definition in
+    # the checkout; a mismatch means the image predates a change to the file that
+    # describes it, which is exactly how a missing lightgbm went unnoticed for
+    # two days.
+    sha256sum /opt/stage45.def | cut -d" " -f1 > /opt/def_sha256
+    {
+      echo "built_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo "def_sha256=$(cat /opt/def_sha256)"
+      echo "python=$(/opt/venv/bin/python3 --version 2>&1)"
+      /opt/venv/bin/pip freeze
+    } > /opt/image_provenance.txt
+    chmod a+r /opt/def_sha256 /opt/image_provenance.txt
+
+%environment
+    export PATH=/opt/venv/bin:$PATH
+    export PYTHONNOUSERSITE=1
+    # Resolved by command substitution, which %environment (sourced as shell)
+    # does run -- `export CMDSTAN=/opt/cmdstan/cmdstan-*` would NOT glob, and
+    # brms would be handed a path with a literal asterisk in it.
+    export CMDSTAN="$(ls -d /opt/cmdstan/cmdstan-* 2>/dev/null | head -1)"
+    # Threads are set by the SLURM script; a default of 1 stops BLAS and numba
+    # each spawning a pool inside a 4-core task.
+    export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+    export MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
+    export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}
+    export NUMBA_NUM_THREADS=${NUMBA_NUM_THREADS:-1}
+
+%test
+    set -eu
+    /opt/venv/bin/python3 -c "
+import importlib.util
+mods = ['numpy','scipy','pandas','pyarrow','sklearn','lightgbm','joblib',
+        'yaml','nibabel','nilearn','hmmlearn','umap','matplotlib','plotly',
+        'statsmodels','jupyterlab','tqdm','pytest','shap']
+missing = [m for m in mods if not importlib.util.find_spec(m)]
+import sys
+from importlib.metadata import version
+print(' | '.join(f'{m} {version(m)}' for m in
+                 ('numpy', 'scikit-learn', 'lightgbm', 'hmmlearn',
+                  'umap-learn', 'pyarrow', 'shap')))
+# Non-zero, not just a printed line: \`apptainer test\` is the gate that is
+# supposed to stop a missing hmmlearn from being discovered inside an array
+# job, and a gate that always passes is not one.
+if missing:
+    sys.exit('python MISSING: %s' % missing)
+print('python ok')
+"
+    # IMPORTING shap is not the same as being able to explain a model: the
+    # TreeExplainer path compiles, and a broken one fails at call time inside
+    # an array job rather than here.
+    /opt/venv/bin/python3 -c "
+import numpy as np, shap
+from sklearn.ensemble import HistGradientBoostingRegressor
+X = np.random.default_rng(0).normal(size=(40, 4)); y = X[:, 0]
+m = HistGradientBoostingRegressor(max_iter=10).fit(X, y)
+v = shap.TreeExplainer(m).shap_values(X[:5])
+assert np.asarray(v).shape[0] == 5, v
+print('shap TreeExplainer ok')
+"
+    /opt/venv/bin/python3 -c "
+import importlib.util
+opt = [m for m in ('neuromaps', 'nimare') if not importlib.util.find_spec(m)]
+import sys
+if opt:
+    sys.exit('MISSING (contextualisation): %s' % opt)
+from importlib.metadata import version
+print('nimare', version('nimare'), '| neuromaps', version('neuromaps'), '| nilearn', version('nilearn'))
+"
+    # The decoder the behavioural profiles use, on a toy selection.
+    /opt/venv/bin/python3 -c "
+import numpy as np, pandas as pd
+from nimare.decode.discrete import brainmap_decode
+ids = np.arange(1, 41)
+foci = pd.DataFrame({'id': ids})
+ann = pd.DataFrame({'id': ids, 'a': np.where(ids <= 20, .5, 0.), 'b': np.where(ids > 20, .5, 0.)})
+r = brainmap_decode(foci, ann, list(range(1, 16)), features=['a', 'b'], correction=None)
+assert r.loc['a', 'zForward'] > r.loc['b', 'zForward'] >= 0, r
+print('nimare BrainMap decoder ok')
+"
+    Rscript -e 'ok <- all(sapply(c("brms","cmdstanr","posterior","arrow"), requireNamespace, quietly=TRUE)); if (!ok) quit(status=1); cat("R ok\n")'
+    test -d "$(ls -d /opt/cmdstan/cmdstan-* 2>/dev/null | head -1)" \
+        && echo "cmdstan ok" || { echo "cmdstan MISSING"; exit 1; }
+
+%runscript
+    exec /opt/venv/bin/python3 "$@"
