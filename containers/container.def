@@ -67,7 +67,7 @@ From: rocker/r-ver:4.4.1
 # pairs, and a commented line inside the section is not worth the risk on a
 # 40-minute build.
 %files
-    containers/stage45_shap.def /opt/stage45.def
+    containers/container.def /opt/stage45.def
 
 %labels
     Purpose    DecomposingfMRI stage 4/5 + shap -- state sets, transitions, brms, SHAP
