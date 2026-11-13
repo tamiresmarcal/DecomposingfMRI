@@ -48,6 +48,11 @@ chmod +x "$WORK/Mango/jre7/bin/"* 2>/dev/null || true
 "$JAVA" -version 2>&1 | head -1
 
 # 2. ROIs ---------------------------------------------------------------------
+if ! $PY -c "import fmri_decomposition, nibabel, scipy" >/dev/null; then
+    echo "PY ($PY) cannot import the repo: in the container, load apptainer, bind the"
+    echo "repo and \$SCRATCH, and put the repo on APPTAINERENV_PYTHONPATH."
+    exit 1
+fi
 if [ ! -f "$WORK/rois/rois.tsv" ]; then
     $PY "$HERE/make_rois.py" --atlas "$ATLAS" --out "$WORK/rois"
 fi
