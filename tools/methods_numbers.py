@@ -207,8 +207,11 @@ def the_models(root, a):
         if not base.exists():
             print(f"  {tree:20s} (absent)")
             continue
-        targets = sorted({hive(p, "target") for p in base.rglob("*")
-                          if "target=" in str(p)} - {""})
+        # select-bstm / select-fcm partition by `target=`, the transfer by
+        # `targets=` (the target SET: category | raw) -- read both.
+        targets = sorted({hive(p, "target") or hive(p, "targets")
+                          for p in base.rglob("*")
+                          if "target=" in str(p) or "targets=" in str(p)} - {""})
         tasks = sorted({hive(p, "task") for p in base.rglob("*")
                         if "task=" in str(p)} - {""})
         print(f"  {tree:20s} tasks={tasks}")

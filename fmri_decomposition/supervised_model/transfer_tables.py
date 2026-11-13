@@ -1522,7 +1522,8 @@ def read_transferred(root, target_set: str, train: str = "camcan",
 
 
 # ------------------------------------------------------------- E1, transferred ---
-def transfer_perf(rows: "pd.DataFrame", best, fc_arm: str = "edges") -> "pd.DataFrame":
+def transfer_perf(rows: "pd.DataFrame", best, fc_arm: str = "edges",
+                  fc_atlas: str | None = None) -> "pd.DataFrame":
     """One row per (phenotype, task, tree): what `figures.hads.fig_performance` reads.
 
     The notebook used to build this by hand as "every row of the chosen state
@@ -1545,13 +1546,17 @@ def transfer_perf(rows: "pd.DataFrame", best, fc_arm: str = "edges") -> "pd.Data
                 & (rows["window_s"] == best["window_s"])
                 & (rows["arm"] == best["arm"])
                 & (rows["model"] == best["model"])]
+    # fc_atlas: the static-FC comparison's parcellation. Default the states'
+    # own atlas; the manuscript's main figure uses "yeo7" (matched in
+    # dimensionality), the states' atlas going to Extended Data.
+    fc_atlas = fc_atlas or best["atlas"]
     fcm = rows[(rows["tree"] == "fcm")
-               & (rows["atlas"] == best["atlas"])
+               & (rows["atlas"] == fc_atlas)
                & (rows["model"] == best["model"])
                & (rows["arm"] == fc_arm)]
     if not len(fcm):
         raise SystemExit(
-            f"no fcm row with arm={fc_arm!r} for atlas={best['atlas']!r} "
+            f"no fcm row with arm={fc_arm!r} for atlas={fc_atlas!r} "
             f"model={best['model']!r}. The arms present are "
             f"{sorted(rows.loc[rows['tree'] == 'fcm', 'arm'].unique())}.")
     if not len(bstm):

@@ -253,6 +253,8 @@ def build(target: str = "raw", root=None, camcan=None, hcp_pheno=None,
                   models=list(models or cfg.get("models", ["ridge", "hgb"])),
                   covariate_values=dict(cfg.get("covariate_values") or {}),
                   modelling_version=modelling_version,
+                  # None = entropy_rate_bits as stored in the tables
+                  entropy_estimator=cfg.get("entropy_estimator"),
                   save_dir=save_dir)
     if root is not None:
         common["root"] = Path(root)

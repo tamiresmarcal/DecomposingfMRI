@@ -59,6 +59,9 @@ class Settings:
     # figure 2a's x ranges: probabilities 0-1; entropy 0-log2(K) bits and distinct 0-K*K are set from K
     ranges: dict = field(default_factory=lambda: {"switch_rate": (0, 1), "mean_dwell_s": (0, 60), "dispersion": (0, 10)})
     save_dir: Path | None = None
+    # None = entropy_rate_bits as stored; "plugin" / "miller_madow" =
+    # recomputed from each table's counts (see hads.Settings.entropy_estimator).
+    entropy_estimator: str | None = None
 
     @property
     def K(self):
@@ -92,6 +95,10 @@ class Cohorts:
                     continue
                 d = pd.concat(map(pd.read_parquet, files), ignore_index=True)
                 d["sub"] = d["sub"].astype(str).str.strip().str.upper()
+                if self.cfg.entropy_estimator is not None and "entropy_rate_bits" in d:
+                    # before as_p_cond: the recompute needs the p_joint cells
+                    from fmri_decomposition.unsupervised_model.transitions import entropy_from_table
+                    d["entropy_rate_bits"] = entropy_from_table(d, K, self.cfg.entropy_estimator)
                 self.cells = ht.cell_cols(d)
                 d[self.cells] = ht.as_p_cond(d, K)
                 P = d[self.cells].to_numpy(float).reshape(len(d), K, K)        # each subject's row entropies

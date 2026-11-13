@@ -94,6 +94,11 @@ class Settings:
     # its `pool_tasks` here; it is a setting rather than an import because
     # hads_tables must not depend on the transfer notebook's module.
     pool_fn: object | None = None
+    # How `entropy_rate_bits` is read. None = as stored in the transition
+    # table (plug-in for every table written so far). "plugin" or
+    # "miller_madow" = recomputed from the table's own counts, after any
+    # pooling, so tables on disk need no rerun (transitions.entropy_from_table).
+    entropy_estimator: str | None = None
     # ONE cohort, two conditions: Cam-CAN's movie and rest are the same people
     # (README's output structure, tests/test_camcan_one_cohort.py). A
     # `camcan_rest` here matched nothing -- `load_set` filters with `in` -- and
@@ -486,6 +491,10 @@ class Study:
             raise SystemExit(
                 f"{space['states']} {task}: a subject appears twice -- narrow `cohorts`, "
                 f"or set `pool_fn` if this cohort has several runs of one condition")
+        if c.entropy_estimator is not None and "entropy_rate_bits" in d:
+            from ..unsupervised_model.transitions import entropy_from_table
+            d["entropy_rate_bits"] = entropy_from_table(
+                d, n_states(space["states"]), c.entropy_estimator)
         return d
 
     def table(self, space, task):
@@ -955,28 +964,33 @@ class Study:
         return s[(s["model"] == model["model"]) & (s["arm"] == model["arm"]) & (s["atlas"] == space["atlas"])
                  & np.isclose(s["window_s"], space["window_s"]) & (s["states"] == space["states"])][["seed", "score"]]
 
-    def performance_trees(self, space, arm, model, base, fc_arm=None):
+    def performance_trees(self, space, arm, model, base, fc_arm=None, fc_atlas=None):
         """E1: one model (`model`, e.g. "hgb") in each panel: the bstm row of the chosen space and arm,
-        and the fcm row of the same atlas, the same model and `fc_arm` (none when fcm has no such
-        atlas), with that model's Age + Sex baseline. One row per (task, phenotype, tree)."""
+        and the fcm row of `fc_atlas` (default: the same atlas as the states), the same model and
+        `fc_arm` (none when fcm has no such atlas), with that model's Age + Sex baseline. One row per
+        (task, phenotype, tree). The manuscript's main comparison uses fc_atlas="yeo7" (matched in
+        dimensionality); the states' own atlas is the Extended Data comparison."""
         c, s, out = self.cfg, self.summ, []
+        fc_atlas = fc_atlas or space["atlas"]
         for task in c.tasks:
             for lab in c.targets:
                 p = s[(s["task"] == task) & (s["phenotype"] == lab) & (s["model"] == model)]
                 b = base[(base["phenotype"] == lab) & (base["model"] == model)]
                 bstm = p[(p["tree"] == "bstm") & (p["arm"] == arm) & (p["atlas"] == space["atlas"])
                          & np.isclose(p["window_s"], space["window_s"]) & (p["states"] == space["states"])]
-                fcm = p[(p["tree"] == "fcm") & (p["arm"] == (fc_arm or c.fc_arm)) & (p["atlas"] == space["atlas"])]
+                fcm = p[(p["tree"] == "fcm") & (p["arm"] == (fc_arm or c.fc_arm)) & (p["atlas"] == fc_atlas)]
                 for tree, r in (("bstm", bstm), ("fcm", fcm)):
                     if len(r) and len(b):
                         out.append(dict(task=task, phenotype=lab, tree=tree, mean=r["mean"].iloc[0], std=r["std"].iloc[0],
                                         base_mean=b["mean"].iloc[0], base_sd=b["std"].iloc[0]))
         return pd.DataFrame(out, columns=["task", "phenotype", "tree", "mean", "std", "base_mean", "base_sd"])
 
-    def tree_seeds(self, space, arm, model, fc_arm=None):
+    def tree_seeds(self, space, arm, model, fc_arm=None, fc_atlas=None):
         """E1's dots: the per-seed scores of the bstm row (select-bstm's scores.csv) and of the fcm
-        row of the same atlas and model (select-fcm's scores.csv), where they exist."""
+        row of `fc_atlas` (default: the states' atlas) and model (select-fcm's scores.csv), where
+        they exist."""
         c, out = self.cfg, []
+        fc_atlas = fc_atlas or space["atlas"]
         for task in c.tasks:
             for lab in c.targets:
                 b = self._scores(task, lab, space, dict(model=model, arm=arm))
@@ -985,7 +999,7 @@ class Study:
                      / f"task={task}" / f"target={c.targets[lab]}" / "scores.csv")
                 if p.exists():
                     f = pd.read_csv(p)
-                    f = f[(f["model"] == model) & (f["arm"] == (fc_arm or c.fc_arm)) & (f["atlas"] == space["atlas"])]
+                    f = f[(f["model"] == model) & (f["arm"] == (fc_arm or c.fc_arm)) & (f["atlas"] == fc_atlas)]
                     out += [dict(task=task, phenotype=lab, tree="fcm", seed=r.seed, score=r.score) for r in f.itertuples()]
         return pd.DataFrame(out, columns=["task", "phenotype", "tree", "seed", "score"])
 

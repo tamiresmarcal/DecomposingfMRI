@@ -335,14 +335,40 @@ def _runs(labels: np.ndarray) -> np.ndarray:
     return np.diff(np.concatenate([[0], change, [len(labels)]]))
 
 
-def _entropy_rate(counts: np.ndarray) -> float:
-    """Plug-in entropy rate of the subject's own matrix, in bits.
+#: How `entropy_rate_bits` is estimated. "plugin" is the historical default;
+#: "miller_madow" adds the first-order bias correction (see _entropy_rate).
+ENTROPY_ESTIMATORS = ("plugin", "miller_madow")
 
-    Biased downward at these counts -- 74 transitions over 64 cells cannot
-    estimate 64 probabilities -- and reported as a comparative feature only,
-    never as an absolute quantity. A shrinkage estimator is the fix if it ever
-    carries a claim.
+
+def _miller_madow_term(counts: np.ndarray) -> float:
+    """First-order bias of the plug-in entropy RATE, in bits.
+
+    The entropy rate is H(X_t, X_t+1) - H(X_t). Miller-Madow adds
+    (m - 1) / (2 N ln 2) to each plug-in entropy, m the non-zero bins, so the
+    rate gains (m - R) / (2 N ln 2): m the non-zero cells of the count matrix,
+    R the states with at least one outgoing transition, N the transitions.
     """
+    n = counts.sum()
+    if n == 0:
+        return np.nan
+    m = int((counts > 0).sum())
+    r = int((counts.sum(axis=1) > 0).sum())
+    return float((m - r) / (2.0 * n * np.log(2)))
+
+
+def _entropy_rate(counts: np.ndarray, estimator: str = "plugin") -> float:
+    """Entropy rate of the subject's own matrix, in bits.
+
+    The plug-in estimate is biased downward at these counts -- 74 transitions
+    over 64 cells cannot estimate 64 probabilities -- and the bias shrinks with
+    the number of transitions, so it differs between cohorts whose scans differ
+    in length (HCP 4 x 15 min vs Cam-CAN ~8 min). estimator="miller_madow"
+    adds the first-order correction, which is what a cross-cohort comparison
+    of this feature should use.
+    """
+    if estimator not in ENTROPY_ESTIMATORS:
+        raise ValueError(f"entropy estimator must be one of {ENTROPY_ESTIMATORS}, "
+                         f"got {estimator!r}")
     n = counts.sum()
     if n == 0:
         return np.nan
@@ -351,7 +377,37 @@ def _entropy_rate(counts: np.ndarray) -> float:
         p = np.where(row > 0, counts / row, 0.0)
         term = np.where(p > 0, p * np.log2(p), 0.0)
     pi = (row / n).ravel()
-    return float(-(pi * term.sum(axis=1)).sum())
+    h = float(-(pi * term.sum(axis=1)).sum())
+    if estimator == "miller_madow":
+        h += _miller_madow_term(counts)
+    return h
+
+
+def entropy_from_table(d: pd.DataFrame, n_states: int,
+                       estimator: str = "miller_madow") -> pd.Series:
+    """`entropy_rate_bits` recomputed from a transition TABLE, row by row.
+
+    For tables already on disk: the cells are p_joint and p_joint *
+    n_transitions is the count matrix exactly, so the entropy rate -- plug-in
+    or corrected -- is recomputed from it, with no pipeline rerun. Recomputed,
+    never adjusted, so applying it twice gives the same answer. The cells must
+    still be p_joint (read the table, pool runs, THEN call this; not after a
+    conversion to p_cond).
+    """
+    cells = cell_names(n_states)
+    missing = [c for c in cells + ["n_transitions"] if c not in d.columns]
+    if missing:
+        raise KeyError(f"entropy_from_table needs the cells and n_transitions; "
+                       f"missing {missing[:5]}")
+    P = d[cells].to_numpy(float)
+    N = d["n_transitions"].to_numpy(float)
+    out = np.full(len(d), np.nan)
+    for i in range(len(d)):
+        if not np.isfinite(N[i]) or N[i] <= 0 or not np.isfinite(P[i]).all():
+            continue
+        counts = np.rint(P[i] * N[i]).reshape(n_states, n_states)
+        out[i] = _entropy_rate(counts, estimator)
+    return pd.Series(out, index=d.index, name="entropy_rate_bits")
 
 
 def cell_names(n_states: int) -> list[str]:
@@ -365,7 +421,8 @@ def cell_names(n_states: int) -> list[str]:
 
 
 def subject_transitions(g: pd.DataFrame, state_col: str, n_states: int,
-                        stride_s: float, indep_factor: int) -> dict:
+                        stride_s: float, indep_factor: int,
+                        entropy_estimator: str = "plugin") -> dict:
     """One subject x task -> ONE row: every cell, then the features.
 
     `g` must already be sorted by window_id. A run boundary is not a
@@ -436,7 +493,7 @@ def subject_transitions(g: pd.DataFrame, state_col: str, n_states: int,
         "switches_per_min": (n_change / (len(lab) * stride_s / 60)
                              if len(lab) else np.nan),
         "mean_dwell_s": float(runs.mean() * stride_s) if len(runs) else np.nan,
-        "entropy_rate_bits": _entropy_rate(counts),
+        "entropy_rate_bits": _entropy_rate(counts, entropy_estimator),
         "dispersion": (float(np.linalg.norm(xyz - xyz.mean(0), axis=1).mean())
                        if xyz is not None and len(xyz) else np.nan),
     })
@@ -566,7 +623,8 @@ def _within_k_band(states: list[str], k_of: dict, min_k: int, max_k: int):
 
 
 def process(root: Path, atlas: str, window_s, cohort: str, task: str,
-            state_col: str, n_overlaps: int, overwrite: bool) -> dict:
+            state_col: str, n_overlaps: int, overwrite: bool,
+            entropy_estimator: str = "plugin") -> dict:
     out_dir = transitions_root(root, atlas, window_s, state_col, cohort, task)
     out_path = out_dir / "subjects.parquet"
     if not overwrite and out_path.exists():
@@ -589,7 +647,8 @@ def process(root: Path, atlas: str, window_s, cohort: str, task: str,
     policy = _meta_value(src, "censor_policy")
 
     rows = [{"task": task, "sub": sub,
-             **subject_transitions(g, state_col, K, stride_s, indep)}
+             **subject_transitions(g, state_col, K, stride_s, indep,
+                                   entropy_estimator)}
             for (task, sub), g in df.sort_values("window_id")
                                     .groupby(["task", "sub"], sort=True)]
 
@@ -597,6 +656,7 @@ def process(root: Path, atlas: str, window_s, cohort: str, task: str,
             "atlas": atlas, "window_s": str(window_s),
             "states": state_col, "n_states": K, "model_hash": model_hash,
             "censor_policy": policy, "n_overlaps": n_overlaps,
+            "entropy_estimator": entropy_estimator,
             # What was actually used, which is not n_overlaps at every aperture.
             "stride_s": stride_s, "indep_factor": indep}
 
@@ -698,7 +758,8 @@ def run(args) -> int:
         log(f"atlas={atlas} window_s={w} states={st}")
         for cohort, task in sorted(set(zip(grp["cohort"], grp["task"]))):
             e = process(root, atlas, w, cohort, task, st, args.n_overlaps,
-                        args.overwrite)
+                        args.overwrite,
+                        getattr(args, "entropy_estimator", "plugin"))
             entries.append(e)
             cell = f"{cohort}/{task}"
             if e["status"] == "skipped":
@@ -764,6 +825,12 @@ def add_arguments(p) -> None:
                         "version is which cohorts play which role; it is "
                         "recorded in modelling/version=<v>/version.json and a "
                         "run whose composition differs is refused.")
+    p.add_argument("--entropy-estimator", choices=ENTROPY_ESTIMATORS,
+                   default="plugin",
+                   help="entropy_rate_bits: plug-in (default, as every table "
+                        "so far) or Miller-Madow bias-corrected. Readers can "
+                        "also recompute it from existing tables "
+                        "(entropy_from_table), so no rerun is needed to switch.")
     p.add_argument("--overwrite", action="store_true")
 
 
