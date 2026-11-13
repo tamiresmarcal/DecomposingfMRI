@@ -77,6 +77,10 @@ From: rocker/r-ver:4.4.1
 %post
     set -eux
     export DEBIAN_FRONTEND=noninteractive
+    # apt drops to the _apt user to download. Under --ignore-fakeroot-command
+    # (a root-mapped namespace with no other uids) that setuid fails, so let
+    # apt download as root. Harmless under a real fakeroot or real root.
+    echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/99-sandbox-root
 
     # Record what we are actually building on. rocker/r-ver's base distro moves
     # between R releases (jammy -> noble around R 4.4), and package names move
