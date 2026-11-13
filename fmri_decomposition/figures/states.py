@@ -539,6 +539,9 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     stem = out / f"reference_matrix_{atlas}_{rows}_x_{cols}"
+    if behavioural_csv in ("brainmap", "brainmap_all") and \
+            {"behavioural", "behavioural_domain"} & {rows, cols}:
+        stem = Path(f"{stem}_{behavioural_csv}db")   # never overwrite the Neurosynth matrix
     tab = pd.DataFrame(r, index=R.names, columns=cn)
     pd.concat({"r": tab, "p_null": pd.DataFrame(res["p"], index=R.names, columns=cn),
                "q_fdr": pd.DataFrame(q, index=R.names, columns=cn)}, axis=0).to_csv(f"{stem}.csv")
