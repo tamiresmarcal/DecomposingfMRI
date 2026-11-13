@@ -636,6 +636,46 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     return out
 
 
+# The BrainMap database itself, through the official Behavioral Analysis
+# plugin of Mango (Lancaster et al. 2012), run headless on each parcel by
+# tools/brainmap/run_brainmap_profiles.sh. The plugin names some leaves
+# differently from BRAINMAP_TAXONOMY; these are the renames. Plugin categories
+# with no counterpart here (Emotion.Guilt, Cognition.Memory.Implicit, ...) stay
+# in the *_all.csv the tool writes, not in the table the panels use.
+BRAINMAP_PLUGIN_RENAME = {
+    "Action.Execution": "Action.Execution.Other",
+    "Cognition.Somatic": "Cognition.Soma",
+    "Cognition.Spatial": "Cognition.Space",
+    "Cognition.Temporal": "Cognition.Time",
+    "Interoception.Gastrointestinal/Genitourinary": "Interoception.Bladder",
+    "Interoception.Respiration Regulation": "Interoception.Air Hunger",
+    "Perception.Somesthesis": "Perception.Somesthesis.Other",
+    "Perception.Vision": "Perception.Vision.Other",
+}
+
+
+def brainmap_db_table(data: Path, key: str, group: str = "normals") -> pd.DataFrame:
+    """Parcels x BrainMap categories from the BrainMap database itself.
+
+    Lancaster et al. (2012)'s regional behavioural analysis, run by the Mango
+    Behavioral Analysis plugin (v4.0, BrainMap data of 2023) on each parcel of
+    `key`, converted to Talairach with icbm_spm2tal. The value is the plugin's
+    z-score: the proportion of a category's foci that fall in the parcel
+    against the parcel's share of brain volume. `group` "normals" uses
+    experiments on healthy participants only, "all" every experiment.
+    Written by tools/brainmap/run_brainmap_profiles.sh as
+    <data>/brainmap/<key>_mango_<group>.csv.
+    """
+    path = Path(data) / "brainmap" / f"{key}_mango_{group}.csv"
+    if not path.exists():
+        raise SystemExit(f"{path} not found: run tools/brainmap/run_brainmap_profiles.sh "
+                         f"--atlas {key}")
+    out = pd.read_csv(path)
+    out.attrs["source"] = (f"BrainMap database (Mango Behavioral Analysis v4.0, {group}), "
+                           f"Lancaster 2012 z, counted in {key} parcels")
+    return out
+
+
 def load_behavioural_table(path: Path) -> pd.DataFrame:
     """The real profiles: CSV keyed by `bn_index` (1..246, BNA numbering),
     one column per BrainMap category named by its dotted path

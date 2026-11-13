@@ -456,6 +456,11 @@ def reference_families(data: Path, ref, families, behavioural_csv=None, seed: in
             table = rm.neurosynth_behavioural_table(
                 data, ref, taxonomy, labels=labels,
                 key=atlas if parc is not None else "brainnetome")
+        elif behavioural_csv in ("brainmap", "brainmap_all"):
+            if parc is None:
+                raise SystemExit("behavioural_csv='brainmap' needs the states' atlas (parc)")
+            table = rm.brainmap_db_table(
+                data, atlas, group="all" if behavioural_csv == "brainmap_all" else "normals")
         elif behavioural_csv:
             table, labels = rm.load_behavioural_table(behavioural_csv), None
         else:
@@ -503,6 +508,9 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
     if behavioural_csv == "neurosynth" and taxonomy != "brainmap" and \
             {"behavioural", "behavioural_domain"} & set(families):
         label += f"_{taxonomy}"
+    if behavioural_csv in ("brainmap", "brainmap_all") and \
+            {"behavioural", "behavioural_domain"} & set(families):
+        label += f"_{behavioural_csv}db"      # never overwrite the Neurosynth run
     dirs = {}
     for atlas in atlases:
         spec, src = rm.state_atlas(atlas, data)
