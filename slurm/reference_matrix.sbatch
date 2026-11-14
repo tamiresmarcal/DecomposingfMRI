@@ -57,6 +57,15 @@ REPO="${SLURM_SUBMIT_DIR:-$PWD}"
 _ENV_SH="$REPO/slurm/env.sh"
 [[ -f "$_ENV_SH" ]] && source "$_ENV_SH"
 
+# Reference maps: the notebooks read <repo>/reference_atlases. slurm/env.sh may
+# point FMRIDECOMP_REFMAPS elsewhere; if that folder does not exist, fall back
+# to the repo's own, so the job sees what the notebook sees.
+if [[ -z "${FMRIDECOMP_REFMAPS:-}" || ! -d "${FMRIDECOMP_REFMAPS}" ]]; then
+  [[ -n "${FMRIDECOMP_REFMAPS:-}" ]] && echo "FMRIDECOMP_REFMAPS=$FMRIDECOMP_REFMAPS not found; using $REPO/reference_atlases"
+  export FMRIDECOMP_REFMAPS="$REPO/reference_atlases"
+fi
+export APPTAINERENV_FMRIDECOMP_REFMAPS="$FMRIDECOMP_REFMAPS"
+
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
 export MKL_NUM_THREADS="${OMP_NUM_THREADS}"
 export OPENBLAS_NUM_THREADS="${OMP_NUM_THREADS}"
