@@ -194,13 +194,28 @@ class StabilityMixin:
         out["tier"] = np.select([a < .2, a < .5], ["stable", "moderate"], "context-dependent")
         return out
 
-    def replication(self, kind="movie", n_split=20, min_occ=0.01, seed=0):
+    def replication(self, kind="movie", n_split=20, min_occ=0.01, seed=0, balance=None, hours=10.0,
+                    n_boot=200):
         """Does the transition STRUCTURE replicate across cohorts, whatever their levels?
 
         r between cohorts' mean p(j | i) (rows of states occupied >= min_occ), divided by the
         noise ceiling: the r between two random halves of the same cohort (mean of n_split
         splits), geometric mean of the two cohorts' ceilings. ~1 = two cohorts agree as well as a
-        cohort agrees with itself. Returns (pairs, ceilings)."""
+        cohort agrees with itself. Returns (pairs, ceilings).
+
+        balance="time" -- people AND stimulus duration at once: every cohort contributes the SAME
+        amount of data. Each draw takes scans (runs, films, episodes) at random until `hours` of
+        scan time, pools their transition COUNTS (a long scan weighs by its length, as it should)
+        and turns them into p(j | i). A cohort of many short scans (Cam-CAN) then contributes many
+        people, one of few long ones (CNeuroMod, NNDb) few people with much data each; neither is
+        left out and neither wins by sheer size. The ceiling is two such draws from DISJOINT halves
+        of the cohort's people (so a person is never in both). `n_boot` draws give the 95% CI;
+        rest vs movie in the same people is added for the cohorts that have both.
+        """
+        if balance == "time":
+            return self._replication_time(min_occ, seed, hours, n_boot)
+        if balance is not None:
+            raise ValueError(f'balance must be None or "time", got {balance!r}')
         K, rng = self.cfg.K, np.random.default_rng(seed)
         occ = pd.concat([v[self.occ].mean() for v in self.data.values()], axis=1).mean(axis=1).to_numpy()
         rows = np.repeat(occ >= min_occ, K)
@@ -304,10 +319,52 @@ class StabilityMixin:
         M = np.array([v[self.cells].mean().to_numpy(float)[rows] for v in self.data.values()])
         return pd.DataFrame(np.corrcoef(M), index=names, columns=names)
 
-    def occupancy_table(self):
-        """Mean time in each state (%), one row per (cohort, rest|movie)."""
-        return pd.DataFrame({f"{c} {k}": 100 * v[self.occ].mean().to_numpy() for (c, k), v in self.data.items()},
-                            index=[f"S{k}" for k in range(self.cfg.K)]).T
+    def _replication_time(self, min_occ, seed, hours, n_boot):
+        K, rng = self.cfg.K, np.random.default_rng(seed)
+        occ = pd.concat([v[self.occ].mean() for v in self.data.values()], axis=1).mean(axis=1).to_numpy()
+        rows = np.repeat(occ >= min_occ, K)
+        U = self.units.dropna(subset=["minutes"])
+        groups = {(c, k): g for (c, k), g in U.groupby(["cohort", "kind"])}
+        target = hours * 60
+
+        def draw(g):
+            idx = rng.permutation(len(g))
+            m = g["minutes"].to_numpy()[idx]
+            take = idx[: int(np.searchsorted(np.cumsum(m), target)) + 1]
+            C = g[self.cells].to_numpy(float)[take].sum(0).reshape(K, K)
+            P = C / np.where(C.sum(1, keepdims=True) > 0, C.sum(1, keepdims=True), 1)
+            return P.ravel()[rows]
+
+        def half(g):
+            subs = g["sub"].unique()
+            pick = set(rng.permutation(subs)[: len(subs) // 2])
+            return g[g["sub"].isin(pick)], g[~g["sub"].isin(pick)]
+
+        r = lambda a, b: float(np.corrcoef(a, b)[0, 1])
+        ceil = {key: [] for key in groups}
+        pairs = {}
+        keys = list(groups)
+        compare = [(a, b) for i, a in enumerate(keys) for b in keys[i + 1:]
+                   if (a[1] == b[1] == "movie") or (a[0] == b[0] and a[1] != b[1])]
+        for _ in range(n_boot):
+            for key, g in groups.items():
+                if g["sub"].nunique() >= 2:
+                    h1, h2 = half(g)
+                    ceil[key].append(r(draw(h1), draw(h2)))
+            v = {key: draw(g) for key, g in groups.items()}
+            for a, b in compare:
+                pairs.setdefault((a, b), []).append(r(v[a], v[b]))
+        cm = {k: float(np.nanmedian(x)) if x else np.nan for k, x in ceil.items()}
+        rows_out = []
+        for (a, b), rs in pairs.items():
+            rs = np.array(rs)
+            norm = rs / np.sqrt(cm[a] * cm[b])
+            rows_out.append(dict(a=f"{a[0]} {a[1]}", b=f"{b[0]} {b[1]}",
+                                 kind="rest vs movie" if a[0] == b[0] else "between cohorts",
+                                 r=np.median(rs), r_norm=np.median(norm),
+                                 lo=np.percentile(norm, 2.5), hi=np.percentile(norm, 97.5)))
+        ceil_s = pd.Series({f"{k[0]} {k[1]}": v for k, v in cm.items()}, name="split_half_r")
+        return pd.DataFrame(rows_out), ceil_s
 
 
 class Cohorts(StabilityMixin):
@@ -331,6 +388,7 @@ class Cohorts(StabilityMixin):
         """{(cohort, rest|movie): one row per subject}, cells as p(j | i), runs and films averaged."""
         K, data = self.cfg.K, {}
         self.by_task = {}                                                     # (cohort, rest|movie, task) -> subjects
+        units = []                                                            # one row per scan: counts + duration
         for label in self.cfg.cohorts:
             for kind, files in self._files(label).items():
                 if not files:
@@ -342,6 +400,13 @@ class Cohorts(StabilityMixin):
                     from fmri_decomposition.unsupervised_model.transitions import entropy_from_table
                     d["entropy_rate_bits"] = entropy_from_table(d, K, self.cfg.entropy_estimator)
                 self.cells = ht.cell_cols(d)
+                # the scan as a UNIT of data: its transition counts (p_joint x n) and its duration,
+                # kept before p(j | i) throws the counts away -- for data-balanced resampling
+                u = d[["sub", "task"]].copy()
+                u[self.cells] = d[self.cells].to_numpy(float) * d["n_transitions"].to_numpy(float)[:, None]
+                u["minutes"] = ((d["n_windows"] * d["stride_s"]).astype(float) / 60
+                                if {"n_windows", "stride_s"} <= set(d) else np.nan)
+                units.append(u.assign(cohort=label, kind=kind))
                 d[self.cells] = ht.as_p_cond(d, K)
                 P = d[self.cells].to_numpy(float).reshape(len(d), K, K)        # each subject's row entropies
                 with np.errstate(divide="ignore", invalid="ignore"):
@@ -357,6 +422,7 @@ class Cohorts(StabilityMixin):
                     self.by_task[label, kind, task] = per_sub(t)
         if not data:
             raise SystemExit(f"no transition tables under {self.base}")
+        self.units = pd.concat(units, ignore_index=True)
         return data
 
     @property

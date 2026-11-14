@@ -562,35 +562,6 @@ def nice(v):
     return v
 
 
-def fig_stability_forest(co, st, variables=None):
-    """Panel A. Per variable, two effect sizes with 95% CI against the equivalence band +-sesoi_d:
-    between cohorts (movie; the cohort furthest from the others) and movie vs rest in the same
-    people. Right: the tier from movie vs rest in the same people (|d_av| < .2 stable, < .5
-    moderate, else context-dependent); the between-cohort d is context, not a criterion."""
-    t = st if variables is None else st.set_index("variable").loc[variables].reset_index()
-    m = co.cfg.sesoi_d
-    y = np.arange(len(t))[::-1]
-    fig, ax = plt.subplots(figsize=(8.5, 0.42 * len(t) + 1.6))
-    ax.axvspan(-m, m, color="#e8f0fb", zorder=0)
-    ax.axvspan(m, .5, color="#f3f6fb", zorder=0)
-    ax.axvline(0, color=hp.INK2, lw=.8)
-    ax.errorbar(t["between_d"], y + .15, xerr=[t["between_d"] - t["between_lo"], t["between_hi"] - t["between_d"]],
-                fmt="o", color=ORANGE, ms=5, capsize=2, label="between cohorts, movie (largest |d|)")
-    ax.errorbar(t["task_d"].abs(), y - .15, xerr=[(t["task_d"] - t["task_lo"]).abs(), (t["task_hi"] - t["task_d"]).abs()],
-                fmt="s", color=hp.BLUE, ms=5, capsize=2, label="movie vs rest, same people (|d_av|)")
-    ax.set_yticks(y, [nice(v) for v in t["variable"]], fontsize=9)
-    ax.set_xlabel(f"effect size |d| (95% CI) · band = equivalence margin ±{m:g} SD", fontsize=9)
-    for s in ("top", "right", "left"):
-        ax.spines[s].set_visible(False)
-    ax.tick_params(axis="y", length=0)
-    for yi, tier in zip(y, t["tier"]):
-        ax.text(1.01, yi, tier, transform=ax.get_yaxis_transform(),
-                va="center", fontsize=8.5, color=hp.INK if tier == "stable" else hp.INK2)
-    ax.legend(frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(.45, -.08 - 2 / (len(t) + 4)), ncol=2)
-    ax.set_title("A  What is stable and what depends on context", fontsize=11, loc="left")
-    save(fig, "stability_forest", co.cfg)
-    return fig
-
 
 def fig_stability_plane(co, st, variables=None, x_cut=None, y_cut=0.4):
     """Panel B. x = movie vs rest shift (|d_av|), y = ICC(3,1) rest <-> movie (individuals keep their
@@ -623,38 +594,6 @@ def fig_stability_plane(co, st, variables=None, x_cut=None, y_cut=0.4):
     return fig
 
 
-def fig_similarity(co, S):
-    """Transition-structure similarity between every (cohort, rest|movie): r between their mean p(j | i)."""
-    fig, ax = plt.subplots(figsize=(0.75 * len(S) + 2.5, 0.65 * len(S) + 1.5))
-    im = ax.imshow(S.to_numpy(), cmap="Blues", vmin=min(0.4, float(np.nanmin(S.to_numpy()))), vmax=1)
-    ax.set_xticks(range(len(S)), S.columns, rotation=45, ha="right", fontsize=8)
-    ax.set_yticks(range(len(S)), S.index, fontsize=8)
-    for i in range(len(S)):
-        for j in range(len(S)):
-            if i != j:
-                v = S.iat[i, j]
-                ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=7, color="white" if v > .8 else hp.INK)
-    fig.colorbar(im, ax=ax, fraction=.046, pad=.03).outline.set_visible(False)
-    ax.set_title("Transition-structure similarity (r between mean p(j | i))", fontsize=10, loc="left")
-    save(fig, "transition_similarity", co.cfg)
-    return fig
-
-
-def fig_occupancy(co, O):
-    """Mean time in each state (%), by cohort and condition."""
-    fig, ax = plt.subplots(figsize=(0.7 * O.shape[1] + 3, 0.5 * O.shape[0] + 1.5))
-    im = ax.imshow(O.to_numpy(), cmap="Blues", vmin=0, aspect="auto")
-    ax.set_xticks(range(O.shape[1]), O.columns, fontsize=8)
-    ax.set_yticks(range(O.shape[0]), O.index, fontsize=8)
-    vmax = float(np.nanmax(O.to_numpy()))
-    for i in range(O.shape[0]):
-        for j in range(O.shape[1]):
-            ax.text(j, i, f"{O.iat[i, j]:.0f}", ha="center", va="center", fontsize=7,
-                    color="white" if O.iat[i, j] > .55 * vmax else hp.INK)
-    fig.colorbar(im, ax=ax, fraction=.03, pad=.02).outline.set_visible(False)
-    ax.set_title("Occupancy (%) by cohort and condition", fontsize=10, loc="left")
-    save(fig, "occupancy", co.cfg)
-    return fig
 
 
 # ------------------------------------------------------------------ variation between films (supplementary)
@@ -687,6 +626,13 @@ def fig_films_forest(co, fs, variables, rest=None, title="", name="films", per_r
             if r.differs:
                 ax.plot(r.mean, yi, "o", ms=9, mfc="none", mec=hp.RED, mew=1.2)
         ax.axvline(t["mean"].mean(), color=hp.INK2, lw=.8, ls=":")
+        # the axis follows the film MEANS, not the widest CI: one film with three viewers must
+        # not flatten every other film (its CI is clipped at the edge)
+        m_lo, m_hi = np.nanmin(t["mean"]), np.nanmax(t["mean"])
+        half = np.nanmedian(t["hi"] - t["mean"])
+        pad = max((m_hi - m_lo) * .15, 1.5 * (half if np.isfinite(half) else 0), 1e-9)
+        ref = [x for x in (rest[v] if rest is not None and v in rest else np.nan,) if np.isfinite(x)]
+        ax.set_xlim(min([m_lo - pad, *ref]), max([m_hi + pad, *ref]))
         if rest is not None and v in rest and np.isfinite(rest[v]):
             ax.axvline(rest[v], color=hp.BLUE, lw=1, ls="--")
         ax.set_title((labels or {}).get(v, nice(v)), fontsize=8.5)
@@ -746,4 +692,152 @@ def fig_films_matrices(co, fs, per_row=6):
              f"(FDR < {co.cfg.alpha:g}; within-person where the films share viewers).", fontsize=7.5,
              color=hp.INK2)
     save(fig, "films_transitions", co.cfg)
+    return fig
+
+
+# ------------------------------------------------------------------ manuscript figure 3, as one figure
+TIER_COL = {"stable": hp.BLUE, "moderate": "#86b6ef", "context-dependent": ORANGE}
+
+
+def _replication_panel(ax, pairs):
+    t = pairs.copy()
+    if "kind" not in t:
+        t["kind"] = "between cohorts"
+    t = t.sort_values(["kind", "r_norm"], ascending=[True, False])
+    y = np.arange(len(t))[::-1]
+    ax.axvline(1, color=hp.INK2, lw=1, ls="--")
+    ax.text(1, 1.01, "noise ceiling", ha="center", va="bottom", fontsize=7.5, color=hp.INK2,
+            transform=ax.get_xaxis_transform())
+    for yi, r in zip(y, t.itertuples()):
+        c = ORANGE if r.kind == "rest vs movie" else hp.BLUE
+        if hasattr(r, "lo") and np.isfinite(getattr(r, "lo", np.nan)):
+            ax.plot([r.lo, r.hi], [yi, yi], color=c, lw=1.3)
+        ax.plot(r.r_norm, yi, "o", color=c, ms=6)
+    lab = [f"{r.a.replace(' movie', '')} – {r.b.replace(' movie', '')}" if r.kind != "rest vs movie"
+           else f"{r.a.split()[0]}: rest – movie" for r in t.itertuples()]
+    ax.set_yticks(y, lab, fontsize=8)
+    lo = min(.5, float(np.nanmin(t.get("lo", t["r_norm"]))) - .05)
+    ax.set_xlim(lo, 1.08)
+    ax.set_xlabel("transition-structure similarity / noise ceiling", fontsize=9)
+    for s in ("top", "right", "left"):
+        ax.spines[s].set_visible(False)
+    ax.tick_params(axis="y", length=0)
+    ax.xaxis.grid(True, color="#e5e4df")
+    ax.set_axisbelow(True)
+
+
+def _tier_panel(ax, st, variables):
+    t = st.set_index("variable").loc[[v for v in variables if v in set(st["variable"])]].reset_index()
+    y = np.arange(len(t))[::-1]
+    ax.axvspan(0, .2, color="#e8f0fb")
+    ax.axvspan(.2, .5, color="#f3f6fb")
+    d = t["task_d"].abs()
+    if t["task_lo"].notna().all():
+        lo = np.minimum(t["task_lo"].abs(), t["task_hi"].abs())
+        hi = np.maximum(t["task_lo"].abs(), t["task_hi"].abs())
+        lo[np.sign(t["task_lo"]) != np.sign(t["task_hi"])] = 0       # the CI crosses 0
+        ax.hlines(y, lo, hi, color="#9b9a95", lw=1)
+    ax.scatter(d, y, c=[TIER_COL[x] for x in t["tier"]], s=45, zorder=3, edgecolor="white")
+    ax.set_yticks(y, [nice(v) for v in t["variable"]], fontsize=8)
+    top = len(t) - .3
+    for x, lab in ((.1, "stable"), (.35, "moderate"), (max(.75, d.max() * .7), "context-dependent")):
+        ax.text(x, top, lab, ha="center", fontsize=8, color=TIER_COL[lab])
+    ax.set_xlim(0, max(1.0, float(d.max()) * 1.1))
+    ax.set_ylim(-.7, len(t) + .2)
+    ax.set_xlabel("|d| movie vs rest, same people (95% CI)", fontsize=9)
+    for s in ("top", "right", "left"):
+        ax.spines[s].set_visible(False)
+    ax.tick_params(axis="y", length=0)
+
+
+def fig_figure3(co, graphs, marks, st, pairs, agree=None, tier_variables=None):
+    """Manuscript Figure 3 as one figure.
+    A.1 the reference graph (every cohort and condition, each once) with its pace;
+    A.2 movie vs rest in the same people (the 'mean' row of task_change);
+    B   every cohort's movie: occupancy, p(j | i) and the dynamic metrics (mean, 90% CI);
+    C   the transition structure replicates (`replication`, ideally balance="time");
+    D   which properties depend on context (`stability` tiers)."""
+    from matplotlib.gridspec import GridSpec
+
+    cfg, K = co.cfg, co.cfg.K
+    col = colours(cfg)
+    cohorts = [c for c in cfg.cohorts if (c, "movie") in graphs]
+    ref = [graphs[k] for k in graphs if k[0] != "mean"]
+    T_ref = np.mean([g[0] for g in ref], axis=0)
+    o_ref = np.mean([g[1] for g in ref], axis=0)
+    off = [(a, b) for a in range(K) for b in range(K) if a != b]
+    base = sorted(sorted(off, key=lambda e: -T_ref[e])[:cfg.edge_top])
+    wmax = max(T_ref[e] for e in base)
+    omax = max(o_ref.max(), max(g[1].max() for g in graphs.values()))
+
+    fig = plt.figure(figsize=(17, 21))
+    gs = GridSpec(3, 1, figure=fig, height_ratios=[1, .95, .9], hspace=.28)
+    gA = gs[0].subgridspec(1, 2, width_ratios=[1.3, 1], wspace=.05)
+    ax = fig.add_subplot(gA[0])
+    hp.diagram(ax, T_ref, o_ref, base, wmax, omax)
+    dyn_ref = {v: np.mean([co.data[k][v].mean() for k in co.data]) for v in co.dyn}
+    ax.set_title("A.1  Reference: every cohort and condition, each once\n" +
+                 " · ".join(f"{nice(v)} {dyn_ref[v]:.2f}" for v in co.dyn[:3]), fontsize=11, loc="left")
+    ax = fig.add_subplot(gA[1])
+    if ("mean", "movie") in graphs:
+        t = marks[(marks["cohort"] == "mean") & marks["variable"].isin(co.cells)].set_index("variable").reindex(co.cells)
+        hit = t["hit"].fillna(False).to_numpy(bool).reshape(K, K)
+        nt = np.full((K, K), "", dtype=object)
+        if ("mean", "rest") in graphs:
+            nt = np.vectorize(ht.pp)(graphs["mean", "movie"][0] - graphs["mean", "rest"][0])
+            nt[~hit] = ""
+        edges = sorted(set(base) | {e for e in off if hit[e]})
+        hp.diagram(ax, *graphs["mean", "movie"], edges, wmax, omax, hit_T=hit, note_T=nt, colour=hp.BLUE)
+    ax.set_title("A.2  Movie vs rest, same people\nblue = differs (paired, FDR)", fontsize=11, loc="left")
+
+    n = len(cohorts)
+    gB = gs[1].subgridspec(2, n + 1, height_ratios=[.3, 1], width_ratios=[1] * n + [1.3], hspace=.12, wspace=.3)
+    for i, c in enumerate(cohorts):
+        T, o = graphs[c, "movie"]
+        axo = fig.add_subplot(gB[0, i])
+        axo.bar(range(K), 100 * o, color=col[c], width=.7)
+        axo.set_xticks([])
+        axo.set_ylim(0, 100 * omax * 1.05)
+        axo.set_title(f"{c}{' *' if co.role(c) == 'train' else ''}", fontsize=10)
+        for s in ("top", "right"):
+            axo.spines[s].set_visible(False)
+        axo.tick_params(labelsize=7)
+        if i == 0:
+            axo.set_ylabel("occupancy %", fontsize=8)
+            axo.text(-.35, 1.25, "B", transform=axo.transAxes, fontsize=15, fontweight="bold")
+        axm = fig.add_subplot(gB[1, i])
+        axm.imshow(T, cmap="Blues", vmin=0, vmax=.9)
+        axm.set_xticks(range(K))
+        axm.set_yticks(range(K))
+        axm.tick_params(labelsize=7)
+        axm.set_xlabel("to state j", fontsize=8)
+        if i == 0:
+            axm.set_ylabel("from state i", fontsize=8)
+    if agree is not None:
+        gD = gB[:, n].subgridspec(len(co.dyn), 1, hspace=1.0)
+        labels = list(agree["cohort"].unique())
+        for r_, v in enumerate(co.dyn):
+            axd = fig.add_subplot(gD[r_])
+            t = agree[agree["variable"] == v]
+            for j, rr in enumerate(t.itertuples()):
+                yy = -j * .3
+                axd.plot([rr.mean_lo, rr.mean_hi], [yy, yy], color=col[rr.cohort], lw=1.3)
+                axd.plot(rr.mean, yy, "o", ms=4, color=col[rr.cohort],
+                         mfc=col[rr.cohort] if co.role(rr.cohort) == "train" else "white")
+            axd.set_yticks([])
+            axd.set_ylim(-.3 * len(labels), .3)
+            for s in ("top", "right", "left"):
+                axd.spines[s].set_visible(False)
+            axd.tick_params(labelsize=7)
+            axd.set_title(nice(v), fontsize=8, pad=2)
+
+    gC = gs[2].subgridspec(1, 2, wspace=.55)
+    ax = fig.add_subplot(gC[0])
+    _replication_panel(ax, pairs)
+    ax.set_title("C  The transition structure replicates", fontsize=11, loc="left")
+    ax = fig.add_subplot(gC[1])
+    _tier_panel(ax, st, tier_variables or ["transition_fit", *co.dyn, *co.occ])
+    ax.set_title("D  Which properties depend on context", fontsize=11, loc="left")
+    fig.suptitle(f"Figure 3 · {ht.set_label(cfg.space)}", x=.02, ha="left", fontsize=12)
+    save(fig, "figure3", cfg)
     return fig
