@@ -123,8 +123,8 @@ def main(argv=None):
             body.append(r"\addlinespace")
         mark = "=" if r.same_top else ("$\\approx$" if r.top_in_other_top5 else "")
         body.append(f"{r.domain if r.domain != last else ''} & {r.subdomain} & "
-                    f"{r.spearman_r:.2f} & {short(r.brainmap_top)} & {short(r.neurosynth_top)} & "
-                    f"{mark} & {r.brainmap_foci:,} & {r.neurosynth_foci:,} \\\\".replace(",", "{,}"))
+                    f"{r.spearman_r:.2f} & {short(r.brainmap_top)} & {mark} & {short(r.neurosynth_top)} & "
+                    f"{r.brainmap_foci:,} & {r.neurosynth_foci:,} \\\\".replace(",", "{,}"))
         last = r.domain
     med = t["spearman_r"].median()
     n_same, n_top5, n_cat = int(t.same_top.sum()), int(t.top_in_other_top5.sum()), len(t)
@@ -154,7 +154,7 @@ superior temporal gyrus.}}
 \toprule
  & & & \multicolumn{{3}}{{c}}{{Top region}} & \multicolumn{{2}}{{c}}{{Foci}} \\
 \cmidrule(lr){{4-6}}\cmidrule(l){{7-8}}
-Domain & Subdomain & $r$ & BrainMap & Neurosynth & & BrainMap & Neurosynth \\
+Domain & Subdomain & $r$ & BrainMap & & Neurosynth & BrainMap & Neurosynth \\
 \midrule
 """ + "\n".join(body) + r"""
 \bottomrule
