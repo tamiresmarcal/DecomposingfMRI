@@ -559,7 +559,7 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
     if behavioural_csv in ("brainmap", "brainmap_all") and \
             {"behavioural", "behavioural_domain"} & {rows, cols}:
         stem = Path(f"{stem}_{behavioural_csv}db")   # never overwrite the Neurosynth matrix
-    elif str(behavioural_csv).startswith("neurosynth_lancaster") and \
+    elif str(behavioural_csv).startswith("neurosynth_") and \
             {"behavioural", "behavioural_domain"} & {rows, cols}:
         stem = Path(f"{stem}_" + behavioural_csv.replace("neurosynth_", "").replace("_", ""))
     if str(behavioural_csv).startswith("neurosynth") and taxonomy != "brainmap" \

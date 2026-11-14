@@ -441,7 +441,8 @@ def _all_subjects(paths) -> set:
 # decoder (zForward), then the Lancaster statistic on foci, studies, or foci
 # weighted 1/n per study.
 NEUROSYNTH_OPTIONS = ("neurosynth", "neurosynth_lancaster", "neurosynth_lancaster_studies",
-                      "neurosynth_lancaster_weighted", "neurosynth_lancaster_reverse")
+                      "neurosynth_lancaster_weighted", "neurosynth_lancaster_reverse",
+                      "neurosynth_zreverse")
 BRAINMAP_OPTIONS = ("brainmap", "brainmap_all", "brainmap_reverse", "brainmap_all_reverse")
 
 
@@ -466,6 +467,7 @@ def reference_families(data: Path, ref, families, behavioural_csv=None, seed: in
                 key=atlas if parc is not None else "brainnetome",
                 statistic=behavioural_csv.replace("neurosynth_", "")
                 if behavioural_csv != "neurosynth" else "zforward")
+            # (neurosynth_zreverse -> "zreverse": NiMARE's own reverse inference)
         elif behavioural_csv in BRAINMAP_OPTIONS:
             if parc is None:
                 raise SystemExit("behavioural_csv='brainmap' needs the states' atlas (parc)")

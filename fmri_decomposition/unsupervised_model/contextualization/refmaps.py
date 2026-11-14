@@ -621,8 +621,8 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     nsd = Path(data) / "neurosynth"
     if taxonomy not in TAXONOMIES:
         raise SystemExit(f"taxonomy must be one of {sorted(TAXONOMIES)}, got {taxonomy!r}")
-    if statistic not in LANCASTER_STATISTICS + ("zforward",):
-        raise SystemExit(f"statistic must be one of {('zforward',) + LANCASTER_STATISTICS}, "
+    if statistic not in LANCASTER_STATISTICS + ("zforward", "zreverse"):
+        raise SystemExit(f"statistic must be one of {('zforward', 'zreverse') + LANCASTER_STATISTICS}, "
                          f"got {statistic!r}")
     label, categories = TAXONOMIES[taxonomy]
     if statistic.startswith("lancaster"):
@@ -634,9 +634,14 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
         cache = nsd / f"{key}_{statistic.replace('_', '')}_{taxonomy}.csv"
         radius_mm = 0.0
     else:
-        source = (f"Neurosynth v7, NiMARE BrainMap decoder (zForward), {label} taxonomy, "
-                  f"counted in {key} parcels")
-        cache = nsd / f"{key}_nimare_{taxonomy}.csv"
+        # One decoder run gives both inferences; each is cached under its own
+        # name (zForward keeps the original one, so old caches stay valid).
+        caches = {"zforward": nsd / f"{key}_nimare_{taxonomy}.csv",
+                  "zreverse": nsd / f"{key}_nimarereverse_{taxonomy}.csv"}
+        source = (f"Neurosynth v7, NiMARE BrainMap decoder "
+                  f"({'zForward' if statistic == 'zforward' else 'zReverse'}), "
+                  f"{label} taxonomy, counted in {key} parcels")
+        cache = caches[statistic]
     if cache.exists():
         out = pd.read_csv(cache)
         out.attrs["source"] = source
@@ -741,16 +746,21 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
         return out
 
     from nimare.decode.discrete import brainmap_decode
-    z = np.zeros((n_parcels, len(cats)))
+    zs = {"zforward": np.zeros((n_parcels, len(cats))),
+          "zreverse": np.zeros((n_parcels, len(cats)))}
     for r in range(1, n_parcels + 1):
         ids = sorted(set(coords["id"].to_numpy()[peak_lab == r]))
         if not ids:
             continue
         res = brainmap_decode(foci, ann, ids, features=cats,
-                              frequency_threshold=threshold, correction=None)
-        z[r - 1] = res.reindex(cats)["zForward"].to_numpy(float)
-    out[cats] = np.nan_to_num(z)
-    out.to_csv(cache, index=False)
+                              frequency_threshold=threshold, correction=None).reindex(cats)
+        zs["zforward"][r - 1] = res["zForward"].to_numpy(float)
+        zs["zreverse"][r - 1] = res["zReverse"].to_numpy(float)
+    for stat, zz in zs.items():
+        o = out.copy()
+        o[cats] = np.nan_to_num(zz)
+        o.to_csv(caches[stat], index=False)
+    out[cats] = np.nan_to_num(zs[statistic])
     pd.Series(n_studies, name="n_studies").to_csv(
         nsd / f"{key}_nimare_{taxonomy}_n_studies.csv")
     out.attrs["source"] = source

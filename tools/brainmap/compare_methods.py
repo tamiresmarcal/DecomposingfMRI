@@ -83,6 +83,12 @@ def load_methods(data: Path, atlas: str, parc, ref) -> dict:
         f = ns / f"{atlas}_nimare_{tax}.csv"
         if f.exists():
             out[f"Neurosynth zForward{suffix}"] = pd.read_csv(f).set_index("parcel")
+        if (ns / "data-neurosynth_version-7_coordinates.tsv.gz").exists():
+            # NiMARE's BrainMap decoder, reverse inference: no added weighting
+            # or statistic (computed on first use, cached with zForward).
+            out[f"Neurosynth NiMARE zReverse{suffix}"] = rm.neurosynth_behavioural_table(
+                data, ref, tax, labels=parc.label_volume(), key=atlas,
+                statistic="zreverse").set_index("parcel")
         if not (ns / "data-neurosynth_version-7_coordinates.tsv.gz").exists():
             continue
         for stat, name in (("lancaster", "Lancaster foci"), ("lancaster_studies", "Lancaster studies"),

@@ -202,3 +202,27 @@ def test_lancaster_reverse_runs_and_separates_parcels(tmp_path, monkeypatch):
                                         statistic="lancaster_reverse")
     assert t.loc[0, "Perception.Vision"] > 0 > t.loc[1, "Perception.Vision"]
     assert t.loc[1, "Perception.Audition"] > 0
+
+
+def test_nimare_zreverse_is_the_decoders_own_and_cached_beside_zforward(tmp_path, monkeypatch):
+    coords, feats = _fake_neurosynth(tmp_path)
+    monkeypatch.setitem(rm.TAXONOMIES, "toy", ("toy", {
+        "Perception.Vision": ["vision"], "Perception.Audition": ["audition"]}))
+    ref = nib.Nifti1Image(np.zeros((10, 4, 4), np.float32), np.diag([2.0, 2, 2, 1]))
+    lab = np.zeros((10, 4, 4), int)
+    lab[:3] = 1
+    lab[5:8] = 2
+    t = rm.neurosynth_behavioural_table(tmp_path, ref, "toy", radius_mm=2.0, labels=lab,
+                                        key="toyatlas", statistic="zreverse")
+    ann = pd.DataFrame({"id": np.arange(1, N + 1),
+                        "Perception.Vision": feats[:, 0].toarray().ravel(),
+                        "Perception.Audition": feats[:, 1].toarray().ravel()})
+    ids = sorted(coords.loc[coords["x"] == 2, "id"])
+    want = brainmap_decode(coords[["id"]], ann, ids,
+                           features=["Perception.Vision", "Perception.Audition"],
+                           correction=None)["zReverse"]
+    assert np.allclose(t.loc[0, want.index].to_numpy(float), np.nan_to_num(want.to_numpy(float)))
+    assert t.loc[0, "Perception.Vision"] > t.loc[1, "Perception.Vision"]
+    nsd = tmp_path / "neurosynth"
+    assert (nsd / "toyatlas_nimarereverse_toy.csv").exists()
+    assert (nsd / "toyatlas_nimare_toy.csv").exists()
