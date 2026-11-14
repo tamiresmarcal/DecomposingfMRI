@@ -596,6 +596,33 @@ def fig_stability_plane(co, st, variables=None, x_cut=None, y_cut=0.4):
 
 
 
+# ------------------------------------------------------------------ fixed axes and one copy per figure
+def fixed_range(co, v):
+    """The same x range for a variable in every figure: probabilities (occupancy, transitions,
+    the transition-pattern correlation) 0-1; the dynamics on their natural ranges -- switch rate
+    0-1, mean dwell 0-60 s, entropy rate 0-log2(K) bits, dispersion 0-10, distinct transitions
+    0-K^2. A value outside the range (e.g. a cohort's very long dwell) is clipped at the edge."""
+    K = co.cfg.K
+    if v.startswith("occ_") or "->" in v or v == "transition_fit":
+        return (0.0, 1.0)
+    top = {"entropy_rate_bits": np.log2(K), "n_distinct_transitions": K * K}
+    if v in top:
+        return (0.0, float(top[v]))
+    return tuple(co.cfg.ranges.get(v, (np.nan, np.nan)))
+
+
+def global_means(co, variables):
+    """Every cohort and condition, each once: the reference the films are drawn against."""
+    return pd.concat([d[variables].mean() for d in co.data.values()], axis=1).mean(axis=1)
+
+
+def _show(fig):
+    """Draw the figure ONCE in a notebook, then close it: an open figure plus a returned one is
+    what made every figure appear twice."""
+    plt.show()
+    plt.close(fig)
+
+
 # ------------------------------------------------------------------ variation between films (supplementary)
 def _film_rows(fs):
     films = fs[["cohort", "film", "within"]].drop_duplicates(["cohort", "film"])
@@ -604,10 +631,9 @@ def _film_rows(fs):
 
 def fig_films_forest(co, fs, variables, rest=None, title="", name="films", per_row=None, labels=None):
     """One panel per variable, one row per film: the film's mean (95% CI). Filled = the film's
-    viewers also saw other films of their cohort (within-person test), hollow = different people
-    per film. A red ring = differs from the cohort's other films (BH-FDR). Dotted = mean of
-    the films; dashed blue = every cohort's rest. Films are grouped by cohort (grey labels), with
-    no colour per cohort."""
+    viewers also saw other films of their cohort, hollow = different people per film. Dashed blue
+    = `rest`, the global mean (every cohort and condition, each once; `global_means`). Every
+    variable on its fixed range (`fixed_range`). Films grouped by cohort, no colour per cohort."""
     rows = _film_rows(fs)
     n = len(variables)
     per_row = per_row or n
@@ -623,16 +649,9 @@ def fig_films_forest(co, fs, variables, rest=None, title="", name="films", per_r
             yi = pos[r.cohort, r.film]
             ax.plot([r.lo, r.hi], [yi, yi], color=hp.INK2, lw=1.1)
             ax.plot(r.mean, yi, "o", ms=4.5, color=hp.INK2, mfc=hp.INK2 if r.within else "white", mew=1.1)
-            if r.differs:
-                ax.plot(r.mean, yi, "o", ms=9, mfc="none", mec=hp.RED, mew=1.2)
-        ax.axvline(t["mean"].mean(), color=hp.INK2, lw=.8, ls=":")
-        # the axis follows the film MEANS, not the widest CI: one film with three viewers must
-        # not flatten every other film (its CI is clipped at the edge)
-        m_lo, m_hi = np.nanmin(t["mean"]), np.nanmax(t["mean"])
-        half = np.nanmedian(t["hi"] - t["mean"])
-        pad = max((m_hi - m_lo) * .15, 1.5 * (half if np.isfinite(half) else 0), 1e-9)
-        ref = [x for x in (rest[v] if rest is not None and v in rest else np.nan,) if np.isfinite(x)]
-        ax.set_xlim(min([m_lo - pad, *ref]), max([m_hi + pad, *ref]))
+        lo, hi = fixed_range(co, v)
+        if np.isfinite(lo):
+            ax.set_xlim(lo, hi)
         if rest is not None and v in rest and np.isfinite(rest[v]):
             ax.axvline(rest[v], color=hp.BLUE, lw=1, ls="--")
         ax.set_title((labels or {}).get(v, nice(v)), fontsize=8.5)
@@ -654,17 +673,16 @@ def fig_films_forest(co, fs, variables, rest=None, title="", name="films", per_r
     for j in range(n, nrow * per_row):
         axs[j // per_row, j % per_row].set_visible(False)
     fig.suptitle(title, fontsize=11, x=.02, ha="left")
-    fig.text(.02, .005, "Film mean (95% CI). Filled = the same people watched several films of their cohort "
-             "(within-person test); hollow = different people per film. Red ring = differs from the cohort's "
-             f"other films (FDR < {co.cfg.alpha:g}). Dotted = mean of the films; dashed blue = rest.",
+    fig.text(.02, .005, "Film mean (95% CI). Filled = the same people watched several films of their cohort; "
+             "hollow = different people per film. Dashed blue = global mean (every cohort and condition).",
              fontsize=7.5, color=hp.INK2)
     save(fig, name, co.cfg)
+    _show(fig)
     return fig
 
 
 def fig_films_matrices(co, fs, per_row=6):
-    """One p(j | i) per film on one colour scale, and the films' mean; a red outline marks a cell
-    that differs from the cohort's other films (BH-FDR). Grey title = cohort · film."""
+    """One p(j | i) per film and the films' mean, on one 0-1 colour scale. Title = cohort · film."""
     K = co.cfg.K
     rows = _film_rows(fs)
     cells = co.cells
@@ -673,14 +691,11 @@ def fig_films_matrices(co, fs, per_row=6):
     nrow = int(np.ceil(n / per_row))
     fig, axs = plt.subplots(nrow, per_row, figsize=(1.9 * per_row, 2.1 * nrow + .6), squeeze=False)
     mean = np.mean([m["mean"].to_numpy(float) for m in M.values()], axis=0).reshape(K, K)
-    panels = [("mean of the films", mean, None)] + [(f"{c} · {f}", m["mean"].to_numpy(float).reshape(K, K),
-                                                     m["differs"].to_numpy().reshape(K, K)) for (c, f), m in M.items()]
-    for k, (title, T, eq) in enumerate(panels):
+    panels = [("mean of the films", mean)] + [(f"{c} · {f}", m["mean"].to_numpy(float).reshape(K, K))
+                                              for (c, f), m in M.items()]
+    for k, (title, T) in enumerate(panels):
         ax = axs[k // per_row, k % per_row]
-        ax.imshow(T, cmap="Blues", vmin=0, vmax=max(.9, float(np.nanmax(mean))))
-        if eq is not None:
-            for i, j in np.argwhere(eq.astype(bool)):
-                ax.add_patch(plt.Rectangle((j - .5, i - .5), 1, 1, fill=False, ec=hp.RED, lw=1.1))
+        im = ax.imshow(T, cmap="Blues", vmin=0, vmax=1)
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set_title(title, fontsize=7, color=hp.INK2)
@@ -688,10 +703,9 @@ def fig_films_matrices(co, fs, per_row=6):
         axs[j // per_row, j % per_row].set_visible(False)
     fig.suptitle("Transitions p(j | i), film by film — rows: from state i, columns: to state j", fontsize=11,
                  x=.02, ha="left")
-    fig.text(.02, .005, "One colour scale. Red outline = the cell differs from the cohort's other films "
-             f"(FDR < {co.cfg.alpha:g}; within-person where the films share viewers).", fontsize=7.5,
-             color=hp.INK2)
+    fig.colorbar(im, ax=axs.ravel().tolist(), fraction=.015, pad=.01, label="p(j | i)").outline.set_visible(False)
     save(fig, "films_transitions", co.cfg)
+    _show(fig)
     return fig
 
 
@@ -767,8 +781,7 @@ def fig_figure3(co, graphs, marks, st, pairs, agree=None, tier_variables=None):
     o_ref = np.mean([g[1] for g in ref], axis=0)
     off = [(a, b) for a in range(K) for b in range(K) if a != b]
     base = sorted(sorted(off, key=lambda e: -T_ref[e])[:cfg.edge_top])
-    wmax = max(T_ref[e] for e in base)
-    omax = max(o_ref.max(), max(g[1].max() for g in graphs.values()))
+    wmax, omax = 1.0, 1.0                  # absolute 0-1 scales: arrow width and node area mean the same everywhere
 
     fig = plt.figure(figsize=(17, 21))
     gs = GridSpec(3, 1, figure=fig, height_ratios=[1, .95, .9], hspace=.28)
@@ -795,18 +808,18 @@ def fig_figure3(co, graphs, marks, st, pairs, agree=None, tier_variables=None):
     for i, c in enumerate(cohorts):
         T, o = graphs[c, "movie"]
         axo = fig.add_subplot(gB[0, i])
-        axo.bar(range(K), 100 * o, color=col[c], width=.7)
+        axo.bar(range(K), o, color=col[c], width=.7)
         axo.set_xticks([])
-        axo.set_ylim(0, 100 * omax * 1.05)
+        axo.set_ylim(0, 1)
         axo.set_title(f"{c}{' *' if co.role(c) == 'train' else ''}", fontsize=10)
         for s in ("top", "right"):
             axo.spines[s].set_visible(False)
         axo.tick_params(labelsize=7)
         if i == 0:
-            axo.set_ylabel("occupancy %", fontsize=8)
+            axo.set_ylabel("occupancy", fontsize=8)
             axo.text(-.35, 1.25, "B", transform=axo.transAxes, fontsize=15, fontweight="bold")
         axm = fig.add_subplot(gB[1, i])
-        axm.imshow(T, cmap="Blues", vmin=0, vmax=.9)
+        axm.imshow(T, cmap="Blues", vmin=0, vmax=1)
         axm.set_xticks(range(K))
         axm.set_yticks(range(K))
         axm.tick_params(labelsize=7)
@@ -826,6 +839,9 @@ def fig_figure3(co, graphs, marks, st, pairs, agree=None, tier_variables=None):
                          mfc=col[rr.cohort] if co.role(rr.cohort) == "train" else "white")
             axd.set_yticks([])
             axd.set_ylim(-.3 * len(labels), .3)
+            lo_, hi_ = fixed_range(co, v)
+            if np.isfinite(lo_):
+                axd.set_xlim(lo_, hi_)
             for s in ("top", "right", "left"):
                 axd.spines[s].set_visible(False)
             axd.tick_params(labelsize=7)
@@ -840,4 +856,5 @@ def fig_figure3(co, graphs, marks, st, pairs, agree=None, tier_variables=None):
     ax.set_title("D  Which properties depend on context", fontsize=11, loc="left")
     fig.suptitle(f"Figure 3 · {ht.set_label(cfg.space)}", x=.02, ha="left", fontsize=12)
     save(fig, "figure3", cfg)
+    _show(fig)
     return fig
