@@ -180,7 +180,7 @@ def test_brainmap_db_reverse_from_long_counts(tmp_path):
     d = tmp_path / "brainmap"
     d.mkdir()
     rows = []
-    for parcel, (fear, vis) in {1: (9, 1), 2: (1, 9)}.items():
+    for parcel, (fear, vis) in {1: (90, 10), 2: (10, 90)}.items():
         for cat, v in (("Emotion.Fear", fear), ("Perception.Vision", vis)):
             rows.append(("normals", "count", cat, v, parcel))
     pd.DataFrame(rows, columns=["group", "measure", "category", "value", "parcel"]).to_csv(
@@ -226,3 +226,13 @@ def test_nimare_zreverse_is_the_decoders_own_and_cached_beside_zforward(tmp_path
     nsd = tmp_path / "neurosynth"
     assert (nsd / "toyatlas_nimarereverse_toy.csv").exists()
     assert (nsd / "toyatlas_nimare_toy.csv").exists()
+
+
+def test_chi2_reverse_z_is_the_signed_two_way_chi_square():
+    from scipy.stats import chi2_contingency
+    cnt, tot = np.array([20, 4, 40.]), np.array([50, 80, 100.])
+    z = rm.chi2_reverse_z(cnt, tot)
+    a, t = cnt[0], tot[0]
+    tab = [[a, t - a], [cnt.sum() - a, (tot.sum() - cnt.sum()) - (t - a)]]
+    assert np.isclose(abs(z[0]), np.sqrt(chi2_contingency(tab, correction=False)[0]))
+    assert z[0] > 0 and z[1] == 0.0          # parcel 2: fewer than 5, NiMARE's rule

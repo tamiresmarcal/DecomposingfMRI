@@ -830,11 +830,13 @@ def brainmap_db_table(data: Path, key: str, group: str = "normals",
 
 
 def _brainmap_db_reverse(data: Path, key: str, group: str) -> pd.DataFrame:
-    """Reverse inference from the plugin's raw foci counts (`reverse_z`).
+    """Reverse inference from the plugin's raw foci counts: the test of
+    NiMARE's BrainMap decoder (`chi2_reverse_z`, signed two-way chi-square),
+    on foci, because the plugin gives foci counts only, not studies.
 
     The plugin gives no count of all foci in a parcel, so the parcel's total
     is the sum of its counts over the leaf categories (a focus coded with two
-    categories counts twice there and in the atlas-wide share alike).
+    categories counts twice there and in the atlas-wide totals alike).
     """
     path = Path(data) / "brainmap" / f"{key}_mango_long.csv"
     if not path.exists():
@@ -848,9 +850,10 @@ def _brainmap_db_reverse(data: Path, key: str, group: str) -> pd.DataFrame:
     total = cnt[cats].sum(axis=1).to_numpy(float)
     out = pd.DataFrame({"parcel": cnt.index.to_numpy()})
     for c in cats:
-        out[c] = reverse_z(cnt[c].to_numpy(float), total)
+        out[c] = chi2_reverse_z(cnt[c].to_numpy(float), total)
     out.attrs["source"] = (f"BrainMap database (Mango Behavioral Analysis v4.0, {group}), "
-                           f"reverse inference on foci counts, counted in {key} parcels")
+                           f"reverse inference (signed chi-square) on foci counts, "
+                           f"counted in {key} parcels")
     return out
 
 
@@ -872,6 +875,30 @@ def lancaster_z(count, n_total, n_vox, n_vox_total):
     pe = np.asarray(n_vox, float) / float(n_vox_total)
     with np.errstate(invalid="ignore", divide="ignore"):
         return (p - pe) / np.sqrt((p * (1 - p) + pe * (1 - pe)) / n_total)
+
+
+def chi2_reverse_z(count, total, min_count: int = 5):
+    """NiMARE's reverse-inference test, on counts per parcel.
+
+    For each parcel, the 2 x 2 table [in parcel, outside] x [category, other]
+    and its chi-square test of association (1 df), as in
+    `nimare.decode.discrete.brainmap_decode`; z = sqrt(chi2) with the sign of
+    P(parcel | category) - P(parcel | other categories), and 0 when the
+    category has fewer than `min_count` in the parcel (NiMARE's rare-feature
+    rule). `count`: the category's count per parcel; `total`: every
+    category's count per parcel.
+    """
+    a = np.asarray(count, float)                # category, in parcel
+    t = np.asarray(total, float)
+    b = t - a                                   # other, in parcel
+    c = a.sum() - a                             # category, outside
+    d = (t.sum() - a.sum()) - b                 # other, outside
+    n = a + b + c + d
+    with np.errstate(invalid="ignore", divide="ignore"):
+        chi2 = n * (a * d - b * c) ** 2 / ((a + b) * (c + d) * (a + c) * (b + d))
+        sign = np.sign(a / (a + c) - b / (b + d))
+    z = sign * np.sqrt(chi2)
+    return np.where((a >= min_count) & np.isfinite(z), z, 0.0)
 
 
 def reverse_z(count, total):
