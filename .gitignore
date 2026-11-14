@@ -310,3 +310,4 @@ config/hcp7t_participants.csv
 # Same rule for the 168-subject table of the hp2000_clean copy
 # (config/hcp7t_fix.yaml). Named HCP subjects, built on the cluster.
 config/hcp7t_fix_participants.csv
+docs/figure_mockups/
