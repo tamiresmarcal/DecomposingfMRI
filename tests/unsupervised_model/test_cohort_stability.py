@@ -131,3 +131,13 @@ def test_context_summary_three_comparisons():
     cs = co.context_summary(st, co.film_summary(["entropy_rate_bits", "switch_rate"])).set_index("variable")
     assert cs.loc["switch_rate", "tier_rest_vs_movie"] == "context-dependent"
     assert cs.loc["switch_rate", "film_vs_film_same_people"] > cs.loc["entropy_rate_bits", "film_vs_film_same_people"]
+
+
+def test_episode_halves_are_one_film():
+    co = _toy_films()
+    d = co.by_task.pop(("b", "movie", "clip1"))
+    co.by_task[("b", "movie", "s01e01a")] = d
+    co.by_task[("b", "movie", "s01e01b")] = d + 1
+    F = co.films()
+    assert ("b", "s01e01") in F and ("b", "s01e01a") not in F
+    assert np.allclose(F[("b", "s01e01")]["switch_rate"], d["switch_rate"] + .5)

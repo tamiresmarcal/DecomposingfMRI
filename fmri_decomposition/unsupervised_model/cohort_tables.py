@@ -62,6 +62,9 @@ class Settings:
     # None = entropy_rate_bits as stored; "plugin" / "miller_madow" =
     # recomputed from each table's counts (see hads.Settings.entropy_estimator).
     entropy_estimator: str | None = None
+    # film labels merged in the per-film figures: (regex, replacement). Default: the two halves of
+    # a Friends episode (s01e01a, s01e01b) are one film, s01e01.
+    film_merge: tuple = (r"^(s\d+e\d+)[a-z]$", r"\1")
 
     @property
     def K(self):
@@ -241,8 +244,17 @@ class StabilityMixin:
 
     # -- variation between films ----------------------------------------------------------
     def films(self):
-        """{(cohort, film): one row per subject} for every movie task (film, episode, run)."""
-        return {(c, t): d for (c, k, t), d in sorted(self.by_task.items()) if k == "movie"}
+        """{(cohort, film): one row per subject} for every movie task (film, episode, run). Tasks
+        whose labels `film_merge` maps to the same film (the halves of an episode) are one film: a
+        person's values are averaged over its parts."""
+        pat, sub = self.cfg.film_merge or (None, None)
+        groups = {}
+        for (c, k, t), d in sorted(self.by_task.items()):
+            if k == "movie":
+                name = re.sub(pat, sub, t) if pat else t
+                groups.setdefault((c, name), []).append(d)
+        return {key: (ds[0] if len(ds) == 1 else pd.concat(ds).groupby(level=0).mean())
+                for key, ds in groups.items()}
 
     def film_summary(self, variables=None):
         """One row per (film, variable): mean and 95% CI over the film's viewers, and whether the
