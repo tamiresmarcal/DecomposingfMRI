@@ -44,7 +44,7 @@ class Settings:
         "ds002837": dict(dirs=["ds002837"], role="train"),
         "cneuromod": dict(dirs=["cneuromod"], role="train"),
         "camcan": dict(dirs=["camcan"], role="projected")})
-    rest_pattern: str = r"rest"                       # a task= value that IS this (whole name, any case) is rest;
+    rest_pattern: str = r"rest\d*"                    # a task= value that IS this (whole name, any case) is rest;
                                                       # every other task is movie ("theprestige" is a film)
     dynamics: list = field(default_factory=lambda: list(DYNAMICS))
     # figure 1: movie vs rest
