@@ -170,3 +170,16 @@ def test_rarefied_distinct_removes_length_effect():
     r = ct.rarefied_distinct(d, K, 5)                             # 20 transitions from each
     expected = (1 - (1 - p) ** 20).sum()                          # 20 draws from p itself
     assert np.allclose(r, expected, atol=.15)                     # whatever the scan length
+
+
+def test_duration_check_runs_on_toy():
+    co = _toy_films()
+    rng = np.random.default_rng(0)
+    for d in co.by_task.values():
+        d["scan_s"] = rng.uniform(300, 3000, len(d))
+    v = co.dyn[0]
+    for d in co.by_task.values():                         # a metric that IS scan length
+        d[v] = d["scan_s"] / 60
+    out = co.duration_check([v])
+    assert {"cohort", "kind", "variable", "rho", "p_fdr"} <= set(out.columns)
+    assert (out["rho"].dropna() > .99).all() and out["rho"].notna().any()

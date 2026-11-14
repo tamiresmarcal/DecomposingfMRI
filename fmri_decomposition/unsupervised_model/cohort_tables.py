@@ -56,8 +56,9 @@ class Settings:
     # figures 2 and 4: equivalence
     sesoi_d: float = 0.2                              # TOST bounds, in pooled SDs
     top_transitions: int = 8                          # figure 2: the strongest transitions shown
-    # figure 2a's x ranges: probabilities 0-1; entropy 0-log2(K) bits and distinct 0-K*K are set from K
-    ranges: dict = field(default_factory=lambda: {"switch_rate": (0, 1), "mean_dwell_s": (0, 60), "dispersion": (0, 10)})
+    # fixed x ranges (figures.cohorts.fixed_range): probabilities 0-1; entropy 0-log2(K) bits and
+    # distinct 0-K*K are set from K; dispersion from the data (its units depend on the latent space)
+    ranges: dict = field(default_factory=lambda: {"switch_rate": (0, 1), "mean_dwell_s": (0, 60)})
     save_dir: Path | None = None
     # None = entropy_rate_bits as stored; "plugin" / "miller_madow" =
     # recomputed from each table's counts (see hads.Settings.entropy_estimator).
@@ -67,7 +68,7 @@ class Settings:
     film_merge: tuple = (r"^(s\d+e\d+)[a-z]$", r"\1")
     # n_distinct_transitions grows with scan length. None = as stored; minutes (float) or "min" =
     # rarefied: the number of distinct transitions EXPECTED in that many minutes of the scan
-    # (Hurlbert 1971), from its transition counts; "min" = the shortest scan read, so none is lost.
+    #, from its transition counts; "min" = the shortest scan read, so none is lost.
     # Scans shorter than the target are NaN.
     distinct_minutes: float | str | None = None
 
@@ -83,7 +84,7 @@ def _scan_minutes(d: pd.DataFrame) -> pd.Series:
 
 
 def expected_distinct(counts, n: int) -> float:
-    """Rarefaction (Hurlbert 1971): the expected number of distinct categories in n draws without
+    """Rarefaction: the expected number of distinct categories in n draws without
     replacement from `counts`, sum_k 1 - C(N - c_k, n) / C(N, n). NaN when n > N."""
     from scipy.special import gammaln
     c = np.asarray(counts, float).ravel()
@@ -294,6 +295,32 @@ class StabilityMixin:
                 groups.setdefault((c, name), []).append(d)
         return {key: (ds[0] if len(ds) == 1 else pd.concat(ds).groupby(level=0).mean())
                 for key, ds in groups.items()}
+
+    def duration_check(self, variables=None):
+        """Does a metric follow the amount of scan? One row per (cohort, rest|movie, variable): the
+        Spearman correlation, over every (person, task) value, between the metric and the scan
+        minutes behind it. Within a cohort, so scanner and population are fixed; across tasks the
+        content changes too (NNDb: each film is its own length), so a correlation is a flag to look
+        at, not a proof. Cohorts whose scans all last the same have nothing to show (rho NaN)."""
+        from scipy.stats import spearmanr
+        variables = variables or [*self.dyn, *self.occ]
+        rows = []
+        for (c, k) in sorted({(c, k) for c, k, _ in self.by_task}):
+            t = pd.concat([d for (c_, k_, _), d in self.by_task.items() if (c_, k_) == (c, k)])
+            m = t["scan_s"] / 60 if "scan_s" in t else pd.Series(np.nan, index=t.index)
+            for v in [v for v in variables if v in t]:
+                ok = m.notna() & t[v].notna()
+                varies = ok.sum() >= 10 and m[ok].nunique() > 1 and m[ok].std() > .05 * m[ok].mean()
+                rho, p = spearmanr(m[ok], t.loc[ok, v]) if varies else (np.nan, np.nan)
+                rows.append(dict(cohort=c, kind=k, variable=v, n=int(ok.sum()),
+                                 minutes_min=m[ok].min(), minutes_max=m[ok].max(), rho=rho, p=p))
+        out = pd.DataFrame(rows, columns=["cohort", "kind", "variable", "n", "minutes_min",
+                                          "minutes_max", "rho", "p"])
+        q = out["p"].dropna()
+        out["p_fdr"] = np.nan
+        if len(q):
+            out.loc[q.index, "p_fdr"] = stats.false_discovery_control(q)
+        return out
 
     def film_summary(self, variables=None):
         """One row per (film, variable): mean and 95% CI over the film's viewers, and whether the

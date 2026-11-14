@@ -158,11 +158,9 @@ def fig_tost(co, agree):
         t = agree[agree["variable"] == v]
         _rows(ax, t, 0, "mean", "mean_lo", "mean_hi", 1, col, offsets, eqf)
         stars(ax, t, 0, 1)
-        top = {"entropy_rate_bits": np.log2(cfg.K), "n_distinct_transitions": cfg.K ** 2}   # the most K states allow
-        if v in top:
-            ax.set_xlim(0, top[v])
-        elif v in cfg.ranges:
-            ax.set_xlim(*cfg.ranges[v])
+        lo_, hi_ = fixed_range(co, v)
+        if np.isfinite(lo_):
+            ax.set_xlim(lo_, hi_)
         ax.set_title(v + DYN_UNIT.get(v, ""), fontsize=9, loc="left", pad=3)
 
     legend = ([Line2D([], [], ls="none", marker="o", color=col[c], label=f"{c} ({co.role(c)})") for c in labels] +
@@ -600,15 +598,24 @@ def fig_stability_plane(co, st, variables=None, x_cut=None, y_cut=0.4):
 def fixed_range(co, v):
     """The same x range for a variable in every figure: probabilities (occupancy, transitions,
     the transition-pattern correlation) 0-1; the dynamics on their natural ranges -- switch rate
-    0-1, mean dwell 0-60 s, entropy rate 0-log2(K) bits, dispersion 0-10, distinct transitions
-    0-K^2. A value outside the range (e.g. a cohort's very long dwell) is clipped at the edge."""
+    0-1, mean dwell 0-60 s, entropy rate 0-log2(K) bits, distinct transitions 0-K^2. Dispersion is
+    in the units of the state set's latent space (PCA and UMAP differ by an order of magnitude),
+    so its range is 0 to the 99th percentile of the subjects' values, rounded up -- the same in
+    every figure of a state set. `cfg.ranges` overrides any of these."""
     K = co.cfg.K
     if v.startswith("occ_") or "->" in v or v == "transition_fit":
         return (0.0, 1.0)
+    if v in co.cfg.ranges:
+        return tuple(co.cfg.ranges[v])
     top = {"entropy_rate_bits": np.log2(K), "n_distinct_transitions": K * K}
     if v in top:
         return (0.0, float(top[v]))
-    return tuple(co.cfg.ranges.get(v, (np.nan, np.nan)))
+    vals = pd.concat([d[v] for d in co.data.values() if v in d]).dropna() if co.data else pd.Series(dtype=float)
+    if not len(vals):
+        return (np.nan, np.nan)
+    hi = float(np.nanpercentile(vals, 99))
+    step = 10 ** np.floor(np.log10(hi)) if hi > 0 else 1.0
+    return (min(0.0, float(vals.min())), float(np.ceil(hi / step) * step))
 
 
 def global_means(co, variables):
