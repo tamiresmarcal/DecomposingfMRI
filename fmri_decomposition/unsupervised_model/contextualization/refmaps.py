@@ -617,13 +617,15 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     nsd = Path(data) / "neurosynth"
     if taxonomy not in TAXONOMIES:
         raise SystemExit(f"taxonomy must be one of {sorted(TAXONOMIES)}, got {taxonomy!r}")
-    if statistic not in ("zforward", "lancaster"):
-        raise SystemExit(f"statistic must be 'zforward' or 'lancaster', got {statistic!r}")
+    if statistic not in ("zforward", "lancaster", "lancaster_studies"):
+        raise SystemExit("statistic must be 'zforward', 'lancaster' or 'lancaster_studies', "
+                         f"got {statistic!r}")
     label, categories = TAXONOMIES[taxonomy]
-    if statistic == "lancaster":
-        source = (f"Neurosynth v7, Lancaster 2012 z (Mango plugin statistic), {label} "
-                  f"taxonomy, counted in {key} parcels")
-        cache = nsd / f"{key}_lancaster_{taxonomy}.csv"
+    if statistic.startswith("lancaster"):
+        unit = "studies" if statistic == "lancaster_studies" else "foci"
+        source = (f"Neurosynth v7, Lancaster 2012 z (Mango plugin statistic) on {unit}, "
+                  f"{label} taxonomy, counted in {key} parcels")
+        cache = nsd / f"{key}_{statistic.replace('_', '')}_{taxonomy}.csv"
         radius_mm = 0.0
     else:
         source = (f"Neurosynth v7, NiMARE BrainMap decoder (zForward), {label} taxonomy, "
@@ -674,19 +676,32 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     out = pd.DataFrame({"parcel": np.arange(1, n_parcels + 1)})
     if key == "brainnetome":
         out["bn_index"] = out["parcel"]
-    if statistic == "lancaster":
+    if statistic.startswith("lancaster"):
+        # "lancaster": every focus counts, as in the plugin. "lancaster_studies":
+        # a study counts once per parcel it has any focus in (as in MKDA,
+        # Wager et al. 2007), so a study reporting many peaks weighs no more
+        # than one reporting a single peak; the total is then the category's
+        # studies with any focus inside the atlas.
         n_vox = np.bincount(lab.ravel(), minlength=n_parcels + 1)[1:]
         has = ann.set_index("id")
+        ids_all = coords["id"].to_numpy()
         z = np.zeros((n_parcels, len(cats)))
         for j, cat in enumerate(cats):
             ids = set(has.index[has[cat].to_numpy() >= threshold])
             in_cat = coords["id"].isin(ids).to_numpy() & (peak_lab > 0)
-            count = np.bincount(peak_lab[in_cat], minlength=n_parcels + 1)[1:]
-            z[:, j] = lancaster_z(count, in_cat.sum(), n_vox, n_vox.sum())
+            if statistic == "lancaster_studies":
+                pairs = pd.DataFrame({"id": ids_all[in_cat], "p": peak_lab[in_cat]})
+                pairs = pairs.drop_duplicates()
+                count = np.bincount(pairs["p"], minlength=n_parcels + 1)[1:]
+                total = pairs["id"].nunique()
+            else:
+                count = np.bincount(peak_lab[in_cat], minlength=n_parcels + 1)[1:]
+                total = in_cat.sum()
+            z[:, j] = lancaster_z(count, total, n_vox, n_vox.sum())
         out[cats] = z
         out.to_csv(cache, index=False)
         pd.Series(n_studies, name="n_studies").to_csv(
-            nsd / f"{key}_lancaster_{taxonomy}_n_studies.csv")
+            str(cache).replace(".csv", "_n_studies.csv"))
         out.attrs["source"] = source
         return out
 
@@ -810,6 +825,11 @@ def behavioural_maps(data: Path, ref, table: pd.DataFrame | None = None,
         table = simulate_behavioural_table(brainnetome_table(data), seed=seed)
     cats = [c for c in table.columns if "." in c or c in ("Action", "Cognition", "Emotion",
                                                            "Interoception", "Perception")]
+    # The "... .Other" bins are the general categories (motor execution,
+    # somesthesis, vision): shown under their general name, so the figures,
+    # which hide leftovers, keep them. Same names as the BrainMap database.
+    table = table.rename(columns={c: c[:-len(".Other")] for c in cats if c.endswith(".Other")})
+    cats = [c[:-len(".Other")] if c.endswith(".Other") else c for c in cats]
     if labels is not None:
         lab = np.asarray(labels).astype(int).reshape(-1)
         lut = np.full((int(lab.max()) + 1, len(cats)), np.nan)

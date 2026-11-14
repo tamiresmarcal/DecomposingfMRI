@@ -111,3 +111,33 @@ def test_pure_taxonomy_is_one_own_name_per_category():
     for cat, (term,) in tax.items():
         leaf = cat.split(".")[-1].lower()
         assert term == leaf or term == f"{leaf} {cat.split('.')[-2].lower()}"
+
+
+def test_lancaster_studies_counts_each_study_once(tmp_path, monkeypatch):
+    coords, feats = _fake_neurosynth(tmp_path)
+    # study 1 (vision) reports 9 extra peaks in parcel 1: by foci it weighs 10x
+    pre = tmp_path / "neurosynth" / "data-neurosynth_version-7_coordinates.tsv.gz"
+    extra = pd.DataFrame({"id": 1, "x": [2] * 9, "y": 2, "z": 2})
+    with gzip.open(pre, "wt") as f:
+        pd.concat([coords, extra]).to_csv(f, sep="\t", index=False)
+    monkeypatch.setitem(rm.TAXONOMIES, "toy", ("toy", {"Perception.Vision": ["vision"]}))
+    ref = nib.Nifti1Image(np.zeros((10, 4, 4), np.float32), np.diag([2.0, 2, 2, 1]))
+    lab = np.zeros((10, 4, 4), int)
+    lab[:3] = 1
+    lab[5:8] = 2
+    t = rm.neurosynth_behavioural_table(tmp_path, ref, "toy", labels=lab, key="toyatlas",
+                                        statistic="lancaster_studies")
+    vision = coords["id"] <= 20
+    count = (vision & (coords["x"] == 2)).sum()           # studies, not foci
+    p, pe, n = count / 20, 0.5, 20
+    want = (p - pe) / np.sqrt((p * (1 - p) + pe * (1 - pe)) / n)
+    assert np.isclose(t.loc[0, "Perception.Vision"], want)
+    assert (tmp_path / "neurosynth" / "toyatlas_lancasterstudies_toy.csv").exists()
+
+
+def test_other_bins_are_shown_as_general_categories():
+    t = pd.DataFrame({"parcel": [1, 2], "Action.Execution.Other": [1.0, 2.0],
+                      "Perception.Vision.Other": [0.0, 1.0], "Emotion.Fear": [3.0, 0.0]})
+    lab = np.array([[[1, 2]]])
+    maps = rm.behavioural_maps(None, None, t, labels=lab)
+    assert maps.names == ["Action.Execution", "Perception.Vision", "Emotion.Fear"]

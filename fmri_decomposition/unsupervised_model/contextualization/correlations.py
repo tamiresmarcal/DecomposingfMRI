@@ -452,12 +452,13 @@ def reference_families(data: Path, ref, families, behavioural_csv=None, seed: in
         out["molecular"] = rm.receptor_maps(data, ref)
     if {"behavioural", "behavioural_domain"} & set(families):
         labels = parc.label_volume() if parc is not None else None
-        if behavioural_csv in ("neurosynth", "neurosynth_lancaster"):
+        if behavioural_csv in ("neurosynth", "neurosynth_lancaster",
+                               "neurosynth_lancaster_studies"):
             table = rm.neurosynth_behavioural_table(
                 data, ref, taxonomy, labels=labels,
                 key=atlas if parc is not None else "brainnetome",
-                statistic="lancaster" if behavioural_csv == "neurosynth_lancaster"
-                else "zforward")
+                statistic=behavioural_csv.replace("neurosynth_", "")
+                if behavioural_csv != "neurosynth" else "zforward")
         elif behavioural_csv in ("brainmap", "brainmap_all"):
             if parc is None:
                 raise SystemExit("behavioural_csv='brainmap' needs the states' atlas (parc)")
@@ -507,15 +508,15 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
     label = "simulated" if states == "simulate" else Path(states).stem
     if window_s is not None and states != "simulate" and Path(states).suffix != ".csv":
         label = f"{states}_window-{window_s}"
-    if behavioural_csv in ("neurosynth", "neurosynth_lancaster") and taxonomy != "brainmap" and \
+    if str(behavioural_csv).startswith("neurosynth") and taxonomy != "brainmap" and \
             {"behavioural", "behavioural_domain"} & set(families):
         label += f"_{taxonomy}"
     if behavioural_csv in ("brainmap", "brainmap_all") and \
             {"behavioural", "behavioural_domain"} & set(families):
         label += f"_{behavioural_csv}db"      # never overwrite the Neurosynth run
-    if behavioural_csv == "neurosynth_lancaster" and \
+    if behavioural_csv in ("neurosynth_lancaster", "neurosynth_lancaster_studies") and \
             {"behavioural", "behavioural_domain"} & set(families):
-        label += "_lancaster"
+        label += "_" + behavioural_csv.replace("neurosynth_", "").replace("_", "")
     dirs = {}
     for atlas in atlases:
         spec, src = rm.state_atlas(atlas, data)
