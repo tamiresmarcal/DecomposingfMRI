@@ -66,7 +66,7 @@ def region(name: str) -> str:
 
 def short(name: str) -> str:
     n = region(name)
-    return ABBREV.get(n, n[0].lower() + n[1:])
+    return ABBREV.get(n, n.lower())
 
 
 def top_regions(col: pd.Series, names: pd.Series, k: int) -> list:
@@ -158,7 +158,7 @@ Domain & Subdomain & $r$ & BrainMap & Neurosynth & & BrainMap & Neurosynth \\
 \midrule
 """ + "\n".join(body) + r"""
 \bottomrule
-\end{tabular}}}
+\end{tabular}}
 \end{table}
 """
     (out / f"{a.atlas}_table_crossdb.tex").write_text(tex)
