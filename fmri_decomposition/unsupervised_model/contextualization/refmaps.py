@@ -621,11 +621,17 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     nsd = Path(data) / "neurosynth"
     if taxonomy not in TAXONOMIES:
         raise SystemExit(f"taxonomy must be one of {sorted(TAXONOMIES)}, got {taxonomy!r}")
-    if statistic not in LANCASTER_STATISTICS + ("zforward", "zreverse"):
-        raise SystemExit(f"statistic must be one of {('zforward', 'zreverse') + LANCASTER_STATISTICS}, "
+    if statistic not in LANCASTER_STATISTICS + ("zforward", "zreverse", "chi2_foci"):
+        raise SystemExit("statistic must be one of "
+                         f"{('zforward', 'zreverse', 'chi2_foci') + LANCASTER_STATISTICS}, "
                          f"got {statistic!r}")
     label, categories = TAXONOMIES[taxonomy]
-    if statistic.startswith("lancaster"):
+    if statistic == "chi2_foci":
+        source = (f"Neurosynth v7, reverse inference (signed chi-square) on foci counts, "
+                  f"{label} taxonomy, counted in {key} parcels")
+        cache = nsd / f"{key}_chi2foci_{taxonomy}.csv"
+        radius_mm = 0.0
+    elif statistic.startswith("lancaster"):
         unit = {"lancaster": "foci", "lancaster_studies": "studies",
                 "lancaster_weighted": "foci weighted 1/n per study",
                 "lancaster_reverse": "reverse inference, foci weighted 1/n per study"}[statistic]
@@ -687,6 +693,26 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     out = pd.DataFrame({"parcel": np.arange(1, n_parcels + 1)})
     if key == "brainnetome":
         out["bn_index"] = out["parcel"]
+    if statistic == "chi2_foci":
+        # Built exactly as the BrainMap database's reverse inference
+        # (`_brainmap_db_reverse`), for a like-for-like check of the two
+        # databases: each category's foci counted strictly inside parcels, a
+        # parcel's total the sum of its counts over the categories, NiMARE's
+        # signed chi-square on them (`chi2_reverse_z`).
+        has = ann.set_index("id")
+        cnt = np.zeros((n_parcels, len(cats)))
+        for j, cat in enumerate(cats):
+            ids = set(has.index[has[cat].to_numpy() >= threshold])
+            in_cat = coords["id"].isin(ids).to_numpy() & (peak_lab > 0)
+            cnt[:, j] = np.bincount(peak_lab[in_cat], minlength=n_parcels + 1)[1:]
+        total = cnt.sum(axis=1)
+        out[cats] = np.stack([chi2_reverse_z(cnt[:, j], total) for j in range(len(cats))], 1)
+        counts = pd.DataFrame(cnt, columns=cats).sum().rename("n_foci")
+        out.to_csv(cache, index=False)
+        pd.concat([pd.Series(n_studies, name="n_studies"), counts], axis=1).to_csv(
+            str(cache).replace(".csv", "_n.csv"))
+        out.attrs["source"] = source
+        return out
     if statistic.startswith("lancaster"):
         # "lancaster": every focus counts, as in the plugin. "lancaster_studies":
         # a study counts once per parcel it has any focus in (as in MKDA,

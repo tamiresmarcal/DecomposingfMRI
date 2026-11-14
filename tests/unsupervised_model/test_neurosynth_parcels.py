@@ -236,3 +236,21 @@ def test_chi2_reverse_z_is_the_signed_two_way_chi_square():
     tab = [[a, t - a], [cnt.sum() - a, (tot.sum() - cnt.sum()) - (t - a)]]
     assert np.isclose(abs(z[0]), np.sqrt(chi2_contingency(tab, correction=False)[0]))
     assert z[0] > 0 and z[1] == 0.0          # parcel 2: fewer than 5, NiMARE's rule
+
+
+def test_chi2_foci_matches_the_brainmap_construction(tmp_path, monkeypatch):
+    coords, feats = _fake_neurosynth(tmp_path)
+    monkeypatch.setitem(rm.TAXONOMIES, "toy", ("toy", {
+        "Perception.Vision": ["vision"], "Perception.Audition": ["audition"]}))
+    ref = nib.Nifti1Image(np.zeros((10, 4, 4), np.float32), np.diag([2.0, 2, 2, 1]))
+    lab = np.zeros((10, 4, 4), int)
+    lab[:3] = 1
+    lab[5:8] = 2
+    t = rm.neurosynth_behavioural_table(tmp_path, ref, "toy", labels=lab, key="toyatlas",
+                                        statistic="chi2_foci")
+    vis = (coords["id"] <= 20).to_numpy()
+    cnt = np.array([[(vis & (coords.x == x)).sum(), (~vis & (coords.x == x)).sum()]
+                    for x in (2, 12)], float)
+    want = rm.chi2_reverse_z(cnt[:, 0], cnt.sum(1))
+    assert np.allclose(t["Perception.Vision"].to_numpy(), want)
+    assert (tmp_path / "neurosynth" / "toyatlas_chi2foci_toy_n.csv").exists()
