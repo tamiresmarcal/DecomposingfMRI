@@ -578,6 +578,9 @@ _ICBM_SPM2TAL = np.array([[0.9254, 0.0024, -0.0118, -1.0207],
                           [0.0, 0.0, 0.0, 1.0]])
 
 
+LANCASTER_STATISTICS = ("lancaster", "lancaster_studies", "lancaster_weighted")
+
+
 def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
                                  radius_mm: float = 6.0,
                                  threshold: float = 0.001,
@@ -617,12 +620,13 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     nsd = Path(data) / "neurosynth"
     if taxonomy not in TAXONOMIES:
         raise SystemExit(f"taxonomy must be one of {sorted(TAXONOMIES)}, got {taxonomy!r}")
-    if statistic not in ("zforward", "lancaster", "lancaster_studies"):
-        raise SystemExit("statistic must be 'zforward', 'lancaster' or 'lancaster_studies', "
+    if statistic not in LANCASTER_STATISTICS + ("zforward",):
+        raise SystemExit(f"statistic must be one of {('zforward',) + LANCASTER_STATISTICS}, "
                          f"got {statistic!r}")
     label, categories = TAXONOMIES[taxonomy]
     if statistic.startswith("lancaster"):
-        unit = "studies" if statistic == "lancaster_studies" else "foci"
+        unit = {"lancaster": "foci", "lancaster_studies": "studies",
+                "lancaster_weighted": "foci weighted 1/n per study"}[statistic]
         source = (f"Neurosynth v7, Lancaster 2012 z (Mango plugin statistic) on {unit}, "
                   f"{label} taxonomy, counted in {key} parcels")
         cache = nsd / f"{key}_{statistic.replace('_', '')}_{taxonomy}.csv"
@@ -681,7 +685,11 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
         # a study counts once per parcel it has any focus in (as in MKDA,
         # Wager et al. 2007), so a study reporting many peaks weighs no more
         # than one reporting a single peak; the total is then the category's
-        # studies with any focus inside the atlas.
+        # studies with any focus inside the atlas. "lancaster_weighted": every
+        # focus counts with weight 1/n, n = its study's foci inside the atlas,
+        # so each study is one vote shared out among its foci: no study
+        # dominates (as with studies) and a parcel's expected share still grows
+        # with its volume (as with foci), which counting studies loses.
         n_vox = np.bincount(lab.ravel(), minlength=n_parcels + 1)[1:]
         has = ann.set_index("id")
         ids_all = coords["id"].to_numpy()
@@ -689,7 +697,13 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
         for j, cat in enumerate(cats):
             ids = set(has.index[has[cat].to_numpy() >= threshold])
             in_cat = coords["id"].isin(ids).to_numpy() & (peak_lab > 0)
-            if statistic == "lancaster_studies":
+            if statistic == "lancaster_weighted":
+                sid = ids_all[in_cat]
+                n_per = pd.Series(sid).map(pd.Series(sid).value_counts()).to_numpy(float)
+                count = np.bincount(peak_lab[in_cat], weights=1.0 / n_per,
+                                    minlength=n_parcels + 1)[1:]
+                total = len(set(sid))
+            elif statistic == "lancaster_studies":
                 pairs = pd.DataFrame({"id": ids_all[in_cat], "p": peak_lab[in_cat]})
                 pairs = pairs.drop_duplicates()
                 count = np.bincount(pairs["p"], minlength=n_parcels + 1)[1:]

@@ -437,6 +437,13 @@ def _all_subjects(paths) -> set:
 
 
 # ------------------------------------------------------------- reference ---
+# BEHAVIOURAL values that compute the profiles from Neurosynth: the NiMARE
+# decoder (zForward), then the Lancaster statistic on foci, studies, or foci
+# weighted 1/n per study.
+NEUROSYNTH_OPTIONS = ("neurosynth", "neurosynth_lancaster", "neurosynth_lancaster_studies",
+                      "neurosynth_lancaster_weighted")
+
+
 def reference_families(data: Path, ref, families, behavioural_csv=None, seed: int = 7,
                        taxonomy: str = "brainmap", parc=None, atlas: str | None = None) -> dict:
     """Voxel-level reference maps for the families asked for.
@@ -452,8 +459,7 @@ def reference_families(data: Path, ref, families, behavioural_csv=None, seed: in
         out["molecular"] = rm.receptor_maps(data, ref)
     if {"behavioural", "behavioural_domain"} & set(families):
         labels = parc.label_volume() if parc is not None else None
-        if behavioural_csv in ("neurosynth", "neurosynth_lancaster",
-                               "neurosynth_lancaster_studies"):
+        if behavioural_csv in NEUROSYNTH_OPTIONS:
             table = rm.neurosynth_behavioural_table(
                 data, ref, taxonomy, labels=labels,
                 key=atlas if parc is not None else "brainnetome",
@@ -514,7 +520,7 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
     if behavioural_csv in ("brainmap", "brainmap_all") and \
             {"behavioural", "behavioural_domain"} & set(families):
         label += f"_{behavioural_csv}db"      # never overwrite the Neurosynth run
-    if behavioural_csv in ("neurosynth_lancaster", "neurosynth_lancaster_studies") and \
+    if behavioural_csv in NEUROSYNTH_OPTIONS[1:] and \
             {"behavioural", "behavioural_domain"} & set(families):
         label += "_" + behavioural_csv.replace("neurosynth_", "").replace("_", "")
     dirs = {}

@@ -141,3 +141,28 @@ def test_other_bins_are_shown_as_general_categories():
     lab = np.array([[[1, 2]]])
     maps = rm.behavioural_maps(None, None, t, labels=lab)
     assert maps.names == ["Action.Execution", "Perception.Vision", "Emotion.Fear"]
+
+
+def test_lancaster_weighted_gives_each_study_one_vote(tmp_path, monkeypatch):
+    coords, feats = _fake_neurosynth(tmp_path)
+    # study 1 (vision) reports 9 extra peaks in parcel 2: weighted, it still
+    # carries one vote, 1/10 in parcel 1 and 9/10 in parcel 2
+    pre = tmp_path / "neurosynth" / "data-neurosynth_version-7_coordinates.tsv.gz"
+    extra = pd.DataFrame({"id": 1, "x": [12] * 9, "y": 2, "z": 2})
+    allc = pd.concat([coords, extra], ignore_index=True)
+    with gzip.open(pre, "wt") as f:
+        allc.to_csv(f, sep="\t", index=False)
+    monkeypatch.setitem(rm.TAXONOMIES, "toy", ("toy", {"Perception.Vision": ["vision"]}))
+    ref = nib.Nifti1Image(np.zeros((10, 4, 4), np.float32), np.diag([2.0, 2, 2, 1]))
+    lab = np.zeros((10, 4, 4), int)
+    lab[:3] = 1
+    lab[5:8] = 2
+    t = rm.neurosynth_behavioural_table(tmp_path, ref, "toy", labels=lab, key="toyatlas",
+                                        statistic="lancaster_weighted")
+    vis = allc[allc["id"] <= 20]
+    w = 1.0 / vis["id"].map(vis["id"].value_counts())
+    for r, x in ((1, 2), (2, 12)):
+        p, pe, n = w[vis["x"] == x].sum() / 20, 0.5, 20
+        want = (p - pe) / np.sqrt((p * (1 - p) + pe * (1 - pe)) / n)
+        assert np.isclose(t.loc[t.parcel == r, "Perception.Vision"].item(), want)
+    assert (tmp_path / "neurosynth" / "toyatlas_lancasterweighted_toy.csv").exists()

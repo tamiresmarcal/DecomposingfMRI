@@ -117,6 +117,7 @@ def main(argv=None):
         parc = rm.Parcellator.build(spec, ref)
         for tax, stat, k in (("brainmap", "lancaster", "Neurosynth-Lancaster"),
                              ("brainmap", "lancaster_studies", "Neurosynth-Lancaster-studies"),
+                             ("brainmap", "lancaster_weighted", "Neurosynth-Lancaster-weighted"),
                              ("brainmap_pure", "lancaster", "Neurosynth-Lancaster-pure")):
             tabs[k] = rm.neurosynth_behavioural_table(
                 data, ref, tax, labels=parc.label_volume(), key=a.atlas,
