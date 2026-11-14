@@ -507,7 +507,7 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
     label = "simulated" if states == "simulate" else Path(states).stem
     if window_s is not None and states != "simulate" and Path(states).suffix != ".csv":
         label = f"{states}_window-{window_s}"
-    if behavioural_csv == "neurosynth" and taxonomy != "brainmap" and \
+    if behavioural_csv in ("neurosynth", "neurosynth_lancaster") and taxonomy != "brainmap" and \
             {"behavioural", "behavioural_domain"} & set(families):
         label += f"_{taxonomy}"
     if behavioural_csv in ("brainmap", "brainmap_all") and \

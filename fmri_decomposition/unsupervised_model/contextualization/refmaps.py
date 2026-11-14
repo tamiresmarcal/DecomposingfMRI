@@ -526,8 +526,46 @@ BEAM2021_TERMS = {
                  "articulation", "phonetics", "word", "semantic processing", "syntax",
                  "voice perception"],
 }
+# The same categories with NO synonyms: each is the Neurosynth term that is its
+# own name, and nothing else. The rule: the leaf of the BrainMap path, lower
+# case ("Emotion.Fear" -> "fear"); where the leaf is only a modifier of its
+# parent, the two together ("Memory.Working" -> "working memory"). A category
+# whose own name is not in the Neurosynth v7 vocabulary is left out, not
+# replaced: imagination, motor learning, orthography, phonology, syntax,
+# explicit memory, soma, happiness, sadness, audition, gustation, olfaction,
+# every interoceptive category but sleep, and the "... Other" bins.
+# Action.Execution.Speech and Cognition.Language.Speech both name "speech",
+# so their two maps are the same map.
+NEUROSYNTH_TERMS_PURE = {
+    "Action.Execution.Speech": ["speech"],
+    "Action.Inhibition": ["inhibition"],
+    "Action.Observation": ["observation"],
+    "Action.Preparation": ["preparation"],
+    "Action.Rest": ["rest"],
+    "Cognition.Attention": ["attention"],
+    "Cognition.Language.Semantics": ["semantics"],
+    "Cognition.Language.Speech": ["speech"],
+    "Cognition.Memory.Working": ["working memory"],
+    "Cognition.Music": ["music"],
+    "Cognition.Reasoning": ["reasoning"],
+    "Cognition.Social Cognition": ["social cognition"],
+    "Cognition.Space": ["space"],
+    "Cognition.Time": ["time"],
+    "Emotion.Anger": ["anger"],
+    "Emotion.Anxiety": ["anxiety"],
+    "Emotion.Disgust": ["disgust"],
+    "Emotion.Fear": ["fear"],
+    "Interoception.Sleep": ["sleep"],
+    "Perception.Somesthesis.Pain": ["pain"],
+    "Perception.Vision.Color": ["color"],
+    "Perception.Vision.Motion": ["motion"],
+    "Perception.Vision.Shape": ["shape"],
+}
+
 TAXONOMIES = {
     "brainmap": ("BrainMap (Fox et al. 2005)", NEUROSYNTH_TERMS),
+    "brainmap_pure": ("BrainMap (Fox et al. 2005), own names only, no synonyms",
+                      NEUROSYNTH_TERMS_PURE),
     "beam2021": ("Beam et al. 2021",
                  {f"{d}.{t}": [t] for d, terms in BEAM2021_TERMS.items() for t in terms}),
 }

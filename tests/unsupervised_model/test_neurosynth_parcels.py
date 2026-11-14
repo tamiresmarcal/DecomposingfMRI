@@ -102,3 +102,12 @@ def test_brainmap_db_columns_keeps_general_categories_before_children():
                                    "Emotion.Fear"})
     assert cols == ["Action.Execution", "Action.Execution.Speech", "Emotion.Fear",
                     "Perception.Vision", "Perception.Vision.Motion"]
+
+
+def test_pure_taxonomy_is_one_own_name_per_category():
+    tax = rm.TAXONOMIES["brainmap_pure"][1]
+    assert all(len(v) == 1 for v in tax.values())
+    assert set(tax) <= set(rm.BRAINMAP_TAXONOMY)
+    for cat, (term,) in tax.items():
+        leaf = cat.split(".")[-1].lower()
+        assert term == leaf or term == f"{leaf} {cat.split('.')[-2].lower()}"

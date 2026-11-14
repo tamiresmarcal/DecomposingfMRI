@@ -108,13 +108,18 @@ def main(argv=None):
     if (ns_dir / f"{a.atlas}_nimare_brainmap.csv").exists():
         tabs["Neurosynth-zForward"] = pd.read_csv(
             ns_dir / f"{a.atlas}_nimare_brainmap.csv").set_index("parcel")
+    if (ns_dir / f"{a.atlas}_nimare_brainmap_pure.csv").exists():
+        tabs["Neurosynth-zForward-pure"] = pd.read_csv(
+            ns_dir / f"{a.atlas}_nimare_brainmap_pure.csv").set_index("parcel")
     if not a.no_neurosynth and (ns_dir / "data-neurosynth_version-7_coordinates.tsv.gz").exists():
         ref = rm.reference_grid(data)
         spec, _ = rm.state_atlas(a.atlas, data)
         parc = rm.Parcellator.build(spec, ref)
-        tabs["Neurosynth-Lancaster"] = rm.neurosynth_behavioural_table(
-            data, ref, "brainmap", labels=parc.label_volume(), key=a.atlas,
-            statistic="lancaster").set_index("parcel")
+        for tax, k in (("brainmap", "Neurosynth-Lancaster"),
+                       ("brainmap_pure", "Neurosynth-Lancaster-pure")):
+            tabs[k] = rm.neurosynth_behavioural_table(
+                data, ref, tax, labels=parc.label_volume(), key=a.atlas,
+                statistic="lancaster").set_index("parcel")
 
     # Parcel-size check: a profile that tracks parcel volume measures size,
     # not function. Spearman across parcels, per category, then the median.
@@ -123,7 +128,7 @@ def main(argv=None):
         cs = [c for c in t.columns if "." in c]
         rs = pd.Series({c: spearmanr(t[c].astype(float), size.loc[t.index])[0] for c in cs
                         if t[c].astype(float).std() > 0})
-        print(f"  {k:22s} median r = {rs.median():+.2f}, "
+        print(f"  {k:26s} median r = {rs.median():+.2f}, "
               f"{(rs < -.3).sum()} categories r < -.3, {(rs > .3).sum()} r > .3")
         rs.rename("r_size").to_csv(outdir / f"{a.atlas}_size_check_{k.lower()}.csv")
 

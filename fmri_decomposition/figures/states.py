@@ -51,7 +51,10 @@ SLICES = [("z", 2), ("y", -10)]          # basal ganglia + thalamus; amygdala/hi
 
 
 def taxonomy_label(res: dict) -> str:
-    return "Beam 2021" if "Beam" in res.get("source", "") else "BrainMap"
+    src = res.get("source", "")
+    if "Beam" in src:
+        return "Beam 2021"
+    return "BrainMap, no synonyms" if "no synonyms" in src else "BrainMap"
 
 
 def diverging_cmap():
@@ -545,6 +548,9 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
     elif behavioural_csv == "neurosynth_lancaster" and \
             {"behavioural", "behavioural_domain"} & {rows, cols}:
         stem = Path(f"{stem}_lancaster")
+    if behavioural_csv in ("neurosynth", "neurosynth_lancaster") and taxonomy != "brainmap" \
+            and {"behavioural", "behavioural_domain"} & {rows, cols}:
+        stem = Path(f"{stem}_{taxonomy}")
     tab = pd.DataFrame(r, index=R.names, columns=cn)
     pd.concat({"r": tab, "p_null": pd.DataFrame(res["p"], index=R.names, columns=cn),
                "q_fdr": pd.DataFrame(q, index=R.names, columns=cn)}, axis=0).to_csv(f"{stem}.csv")
