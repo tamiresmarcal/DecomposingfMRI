@@ -724,7 +724,8 @@ def _replication_panel(ax, pairs):
     t = pairs.copy()
     if "kind" not in t:
         t["kind"] = "between cohorts"
-    t = t.sort_values(["kind", "r_norm"], ascending=[True, False])
+    t["_o"] = t["kind"].map({"vs mean": 0, "between cohorts": 0, "rest vs movie": 1})
+    t = t.sort_values(["_o", "r_norm"], ascending=[True, False])
     y = np.arange(len(t))[::-1]
     ax.axvline(1, color=hp.INK2, lw=1, ls="--")
     ax.text(1, 1.01, "noise ceiling", ha="center", va="bottom", fontsize=7.5, color=hp.INK2,
@@ -734,8 +735,9 @@ def _replication_panel(ax, pairs):
         if hasattr(r, "lo") and np.isfinite(getattr(r, "lo", np.nan)):
             ax.plot([r.lo, r.hi], [yi, yi], color=c, lw=1.3)
         ax.plot(r.r_norm, yi, "o", color=c, ms=6)
-    lab = [f"{r.a.replace(' movie', '')} – {r.b.replace(' movie', '')}" if r.kind != "rest vs movie"
-           else f"{r.a.split()[0]}: rest – movie" for r in t.itertuples()]
+    lab = [f"{r.a.split()[0]}: rest – movie" if r.kind == "rest vs movie" else
+           f"{r.a.replace(' movie', '')} – mean of the others" if r.kind == "vs mean" else
+           f"{r.a.replace(' movie', '')} – {r.b.replace(' movie', '')}" for r in t.itertuples()]
     ax.set_yticks(y, lab, fontsize=8)
     lo = min(.5, float(np.nanmin(t.get("lo", t["r_norm"]))) - .05)
     ax.set_xlim(lo, 1.08)

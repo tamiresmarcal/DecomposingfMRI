@@ -183,3 +183,14 @@ def test_duration_check_runs_on_toy():
     out = co.duration_check([v])
     assert {"cohort", "kind", "variable", "rho", "p_fdr"} <= set(out.columns)
     assert (out["rho"].dropna() > .99).all() and out["rho"].notna().any()
+
+
+def test_replication_versus_mean_one_row_per_cohort():
+    import pytest
+    co = _toy()
+    if not hasattr(co, "units"):
+        pytest.skip("toy has no units")
+    pairs, ceil = co.replication("movie", balance="time", hours=.5, n_boot=5, versus="mean")
+    vm = pairs[pairs["kind"] == "vs mean"]
+    assert len(vm) == len({c for c, k in co.data if k == "movie"})
+    assert (vm["b"] == "mean of the others").all()

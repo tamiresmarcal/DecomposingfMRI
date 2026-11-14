@@ -238,7 +238,7 @@ class StabilityMixin:
         return out
 
     def replication(self, kind="movie", n_split=20, min_occ=0.01, seed=0, balance=None, hours=10.0,
-                    n_boot=200):
+                    n_boot=200, versus="pairs"):
         """Does the transition STRUCTURE replicate across cohorts, whatever their levels?
 
         r between cohorts' mean p(j | i) (rows of states occupied >= min_occ), divided by the
@@ -254,9 +254,17 @@ class StabilityMixin:
         left out and neither wins by sheer size. The ceiling is two such draws from DISJOINT halves
         of the cohort's people (so a person is never in both). `n_boot` draws give the 95% CI;
         rest vs movie in the same people is added for the cohorts that have both.
+
+        versus="mean" (balance="time" only): each cohort against the mean of the OTHER cohorts
+        (leave-one-out, so a cohort is never compared with itself), one row per cohort instead of
+        one per pair. The ceiling of that mean is the r between the means of the others' halves.
         """
+        if versus not in ("pairs", "mean"):
+            raise ValueError(f'versus must be "pairs" or "mean", got {versus!r}')
         if balance == "time":
-            return self._replication_time(min_occ, seed, hours, n_boot)
+            return self._replication_time(min_occ, seed, hours, n_boot, versus)
+        if versus == "mean":
+            raise ValueError('versus="mean" needs balance="time"')
         if balance is not None:
             raise ValueError(f'balance must be None or "time", got {balance!r}')
         K, rng = self.cfg.K, np.random.default_rng(seed)
@@ -416,7 +424,7 @@ class StabilityMixin:
         M = np.array([v[self.cells].mean().to_numpy(float)[rows] for v in self.data.values()])
         return pd.DataFrame(np.corrcoef(M), index=names, columns=names)
 
-    def _replication_time(self, min_occ, seed, hours, n_boot):
+    def _replication_time(self, min_occ, seed, hours, n_boot, versus="pairs"):
         K, rng = self.cfg.K, np.random.default_rng(seed)
         occ = pd.concat([v[self.occ].mean() for v in self.data.values()], axis=1).mean(axis=1).to_numpy()
         rows = np.repeat(occ >= min_occ, K)
@@ -441,26 +449,40 @@ class StabilityMixin:
         ceil = {key: [] for key in groups}
         pairs = {}
         keys = list(groups)
+        movie = [k for k in keys if k[1] == "movie"]
         compare = [(a, b) for i, a in enumerate(keys) for b in keys[i + 1:]
-                   if (a[1] == b[1] == "movie") or (a[0] == b[0] and a[1] != b[1])]
+                   if (versus == "pairs" and a[1] == b[1] == "movie") or (a[0] == b[0] and a[1] != b[1])]
+        others = {a: [b for b in movie if b != a] for a in movie} if versus == "mean" else {}
+        for a in others:
+            ceil[("others", a)] = []
         for _ in range(n_boot):
+            halves = {}
             for key, g in groups.items():
                 if g["sub"].nunique() >= 2:
                     h1, h2 = half(g)
-                    ceil[key].append(r(draw(h1), draw(h2)))
+                    halves[key] = draw(h1), draw(h2)
+                    ceil[key].append(r(*halves[key]))
             v = {key: draw(g) for key, g in groups.items()}
             for a, b in compare:
                 pairs.setdefault((a, b), []).append(r(v[a], v[b]))
+            for a, bs in others.items():
+                pairs.setdefault((a, ("others", a)), []).append(r(v[a], np.mean([v[b] for b in bs], 0)))
+                if all(b in halves for b in bs):
+                    ceil[("others", a)].append(r(np.mean([halves[b][0] for b in bs], 0),
+                                                 np.mean([halves[b][1] for b in bs], 0)))
         cm = {k: float(np.nanmedian(x)) if x else np.nan for k, x in ceil.items()}
         rows_out = []
         for (a, b), rs in pairs.items():
             rs = np.array(rs)
             norm = rs / np.sqrt(cm[a] * cm[b])
-            rows_out.append(dict(a=f"{a[0]} {a[1]}", b=f"{b[0]} {b[1]}",
-                                 kind="rest vs movie" if a[0] == b[0] else "between cohorts",
+            rows_out.append(dict(a=f"{a[0]} {a[1]}",
+                                 b="mean of the others" if b[0] == "others" else f"{b[0]} {b[1]}",
+                                 kind=("vs mean" if b[0] == "others" else
+                                       "rest vs movie" if a[0] == b[0] else "between cohorts"),
                                  r=np.median(rs), r_norm=np.median(norm),
                                  lo=np.percentile(norm, 2.5), hi=np.percentile(norm, 97.5)))
-        ceil_s = pd.Series({f"{k[0]} {k[1]}": v for k, v in cm.items()}, name="split_half_r")
+        ceil_s = pd.Series({(f"others than {k[1][0]}" if k[0] == "others" else f"{k[0]} {k[1]}"): v
+                            for k, v in cm.items()}, name="split_half_r")
         return pd.DataFrame(rows_out), ceil_s
 
 
