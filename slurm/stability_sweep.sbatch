@@ -3,6 +3,8 @@
 #
 #   sbatch slurm/stability_sweep.sbatch                       # every atlas, window and state set
 #   sbatch slurm/stability_sweep.sbatch -- --atlas harvardoxford --window-s 30 --states '.*_8'
+#   sbatch slurm/stability_sweep.sbatch -- --atlas all --window-s all --balance time --hours 10 --n-boot 50 \
+#          --out stability_sweep_balanced.csv     # replication balanced by scan time (notebook 14)
 #
 # Options after a bare -- go to the script. Output: stability_sweep_all.csv in the submit
 # directory (or --out), rewritten every 10 sets, so a time-out still leaves the sets done.

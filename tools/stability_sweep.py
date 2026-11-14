@@ -38,13 +38,19 @@ COHORTS = {"ds002837": dict(dirs=["ds002837"], role="train"),
            "hcp7t_fix": dict(dirs=["hcp7t_fix"], role="projected")}
 
 
-def summarize(co: ct.Cohorts) -> dict:
+def summarize(co: ct.Cohorts, balance=None, hours=10.0, n_boot=50) -> dict:
     out = {"K": co.cfg.K}
     occ = pd.concat([v[co.occ].mean() for v in co.data.values()], axis=1).mean(axis=1)
     out["n_rare_states"] = int((occ < .01).sum())
     out["min_occupancy"] = float(occ.min())
 
-    pairs, ceil = co.replication("movie")
+    pairs, ceil = co.replication("movie", balance=balance, hours=hours, n_boot=n_boot)
+    if "kind" in pairs:                                   # balanced: rest-movie pairs come with it
+        rm = pairs[pairs["kind"] == "rest vs movie"]
+        for r in rm.itertuples():
+            out[f"rest_movie_rnorm_{r.a.split()[0]}"] = r.r_norm
+        pairs = pairs[pairs["kind"] == "between cohorts"]
+        out["repl_rnorm_ci_low_min"] = pairs["lo"].min()
     out["repl_r_median"] = pairs["r"].median()
     out["repl_rnorm_median"] = pairs["r_norm"].median()
     out["repl_rnorm_min"] = pairs["r_norm"].min()
@@ -77,6 +83,10 @@ def main(argv=None):
     ap.add_argument("--states", default=None, help="regex over state-set names (default: all)")
     ap.add_argument("--entropy-estimator", default="miller_madow")
     ap.add_argument("--out", type=Path, default=Path("stability_sweep.csv"))
+    ap.add_argument("--balance", default=None, choices=[None, "time"],
+                    help='"time": every cohort the same hours of scan per draw (notebook 14 BALANCE)')
+    ap.add_argument("--hours", type=float, default=10.0)
+    ap.add_argument("--n-boot", type=int, default=50)
     a = ap.parse_args(argv)
 
     base = ct.Settings(cohorts=COHORTS)
@@ -95,7 +105,8 @@ def main(argv=None):
         cfg = ct.Settings(space=dict(atlas=atlas, window_s=w, states=s), cohorts=COHORTS,
                           entropy_estimator=a.entropy_estimator)
         try:
-            rows.append({"atlas": atlas, "window_s": w, "states": s, **summarize(ct.Cohorts(cfg))})
+            rows.append({"atlas": atlas, "window_s": w, "states": s,
+                         **summarize(ct.Cohorts(cfg), a.balance, a.hours, a.n_boot)})
             print(f"[{i}/{len(sets)}] {atlas} {w:g} {s}", flush=True)
             if i % 10 == 0:                                   # partial results survive a time-out
                 pd.DataFrame(rows).to_csv(a.out, index=False)
@@ -107,7 +118,7 @@ def main(argv=None):
     t = pd.DataFrame(rows).sort_values(["repl_rnorm_median", "n_rare_states"], ascending=[False, True])
     t.to_csv(a.out, index=False)
     show = ["atlas", "window_s", "states", "K", "n_rare_states", "repl_rnorm_median", "repl_rnorm_min", "repl_worst_pair",
-            *[c for c in t.columns if c.startswith("rest_movie_r_")], "n_stable", "n_context",
+            *[c for c in t.columns if c.startswith("rest_movie_r")], "n_stable", "n_context",
             *[c for c in t.columns if c.startswith("icc_") and c.endswith("_median")]]
     pd.set_option("display.width", 250)
     print(t[show].to_string(index=False, float_format="%.2f"))
