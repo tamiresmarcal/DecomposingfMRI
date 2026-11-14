@@ -543,3 +543,113 @@ def fig_latents(co, lat, by="participant", who=None, embedding="umap3", paths=Fa
 
 def window_name(cfg):
     return ht.window_name(cfg.space["window_s"])
+
+
+# ------------------------------------------------------------------ stability (manuscript figure 3)
+ORANGE = "#eb6834"
+NICE = {"transition_fit": "Transition structure (fit to reference)", "switch_rate": "Switch rate",
+        "mean_dwell_s": "Mean dwell", "entropy_rate_bits": "Entropy rate", "dispersion": "Dispersion",
+        "n_distinct_transitions": "Distinct transitions"}
+
+
+def nice(v):
+    if v in NICE:
+        return NICE[v]
+    if v.startswith("occ_"):
+        return f"Occupancy S{v[4:]}"
+    if "->" in v:
+        return f"p(S{v.replace('->', ' → S')})"
+    return v
+
+
+def fig_stability_forest(co, st, variables=None):
+    """Panel A. Per variable, two effect sizes with 95% CI against the equivalence band +-sesoi_d:
+    between cohorts (movie; the cohort furthest from the others) and movie vs rest in the same
+    people. Right: 'stable' when both are equivalent (TOST, 5%), else 'context-dependent'."""
+    t = st if variables is None else st.set_index("variable").loc[variables].reset_index()
+    m = co.cfg.sesoi_d
+    y = np.arange(len(t))[::-1]
+    fig, ax = plt.subplots(figsize=(8.5, 0.42 * len(t) + 1.6))
+    ax.axvspan(-m, m, color="#e8f0fb", zorder=0)
+    ax.axvline(0, color=hp.INK2, lw=.8)
+    ax.errorbar(t["between_d"], y + .15, xerr=[t["between_d"] - t["between_lo"], t["between_hi"] - t["between_d"]],
+                fmt="o", color=ORANGE, ms=5, capsize=2, label="between cohorts, movie (largest |d|)")
+    ax.errorbar(t["task_d"].abs(), y - .15, xerr=[(t["task_d"] - t["task_lo"]).abs(), (t["task_hi"] - t["task_d"]).abs()],
+                fmt="s", color=hp.BLUE, ms=5, capsize=2, label="movie vs rest, same people (|d_av|)")
+    ax.set_yticks(y, [nice(v) for v in t["variable"]], fontsize=9)
+    ax.set_xlabel(f"effect size |d| (95% CI) · band = equivalence margin ±{m:g} SD", fontsize=9)
+    for s in ("top", "right", "left"):
+        ax.spines[s].set_visible(False)
+    ax.tick_params(axis="y", length=0)
+    for yi, st_ in zip(y, t["stable"]):
+        ax.text(1.01, yi, "stable" if st_ else "context-dependent", transform=ax.get_yaxis_transform(),
+                va="center", fontsize=8.5, color=hp.INK if st_ else hp.INK2)
+    ax.legend(frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(.45, -.08 - 2 / (len(t) + 4)), ncol=2)
+    ax.set_title("A  What is stable and what depends on context", fontsize=11, loc="left")
+    save(fig, "stability_forest", co.cfg)
+    return fig
+
+
+def fig_stability_plane(co, st, variables=None, x_cut=None, y_cut=0.4):
+    """Panel B. x = movie vs rest shift (|d_av|), y = ICC(3,1) rest <-> movie (individuals keep their
+    rank). Quadrants: stable trait / context-modulated trait / context-driven / unreliable."""
+    t = st if variables is None else st.set_index("variable").loc[variables].reset_index()
+    x_cut = co.cfg.sesoi_d if x_cut is None else x_cut
+    fig, ax = plt.subplots(figsize=(7.5, 6))
+    ax.axvline(x_cut, color="#e5e4df", lw=1.5)
+    ax.axhline(y_cut, color="#e5e4df", lw=1.5)
+    x = t["task_d"].abs()
+    c = [hp.BLUE if s else ORANGE for s in t["stable"]]
+    ax.errorbar(x, t["icc"], yerr=[t["icc"] - t["icc_lo"], t["icc_hi"] - t["icc"]], fmt="none", ecolor="#c9c8c2", lw=1, zorder=1)
+    ax.scatter(x, t["icc"], s=70, c=c, edgecolor="white", linewidth=1.5, zorder=3)
+    for xi, yi, v in zip(x, t["icc"], t["variable"]):
+        ax.annotate(nice(v), (xi, yi), xytext=(6, 4), textcoords="offset points", fontsize=7.5, color=hp.INK)
+    xmax = max(1.0, float(np.nanmax(x)) * 1.1)
+    ax.set_xlim(0, xmax)
+    ax.set_ylim(min(0, float(np.nanmin(t["icc_lo"]))), 1)
+    kw = dict(fontsize=8, color=hp.INK2, style="italic", transform=ax.transAxes)
+    ax.text(.02, .98, "stable trait", va="top", **kw)
+    ax.text(.98, .98, "context-modulated trait", va="top", ha="right", **kw)
+    ax.text(.98, .02, "context-driven", ha="right", **kw)
+    ax.text(.02, .02, "unreliable", **kw)
+    ax.set_xlabel("context shift: |d_av| movie vs rest (same people)", fontsize=9)
+    ax.set_ylabel("individual consistency: ICC(3,1) rest ↔ movie", fontsize=9)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    ax.set_title("B  Stable in the mean, stable in the individual", fontsize=11, loc="left")
+    save(fig, "stability_plane", co.cfg)
+    return fig
+
+
+def fig_similarity(co, S):
+    """Transition-structure similarity between every (cohort, rest|movie): r between their mean p(j | i)."""
+    fig, ax = plt.subplots(figsize=(0.75 * len(S) + 2.5, 0.65 * len(S) + 1.5))
+    im = ax.imshow(S.to_numpy(), cmap="Blues", vmin=min(0.4, float(np.nanmin(S.to_numpy()))), vmax=1)
+    ax.set_xticks(range(len(S)), S.columns, rotation=45, ha="right", fontsize=8)
+    ax.set_yticks(range(len(S)), S.index, fontsize=8)
+    for i in range(len(S)):
+        for j in range(len(S)):
+            if i != j:
+                v = S.iat[i, j]
+                ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=7, color="white" if v > .8 else hp.INK)
+    fig.colorbar(im, ax=ax, fraction=.046, pad=.03).outline.set_visible(False)
+    ax.set_title("Transition-structure similarity (r between mean p(j | i))", fontsize=10, loc="left")
+    save(fig, "transition_similarity", co.cfg)
+    return fig
+
+
+def fig_occupancy(co, O):
+    """Mean time in each state (%), by cohort and condition."""
+    fig, ax = plt.subplots(figsize=(0.7 * O.shape[1] + 3, 0.5 * O.shape[0] + 1.5))
+    im = ax.imshow(O.to_numpy(), cmap="Blues", vmin=0, aspect="auto")
+    ax.set_xticks(range(O.shape[1]), O.columns, fontsize=8)
+    ax.set_yticks(range(O.shape[0]), O.index, fontsize=8)
+    vmax = float(np.nanmax(O.to_numpy()))
+    for i in range(O.shape[0]):
+        for j in range(O.shape[1]):
+            ax.text(j, i, f"{O.iat[i, j]:.0f}", ha="center", va="center", fontsize=7,
+                    color="white" if O.iat[i, j] > .55 * vmax else hp.INK)
+    fig.colorbar(im, ax=ax, fraction=.03, pad=.02).outline.set_visible(False)
+    ax.set_title("Occupancy (%) by cohort and condition", fontsize=10, loc="left")
+    save(fig, "occupancy", co.cfg)
+    return fig

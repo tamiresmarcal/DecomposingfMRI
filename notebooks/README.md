@@ -61,6 +61,7 @@ Nothing here writes to `outputs/` directly — the modules do.
 | `11_normal_brain_cohorts.ipynb` | the normal brain across cohorts: rest and movie per cohort and their mean, movie vs rest with the dynamics beside, each cohort's equivalence to the others (TOST), train vs projected cohorts, the transition matrices with a TOST per cell |
 | `12_symptom_distributions.ipynb` | how much clinical signal there is to predict: HADS (Cam-CAN) vs ASR/DSM-oriented (HCP). The band PERCENTAGES are not comparable between the two instruments and the figures say so; the percentile table and the Q-Q are the comparison that is |
 | `13_camcan_to_hcp.ipynb` | train on every Cam-CAN subject, test once on HCP: the equivalence precondition, the whole multiverse transferred with a bootstrap interval over the test subjects, and one model in depth. Needs no equating of HADS against the ASR -- Spearman compares order, not values |
+| `14_cross_cohort_stability.ipynb` | Figure 3 of the manuscript, for any state set (HMM, mean-shift, threshold): everything in notebook 11, then what is stable and what depends on context (equivalence forest plot: between cohorts and movie vs rest), stable in the mean vs stable in the individual (ICC rest ↔ movie), transition-structure similarity and occupancy across cohorts |
 
 Retired, and in the git history if they are wanted: `01_activation`,
 `02_dfc` (their loaders are `extractions/inventory.py`, which `03` still

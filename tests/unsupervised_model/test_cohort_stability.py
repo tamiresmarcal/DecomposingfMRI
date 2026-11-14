@@ -1,0 +1,49 @@
+"""Stability analyses of cohort_tables (notebook 14) on a toy Cohorts."""
+import numpy as np
+import pandas as pd
+
+from fmri_decomposition.unsupervised_model import cohort_tables as ct
+
+
+def _toy(seed=0):
+    K, rng = 3, np.random.default_rng(seed)
+    cfg = ct.Settings(space=dict(atlas="x", window_s=30.0, states="HMM2_umap3_3"),
+                      cohorts={"a": dict(dirs=["a"], role="train"), "b": dict(dirs=["b"], role="projected")})
+    co = ct.Cohorts.__new__(ct.Cohorts)
+    co.cfg, co.by_task = cfg, {}
+    co.cells = [f"{i}->{j}" for i in range(K) for j in range(K)]
+    trait = rng.normal(0, 1, 50)
+
+    def table(n, shift, subs, tr):
+        P = rng.dirichlet(np.ones(K) * 3, size=(n, K)) + np.eye(K)
+        P /= P.sum(2, keepdims=True)
+        d = pd.DataFrame(P.reshape(n, -1), columns=co.cells, index=subs)
+        d[[f"occ_{k}" for k in range(K)]] = rng.dirichlet(np.ones(K) * 5, size=n)
+        d["switch_rate"] = .4 + shift + .1 * tr + rng.normal(0, .01, n)      # shifts, keeps rank
+        d["entropy_rate_bits"] = 1 + .1 * tr + rng.normal(0, .01, n)         # stable trait
+        return d
+    subs = [f"s{i}" for i in range(50)]
+    co.data = {("a", "movie"): table(50, 0, [f"a{i}" for i in range(50)], rng.normal(0, 1, 50)),
+               ("b", "movie"): table(50, 0, subs, trait), ("b", "rest"): table(50, .2, subs, trait)}
+    return co
+
+
+def test_stability_separates_a_stable_trait_from_a_shifted_one():
+    st = _toy().stability(["entropy_rate_bits", "switch_rate"], n_boot=200).set_index("variable")
+    assert st.loc["entropy_rate_bits", "task_equivalent"]
+    assert not st.loc["switch_rate", "task_equivalent"]
+    assert st.loc["switch_rate", "task_d"] < 0                         # movie - rest, rest is higher
+    assert st.loc["entropy_rate_bits", "icc"] > .8 and st.loc["switch_rate", "icc"] > .8
+
+
+def test_icc_c1_is_consistency_not_agreement():
+    x = np.arange(20.0)
+    assert np.isclose(ct._icc_c1(x, x + 5), 1.0)                       # a constant shift keeps rank
+    assert ct._icc_c1(x, -x) < 0
+
+
+def test_similarity_and_occupancy_shapes():
+    co = _toy()
+    S, O = co.similarity(), co.occupancy_table()
+    assert S.shape == (3, 3) and np.allclose(np.diag(S), 1)
+    assert O.shape == (3, 3) and np.allclose(O.sum(axis=1), 100)

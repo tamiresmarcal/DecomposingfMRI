@@ -68,7 +68,138 @@ class Settings:
         return ht.n_states(self.space["states"])
 
 
-class Cohorts:
+# -- stability: what is stable, what depends on context (figure 3 of the manuscript) ---------
+def _icc_c1(x, y):
+    """ICC(3,1), two-way mixed, consistency: do the people keep their rank between x and y,
+    whatever the shift of the mean (Shrout & Fleiss 1979; McGraw & Wong 1996)."""
+    Y = np.c_[x, y]
+    Y = Y[np.isfinite(Y).all(1)]
+    n, k = Y.shape
+    if n < 3:
+        return np.nan
+    gm = Y.mean()
+    ss_r = k * ((Y.mean(1) - gm) ** 2).sum()
+    ss_c = n * ((Y.mean(0) - gm) ** 2).sum()
+    ss_e = ((Y - gm) ** 2).sum() - ss_r - ss_c
+    ms_r, ms_e = ss_r / (n - 1), ss_e / ((n - 1) * (k - 1))
+    return (ms_r - ms_e) / (ms_r + (k - 1) * ms_e) if (ms_r + (k - 1) * ms_e) > 0 else np.nan
+
+
+def _paired(r, m):
+    """Movie - rest in the same people: d_av (mean difference over the mean of the two SDs,
+    Lakens 2013), so it is on the same scale as the between-cohort d."""
+    diff = m - r
+    sd = (r.std(ddof=1) + m.std(ddof=1)) / 2
+    return diff.mean() / sd if sd > 0 else 0.0
+
+
+class StabilityMixin:
+    """Methods of `Cohorts` behind the stability panels; split out only for reading."""
+
+    def transition_fit(self, min_occ=0.01):
+        """Per subject and scan kind: Pearson r between the subject's p(j | i) and the reference
+        p(j | i) (the mean over every cohort and both kinds, each cohort once), on the rows of the
+        states the reference occupies >= min_occ. One number for 'does this person move between
+        states the way people do' -- the transition structure as a per-subject variable."""
+        K = self.cfg.K
+        ref = pd.concat([v[self.cells].mean() for v in self.data.values()], axis=1).mean(axis=1)
+        occ = pd.concat([v[self.occ].mean() for v in self.data.values()], axis=1).mean(axis=1).to_numpy()
+        rows = np.repeat(occ >= min_occ, K)
+        R = ref.to_numpy(float)[rows]
+        for key, d in self.data.items():
+            X = d[self.cells].to_numpy(float)[:, rows]
+            Xc, Rc = X - X.mean(1, keepdims=True), R - R.mean()
+            with np.errstate(invalid="ignore", divide="ignore"):
+                d["transition_fit"] = (Xc @ Rc) / np.sqrt((Xc ** 2).sum(1) * (Rc ** 2).sum())
+        return "transition_fit"
+
+    def stability_variables(self):
+        fit = self.transition_fit()
+        return [fit, *self.dyn, *self.occ, *self.strongest()]
+
+    def paired_rest_movie(self):
+        """{variable-ready}: rest and movie of the people with both, one row each, indexed
+        cohort:sub, with the cohort in a column (for cohort-demeaning)."""
+        r, m = [], []
+        for c in self.cfg.cohorts:
+            if (c, "rest") in self.data and (c, "movie") in self.data:
+                both = self.data[c, "rest"].index.intersection(self.data[c, "movie"].index)
+                r.append(self.data[c, "rest"].loc[both].rename(index=lambda s, c=c: f"{c}:{s}").assign(cohort=c))
+                m.append(self.data[c, "movie"].loc[both].rename(index=lambda s, c=c: f"{c}:{s}").assign(cohort=c))
+        if not r:
+            raise SystemExit("no cohort has the same people in rest and movie")
+        return pd.concat(r), pd.concat(m)
+
+    def stability(self, variables=None, n_boot=2000, seed=0):
+        """One row per variable, everything panels A and B need.
+
+        between cohorts (movie): the largest |d| of any cohort vs the others (`cohen`), and whether
+            every cohort is equivalent to the others (TOST, `agreement`).
+        movie vs rest (same people, cohorts with both): d_av with a bootstrap 95% CI over people,
+            and a paired TOST: the 90% CI of the mean difference inside +- sesoi_d x pooled SD.
+        individual consistency: ICC(3,1) between rest and movie on cohort-demeaned values (a
+            cohort's offset is not 'keeping your rank'), bootstrap 95% CI; and per cohort.
+        """
+        vs = variables or self.stability_variables()
+        rng = np.random.default_rng(seed)
+        coh, agr = self.cohen(vs), self.agreement(vs)
+        r, m = self.paired_rest_movie()
+        demean = lambda t, v: t[v] - t.groupby("cohort")[v].transform("mean")
+        n = len(r)
+        boot = rng.integers(0, n, size=(n_boot, n))
+        rows = []
+        for v in vs:
+            cv = coh[coh["variable"] == v]
+            i = cv["d"].abs().idxmax()
+            rv, mv_ = r[v].to_numpy(float), m[v].to_numpy(float)
+            ok = np.isfinite(rv) & np.isfinite(mv_)
+            d_av = _paired(pd.Series(rv[ok]), pd.Series(mv_[ok]))
+            bd = [_paired(pd.Series(rv[b][ok[b]]), pd.Series(mv_[b][ok[b]])) for b in boot]
+            diff = (mv_ - rv)[ok]
+            se = diff.std(ddof=1) / np.sqrt(len(diff))
+            h = stats.t.ppf(.95, len(diff) - 1) * se
+            bound = self.cfg.sesoi_d * np.nanstd(np.r_[rv, mv_], ddof=1)
+            rd, md = demean(r, v).to_numpy(float), demean(m, v).to_numpy(float)
+            icc = _icc_c1(rd, md)
+            bi = [_icc_c1(rd[b], md[b]) for b in boot]
+            row = dict(variable=v,
+                       between_d=abs(cv.loc[i, "d"]), between_lo=abs(cv.loc[i, "d"]) - (cv.loc[i, "hi"] - cv.loc[i, "d"]),
+                       between_hi=abs(cv.loc[i, "d"]) + (cv.loc[i, "hi"] - cv.loc[i, "d"]),
+                       between_cohort=cv.loc[i, "cohort"],
+                       between_equivalent=bool(agr.loc[agr["variable"] == v, "equivalent"].all()),
+                       task_d=d_av, task_lo=np.nanpercentile(bd, 2.5), task_hi=np.nanpercentile(bd, 97.5),
+                       task_equivalent=bool((diff.mean() - h > -bound) and (diff.mean() + h < bound)),
+                       task_p=stats.ttest_rel(mv_[ok], rv[ok]).pvalue, n_paired=int(ok.sum()),
+                       icc=icc, icc_lo=np.nanpercentile(bi, 2.5), icc_hi=np.nanpercentile(bi, 97.5))
+            for c in r["cohort"].unique():
+                s = (r["cohort"] == c).to_numpy()
+                row[f"icc_{c}"] = _icc_c1(rv[s], mv_[s])
+            rows.append(row)
+        out = pd.DataFrame(rows)
+        out["task_p_fdr"] = stats.false_discovery_control(out["task_p"].fillna(1))
+        out["stable"] = out["between_equivalent"] & out["task_equivalent"]
+        return out
+
+    # -- reference structure across cohorts ------------------------------------------------
+    def similarity(self, min_occ=0.01):
+        """Pearson r between the mean p(j | i) of every (cohort, rest|movie), on the rows of the
+        states the reference occupies >= min_occ (rare states' rows are noise). The question is
+        how alike the transition structure is across cohorts and conditions; its null (the same
+        with time circularly shifted) needs the state sequences and is not computed here."""
+        K = self.cfg.K
+        occ = pd.concat([v[self.occ].mean() for v in self.data.values()], axis=1).mean(axis=1).to_numpy()
+        rows = np.repeat(occ >= min_occ, K)
+        names = [f"{c} {k}" for (c, k) in self.data]
+        M = np.array([v[self.cells].mean().to_numpy(float)[rows] for v in self.data.values()])
+        return pd.DataFrame(np.corrcoef(M), index=names, columns=names)
+
+    def occupancy_table(self):
+        """Mean time in each state (%), one row per (cohort, rest|movie)."""
+        return pd.DataFrame({f"{c} {k}": 100 * v[self.occ].mean().to_numpy() for (c, k), v in self.data.items()},
+                            index=[f"S{k}" for k in range(self.cfg.K)]).T
+
+
+class Cohorts(StabilityMixin):
     def __init__(self, cfg: Settings | None = None):
         self.cfg = cfg or Settings()
         self.base = transitions_root(
