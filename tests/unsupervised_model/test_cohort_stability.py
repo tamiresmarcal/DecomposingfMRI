@@ -123,3 +123,11 @@ def test_figure3_draws():
     fig = cp.fig_figure3(co, co.graphs(), marks, st, pairs, co.agreement(co.dyn),
                          ["transition_fit", "switch_rate", "entropy_rate_bits"])
     assert len(fig.axes) > 6
+
+
+def test_context_summary_three_comparisons():
+    co = _toy_films()
+    st = co.stability(["entropy_rate_bits", "switch_rate"], n_boot=0)
+    cs = co.context_summary(st, co.film_summary(["entropy_rate_bits", "switch_rate"])).set_index("variable")
+    assert cs.loc["switch_rate", "tier_rest_vs_movie"] == "context-dependent"
+    assert cs.loc["switch_rate", "film_vs_film_same_people"] > cs.loc["entropy_rate_bits", "film_vs_film_same_people"]

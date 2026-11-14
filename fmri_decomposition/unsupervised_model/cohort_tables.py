@@ -293,12 +293,31 @@ class StabilityMixin:
                     eq = bool((diff - hh > -bound) and (diff + hh < bound))
                     pv = stats.ttest_ind(x, y, equal_var=False).pvalue
                 rows.append(dict(cohort=c, film=t, variable=v, n=n, mean=x.mean(), lo=x.mean() - h,
-                                 hi=x.mean() + h, within=within, diff=diff, equivalent=eq, p=pv))
+                                 hi=x.mean() + h, within=within, diff=diff, d=diff / sd[v] if sd[v] > 0 else np.nan,
+                                 equivalent=eq, p=pv))
         out = pd.DataFrame(rows)
         ok = out["p"].notna()
         out["p_fdr"] = np.nan
         out.loc[ok, "p_fdr"] = stats.false_discovery_control(out.loc[ok, "p"])
         out["differs"] = out["p_fdr"] < self.cfg.alpha
+        return out
+
+    def context_summary(self, st, fs):
+        """One row per variable, the three comparisons of the text on one scale (|d|, Cohen's tiers):
+        rest vs movie in the same people (`stability`); film vs film in the same people (median |d|
+        of each film against the person's other films, HCP runs and CNeuroMod episodes); and movie
+        across cohorts, different people (median |d| of each cohort against the others, `cohen`) --
+        film, people, scanner and age change together there, so it can show that a property is
+        alike DESPITE all that, not why it differs."""
+        tier = lambda a: np.select([a < .2, a < .5], ["stable", "moderate"], "context-dependent")
+        coh = self.cohen(list(st["variable"]))
+        out = st[["variable"]].copy()
+        out["rest_vs_movie"] = st["task_d"].abs().to_numpy()
+        w = fs[fs["within"]].groupby("variable")["d"].apply(lambda x: x.abs().median())
+        out["film_vs_film_same_people"] = out["variable"].map(w)
+        out["movie_across_cohorts"] = out["variable"].map(coh.groupby("variable")["d"].apply(lambda x: x.abs().median()))
+        for c in ("rest_vs_movie", "film_vs_film_same_people", "movie_across_cohorts"):
+            out[f"tier_{c}"] = np.where(out[c].notna(), tier(out[c].fillna(0)), "")
         return out
 
     def rest_means(self, variables):
