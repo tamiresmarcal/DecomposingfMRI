@@ -94,9 +94,23 @@ def main(argv=None):
 
     # Against the Neurosynth profiles, if cached for this atlas.
     ns_path = Path(data) / "neurosynth" / f"{a.atlas}_nimare_brainmap.csv"
+    size = rois.set_index("parcel")["n_vox_mni"].astype(float)
+    bm = tables["normals"].set_index("parcel")
+    tabs = {"BrainMap": bm}
     if ns_path.exists():
-        ns = pd.read_csv(ns_path).set_index("parcel")
-        bm = tables["normals"].set_index("parcel")
+        tabs["Neurosynth"] = pd.read_csv(ns_path).set_index("parcel")
+    # Parcel-size check: a profile that tracks parcel volume measures size,
+    # not function. Spearman across parcels, per category, then the median.
+    print("\nparcel size vs profile (Spearman across parcels, per category):")
+    for k, t in tabs.items():
+        cs = [c for c in t.columns if "." in c]
+        rs = pd.Series({c: spearmanr(t[c].astype(float), size.loc[t.index])[0] for c in cs
+                        if t[c].astype(float).std() > 0})
+        print(f"  {k:10s} median r = {rs.median():+.2f}, "
+              f"{(rs < -.3).sum()} categories r < -.3, {(rs > .3).sum()} r > .3")
+        rs.rename("r_size").to_csv(outdir / f"{a.atlas}_size_check_{k.lower()}.csv")
+    if ns_path.exists():
+        ns = tabs["Neurosynth"]
         rows = []
         for c in [c for c in bm.columns if c in ns.columns]:
             x, y = bm[c].astype(float), ns.loc[bm.index, c].astype(float)
