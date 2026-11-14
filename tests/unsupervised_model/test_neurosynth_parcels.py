@@ -72,3 +72,33 @@ def test_nimare_zforward_per_parcel_and_paints_back(tmp_path, monkeypatch):
     assert np.allclose(v[lab == 1], t.loc[0, maps.names[0]])
     assert np.allclose(v[lab == 2], t.loc[1, maps.names[0]])
     assert np.isnan(v[lab == 0]).all() and not maps.simulated
+
+
+def test_lancaster_statistic_matches_the_plugin_formula(tmp_path, monkeypatch):
+    """statistic='lancaster': foci counted strictly inside parcels, z as in the
+    Mango Behavioral Analysis plugin, separate cache from the decoder's."""
+    coords, feats = _fake_neurosynth(tmp_path)
+    monkeypatch.setitem(rm.TAXONOMIES, "toy", ("toy", {
+        "Perception.Vision": ["vision"], "Perception.Audition": ["audition"]}))
+    ref = nib.Nifti1Image(np.zeros((10, 4, 4), np.float32), np.diag([2.0, 2, 2, 1]))
+    lab = np.zeros((10, 4, 4), int)
+    lab[:3] = 1
+    lab[5:8] = 2
+    t = rm.neurosynth_behavioural_table(tmp_path, ref, "toy", labels=lab, key="toyatlas",
+                                        statistic="lancaster")
+    assert (tmp_path / "neurosynth" / "toyatlas_lancaster_toy.csv").exists()
+    vision = coords["id"] <= 20
+    for r, x in ((1, 2), (2, 12)):
+        count = (vision & (coords["x"] == x)).sum()
+        p, pe, n = count / vision.sum(), 0.5, vision.sum()
+        want = (p - pe) / np.sqrt((p * (1 - p) + pe * (1 - pe)) / n)
+        assert np.isclose(t.loc[t.parcel == r, "Perception.Vision"].item(), want)
+    assert t.loc[0, "Perception.Vision"] > 0 > t.loc[1, "Perception.Vision"]
+
+
+def test_brainmap_db_columns_keeps_general_categories_before_children():
+    cols = rm.brainmap_db_columns({"Action.Execution", "Action.Execution.Speech",
+                                   "Perception.Vision", "Perception.Vision.Motion",
+                                   "Emotion.Fear"})
+    assert cols == ["Action.Execution", "Action.Execution.Speech", "Emotion.Fear",
+                    "Perception.Vision", "Perception.Vision.Motion"]

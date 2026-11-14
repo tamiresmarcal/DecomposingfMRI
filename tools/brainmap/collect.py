@@ -4,8 +4,10 @@ Writes, in <data>/brainmap/:
     <atlas>_mango_long.csv      every parcel x group x measure x plugin category
     <atlas>_mango_normals.csv   parcel x BRAINMAP_TAXONOMY, z, healthy participants
     <atlas>_mango_all.csv       the same on all experiments
-    <atlas>_mango_vs_neurosynth.csv   per category, Spearman r across parcels
-                                with the Neurosynth table (if it is cached)
+    <atlas>_mango_vs_neurosynth-*.csv   per category, Spearman r across parcels
+                                with the Neurosynth tables: the decoder's zForward
+                                (if notebook 08 cached it) and the same Lancaster
+                                statistic, computed here
 and prints sanity checks: the top categories of landmark parcels, and the
 left/right asymmetry of language in the inferior frontal gyrus, which a
 mirrored ROI would flip.
@@ -34,6 +36,8 @@ def main(argv=None):
     ap.add_argument("--atlas", default="harvardoxford")
     ap.add_argument("--work", required=True, type=Path)
     ap.add_argument("--data", type=Path, default=None)
+    ap.add_argument("--no-neurosynth", action="store_true",
+                    help="skip computing the Lancaster-statistic Neurosynth table")
     a = ap.parse_args(argv)
 
     data = a.data or require_reference_maps()
@@ -61,11 +65,12 @@ def main(argv=None):
     for group in ("normals", "all"):
         z = (long.query("group == @group and measure == 'z'")
              .pivot(index="parcel", columns="category", values="value"))
-        cats = [c for c in rm.BRAINMAP_TAXONOMY if c in z.columns]
+        cats = rm.brainmap_db_columns(z.columns)
         t = z[cats].reset_index()
         t.to_csv(outdir / f"{a.atlas}_mango_{group}.csv", index=False)
         tables[group] = t
-        absent = [c for c in rm.BRAINMAP_TAXONOMY if c not in z.columns]
+        absent = [c for c in rm.BRAINMAP_TAXONOMY
+                  if c not in z.columns and c not in rm.BRAINMAP_DB_GENERAL.values()]
         print(f"[{group}] {len(t)} parcels x {len(cats)} categories"
               + (f"; not in the plugin: {', '.join(absent)}" if absent else ""))
 
@@ -92,13 +97,25 @@ def main(argv=None):
                         for n, (_, r) in zip(ifg["name"], ifg.iterrows())),
               "(left should exceed right)")
 
-    # Against the Neurosynth profiles, if cached for this atlas.
-    ns_path = Path(data) / "neurosynth" / f"{a.atlas}_nimare_brainmap.csv"
+    # The Neurosynth profiles: the decoder's zForward (cached by notebook 08)
+    # and the same Lancaster statistic as the BrainMap ones (computed here),
+    # so database and statistic can be told apart.
     size = rois.set_index("parcel")["n_vox_mni"].astype(float)
+    pname = rois.set_index("parcel")["name"]
     bm = tables["normals"].set_index("parcel")
     tabs = {"BrainMap": bm}
-    if ns_path.exists():
-        tabs["Neurosynth"] = pd.read_csv(ns_path).set_index("parcel")
+    ns_dir = Path(data) / "neurosynth"
+    if (ns_dir / f"{a.atlas}_nimare_brainmap.csv").exists():
+        tabs["Neurosynth-zForward"] = pd.read_csv(
+            ns_dir / f"{a.atlas}_nimare_brainmap.csv").set_index("parcel")
+    if not a.no_neurosynth and (ns_dir / "data-neurosynth_version-7_coordinates.tsv.gz").exists():
+        ref = rm.reference_grid(data)
+        spec, _ = rm.state_atlas(a.atlas, data)
+        parc = rm.Parcellator.build(spec, ref)
+        tabs["Neurosynth-Lancaster"] = rm.neurosynth_behavioural_table(
+            data, ref, "brainmap", labels=parc.label_volume(), key=a.atlas,
+            statistic="lancaster").set_index("parcel")
+
     # Parcel-size check: a profile that tracks parcel volume measures size,
     # not function. Spearman across parcels, per category, then the median.
     print("\nparcel size vs profile (Spearman across parcels, per category):")
@@ -106,25 +123,30 @@ def main(argv=None):
         cs = [c for c in t.columns if "." in c]
         rs = pd.Series({c: spearmanr(t[c].astype(float), size.loc[t.index])[0] for c in cs
                         if t[c].astype(float).std() > 0})
-        print(f"  {k:10s} median r = {rs.median():+.2f}, "
+        print(f"  {k:22s} median r = {rs.median():+.2f}, "
               f"{(rs < -.3).sum()} categories r < -.3, {(rs > .3).sum()} r > .3")
         rs.rename("r_size").to_csv(outdir / f"{a.atlas}_size_check_{k.lower()}.csv")
-    if ns_path.exists():
-        ns = tabs["Neurosynth"]
+
+    for k in [k for k in tabs if k != "BrainMap"]:
+        ns = tabs[k]
+        pairs = [(c, c) for c in bm.columns if c in ns.columns] + \
+                [(g, o) for g, o in rm.BRAINMAP_DB_GENERAL.items()
+                 if g in bm.columns and o in ns.columns]
         rows = []
-        for c in [c for c in bm.columns if c in ns.columns]:
-            x, y = bm[c].astype(float), ns.loc[bm.index, c].astype(float)
+        for c, c_ns in pairs:
+            x, y = bm[c].astype(float), ns.loc[bm.index, c_ns].astype(float)
             r, p = spearmanr(x, y) if x.std() > 0 and y.std() > 0 else (np.nan, np.nan)
             rows.append({"category": c, "spearman_r": r, "p": p,
-                         "brainmap_top": bm[c].idxmax(), "neurosynth_top": ns[c].idxmax()})
+                         "brainmap_top": pname[bm[c].idxmax()],
+                         "neurosynth_top": pname[ns[c_ns].idxmax()]})
         cmp_ = pd.DataFrame(rows).sort_values("spearman_r")
-        cmp_.to_csv(outdir / f"{a.atlas}_mango_vs_neurosynth.csv", index=False)
-        print(f"\nBrainMap vs Neurosynth, Spearman across {len(bm)} parcels "
+        cmp_.to_csv(outdir / f"{a.atlas}_mango_vs_{k.lower()}.csv", index=False)
+        print(f"\nBrainMap vs {k}, Spearman across {len(bm)} parcels "
               f"(median r = {cmp_.spearman_r.median():.2f}):")
-        print(cmp_[["category", "spearman_r"]].to_string(index=False, float_format="%.2f"))
-    else:
-        print(f"\n(no {ns_path.name}: run notebook 08 with BEHAVIOURAL='neurosynth' "
-              "first to compare)")
+        print(cmp_[["category", "spearman_r", "brainmap_top", "neurosynth_top"]]
+              .to_string(index=False, float_format="%.2f"))
+    if len(tabs) == 1:
+        print("\n(no Neurosynth data or cache: nothing to compare with)")
     print(f"\ntables in {outdir}")
 
 

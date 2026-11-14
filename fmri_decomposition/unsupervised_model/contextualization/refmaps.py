@@ -544,7 +544,8 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
                                  radius_mm: float = 6.0,
                                  threshold: float = 0.001,
                                  labels: np.ndarray | None = None,
-                                 key: str = "brainnetome") -> pd.DataFrame:
+                                 key: str = "brainnetome",
+                                 statistic: str = "zforward") -> pd.DataFrame:
     """Parcels x BrainMap categories from Neurosynth, by NiMARE's BrainMap decoder.
 
     The regional behavioural analysis of BrainMap (Lancaster et al. 2012), as
@@ -563,18 +564,33 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     Omitted, it falls back to the 246 Brainnetome subregions. The table's
     first column is `parcel` (1..P), plus `bn_index` for Brainnetome.
     Cached as neurosynth/<key>_nimare_<taxonomy>.csv; delete to recompute.
+
+    `statistic="lancaster"` replaces the decoder by the statistic of the
+    Mango Behavioral Analysis plugin (`lancaster_z`), the one the BrainMap
+    database profiles use: the share of a category's foci that fall inside
+    the parcel against the parcel's share of the atlas volume. Foci are
+    counted strictly inside parcels (no `radius_mm`), as the plugin does, so
+    the two databases then differ in their data only. Cached as
+    neurosynth/<key>_lancaster_<taxonomy>.csv.
     """
     import scipy.sparse as sp
-    from nimare.decode.discrete import brainmap_decode
     from scipy.ndimage import distance_transform_edt
 
     nsd = Path(data) / "neurosynth"
     if taxonomy not in TAXONOMIES:
         raise SystemExit(f"taxonomy must be one of {sorted(TAXONOMIES)}, got {taxonomy!r}")
+    if statistic not in ("zforward", "lancaster"):
+        raise SystemExit(f"statistic must be 'zforward' or 'lancaster', got {statistic!r}")
     label, categories = TAXONOMIES[taxonomy]
-    source = (f"Neurosynth v7, NiMARE BrainMap decoder (zForward), {label} taxonomy, "
-              f"counted in {key} parcels")
-    cache = nsd / f"{key}_nimare_{taxonomy}.csv"
+    if statistic == "lancaster":
+        source = (f"Neurosynth v7, Lancaster 2012 z (Mango plugin statistic), {label} "
+                  f"taxonomy, counted in {key} parcels")
+        cache = nsd / f"{key}_lancaster_{taxonomy}.csv"
+        radius_mm = 0.0
+    else:
+        source = (f"Neurosynth v7, NiMARE BrainMap decoder (zForward), {label} taxonomy, "
+                  f"counted in {key} parcels")
+        cache = nsd / f"{key}_nimare_{taxonomy}.csv"
     if cache.exists():
         out = pd.read_csv(cache)
         out.attrs["source"] = source
@@ -620,6 +636,23 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     out = pd.DataFrame({"parcel": np.arange(1, n_parcels + 1)})
     if key == "brainnetome":
         out["bn_index"] = out["parcel"]
+    if statistic == "lancaster":
+        n_vox = np.bincount(lab.ravel(), minlength=n_parcels + 1)[1:]
+        has = ann.set_index("id")
+        z = np.zeros((n_parcels, len(cats)))
+        for j, cat in enumerate(cats):
+            ids = set(has.index[has[cat].to_numpy() >= threshold])
+            in_cat = coords["id"].isin(ids).to_numpy() & (peak_lab > 0)
+            count = np.bincount(peak_lab[in_cat], minlength=n_parcels + 1)[1:]
+            z[:, j] = lancaster_z(count, in_cat.sum(), n_vox, n_vox.sum())
+        out[cats] = z
+        out.to_csv(cache, index=False)
+        pd.Series(n_studies, name="n_studies").to_csv(
+            nsd / f"{key}_lancaster_{taxonomy}_n_studies.csv")
+        out.attrs["source"] = source
+        return out
+
+    from nimare.decode.discrete import brainmap_decode
     z = np.zeros((n_parcels, len(cats)))
     for r in range(1, n_parcels + 1):
         ids = sorted(set(coords["id"].to_numpy()[peak_lab == r]))
@@ -643,15 +676,34 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
 # with no counterpart here (Emotion.Guilt, Cognition.Memory.Implicit, ...) stay
 # in the *_all.csv the tool writes, not in the table the panels use.
 BRAINMAP_PLUGIN_RENAME = {
-    "Action.Execution": "Action.Execution.Other",
     "Cognition.Somatic": "Cognition.Soma",
     "Cognition.Spatial": "Cognition.Space",
     "Cognition.Temporal": "Cognition.Time",
     "Interoception.Gastrointestinal/Genitourinary": "Interoception.Bladder",
     "Interoception.Respiration Regulation": "Interoception.Air Hunger",
+}
+# The plugin's general categories are kept under their own names, NOT folded
+# into the "... .Other" bins the figures hide: in the BrainMap database they
+# are the main motor, somatosensory and visual categories, not leftovers.
+# Each sits just before its subcategories; the Neurosynth bin it is compared to
+# is the value.
+BRAINMAP_DB_GENERAL = {
+    "Action.Execution": "Action.Execution.Other",
     "Perception.Somesthesis": "Perception.Somesthesis.Other",
     "Perception.Vision": "Perception.Vision.Other",
 }
+
+
+def brainmap_db_columns(available) -> list:
+    """BRAINMAP_TAXONOMY order, the general categories before their children."""
+    cols = []
+    for c in BRAINMAP_TAXONOMY:
+        for g in BRAINMAP_DB_GENERAL:
+            if c.startswith(g + ".") and g in available and g not in cols:
+                cols.append(g)
+        if c in available:
+            cols.append(c)
+    return cols
 
 
 def brainmap_db_table(data: Path, key: str, group: str = "normals") -> pd.DataFrame:
@@ -674,6 +726,26 @@ def brainmap_db_table(data: Path, key: str, group: str = "normals") -> pd.DataFr
     out.attrs["source"] = (f"BrainMap database (Mango Behavioral Analysis v4.0, {group}), "
                            f"Lancaster 2012 z, counted in {key} parcels")
     return out
+
+
+def lancaster_z(count, n_total, n_vox, n_vox_total):
+    """The z of the Mango Behavioral Analysis plugin (Lancaster et al. 2012).
+
+    p  = count / n_total          share of the category's foci inside the ROI
+    pe = n_vox / n_vox_total      share of the volume the ROI takes
+    z  = (p - pe) / sqrt((p(1-p) + pe(1-pe)) / n_total)
+
+    Read off the plugin's convertToZscore (v4.0), so the Neurosynth profiles
+    can be computed with exactly the statistic the BrainMap ones use. NaN for
+    a category with no foci.
+    """
+    count = np.asarray(count, float)
+    if n_total <= 0:
+        return np.full(count.shape, np.nan)
+    p = count / n_total
+    pe = np.asarray(n_vox, float) / float(n_vox_total)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return (p - pe) / np.sqrt((p * (1 - p) + pe * (1 - pe)) / n_total)
 
 
 def load_behavioural_table(path: Path) -> pd.DataFrame:

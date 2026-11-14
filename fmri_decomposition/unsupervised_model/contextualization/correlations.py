@@ -452,10 +452,12 @@ def reference_families(data: Path, ref, families, behavioural_csv=None, seed: in
         out["molecular"] = rm.receptor_maps(data, ref)
     if {"behavioural", "behavioural_domain"} & set(families):
         labels = parc.label_volume() if parc is not None else None
-        if behavioural_csv == "neurosynth":
+        if behavioural_csv in ("neurosynth", "neurosynth_lancaster"):
             table = rm.neurosynth_behavioural_table(
                 data, ref, taxonomy, labels=labels,
-                key=atlas if parc is not None else "brainnetome")
+                key=atlas if parc is not None else "brainnetome",
+                statistic="lancaster" if behavioural_csv == "neurosynth_lancaster"
+                else "zforward")
         elif behavioural_csv in ("brainmap", "brainmap_all"):
             if parc is None:
                 raise SystemExit("behavioural_csv='brainmap' needs the states' atlas (parc)")
@@ -511,6 +513,9 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
     if behavioural_csv in ("brainmap", "brainmap_all") and \
             {"behavioural", "behavioural_domain"} & set(families):
         label += f"_{behavioural_csv}db"      # never overwrite the Neurosynth run
+    if behavioural_csv == "neurosynth_lancaster" and \
+            {"behavioural", "behavioural_domain"} & set(families):
+        label += "_lancaster"
     dirs = {}
     for atlas in atlases:
         spec, src = rm.state_atlas(atlas, data)
