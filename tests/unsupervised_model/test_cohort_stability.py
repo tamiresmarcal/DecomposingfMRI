@@ -140,4 +140,4 @@ def test_episode_halves_are_one_film():
     co.by_task[("b", "movie", "s01e01b")] = d + 1
     F = co.films()
     assert ("b", "s01e01") in F and ("b", "s01e01a") not in F
-    assert np.allclose(F[("b", "s01e01")]["switch_rate"], d["switch_rate"] + .5)
+    assert np.allclose(F[("b", "s01e01")].loc[d.index, "switch_rate"], d["switch_rate"] + .5)
