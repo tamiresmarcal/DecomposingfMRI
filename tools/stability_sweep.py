@@ -72,8 +72,8 @@ def summarize(co: ct.Cohorts) -> dict:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--atlas", default="harvardoxford")
-    ap.add_argument("--window-s", type=float, default=30.0)
+    ap.add_argument("--atlas", default="harvardoxford", help='an atlas, or "all"')
+    ap.add_argument("--window-s", default="30", help='a window in s (-1 = per TR), or "all"')
     ap.add_argument("--states", default=None, help="regex over state-set names (default: all)")
     ap.add_argument("--entropy-estimator", default="miller_madow")
     ap.add_argument("--out", type=Path, default=Path("stability_sweep.csv"))
@@ -81,26 +81,32 @@ def main(argv=None):
 
     base = ct.Settings(cohorts=COHORTS)
     sets = ct.available_sets(base.root, COHORTS, base.modelling_version)
-    sets = sets[(sets["atlas"] == a.atlas) & np.isclose(sets["window_s"].astype(float), a.window_s)]
+    if a.atlas != "all":
+        sets = sets[sets["atlas"] == a.atlas]
+    if a.window_s != "all":
+        sets = sets[np.isclose(sets["window_s"].astype(float), float(a.window_s))]
     if a.states:
         sets = sets[sets["states"].str.fullmatch(a.states)]
-    print(f"{len(sets)} state sets ({a.atlas}, {a.window_s:g} s)", flush=True)
+    print(f"{len(sets)} state sets (atlas {a.atlas}, window {a.window_s})", flush=True)
 
     rows = []
-    for i, s in enumerate(sets["states"], 1):
-        cfg = ct.Settings(space=dict(atlas=a.atlas, window_s=a.window_s, states=s), cohorts=COHORTS,
+    for i, (atlas, w, s) in enumerate(sets[["atlas", "window_s", "states"]].itertuples(index=False), 1):
+        w = float(w)
+        cfg = ct.Settings(space=dict(atlas=atlas, window_s=w, states=s), cohorts=COHORTS,
                           entropy_estimator=a.entropy_estimator)
         try:
-            rows.append({"states": s, **summarize(ct.Cohorts(cfg))})
-            print(f"[{i}/{len(sets)}] {s}", flush=True)
+            rows.append({"atlas": atlas, "window_s": w, "states": s, **summarize(ct.Cohorts(cfg))})
+            print(f"[{i}/{len(sets)}] {atlas} {w:g} {s}", flush=True)
+            if i % 10 == 0:                                   # partial results survive a time-out
+                pd.DataFrame(rows).to_csv(a.out, index=False)
         except (Exception, SystemExit) as e:                 # one bad set must not stop the sweep
-            print(f"[{i}/{len(sets)}] {s} FAILED: {e}", file=sys.stderr, flush=True)
+            print(f"[{i}/{len(sets)}] {atlas} {w:g} {s} FAILED: {e}", file=sys.stderr, flush=True)
             traceback.print_exc(limit=1)
     if not rows:
         raise SystemExit("no state set could be summarised")
     t = pd.DataFrame(rows).sort_values(["repl_rnorm_median", "n_rare_states"], ascending=[False, True])
     t.to_csv(a.out, index=False)
-    show = ["states", "K", "n_rare_states", "repl_rnorm_median", "repl_rnorm_min", "repl_worst_pair",
+    show = ["atlas", "window_s", "states", "K", "n_rare_states", "repl_rnorm_median", "repl_rnorm_min", "repl_worst_pair",
             *[c for c in t.columns if c.startswith("rest_movie_r_")], "n_stable", "n_context",
             *[c for c in t.columns if c.startswith("icc_") and c.endswith("_median")]]
     pd.set_option("display.width", 250)
