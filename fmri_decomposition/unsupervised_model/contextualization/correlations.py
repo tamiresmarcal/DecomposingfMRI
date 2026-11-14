@@ -441,7 +441,8 @@ def _all_subjects(paths) -> set:
 # decoder (zForward), then the Lancaster statistic on foci, studies, or foci
 # weighted 1/n per study.
 NEUROSYNTH_OPTIONS = ("neurosynth", "neurosynth_lancaster", "neurosynth_lancaster_studies",
-                      "neurosynth_lancaster_weighted")
+                      "neurosynth_lancaster_weighted", "neurosynth_lancaster_reverse")
+BRAINMAP_OPTIONS = ("brainmap", "brainmap_all", "brainmap_reverse", "brainmap_all_reverse")
 
 
 def reference_families(data: Path, ref, families, behavioural_csv=None, seed: int = 7,
@@ -465,11 +466,13 @@ def reference_families(data: Path, ref, families, behavioural_csv=None, seed: in
                 key=atlas if parc is not None else "brainnetome",
                 statistic=behavioural_csv.replace("neurosynth_", "")
                 if behavioural_csv != "neurosynth" else "zforward")
-        elif behavioural_csv in ("brainmap", "brainmap_all"):
+        elif behavioural_csv in BRAINMAP_OPTIONS:
             if parc is None:
                 raise SystemExit("behavioural_csv='brainmap' needs the states' atlas (parc)")
             table = rm.brainmap_db_table(
-                data, atlas, group="all" if behavioural_csv == "brainmap_all" else "normals")
+                data, atlas, group=behavioural_csv.replace("brainmap", "").strip("_")
+                .replace("_reverse", "").replace("reverse", "") or "normals",
+                reverse=behavioural_csv.endswith("reverse"))
         elif behavioural_csv:
             table, labels = rm.load_behavioural_table(behavioural_csv), None
         else:
@@ -517,7 +520,7 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
     if str(behavioural_csv).startswith("neurosynth") and taxonomy != "brainmap" and \
             {"behavioural", "behavioural_domain"} & set(families):
         label += f"_{taxonomy}"
-    if behavioural_csv in ("brainmap", "brainmap_all") and \
+    if behavioural_csv in BRAINMAP_OPTIONS and \
             {"behavioural", "behavioural_domain"} & set(families):
         label += f"_{behavioural_csv}db"      # never overwrite the Neurosynth run
     if behavioural_csv in NEUROSYNTH_OPTIONS[1:] and \

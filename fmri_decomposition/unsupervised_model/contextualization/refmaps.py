@@ -578,7 +578,8 @@ _ICBM_SPM2TAL = np.array([[0.9254, 0.0024, -0.0118, -1.0207],
                           [0.0, 0.0, 0.0, 1.0]])
 
 
-LANCASTER_STATISTICS = ("lancaster", "lancaster_studies", "lancaster_weighted")
+LANCASTER_STATISTICS = ("lancaster", "lancaster_studies", "lancaster_weighted",
+                        "lancaster_reverse")
 
 
 def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
@@ -626,7 +627,8 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
     label, categories = TAXONOMIES[taxonomy]
     if statistic.startswith("lancaster"):
         unit = {"lancaster": "foci", "lancaster_studies": "studies",
-                "lancaster_weighted": "foci weighted 1/n per study"}[statistic]
+                "lancaster_weighted": "foci weighted 1/n per study",
+                "lancaster_reverse": "reverse inference, foci weighted 1/n per study"}[statistic]
         source = (f"Neurosynth v7, Lancaster 2012 z (Mango plugin statistic) on {unit}, "
                   f"{label} taxonomy, counted in {key} parcels")
         cache = nsd / f"{key}_{statistic.replace('_', '')}_{taxonomy}.csv"
@@ -693,10 +695,29 @@ def neurosynth_behavioural_table(data: Path, ref, taxonomy: str = "brainmap",
         n_vox = np.bincount(lab.ravel(), minlength=n_parcels + 1)[1:]
         has = ann.set_index("id")
         ids_all = coords["id"].to_numpy()
+        # Every study's foci inside the atlas, weighted 1/n: the reverse
+        # inference's denominator (what is reported in a parcel at all).
+        inside = peak_lab > 0
+        w_all = np.zeros(len(peak_lab))
+        sid_in = pd.Series(ids_all[inside])
+        w_all[inside] = 1.0 / sid_in.map(sid_in.value_counts()).to_numpy(float)
+        T_par = np.bincount(peak_lab[inside], weights=w_all[inside],
+                            minlength=n_parcels + 1)[1:]
         z = np.zeros((n_parcels, len(cats)))
         for j, cat in enumerate(cats):
             ids = set(has.index[has[cat].to_numpy() >= threshold])
             in_cat = coords["id"].isin(ids).to_numpy() & (peak_lab > 0)
+            if statistic == "lancaster_reverse":
+                # Of what is reported in this parcel (weighted foci of every
+                # study), the share from this category's studies, against
+                # that share over the whole atlas. Relative to the parcel's
+                # own total, so a parcel the literature samples little
+                # (signal dropout: orbitofrontal, temporal pole) is judged by
+                # its profile, not its density.
+                C_par = np.bincount(peak_lab[in_cat], weights=w_all[in_cat],
+                                    minlength=n_parcels + 1)[1:]
+                z[:, j] = reverse_z(C_par, T_par)
+                continue
             if statistic == "lancaster_weighted":
                 sid = ids_all[in_cat]
                 n_per = pd.Series(sid).map(pd.Series(sid).value_counts()).to_numpy(float)
@@ -773,7 +794,8 @@ def brainmap_db_columns(available) -> list:
     return cols
 
 
-def brainmap_db_table(data: Path, key: str, group: str = "normals") -> pd.DataFrame:
+def brainmap_db_table(data: Path, key: str, group: str = "normals",
+                      reverse: bool = False) -> pd.DataFrame:
     """Parcels x BrainMap categories from the BrainMap database itself.
 
     Lancaster et al. (2012)'s regional behavioural analysis, run by the Mango
@@ -785,6 +807,8 @@ def brainmap_db_table(data: Path, key: str, group: str = "normals") -> pd.DataFr
     Written by tools/brainmap/run_brainmap_profiles.sh as
     <data>/brainmap/<key>_mango_<group>.csv.
     """
+    if reverse:
+        return _brainmap_db_reverse(data, key, group)
     path = Path(data) / "brainmap" / f"{key}_mango_{group}.csv"
     if not path.exists():
         raise SystemExit(f"{path} not found: run tools/brainmap/run_brainmap_profiles.sh "
@@ -792,6 +816,31 @@ def brainmap_db_table(data: Path, key: str, group: str = "normals") -> pd.DataFr
     out = pd.read_csv(path)
     out.attrs["source"] = (f"BrainMap database (Mango Behavioral Analysis v4.0, {group}), "
                            f"Lancaster 2012 z, counted in {key} parcels")
+    return out
+
+
+def _brainmap_db_reverse(data: Path, key: str, group: str) -> pd.DataFrame:
+    """Reverse inference from the plugin's raw foci counts (`reverse_z`).
+
+    The plugin gives no count of all foci in a parcel, so the parcel's total
+    is the sum of its counts over the leaf categories (a focus coded with two
+    categories counts twice there and in the atlas-wide share alike).
+    """
+    path = Path(data) / "brainmap" / f"{key}_mango_long.csv"
+    if not path.exists():
+        raise SystemExit(f"{path} not found: run tools/brainmap/run_brainmap_profiles.sh")
+    long = pd.read_csv(path)
+    cnt = (long.query("group == @group and measure == 'count'")
+           .pivot(index="parcel", columns="category", values="value"))
+    # Leaves only: a general category (Action.Execution) is a separate code
+    # in the plugin, not the sum of its children, so it stays a leaf too.
+    cats = brainmap_db_columns(cnt.columns)
+    total = cnt[cats].sum(axis=1).to_numpy(float)
+    out = pd.DataFrame({"parcel": cnt.index.to_numpy()})
+    for c in cats:
+        out[c] = reverse_z(cnt[c].to_numpy(float), total)
+    out.attrs["source"] = (f"BrainMap database (Mango Behavioral Analysis v4.0, {group}), "
+                           f"reverse inference on foci counts, counted in {key} parcels")
     return out
 
 
@@ -813,6 +862,19 @@ def lancaster_z(count, n_total, n_vox, n_vox_total):
     pe = np.asarray(n_vox, float) / float(n_vox_total)
     with np.errstate(invalid="ignore", divide="ignore"):
         return (p - pe) / np.sqrt((p * (1 - p) + pe * (1 - pe)) / n_total)
+
+
+def reverse_z(count, total):
+    """Reverse inference per parcel: p = count/total (the category's share of
+    what is reported in the parcel) against p0, the same share over the whole
+    atlas; z = (p - p0) / sqrt((p(1-p) + p0(1-p0)) / total), the plugin's
+    form with the parcel's own total as n. NaN for a parcel with nothing."""
+    count, total = np.asarray(count, float), np.asarray(total, float)
+    p0 = count.sum() / total.sum() if total.sum() > 0 else np.nan
+    with np.errstate(invalid="ignore", divide="ignore"):
+        p = count / total
+        z = (p - p0) / np.sqrt((p * (1 - p) + p0 * (1 - p0)) / total)
+    return np.where(total > 0, z, np.nan)
 
 
 def load_behavioural_table(path: Path) -> pd.DataFrame:

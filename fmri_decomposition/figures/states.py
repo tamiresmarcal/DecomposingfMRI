@@ -506,8 +506,14 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
                      *, out: Path | None = None,
                      data: Path | None = None, taxonomy: str = "brainmap",
                      behavioural_csv="neurosynth", n_nulls: int = 10000, null: str = "moran",
-                     seed: int = 7, drop_other: bool = True) -> Path:
+                     seed: int = 7, drop_other: bool = True,
+                     cortical_only: bool | None = None) -> Path:
     """How two reference families relate to each other, in one atlas.
+
+    `cortical_only`: correlate over the atlas's cortical parcels only. Default
+    (None): on whenever Yeo 7 is a side, because Yeo 2011 is a cortical
+    parcellation -- every network is 0 in every subcortical parcel, so an
+    amygdala full of emotion foci would count against the limbic network.
 
     Each cell is the spatial correlation, across the atlas's parcels, between
     one map of `rows` (e.g. a Yeo network) and one of `cols` (e.g. a BrainMap
@@ -536,12 +542,20 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
     A = parc.parcellate(R.voxels)
     B = parc.parcellate(C.voxels)[keep_c]
     cn = [C.names[j] for j in keep_c]
-    res = rm.null_test(A, B, parc.centroids, n_nulls, seed=seed, method=null)
+    if cortical_only is None:
+        cortical_only = "yeo7" in (rows, cols)
+    keep_p = np.ones(parc.n, bool)
+    if cortical_only and "network" in spec.labels:
+        keep_p = spec.labels["network"].to_numpy() == "cortical"
+    A, B, cent = A[:, keep_p], B[:, keep_p], parc.centroids[keep_p]
+    res = rm.null_test(A, B, cent, n_nulls, seed=seed, method=null)
     r, q = res["r"], res["q"]
 
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     stem = out / f"reference_matrix_{atlas}_{rows}_x_{cols}"
+    if cortical_only:
+        stem = Path(f"{stem}_cortical")
     if behavioural_csv in ("brainmap", "brainmap_all") and \
             {"behavioural", "behavioural_domain"} & {rows, cols}:
         stem = Path(f"{stem}_{behavioural_csv}db")   # never overwrite the Neurosynth matrix
@@ -598,7 +612,7 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
     cb.outline.set_visible(False)
     tax = taxonomy_label({"source": C.source})
     title = (f"{PANEL_TITLES[rows].format(tax=tax)} × {PANEL_TITLES[cols].format(tax=tax)}"
-             f" — {atlas} ({parc.n} parcels)")
+             f" — {atlas} ({int(keep_p.sum())} {'cortical ' if cortical_only else ''}parcels)")
     note = ("* q<.05, ** q<.01 (spatial null, FDR over the matrix)"
             if np.isfinite(q).any() else f"no p-values: {parc.n} parcels")
     if C.simulated or R.simulated:

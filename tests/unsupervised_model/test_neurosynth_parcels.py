@@ -166,3 +166,39 @@ def test_lancaster_weighted_gives_each_study_one_vote(tmp_path, monkeypatch):
         want = (p - pe) / np.sqrt((p * (1 - p) + pe * (1 - pe)) / n)
         assert np.isclose(t.loc[t.parcel == r, "Perception.Vision"].item(), want)
     assert (tmp_path / "neurosynth" / "toyatlas_lancasterweighted_toy.csv").exists()
+
+
+def test_reverse_z_judges_a_sparse_parcel_by_its_profile():
+    # parcel 0 reports little (10) but all of it fear; parcel 1 reports a lot
+    # (1000), 10% fear. Density says parcel 1; reverse inference says parcel 0.
+    z = rm.reverse_z([10, 100], [10, 1000])
+    assert z[0] > 0 > z[1]
+    assert np.isnan(rm.reverse_z([0, 5], [0, 10])[0])
+
+
+def test_brainmap_db_reverse_from_long_counts(tmp_path):
+    d = tmp_path / "brainmap"
+    d.mkdir()
+    rows = []
+    for parcel, (fear, vis) in {1: (9, 1), 2: (1, 9)}.items():
+        for cat, v in (("Emotion.Fear", fear), ("Perception.Vision", vis)):
+            rows.append(("normals", "count", cat, v, parcel))
+    pd.DataFrame(rows, columns=["group", "measure", "category", "value", "parcel"]).to_csv(
+        d / "toy_mango_long.csv", index=False)
+    t = rm.brainmap_db_table(tmp_path, "toy", reverse=True).set_index("parcel")
+    assert t.loc[1, "Emotion.Fear"] > 0 > t.loc[2, "Emotion.Fear"]
+    assert t.loc[2, "Perception.Vision"] > 0
+
+
+def test_lancaster_reverse_runs_and_separates_parcels(tmp_path, monkeypatch):
+    _fake_neurosynth(tmp_path)
+    monkeypatch.setitem(rm.TAXONOMIES, "toy", ("toy", {
+        "Perception.Vision": ["vision"], "Perception.Audition": ["audition"]}))
+    ref = nib.Nifti1Image(np.zeros((10, 4, 4), np.float32), np.diag([2.0, 2, 2, 1]))
+    lab = np.zeros((10, 4, 4), int)
+    lab[:3] = 1
+    lab[5:8] = 2
+    t = rm.neurosynth_behavioural_table(tmp_path, ref, "toy", labels=lab, key="toyatlas",
+                                        statistic="lancaster_reverse")
+    assert t.loc[0, "Perception.Vision"] > 0 > t.loc[1, "Perception.Vision"]
+    assert t.loc[1, "Perception.Audition"] > 0

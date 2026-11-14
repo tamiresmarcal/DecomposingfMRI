@@ -2,7 +2,7 @@
 
 For every method available on disk -- the BrainMap database (Mango plugin)
 and the Neurosynth variants (NiMARE zForward; Lancaster on foci, on studies,
-on foci weighted 1/n per study; with and without synonyms) -- this correlates
+on foci weighted 1/n per study, reverse inference; with and without synonyms) -- this correlates
 each BrainMap category with each Yeo network across the parcels of the states'
 atlas (Pearson, as the matrix in notebook 08) and scores the matrix:
 
@@ -75,6 +75,9 @@ def load_methods(data: Path, atlas: str, parc, ref) -> dict:
         f = bm / f"{atlas}_mango_{g}.csv"
         if f.exists():
             out[f"BrainMap ({g})"] = pd.read_csv(f).set_index("parcel")
+        if (bm / f"{atlas}_mango_long.csv").exists():
+            out[f"BrainMap reverse ({g})"] = rm.brainmap_db_table(
+                data, atlas, group=g, reverse=True).set_index("parcel")
     ns = Path(data) / "neurosynth"
     for tax, suffix in (("brainmap", ""), ("brainmap_pure", ", no synonyms")):
         f = ns / f"{atlas}_nimare_{tax}.csv"
@@ -83,7 +86,8 @@ def load_methods(data: Path, atlas: str, parc, ref) -> dict:
         if not (ns / "data-neurosynth_version-7_coordinates.tsv.gz").exists():
             continue
         for stat, name in (("lancaster", "Lancaster foci"), ("lancaster_studies", "Lancaster studies"),
-                           ("lancaster_weighted", "Lancaster weighted")):
+                           ("lancaster_weighted", "Lancaster weighted"),
+                           ("lancaster_reverse", "Lancaster reverse")):
             out[f"Neurosynth {name}{suffix}"] = rm.neurosynth_behavioural_table(
                 data, ref, tax, labels=parc.label_volume(), key=atlas,
                 statistic=stat).set_index("parcel")
