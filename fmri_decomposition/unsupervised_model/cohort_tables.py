@@ -106,7 +106,7 @@ class StabilityMixin:
         occ = pd.concat([v[self.occ].mean() for v in self.data.values()], axis=1).mean(axis=1).to_numpy()
         rows = np.repeat(occ >= min_occ, K)
         R = ref.to_numpy(float)[rows]
-        for key, d in self.data.items():
+        for key, d in [*self.data.items(), *getattr(self, "by_task", {}).items()]:
             X = d[self.cells].to_numpy(float)[:, rows]
             Xc, Rc = X - X.mean(1, keepdims=True), R - R.mean()
             with np.errstate(invalid="ignore", divide="ignore"):
@@ -179,6 +179,73 @@ class StabilityMixin:
         out["task_p_fdr"] = stats.false_discovery_control(out["task_p"].fillna(1))
         out["stable"] = out["between_equivalent"] & out["task_equivalent"]
         return out
+
+    # -- variation between films ----------------------------------------------------------
+    def films(self):
+        """{(cohort, film): one row per subject} for every movie task (film, episode, run)."""
+        return {(c, t): d for (c, k, t), d in sorted(self.by_task.items()) if k == "movie"}
+
+    def film_summary(self, variables=None):
+        """One row per (film, variable): mean and 95% CI over the film's viewers, and whether the
+        film is equivalent to the OTHER films of its cohort (TOST at 5%, bounds +- sesoi_d x the
+        variable's SD over every film).
+
+        Within person when the cohort's films share viewers (>= 3 people saw this film and another):
+        each person's value in this film against their own mean over their other films, paired.
+        Between people otherwise (each film seen by different people): Welch against the cohort's
+        other films pooled. A cohort with one film has nothing to compare: equivalent = NaN.
+        `differs`: the same comparison as a two-sided test, BH-FDR over every film and variable.
+        With few viewers a film is rarely shown equivalent; `differs` is what the figures mark.
+        """
+        if variables is None:
+            variables = [self.transition_fit(), *self.dyn, *self.occ, *self.cells]
+        else:
+            self.transition_fit()
+        F = self.films()
+        allv = pd.concat(F.values())
+        sd = allv[variables].std()
+        rows = []
+        for (c, t), d in F.items():
+            others = {k: v for k, v in F.items() if k[0] == c and k != (c, t)}
+            pooled = pd.concat(others.values()) if others else None
+            shared = d.index.intersection(pooled.index) if pooled is not None else pd.Index([])
+            within = len(shared) >= 3
+            other_mean = pooled.groupby(level=0).mean() if within else None
+            for v in variables:
+                x = d[v].dropna()
+                n = len(x)
+                h = stats.t.ppf(.975, max(n - 1, 1)) * x.std(ddof=1) / np.sqrt(n) if n > 1 else np.nan
+                eq, diff, pv = np.nan, np.nan, np.nan
+                bound = self.cfg.sesoi_d * sd[v]
+                if within:
+                    dd = (d.loc[shared, v] - other_mean.loc[shared, v]).dropna()
+                    if len(dd) >= 3:
+                        hh = stats.t.ppf(.95, len(dd) - 1) * dd.std(ddof=1) / np.sqrt(len(dd))
+                        diff = dd.mean()
+                        eq = bool((diff - hh > -bound) and (diff + hh < bound))
+                        pv = stats.ttest_1samp(dd, 0).pvalue
+                elif pooled is not None:
+                    y = pooled[v].dropna()
+                    va, vb = x.var(ddof=1) / len(x), y.var(ddof=1) / len(y)
+                    se = np.sqrt(va + vb)
+                    df = (va + vb) ** 2 / (va ** 2 / max(len(x) - 1, 1) + vb ** 2 / max(len(y) - 1, 1))
+                    diff = x.mean() - y.mean()
+                    hh = stats.t.ppf(.95, df) * se
+                    eq = bool((diff - hh > -bound) and (diff + hh < bound))
+                    pv = stats.ttest_ind(x, y, equal_var=False).pvalue
+                rows.append(dict(cohort=c, film=t, variable=v, n=n, mean=x.mean(), lo=x.mean() - h,
+                                 hi=x.mean() + h, within=within, diff=diff, equivalent=eq, p=pv))
+        out = pd.DataFrame(rows)
+        ok = out["p"].notna()
+        out["p_fdr"] = np.nan
+        out.loc[ok, "p_fdr"] = stats.false_discovery_control(out.loc[ok, "p"])
+        out["differs"] = out["p_fdr"] < self.cfg.alpha
+        return out
+
+    def rest_means(self, variables):
+        """Every cohort's rest pooled (each cohort once): the reference line of the film figures."""
+        r = [self.data[c, "rest"][variables].mean() for c in self.cfg.cohorts if (c, "rest") in self.data]
+        return pd.concat(r, axis=1).mean(axis=1) if r else pd.Series(np.nan, variables)
 
     # -- reference structure across cohorts ------------------------------------------------
     def similarity(self, min_occ=0.01):

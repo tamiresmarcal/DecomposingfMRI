@@ -653,3 +653,95 @@ def fig_occupancy(co, O):
     ax.set_title("Occupancy (%) by cohort and condition", fontsize=10, loc="left")
     save(fig, "occupancy", co.cfg)
     return fig
+
+
+# ------------------------------------------------------------------ variation between films (supplementary)
+def _film_rows(fs):
+    films = fs[["cohort", "film", "within"]].drop_duplicates(["cohort", "film"])
+    return list(zip(films["cohort"], films["film"], films["within"]))
+
+
+def fig_films_forest(co, fs, variables, rest=None, title="", name="films", per_row=None, labels=None):
+    """One panel per variable, one row per film: the film's mean (95% CI). Filled = the film's
+    viewers also saw other films of their cohort (within-person test), hollow = different people
+    per film. A red ring = differs from the cohort's other films (BH-FDR). Dotted = mean of
+    the films; dashed blue = every cohort's rest. Films are grouped by cohort (grey labels), with
+    no colour per cohort."""
+    rows = _film_rows(fs)
+    n = len(variables)
+    per_row = per_row or n
+    nrow = int(np.ceil(n / per_row))
+    fig, axs = plt.subplots(nrow, per_row, figsize=(1.75 * per_row + 2.2, 0.33 * len(rows) * nrow + 1.8),
+                            squeeze=False, gridspec_kw=dict(wspace=.12, hspace=.25))
+    y = np.arange(len(rows))[::-1]
+    pos = {(c, f): yi for yi, (c, f, _) in zip(y, rows)}
+    for i, v in enumerate(variables):
+        ax = axs[i // per_row, i % per_row]
+        t = fs[fs["variable"] == v]
+        for r in t.itertuples():
+            yi = pos[r.cohort, r.film]
+            ax.plot([r.lo, r.hi], [yi, yi], color=hp.INK2, lw=1.1)
+            ax.plot(r.mean, yi, "o", ms=4.5, color=hp.INK2, mfc=hp.INK2 if r.within else "white", mew=1.1)
+            if r.differs:
+                ax.plot(r.mean, yi, "o", ms=9, mfc="none", mec=hp.RED, mew=1.2)
+        ax.axvline(t["mean"].mean(), color=hp.INK2, lw=.8, ls=":")
+        if rest is not None and v in rest and np.isfinite(rest[v]):
+            ax.axvline(rest[v], color=hp.BLUE, lw=1, ls="--")
+        ax.set_title((labels or {}).get(v, nice(v)), fontsize=8.5)
+        ax.set_yticks(y, [f for _, f, _ in rows] if i % per_row == 0 else [], fontsize=7.5)
+        for s in ("top", "right"):
+            ax.spines[s].set_visible(False)
+        ax.xaxis.grid(True, color="#e5e4df")
+        ax.set_axisbelow(True)
+        ax.tick_params(axis="x", labelsize=7)
+        prev = None
+        for yi, (c, f, _) in zip(y, rows):                         # cohort separators and names
+            if c != prev:
+                if prev is not None:
+                    ax.axhline(yi + .5, color="#c9c8c2", lw=.8)
+                if i % per_row == 0:
+                    ax.text(-0.02, yi + .5, c, transform=ax.get_yaxis_transform(), ha="right", va="bottom",
+                            fontsize=7.5, color=hp.MUTED, fontweight="bold")
+                prev = c
+    for j in range(n, nrow * per_row):
+        axs[j // per_row, j % per_row].set_visible(False)
+    fig.suptitle(title, fontsize=11, x=.02, ha="left")
+    fig.text(.02, .005, "Film mean (95% CI). Filled = the same people watched several films of their cohort "
+             "(within-person test); hollow = different people per film. Red ring = differs from the cohort's "
+             f"other films (FDR < {co.cfg.alpha:g}). Dotted = mean of the films; dashed blue = rest.",
+             fontsize=7.5, color=hp.INK2)
+    save(fig, name, co.cfg)
+    return fig
+
+
+def fig_films_matrices(co, fs, per_row=6):
+    """One p(j | i) per film on one colour scale, and the films' mean; a red outline marks a cell
+    that differs from the cohort's other films (BH-FDR). Grey title = cohort · film."""
+    K = co.cfg.K
+    rows = _film_rows(fs)
+    cells = co.cells
+    M = {(c, f): fs[(fs.cohort == c) & (fs.film == f)].set_index("variable").loc[cells] for c, f, _ in rows}
+    n = len(rows) + 1
+    nrow = int(np.ceil(n / per_row))
+    fig, axs = plt.subplots(nrow, per_row, figsize=(1.9 * per_row, 2.1 * nrow + .6), squeeze=False)
+    mean = np.mean([m["mean"].to_numpy(float) for m in M.values()], axis=0).reshape(K, K)
+    panels = [("mean of the films", mean, None)] + [(f"{c} · {f}", m["mean"].to_numpy(float).reshape(K, K),
+                                                     m["differs"].to_numpy().reshape(K, K)) for (c, f), m in M.items()]
+    for k, (title, T, eq) in enumerate(panels):
+        ax = axs[k // per_row, k % per_row]
+        ax.imshow(T, cmap="Blues", vmin=0, vmax=max(.9, float(np.nanmax(mean))))
+        if eq is not None:
+            for i, j in np.argwhere(eq.astype(bool)):
+                ax.add_patch(plt.Rectangle((j - .5, i - .5), 1, 1, fill=False, ec=hp.RED, lw=1.1))
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(title, fontsize=7, color=hp.INK2)
+    for j in range(n, nrow * per_row):
+        axs[j // per_row, j % per_row].set_visible(False)
+    fig.suptitle("Transitions p(j | i), film by film — rows: from state i, columns: to state j", fontsize=11,
+                 x=.02, ha="left")
+    fig.text(.02, .005, "One colour scale. Red outline = the cell differs from the cohort's other films "
+             f"(FDR < {co.cfg.alpha:g}; within-person where the films share viewers).", fontsize=7.5,
+             color=hp.INK2)
+    save(fig, "films_transitions", co.cfg)
+    return fig

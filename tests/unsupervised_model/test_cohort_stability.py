@@ -47,3 +47,33 @@ def test_similarity_and_occupancy_shapes():
     S, O = co.similarity(), co.occupancy_table()
     assert S.shape == (3, 3) and np.allclose(np.diag(S), 1)
     assert O.shape == (3, 3) and np.allclose(O.sum(axis=1), 100)
+
+
+def _toy_films(seed=1):
+    co = _toy(seed)
+    rng = np.random.default_rng(seed)
+    K = co.cfg.K
+    def film(subs, shift):
+        P = rng.dirichlet(np.ones(K) * 3, size=(len(subs), K)) + np.eye(K)
+        P /= P.sum(2, keepdims=True)
+        d = pd.DataFrame(P.reshape(len(subs), -1), columns=co.cells, index=subs)
+        d[[f"occ_{k}" for k in range(K)]] = rng.dirichlet(np.ones(K) * 5, size=len(subs))
+        d["switch_rate"] = .4 + shift + rng.normal(0, .02, len(subs))
+        d["entropy_rate_bits"] = 1 + rng.normal(0, .02, len(subs))
+        return d
+    same = [f"s{i}" for i in range(30)]
+    co.by_task = {("b", "movie", "clip1"): film(same, 0), ("b", "movie", "clip2"): film(same, 0),
+                  ("b", "movie", "clip3"): film(same, .3),
+                  ("a", "movie", "f1"): film([f"a{i}" for i in range(20)], 0),
+                  ("a", "movie", "f2"): film([f"x{i}" for i in range(20)], 0)}
+    return co
+
+
+def test_film_summary_within_and_between_person():
+    co = _toy_films()
+    co.cfg.alpha = 0.05
+    fs = co.film_summary(["entropy_rate_bits", "switch_rate"]).set_index(["film", "variable"])
+    assert fs.loc[("clip1", "switch_rate"), "within"] and not fs.loc[("f1", "switch_rate"), "within"]
+    assert fs.loc[("clip3", "switch_rate"), "differs"]                    # the shifted clip
+    assert not fs.loc[("clip1", "entropy_rate_bits"), "differs"]
+    assert not fs.loc[("f1", "entropy_rate_bits"), "differs"]
