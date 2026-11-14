@@ -82,6 +82,8 @@ def main(argv=None):
     ap.add_argument("--window-s", default="30", help='a window in s (-1 = per TR), or "all"')
     ap.add_argument("--states", default=None, help="regex over state-set names (default: all)")
     ap.add_argument("--entropy-estimator", default="miller_madow")
+    ap.add_argument("--distinct-minutes", default="min",
+                    help='rarefy n_distinct_transitions to these minutes, "min" (shortest scan) or "none"')
     ap.add_argument("--out", type=Path, default=Path("stability_sweep.csv"))
     ap.add_argument("--balance", default=None, choices=[None, "time"],
                     help='"time": every cohort the same hours of scan per draw (notebook 14 BALANCE)')
@@ -103,7 +105,9 @@ def main(argv=None):
     for i, (atlas, w, s) in enumerate(sets[["atlas", "window_s", "states"]].itertuples(index=False), 1):
         w = float(w)
         cfg = ct.Settings(space=dict(atlas=atlas, window_s=w, states=s), cohorts=COHORTS,
-                          entropy_estimator=a.entropy_estimator)
+                          entropy_estimator=a.entropy_estimator,
+                          distinct_minutes=(None if a.distinct_minutes == "none" else
+                                            a.distinct_minutes if a.distinct_minutes == "min" else float(a.distinct_minutes)))
         try:
             rows.append({"atlas": atlas, "window_s": w, "states": s,
                          **summarize(ct.Cohorts(cfg), a.balance, a.hours, a.n_boot)})

@@ -141,3 +141,32 @@ def test_episode_halves_are_one_film():
     F = co.films()
     assert ("b", "s01e01") in F and ("b", "s01e01a") not in F
     assert np.allclose(F[("b", "s01e01")].loc[d.index, "switch_rate"], d["switch_rate"] + .5)
+
+
+def test_expected_distinct_matches_simulation():
+    from math import comb
+    counts = np.array([10, 5, 1, 1, 0, 3])
+    n = 6
+    N = counts.sum()
+    exact = sum(1 - comb(N - c, n) / comb(N, n) for c in counts if c > 0)
+    assert np.isclose(ct.expected_distinct(counts, n), exact)
+    rng = np.random.default_rng(0)
+    pool = np.repeat(np.arange(len(counts)), counts)
+    sim = np.mean([len(set(rng.choice(pool, n, replace=False))) for _ in range(20000)])
+    assert abs(sim - exact) < .05
+    assert ct.expected_distinct(counts, N) == (counts > 0).sum()      # all drawn: the observed count
+    assert np.isnan(ct.expected_distinct(counts, N + 1))
+
+
+def test_rarefied_distinct_removes_length_effect():
+    K = 3
+    p = np.array([.5, .2, .1, .08, .05, .03, .02, .015, .005])
+    cells = [f"{i}->{j}" for i in range(K) for j in range(K)]
+    rows = []
+    for minutes in (100, 1000):
+        n = minutes * 4                                           # 4 transitions / min, stride 15 s
+        rows.append({**dict(zip(cells, p)), "n_transitions": n, "n_windows": n + 1, "stride_s": 15.0})
+    d = pd.DataFrame(rows)
+    r = ct.rarefied_distinct(d, K, 5)                             # 20 transitions from each
+    expected = (1 - (1 - p) ** 20).sum()                          # 20 draws from p itself
+    assert np.allclose(r, expected, atol=.15)                     # whatever the scan length

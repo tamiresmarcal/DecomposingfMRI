@@ -65,10 +65,49 @@ class Settings:
     # film labels merged in the per-film figures: (regex, replacement). Default: the two halves of
     # a Friends episode (s01e01a, s01e01b) are one film, s01e01.
     film_merge: tuple = (r"^(s\d+e\d+)[a-z]$", r"\1")
+    # n_distinct_transitions grows with scan length. None = as stored; minutes (float) or "min" =
+    # rarefied: the number of distinct transitions EXPECTED in that many minutes of the scan
+    # (Hurlbert 1971), from its transition counts; "min" = the shortest scan read, so none is lost.
+    # Scans shorter than the target are NaN.
+    distinct_minutes: float | str | None = None
 
     @property
     def K(self):
         return ht.n_states(self.space["states"])
+
+
+def _scan_minutes(d: pd.DataFrame) -> pd.Series:
+    if not {"n_windows", "stride_s"} <= set(d):
+        raise SystemExit("distinct_minutes needs n_windows and stride_s in the transition tables")
+    return (d["n_windows"] * d["stride_s"]).astype(float) / 60
+
+
+def expected_distinct(counts, n: int) -> float:
+    """Rarefaction (Hurlbert 1971): the expected number of distinct categories in n draws without
+    replacement from `counts`, sum_k 1 - C(N - c_k, n) / C(N, n). NaN when n > N."""
+    from scipy.special import gammaln
+    c = np.asarray(counts, float).ravel()
+    c = c[c > 0]
+    N = c.sum()
+    if n > N or n <= 0:
+        return np.nan
+    rest = N - c
+    ok = rest >= n                                       # else the category is certainly drawn
+    p_absent = np.zeros_like(c)
+    p_absent[ok] = np.exp(gammaln(rest[ok] + 1) - gammaln(rest[ok] - n + 1)
+                          - gammaln(N + 1) + gammaln(N - n + 1))
+    return float((1 - p_absent).sum())
+
+
+def rarefied_distinct(d: pd.DataFrame, n_states: int, minutes: float) -> pd.Series:
+    """n_distinct_transitions per row, rarefied to the transitions of `minutes` of that scan
+    (its own transitions per minute, so the window stride is respected). Cells must be p_joint."""
+    cells = ht.cell_cols(d)
+    C = np.rint(d[cells].to_numpy(float) * d["n_transitions"].to_numpy(float)[:, None])
+    rate = d["n_transitions"].to_numpy(float) / _scan_minutes(d).to_numpy()
+    n = np.rint(rate * minutes)
+    out = [expected_distinct(C[i], int(n[i])) if np.isfinite(n[i]) else np.nan for i in range(len(d))]
+    return pd.Series(out, index=d.index, name="n_distinct_transitions")
 
 
 # -- stability: what is stable, what depends on context (figure 3 of the manuscript) ---------
@@ -420,37 +459,41 @@ class Cohorts(StabilityMixin):
         K, data = self.cfg.K, {}
         self.by_task = {}                                                     # (cohort, rest|movie, task) -> subjects
         units = []                                                            # one row per scan: counts + duration
-        for label in self.cfg.cohorts:
-            for kind, files in self._files(label).items():
-                if not files:
-                    continue
-                d = pd.concat(map(pd.read_parquet, files), ignore_index=True)
-                d["sub"] = d["sub"].astype(str).str.strip().str.upper()
-                if self.cfg.entropy_estimator is not None and "entropy_rate_bits" in d:
-                    # before as_p_cond: the recompute needs the p_joint cells
-                    from fmri_decomposition.unsupervised_model.transitions import entropy_from_table
-                    d["entropy_rate_bits"] = entropy_from_table(d, K, self.cfg.entropy_estimator)
-                self.cells = ht.cell_cols(d)
-                # the scan as a UNIT of data: its transition counts (p_joint x n) and its duration,
-                # kept before p(j | i) throws the counts away -- for data-balanced resampling
-                u = d[["sub", "task"]].copy()
-                u[self.cells] = d[self.cells].to_numpy(float) * d["n_transitions"].to_numpy(float)[:, None]
-                u["minutes"] = ((d["n_windows"] * d["stride_s"]).astype(float) / 60
-                                if {"n_windows", "stride_s"} <= set(d) else np.nan)
-                units.append(u.assign(cohort=label, kind=kind))
-                d[self.cells] = ht.as_p_cond(d, K)
-                P = d[self.cells].to_numpy(float).reshape(len(d), K, K)        # each subject's row entropies
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    H = -np.where(P > 0, P * np.log2(P), 0).sum(2)
-                H[P.sum(2) == 0] = np.nan                                      # a state the subject never left
-                d[self.row_h] = H
-                cols = [*self.cells, *self.occ, *self.row_h, *[v for v in self.cfg.dynamics if v in d]]
-                # the scan time used: windows x their stride (provenance written by `transitions`), summed
-                d["scan_s"] = (d["n_windows"] * d["stride_s"]).astype(float) if {"n_windows", "stride_s"} <= set(d) else np.nan
-                per_sub = lambda t: t.groupby("sub")[cols].mean().assign(scan_s=t.groupby("sub")["scan_s"].sum(min_count=1))
-                data[label, kind] = per_sub(d)
-                for task, t in d.groupby(d["task"].astype(str)):              # and one table per task (film)
-                    self.by_task[label, kind, task] = per_sub(t)
+        raw = {(label, kind): pd.concat(map(pd.read_parquet, files), ignore_index=True)
+               for label in self.cfg.cohorts for kind, files in self._files(label).items() if files}
+        target = self.cfg.distinct_minutes
+        if target == "min":
+            target = min(float(_scan_minutes(d).min()) for d in raw.values())
+        self.distinct_minutes = target
+        for (label, kind), d in raw.items():
+            if target is not None and "n_distinct_transitions" in d:
+                d["n_distinct_transitions"] = rarefied_distinct(d, K, target)
+            d["sub"] = d["sub"].astype(str).str.strip().str.upper()
+            if self.cfg.entropy_estimator is not None and "entropy_rate_bits" in d:
+                # before as_p_cond: the recompute needs the p_joint cells
+                from fmri_decomposition.unsupervised_model.transitions import entropy_from_table
+                d["entropy_rate_bits"] = entropy_from_table(d, K, self.cfg.entropy_estimator)
+            self.cells = ht.cell_cols(d)
+            # the scan as a UNIT of data: its transition counts (p_joint x n) and its duration,
+            # kept before p(j | i) throws the counts away -- for data-balanced resampling
+            u = d[["sub", "task"]].copy()
+            u[self.cells] = d[self.cells].to_numpy(float) * d["n_transitions"].to_numpy(float)[:, None]
+            u["minutes"] = ((d["n_windows"] * d["stride_s"]).astype(float) / 60
+                            if {"n_windows", "stride_s"} <= set(d) else np.nan)
+            units.append(u.assign(cohort=label, kind=kind))
+            d[self.cells] = ht.as_p_cond(d, K)
+            P = d[self.cells].to_numpy(float).reshape(len(d), K, K)        # each subject's row entropies
+            with np.errstate(divide="ignore", invalid="ignore"):
+                H = -np.where(P > 0, P * np.log2(P), 0).sum(2)
+            H[P.sum(2) == 0] = np.nan                                      # a state the subject never left
+            d[self.row_h] = H
+            cols = [*self.cells, *self.occ, *self.row_h, *[v for v in self.cfg.dynamics if v in d]]
+            # the scan time used: windows x their stride (provenance written by `transitions`), summed
+            d["scan_s"] = (d["n_windows"] * d["stride_s"]).astype(float) if {"n_windows", "stride_s"} <= set(d) else np.nan
+            per_sub = lambda t: t.groupby("sub")[cols].mean().assign(scan_s=t.groupby("sub")["scan_s"].sum(min_count=1))
+            data[label, kind] = per_sub(d)
+            for task, t in d.groupby(d["task"].astype(str)):              # and one table per task (film)
+                self.by_task[label, kind, task] = per_sub(t)
         if not data:
             raise SystemExit(f"no transition tables under {self.base}")
         self.units = pd.concat(units, ignore_index=True)
