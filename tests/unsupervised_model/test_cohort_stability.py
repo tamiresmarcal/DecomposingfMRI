@@ -87,3 +87,12 @@ def test_tiers_and_replication():
     assert np.isnan(st.loc["switch_rate", "task_lo"])                     # n_boot=0: no CI
     pairs, ceil = co.replication("movie", n_split=5)
     assert len(pairs) == 1 and ceil.notna().all()
+
+
+def test_sweep_summary_runs_on_a_fresh_cohorts():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+    import stability_sweep as sw
+    r = sw.summarize(_toy())                       # no transition_fit() beforehand
+    assert r["n_stable"] + r["n_context"] <= 3 and "d_transition_fit" in r

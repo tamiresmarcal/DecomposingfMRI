@@ -149,6 +149,8 @@ class StabilityMixin:
         n_boot=0 skips the bootstrap CIs (fast, for sweeps over state sets).
         """
         vs = variables or self.stability_variables()
+        if "transition_fit" in vs:
+            self.transition_fit()                  # computed on demand, not stored in the tables
         rng = np.random.default_rng(seed)
         coh, agr = self.cohen(vs), self.agreement(vs)
         r, m = self.paired_rest_movie()
