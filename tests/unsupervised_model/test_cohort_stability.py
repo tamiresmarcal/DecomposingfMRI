@@ -77,3 +77,13 @@ def test_film_summary_within_and_between_person():
     assert fs.loc[("clip3", "switch_rate"), "differs"]                    # the shifted clip
     assert not fs.loc[("clip1", "entropy_rate_bits"), "differs"]
     assert not fs.loc[("f1", "entropy_rate_bits"), "differs"]
+
+
+def test_tiers_and_replication():
+    co = _toy()
+    st = co.stability(["entropy_rate_bits", "switch_rate"], n_boot=0).set_index("variable")
+    assert st.loc["entropy_rate_bits", "tier"] == "stable"
+    assert st.loc["switch_rate", "tier"] == "context-dependent"
+    assert np.isnan(st.loc["switch_rate", "task_lo"])                     # n_boot=0: no CI
+    pairs, ceil = co.replication("movie", n_split=5)
+    assert len(pairs) == 1 and ceil.notna().all()

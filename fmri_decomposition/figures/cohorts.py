@@ -565,12 +565,14 @@ def nice(v):
 def fig_stability_forest(co, st, variables=None):
     """Panel A. Per variable, two effect sizes with 95% CI against the equivalence band +-sesoi_d:
     between cohorts (movie; the cohort furthest from the others) and movie vs rest in the same
-    people. Right: 'stable' when both are equivalent (TOST, 5%), else 'context-dependent'."""
+    people. Right: the tier from movie vs rest in the same people (|d_av| < .2 stable, < .5
+    moderate, else context-dependent); the between-cohort d is context, not a criterion."""
     t = st if variables is None else st.set_index("variable").loc[variables].reset_index()
     m = co.cfg.sesoi_d
     y = np.arange(len(t))[::-1]
     fig, ax = plt.subplots(figsize=(8.5, 0.42 * len(t) + 1.6))
     ax.axvspan(-m, m, color="#e8f0fb", zorder=0)
+    ax.axvspan(m, .5, color="#f3f6fb", zorder=0)
     ax.axvline(0, color=hp.INK2, lw=.8)
     ax.errorbar(t["between_d"], y + .15, xerr=[t["between_d"] - t["between_lo"], t["between_hi"] - t["between_d"]],
                 fmt="o", color=ORANGE, ms=5, capsize=2, label="between cohorts, movie (largest |d|)")
@@ -581,9 +583,9 @@ def fig_stability_forest(co, st, variables=None):
     for s in ("top", "right", "left"):
         ax.spines[s].set_visible(False)
     ax.tick_params(axis="y", length=0)
-    for yi, st_ in zip(y, t["stable"]):
-        ax.text(1.01, yi, "stable" if st_ else "context-dependent", transform=ax.get_yaxis_transform(),
-                va="center", fontsize=8.5, color=hp.INK if st_ else hp.INK2)
+    for yi, tier in zip(y, t["tier"]):
+        ax.text(1.01, yi, tier, transform=ax.get_yaxis_transform(),
+                va="center", fontsize=8.5, color=hp.INK if tier == "stable" else hp.INK2)
     ax.legend(frameon=False, fontsize=8, loc="upper center", bbox_to_anchor=(.45, -.08 - 2 / (len(t) + 4)), ncol=2)
     ax.set_title("A  What is stable and what depends on context", fontsize=11, loc="left")
     save(fig, "stability_forest", co.cfg)
@@ -599,7 +601,7 @@ def fig_stability_plane(co, st, variables=None, x_cut=None, y_cut=0.4):
     ax.axvline(x_cut, color="#e5e4df", lw=1.5)
     ax.axhline(y_cut, color="#e5e4df", lw=1.5)
     x = t["task_d"].abs()
-    c = [hp.BLUE if s else ORANGE for s in t["stable"]]
+    c = [{"stable": hp.BLUE, "moderate": "#86b6ef"}.get(s, ORANGE) for s in t["tier"]]
     ax.errorbar(x, t["icc"], yerr=[t["icc"] - t["icc_lo"], t["icc_hi"] - t["icc"]], fmt="none", ecolor="#c9c8c2", lw=1, zorder=1)
     ax.scatter(x, t["icc"], s=70, c=c, edgecolor="white", linewidth=1.5, zorder=3)
     for xi, yi, v in zip(x, t["icc"], t["variable"]):

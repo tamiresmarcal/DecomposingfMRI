@@ -139,6 +139,14 @@ class StabilityMixin:
             and a paired TOST: the 90% CI of the mean difference inside +- sesoi_d x pooled SD.
         individual consistency: ICC(3,1) between rest and movie on cohort-demeaned values (a
             cohort's offset is not 'keeping your rank'), bootstrap 95% CI; and per cohort.
+
+        `tier` -- the classification the figures use -- rests on movie vs rest in the SAME people
+        only, the one contrast that isolates context: |d_av| < 0.2 "stable", 0.2-0.5 "moderate",
+        > 0.5 "context-dependent" (Cohen's small / medium). The cohorts differ in age, scanner,
+        TR and run length, so their levels are not expected to be equal; whether the cohorts
+        share the STRUCTURE is `replication()`'s question, not a per-variable equivalence.
+        `stable` (equivalent in both comparisons, TOST) is kept for reference only.
+        n_boot=0 skips the bootstrap CIs (fast, for sweeps over state sets).
         """
         vs = variables or self.stability_variables()
         rng = np.random.default_rng(seed)
@@ -146,7 +154,7 @@ class StabilityMixin:
         r, m = self.paired_rest_movie()
         demean = lambda t, v: t[v] - t.groupby("cohort")[v].transform("mean")
         n = len(r)
-        boot = rng.integers(0, n, size=(n_boot, n))
+        boot = rng.integers(0, n, size=(n_boot, n)) if n_boot else np.empty((0, n), int)
         rows = []
         for v in vs:
             cv = coh[coh["variable"] == v]
@@ -167,10 +175,12 @@ class StabilityMixin:
                        between_hi=abs(cv.loc[i, "d"]) + (cv.loc[i, "hi"] - cv.loc[i, "d"]),
                        between_cohort=cv.loc[i, "cohort"],
                        between_equivalent=bool(agr.loc[agr["variable"] == v, "equivalent"].all()),
-                       task_d=d_av, task_lo=np.nanpercentile(bd, 2.5), task_hi=np.nanpercentile(bd, 97.5),
+                       task_d=d_av, task_lo=np.nanpercentile(bd, 2.5) if n_boot else np.nan,
+                       task_hi=np.nanpercentile(bd, 97.5) if n_boot else np.nan,
                        task_equivalent=bool((diff.mean() - h > -bound) and (diff.mean() + h < bound)),
                        task_p=stats.ttest_rel(mv_[ok], rv[ok]).pvalue, n_paired=int(ok.sum()),
-                       icc=icc, icc_lo=np.nanpercentile(bi, 2.5), icc_hi=np.nanpercentile(bi, 97.5))
+                       icc=icc, icc_lo=np.nanpercentile(bi, 2.5) if n_boot else np.nan,
+                       icc_hi=np.nanpercentile(bi, 97.5) if n_boot else np.nan)
             for c in r["cohort"].unique():
                 s = (r["cohort"] == c).to_numpy()
                 row[f"icc_{c}"] = _icc_c1(rv[s], mv_[s])
@@ -178,7 +188,39 @@ class StabilityMixin:
         out = pd.DataFrame(rows)
         out["task_p_fdr"] = stats.false_discovery_control(out["task_p"].fillna(1))
         out["stable"] = out["between_equivalent"] & out["task_equivalent"]
+        a = out["task_d"].abs()
+        out["tier"] = np.select([a < .2, a < .5], ["stable", "moderate"], "context-dependent")
         return out
+
+    def replication(self, kind="movie", n_split=20, min_occ=0.01, seed=0):
+        """Does the transition STRUCTURE replicate across cohorts, whatever their levels?
+
+        r between cohorts' mean p(j | i) (rows of states occupied >= min_occ), divided by the
+        noise ceiling: the r between two random halves of the same cohort (mean of n_split
+        splits), geometric mean of the two cohorts' ceilings. ~1 = two cohorts agree as well as a
+        cohort agrees with itself. Returns (pairs, ceilings)."""
+        K, rng = self.cfg.K, np.random.default_rng(seed)
+        occ = pd.concat([v[self.occ].mean() for v in self.data.values()], axis=1).mean(axis=1).to_numpy()
+        rows = np.repeat(occ >= min_occ, K)
+        vec = lambda d: d[self.cells].mean().to_numpy(float)[rows]
+        groups = {c: d for (c, k), d in self.data.items() if k == kind}
+        ceil = {}
+        for c, d in groups.items():
+            if len(d) < 4:
+                ceil[c] = np.nan
+                continue
+            rs = []
+            for _ in range(n_split):
+                idx = rng.permutation(len(d))
+                rs.append(np.corrcoef(vec(d.iloc[idx[: len(d) // 2]]), vec(d.iloc[idx[len(d) // 2:]]))[0, 1])
+            ceil[c] = float(np.mean(rs))
+        pairs = []
+        labels = list(groups)
+        for i, a in enumerate(labels):
+            for b in labels[i + 1:]:
+                r = float(np.corrcoef(vec(groups[a]), vec(groups[b]))[0, 1])
+                pairs.append(dict(a=a, b=b, r=r, r_norm=r / np.sqrt(ceil[a] * ceil[b])))
+        return pd.DataFrame(pairs), pd.Series(ceil, name="split_half_r")
 
     # -- variation between films ----------------------------------------------------------
     def films(self):
