@@ -150,7 +150,7 @@ temporal gyrus; SFG, superior frontal gyrus; SMA, supplementary motor area
 superior temporal gyrus.}}
 \label{{tab:crossdb}}
 \resizebox{{\textwidth}}{{!}}{{%
-\begin{{tabular}}{{llrlllrr}}
+\begin{{tabular}}{{llrlclrr}}
 \toprule
  & & & \multicolumn{{3}}{{c}}{{Top region}} & \multicolumn{{2}}{{c}}{{Foci}} \\
 \cmidrule(lr){{4-6}}\cmidrule(l){{7-8}}
