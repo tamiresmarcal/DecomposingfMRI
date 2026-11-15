@@ -75,7 +75,28 @@ def load_models(root: Path, atlas: str, window_s) -> dict:
 def _joblib_load(path: Path):
     import joblib
 
-    return joblib.load(path)
+    try:
+        return joblib.load(path)
+    except AttributeError as e:
+        if "NNDescent" not in str(e):
+            raise
+    # The UMAP inside was pickled with another pynndescent: its nearest-neighbour
+    # index cannot rebuild its search function on load. Nothing read here (scaler,
+    # PCA, metadata) uses it, so load it as a plain object; only umap.transform on
+    # new data would need it, and that must be done in the environment that fit it.
+    import warnings
+    from pynndescent import NNDescent
+
+    original = NNDescent.__setstate__
+    NNDescent.__setstate__ = lambda self, d: self.__dict__.update(d)
+    try:
+        out = joblib.load(path)
+    finally:
+        NNDescent.__setstate__ = original
+    warnings.warn(f"{path.name}: the UMAP's pynndescent index was pickled with another "
+                  "pynndescent version and is loaded inert (scaler and PCA are fine; "
+                  "do not call umap.transform on this object).", stacklevel=2)
+    return out
 
 
 def _pickle_load(path: Path):
