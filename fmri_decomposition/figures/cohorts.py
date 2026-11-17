@@ -15,6 +15,15 @@ DYN_UNIT = {"switch_rate": " (share of steps)", "mean_dwell_s": " (s)", "entropy
             "self_transition_rate": " (share of steps)", "switches_per_min": " (per min)", "n_states_visited": " (states)"}
 
 
+# how a cohort is named in the figures
+COHORT_NAMES = {"ds002837": "NNDb", "cneuromod": "CNeuroMod", "camcan": "Cam-CAN", "hcp7t_fix": "HCP",
+                "hcp7t": "HCP"}
+
+
+def cname(c):
+    return COHORT_NAMES.get(c, c)
+
+
 def colours(cfg):
     return dict(zip(cfg.cohorts, PALETTE))
 
@@ -647,7 +656,16 @@ def fig_films_forest(co, fs, variables, rest=None, title="", name="films", per_r
     nrow = int(np.ceil(n / per_row))
     fig, axs = plt.subplots(nrow, per_row, figsize=(1.75 * per_row + 2.2, 0.33 * len(rows) * nrow + 1.8),
                             squeeze=False, gridspec_kw=dict(wspace=.12, hspace=.25))
-    y = np.arange(len(rows))[::-1]
+    # each cohort gets a header line of its own above its tasks, so its name sits on no task's
+    y, heads, yy, prev = [], [], 0.0, None
+    for c, f, _ in rows:
+        if c != prev:
+            heads.append((c, yy))
+            yy -= 1
+            prev = c
+        y.append(yy)
+        yy -= 1
+    y = np.array(y)
     pos = {(c, f): yi for yi, (c, f, _) in zip(y, rows)}
     for i, v in enumerate(variables):
         ax = axs[i // per_row, i % per_row]
@@ -668,20 +686,18 @@ def fig_films_forest(co, fs, variables, rest=None, title="", name="films", per_r
         ax.xaxis.grid(True, color="#e5e4df")
         ax.set_axisbelow(True)
         ax.tick_params(axis="x", labelsize=7)
-        prev = None
-        for yi, (c, f, _) in zip(y, rows):                         # cohort separators and names
-            if c != prev:
-                if prev is not None:
-                    ax.axhline(yi + .5, color="#c9c8c2", lw=.8)
-                if i % per_row == 0:
-                    ax.text(-0.02, yi + .5, c, transform=ax.get_yaxis_transform(), ha="right", va="bottom",
-                            fontsize=7.5, color=hp.MUTED, fontweight="bold")
-                prev = c
+        for k, (c, yh) in enumerate(heads):                        # cohort separators and names
+            if k:
+                ax.axhline(yh + .5, color="#c9c8c2", lw=.8)
+            if i % per_row == 0:
+                ax.text(-0.02, yh, cname(c), transform=ax.get_yaxis_transform(), ha="right", va="center",
+                        fontsize=8, color=hp.INK, fontweight="bold")
+        ax.set_ylim(y.min() - .7, .7)
     for j in range(n, nrow * per_row):
         axs[j // per_row, j % per_row].set_visible(False)
     fig.suptitle(title, fontsize=11, x=.02, ha="left")
-    fig.text(.02, .005, "Film mean (95% CI). Filled = the same people watched several films of their cohort; "
-             "hollow = different people per film. Dashed blue = global mean (every cohort and condition).",
+    fig.text(.02, .005, "Task mean (95% CI). Filled = the same people did several tasks of their cohort; "
+             "hollow = different people per task. Dashed blue = global mean (every cohort and condition).",
              fontsize=7.5, color=hp.INK2)
     save(fig, name, co.cfg)
     _show(fig)
@@ -698,7 +714,7 @@ def fig_films_matrices(co, fs, per_row=6):
     nrow = int(np.ceil(n / per_row))
     fig, axs = plt.subplots(nrow, per_row, figsize=(1.9 * per_row, 2.1 * nrow + .6), squeeze=False)
     mean = np.mean([m["mean"].to_numpy(float) for m in M.values()], axis=0).reshape(K, K)
-    panels = [("mean of the tasks", mean)] + [(f"{c} · {f}", m["mean"].to_numpy(float).reshape(K, K))
+    panels = [("mean of the tasks", mean)] + [(f"{cname(c)} · {f}", m["mean"].to_numpy(float).reshape(K, K))
                                               for (c, f), m in M.items()]
     for k, (title, T) in enumerate(panels):
         ax = axs[k // per_row, k % per_row]
@@ -735,9 +751,10 @@ def _replication_panel(ax, pairs):
         if hasattr(r, "lo") and np.isfinite(getattr(r, "lo", np.nan)):
             ax.plot([r.lo, r.hi], [yi, yi], color=c, lw=1.3)
         ax.plot(r.r_norm, yi, "o", color=c, ms=6)
-    lab = [f"{r.a.split()[0]}: rest – movie" if r.kind == "rest vs movie" else
-           f"{r.a.replace(' movie', '')} – mean of the others" if r.kind == "vs mean" else
-           f"{r.a.replace(' movie', '')} – {r.b.replace(' movie', '')}" for r in t.itertuples()]
+    nm = lambda x: cname(x.split()[0])
+    lab = [f"{nm(r.a)}: rest – movie" if r.kind == "rest vs movie" else
+           f"{nm(r.a)} – mean of the others" if r.kind == "vs mean" else
+           f"{nm(r.a)} – {nm(r.b)}" for r in t.itertuples()]
     ax.set_yticks(y, lab, fontsize=8)
     lo = min(.5, float(np.nanmin(t.get("lo", t["r_norm"]))) - .05)
     ax.set_xlim(lo, 1.08)
@@ -803,7 +820,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0):
         axo.bar(range(K), o, color=col[c], width=.7)
         axo.set_xticks([])
         axo.set_ylim(0, 1)
-        axo.set_title(f"{c}{' *' if co.role(c) == 'train' else ''}", fontsize=10)
+        axo.set_title(f"{cname(c)}{' *' if co.role(c) == 'train' else ''}", fontsize=10)
         for sp in ("top", "right"):
             axo.spines[sp].set_visible(False)
         axo.tick_params(labelsize=7)
@@ -840,6 +857,10 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0):
     gB = gs[1].subgridspec(1, 2, width_ratios=[1.25, 1], wspace=.35)
     ax = fig.add_subplot(gB[0])
     hp.diagram(ax, T_ref, o_ref, edges, 1.0, 1.0, fs=diagram_fs)
+    p_min = min(T_ref[e] for e in edges)
+    ax.text(.5, -.02, f"Circle area = share of time; loop and arrow width ∝ p(j | i).\n"
+            f"Arrows: the {len(edges)} most likely transitions between states (p ≥ {p_min:.2f}).",
+            transform=ax.transAxes, ha="center", va="top", fontsize=8, color=hp.INK2)
     ax.text(.0, 1.0, "B", transform=ax.transAxes, fontsize=13, fontweight="bold")
     ax = fig.add_subplot(gB[1])
     _tier_panel(ax, st, tier_variables or ["transition_fit", *co.dyn, *co.occ])
