@@ -633,7 +633,8 @@ def diagram(ax, T, occ, edges, wmax, omax, compare=False, hit_T=None, hit_occ=No
         u, r = pos[k] / np.linalg.norm(pos[k]), radius(occ[k])   # their places are fixed
         th = np.degrees(np.arctan2(u[1], u[0]))
         ax.add_patch(Arc(pos[k] + u * (r + .045), .11, .11, theta1=th - 140, theta2=th + 140, zorder=2,
-                         lw=.3 + 3 * T[k, k], color=colour if hit_T[k, k] else base))
+                         lw=.3 + 4.5 * T[k, k] / wmax,   # the arrows' rule
+                         color=colour if hit_T[k, k] else base))
         occ_note = note_occ[k] if hit_occ[k] and note_occ is not None and note_occ[k] else None
         ax.text(*pos[k], str(k), ha="center", va="center", fontsize=7.5 * fs, gid="scaled", color=INK, zorder=6)
         at, lab = pos[k] * (1 + (r + .36) / np.linalg.norm(pos[k])), pct(occ[k]) + (f" ({occ_note})" if occ_note else "")

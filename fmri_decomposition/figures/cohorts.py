@@ -716,18 +716,26 @@ def fig_films_matrices(co, fs, per_row=6):
     n = len(rows) + 1
     nrow = int(np.ceil(n / per_row))
     fig, axs = plt.subplots(nrow, per_row, figsize=(1.9 * per_row, 2.1 * nrow + .6), squeeze=False)
-    mean = np.mean([m["mean"].to_numpy(float) for m in M.values()], axis=0).reshape(K, K)
+    # a row nobody in a task left (e.g. a state CNeuroMod never visits) is NaN, not 0: the mean
+    # is over the tasks that have it, and a missing row is drawn hatched grey, not white (= 0)
+    with np.errstate(all="ignore"), __import__("warnings").catch_warnings():
+        __import__("warnings").simplefilter("ignore", RuntimeWarning)          # a row no task has: NaN
+        mean = np.nanmean([m["mean"].to_numpy(float) for m in M.values()], axis=0).reshape(K, K)
     panels = [("mean of the tasks", mean)] + [(f"{cname(c)} · {f}", m["mean"].to_numpy(float).reshape(K, K))
                                               for (c, f), m in M.items()]
     for k, (title, T) in enumerate(panels):
         ax = axs[k // per_row, k % per_row]
-        im = ax.imshow(T, cmap="Blues", vmin=0, vmax=1)
+        ax.set_facecolor("#ecebe6")
+        im = ax.imshow(np.ma.masked_invalid(T), cmap="Blues", vmin=0, vmax=1)
+        for r_ in np.flatnonzero(np.isnan(T).all(1)):
+            ax.add_patch(plt.Rectangle((-.5, r_ - .5), K, 1, fc="#ecebe6", ec="#c9c8c2", hatch="////", lw=0))
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set_title(title, fontsize=7, color=hp.INK2)
     for j in range(n, nrow * per_row):
         axs[j // per_row, j % per_row].set_visible(False)
-    fig.suptitle("Transitions p(j | i), film by film — rows: from state i, columns: to state j", fontsize=11,
+    fig.suptitle("Transitions p(j | i), task by task — rows: from state i, columns: to state j; "
+                 "hatched: state not left in that task", fontsize=11,
                  x=.02, ha="left")
     fig.colorbar(im, ax=axs.ravel().tolist(), fraction=.015, pad=.01, label="p(j | i)").outline.set_visible(False)
     save(fig, "films_transitions", co.cfg)
@@ -1005,7 +1013,7 @@ def fig_replication(co, pairs, name="Sd_replication"):
 
 
 def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation", pvalue=None, test="tier",
-                          means=True, measure="task"):
+                          means=False, measure="task"):
     """Does one number per family lose information? Movie vs rest |d_av| (same people, 95% CI); transitions
     on the left, dynamic metrics over occupancy on the right: the family's profile r with the reference on top, then every member of the family --
     transitions p(j | i) (rows of states with mean occupancy >= min_occ), occupancy of each state,
