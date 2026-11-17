@@ -826,7 +826,7 @@ def family(v):
     return "dynamics"
 
 
-def _tier_panel(ax, st, variables, pvalue=None, test="tier"):
+def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False):
     """pvalue: None, "exact" or "stars"; test: "tier" (P(tier)), "difference", "tost", "both"
     (difference + tost), "all", or a list (see _p_columns). A thin line separates the families
     (transitions, occupancy, dynamic metrics). A row with too few people scanned in both
@@ -848,7 +848,7 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier"):
         if not np.isfinite(dv):
             ax.text(.02, yi, f"too few people with both conditions (n = {int(n) if np.isfinite(n) else 0})",
                     va="center", fontsize=6.5, color=hp.MUTED)
-    fam = [family(v) for v in t["variable"]]
+    fam = [family(v) for v in t["variable"]] if separators else []
     for k in range(1, len(fam)):
         if fam[k] != fam[k - 1]:
             ax.axhline(y[k] + .5, color="#c9c8c2", lw=.8)
@@ -943,7 +943,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     co.diagram_p_min = min(T_ref[e] for e in edges)       # for the legend: the thinnest arrow drawn
     ax = fig.add_subplot(gB[1])
     occ = co.occ if occupancy == "each" else ["occupancy_fit"]
-    _tier_panel(ax, st, tier_variables or ["transition_fit", *occ, *co.dyn], pvalue, test)
+    _tier_panel(ax, st, tier_variables or ["transition_fit", *co.dyn, *occ], pvalue, test)
     for t in fig.findobj(plt.matplotlib.text.Text):              # every text larger, but the diagram's:
         if t.get_gid() != "scaled":                              # its labels were placed at diagram_fs
             t.set_fontsize(t.get_fontsize() * font)
@@ -971,8 +971,8 @@ def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation
     and each dynamic metric. Same tiers as Figure 3C."""
     occ = pd.concat([v[co.occ].mean() for v in co.data.values()], axis=1).mean(axis=1).to_numpy()
     keep = [c for c in co.cells if occ[int(c.split("->")[0])] >= min_occ]
-    fams = [("Transitions", "transition_fit", keep), ("Occupancy", "occupancy_fit", list(co.occ)),
-            ("Dynamic metrics", "dynamics_fit", list(co.dyn))]
+    fams = [("Transitions", "transition_fit", keep), ("Dynamic metrics", "dynamics_fit", list(co.dyn)),
+            ("Occupancy", "occupancy_fit", list(co.occ))]
     st = co.stability([v for _, f, m in fams for v in [f, *m]], n_boot=n_boot)
     h = [len(m) + 1 for _, _, m in fams]
     fig, axs = plt.subplots(1, 3, figsize=(18, max(6, .2 * max(h) + 2)), gridspec_kw=dict(wspace=1.0 if pvalue else .75))
