@@ -826,12 +826,18 @@ def family(v):
     return "dynamics"
 
 
-def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False):
+def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, sort=True):
     """pvalue: None, "exact" or "stars"; test: "tier" (P(tier)), "difference", "tost", "both"
     (difference + tost), "all", or a list (see _p_columns). A thin line separates the families
     (transitions, occupancy, dynamic metrics). A row with too few people scanned in both
     conditions to estimate (NaN) says so, with its n."""
     t = st.set_index("variable").loc[[v for v in variables if v in set(st["variable"])]].reset_index()
+    if sort:   # families in the order given; inside each, the profile r first, then by |d| (top = smallest)
+        fam_rank = {f: k for k, f in enumerate(dict.fromkeys(family(v) for v in t["variable"]))}
+        key = pd.DataFrame({"f": [fam_rank[family(v)] for v in t["variable"]],
+                            "fit": [0 if v.endswith("_fit") else 1 for v in t["variable"]],
+                            "d": t["task_d"].abs().fillna(np.inf)})
+        t = t.loc[key.sort_values(["f", "fit", "d"], kind="stable").index].reset_index(drop=True)
     y = np.arange(len(t))[::-1]
     ax.axvspan(0, .2, color="#e8f0fb")
     ax.axvspan(.2, .5, color="#f3f6fb")

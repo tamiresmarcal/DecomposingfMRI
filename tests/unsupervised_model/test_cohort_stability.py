@@ -290,3 +290,18 @@ def test_load_pools_counts_per_person(tmp_path):
     assert np.isclose(r.loc["A", "0->1"], .1) and np.isclose(r.loc["A", "1->0"], .2)   # pooled, not averaged
     assert np.isnan(r.loc["B", "1->0"]) and np.isnan(r.loc["B", "1->1"])              # never left 1: NaN
     assert np.isclose(r.loc["B", "0->0"], 1.0)
+
+
+def test_tier_panel_sorted_within_family():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from fmri_decomposition.figures import cohorts as cp
+    st = pd.DataFrame({"variable": ["occ_1", "switch_rate", "occ_0", "transition_fit", "entropy_rate_bits"],
+                       "task_d": [.1, .9, 1.5, .3, .2], "task_lo": np.nan, "task_hi": np.nan,
+                       "tier": ["stable", "context-dependent", "context-dependent", "moderate", "moderate"]})
+    fig, ax = plt.subplots()
+    cp._tier_panel(ax, st, ["transition_fit", "switch_rate", "entropy_rate_bits", "occ_1", "occ_0"])
+    ticks = sorted(zip(ax.get_yticks(), [t.get_text() for t in ax.get_yticklabels()]), reverse=True)
+    labels = [l for _, l in ticks]                                        # top to bottom
+    assert labels == [cp.nice(v) for v in ["transition_fit", "entropy_rate_bits", "switch_rate", "occ_1", "occ_0"]]
