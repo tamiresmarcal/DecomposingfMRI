@@ -922,7 +922,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
                 pvalue=None, test="tier"):
     """Manuscript Figure 3 as one figure, rest and movie together (each person's mean of the
     conditions they have; `groups(tasks="all")`).
-    A  every cohort: occupancy, p(j | i) and the dynamic metrics (mean, 90% CI);
+    A  every cohort: occupancy, p(j | i) and the dynamic metrics (mean, 95% CI);
     B  the reference transition graph: the mean of the cohorts in A, each cohort once;
     C  which properties depend on context (`stability` tiers: movie vs rest, same people).
     font scales every text; diagram_fs the diagram's own (its labels are placed for that size).
@@ -973,12 +973,12 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     gD = gA[:, n].subgridspec(len(co.dyn), 1, hspace=1.1)
     for r_, v in enumerate(co.dyn):
         axd = fig.add_subplot(gD[r_])
-        t = agree[agree["variable"] == v]
-        for j, rr in enumerate(t.itertuples()):
+        for j, c in enumerate(cohorts):                       # mean and 95% CI over the cohort's people
+            x = G[c][v].dropna()
+            h = stats.t.ppf(.975, max(len(x) - 1, 1)) * x.std(ddof=1) / np.sqrt(len(x)) if len(x) > 1 else np.nan
             yy = -j * .3
-            axd.plot([rr.mean_lo, rr.mean_hi], [yy, yy], color=col[rr.cohort], lw=1.3)
-            axd.plot(rr.mean, yy, "o", ms=4, color=col[rr.cohort],
-                     mfc=col[rr.cohort])
+            axd.plot([x.mean() - h, x.mean() + h], [yy, yy], color=col[c], lw=1.3)
+            axd.plot(x.mean(), yy, "o", ms=4, color=col[c], mfc=col[c])
         axd.set_yticks([])
         axd.set_ylim(-.3 * len(cohorts), .3)
         lo_, hi_ = fixed_range(co, v)
