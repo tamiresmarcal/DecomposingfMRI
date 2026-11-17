@@ -907,7 +907,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
         oc = G[c][co.occ]                                    # 95% CI of the mean over the cohort's people
         h = stats.t.ppf(.975, np.maximum(oc.count() - 1, 1)) * oc.std(ddof=1) / np.sqrt(oc.count())
         axo.bar(range(K), o, color=col[c], width=.7, yerr=h.to_numpy(float),
-                error_kw=dict(ecolor=hp.INK2, elinewidth=1, capsize=2))
+                error_kw=dict(ecolor=hp.INK2, elinewidth=1, capsize=0))
         axo.set_xticks([])
         axo.set_ylim(0, 1)
         axo.set_title(f"{cname(c)}{' *' if co.role(c) == 'train' else ''}", fontsize=10)
@@ -971,8 +971,8 @@ def fig_replication(co, pairs, name="Sd_replication"):
 
 
 def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation", pvalue=None, test="tier"):
-    """Does one number per family lose information? Movie vs rest |d_av| (same people, 95% CI), three
-    panels: the family's profile r with the reference on top, then every member of the family --
+    """Does one number per family lose information? Movie vs rest |d_av| (same people, 95% CI); transitions
+    on the left, dynamic metrics over occupancy on the right: the family's profile r with the reference on top, then every member of the family --
     transitions p(j | i) (rows of states with mean occupancy >= min_occ), occupancy of each state,
     and each dynamic metric. Same tiers as Figure 3C."""
     occ = pd.concat([v[co.occ].mean() for v in co.data.values()], axis=1).mean(axis=1).to_numpy()
@@ -980,13 +980,18 @@ def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation
     fams = [("Transitions", "transition_fit", keep), ("Dynamic metrics", "dynamics_fit", list(co.dyn)),
             ("Occupancy", "occupancy_fit", list(co.occ))]
     st = co.stability([v for _, f, m in fams for v in [f, *m]], n_boot=n_boot)
+    from matplotlib.gridspec import GridSpec
     h = [len(m) + 1 for _, _, m in fams]
-    fig, axs = plt.subplots(1, 3, figsize=(18, max(6, .2 * max(h) + 2)), gridspec_kw=dict(wspace=1.0 if pvalue else .75))
-    for ax, (title, f, members) in zip(axs, fams):
+    fig = plt.figure(figsize=(14, max(6, .2 * h[0] + 2)))
+    gs = GridSpec(2, 2, figure=fig, height_ratios=h[1:], wspace=1.1 if pvalue else .9, hspace=.35,
+                  left=.2, right=.95)
+    axs = [fig.add_subplot(gs[:, 0]), fig.add_subplot(gs[0, 1]), fig.add_subplot(gs[1, 1])]
+    for ax, (title, f, members) in zip(axs, fams):            # transitions left; metrics over occupancy right
         _tier_panel(ax, st, [f, *members], pvalue, test)
         ax.axhline(len(members) - .5, color="#c9c8c2", lw=.8)       # the profile above, members below
         ax.set_title(title, fontsize=12, loc="left")
         ax.tick_params(axis="y", labelsize=7 if len(members) > 20 else 9)
+    axs[1].set_xlabel("")                                      # one x label in the right column, at the bottom
     fig.suptitle(f"Aggregation check · {ht.set_label(co.cfg.space)} · |d_av| movie vs rest", x=.02, ha="left", fontsize=12)
     save(fig, name, co.cfg)
     _show(fig)
