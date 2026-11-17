@@ -1140,19 +1140,29 @@ def fig_variance_partition(co, st, variables=None, name="variance_partition", co
     return fig
 
 
-def variance_table(co, st, variables=None, digits=3):
-    """The partition as a table, Figure 3's order: variance components (on z-scored values), the
-    VPC of the task within cohorts with its 95% CI, and Nakagawa's marginal / conditional R^2."""
+def variance_table(co, st, variables=None, digits=3, st_transitions=None, min_occ=0.01):
+    """The partition as a table: one row per property (Figure 3's order) and, with st_transitions,
+    one per transition p(j | i) (rows of states with mean occupancy >= min_occ; grouped by the state
+    left). Variance components on z-scored values; VPC of task and of person within cohorts (VPC
+    task with its 95% CI); Nakagawa's marginal / conditional R^2."""
     variables = variables or ["transition_fit", *co.dyn, *co.occ]
-    t = _ordered(co, st, variables)
-    out = pd.DataFrame({
-        "property": [nice(v) for v in t["variable"]],
-        "σ² cohort": t["var_cohort"], "σ² task": t["var_task"], "σ² person": t["var_person"],
-        "σ² residual": t["var_residual"],
-        "VPC task": t["task_d"], "VPC 95% CI": [f"{a:.{digits}f}–{b:.{digits}f}" if np.isfinite(a) else ""
-                                                 for a, b in zip(t["task_lo"], t["task_hi"])],
-        "R² marginal": t["r2_marginal"], "R² conditional": t["r2_conditional"]})
-    return out.round(digits)
+    parts = [("property", _ordered(co, st, variables))]
+    if st_transitions is not None:
+        occ = pd.concat([v[co.occ].mean() for v in co._ref_tables()], axis=1).mean(axis=1).to_numpy()
+        cells = [c for c in co.cells if occ[int(c.split("->")[0])] >= min_occ]
+        parts.append(("transition", _ordered(co, st_transitions, cells)))
+    rows = []
+    for kind, t in parts:
+        rows.append(pd.DataFrame({
+            "family": [family(v) if kind == "property" else "transition p(j | i)" for v in t["variable"]],
+            "property": [nice(v) for v in t["variable"]],
+            "σ² cohort": t["var_cohort"], "σ² task": t["var_task"], "σ² person": t["var_person"],
+            "σ² residual": t["var_residual"],
+            "VPC task": t["task_d"], "VPC 95% CI": [f"{a_:.{digits}f}–{b_:.{digits}f}" if np.isfinite(a_) else ""
+                                                     for a_, b_ in zip(t["task_lo"], t["task_hi"])],
+            "VPC person": _vpc_within(t, "person"),
+            "R² marginal": t["r2_marginal"], "R² conditional": t["r2_conditional"]}))
+    return pd.concat(rows, ignore_index=True).round(digits)
 
 
 FAMILY_COL = {"transitions": "#1f4e9c", "dynamics": "#2a9d6f", "occupancy": ORANGE}

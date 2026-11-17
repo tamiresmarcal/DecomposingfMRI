@@ -477,3 +477,6 @@ def test_variance_partition_figure_and_table():
     assert len(fig.axes[0].texts) == len(co.dyn)
     tab = cp.variance_table(co, st, list(co.dyn))
     assert list(tab["property"]) and "VPC task" in tab
+    stc2 = co.task_variation(co.cells, n_boot=0, combine="mixed")
+    tab = cp.variance_table(co, st, list(co.dyn), st_transitions=stc2)
+    assert (tab["family"] == "transition p(j | i)").sum() == len(co.cells) and "VPC person" in tab
