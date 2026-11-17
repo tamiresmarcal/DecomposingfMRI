@@ -512,10 +512,21 @@ class StabilityMixin:
                 continue
             df["y"] = (df["y"] - df["y"].mean()) / df["y"].std()          # scale-free; the VPC is unchanged
             try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    r = smf.mixedlm("y ~ C(cohort)", df, groups="cohort", re_formula="0",
-                                    vc_formula={"task": "0 + C(task)", "person": "0 + C(person)"}).fit(reml=True)
+                model = smf.mixedlm("y ~ C(cohort)", df, groups="cohort", re_formula="0",
+                                    vc_formula={"task": "0 + C(task)", "person": "0 + C(person)"})
+                r, errs = None, []
+                for method in ("lbfgs", "bfgs", "powell", "nm"):     # the default optimiser can fail
+                    try:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            r = model.fit(reml=True, method=method)
+                        if np.isfinite(r.params.get("task Var", np.nan)):
+                            break
+                    except Exception as e:
+                        errs.append(f"{method}: {type(e).__name__}: {e}"[:120])
+                        r = None
+                if r is None:
+                    raise RuntimeError(" | ".join(errs))
                 tau, pi = (float(r.params[f"{n} Var"]) for n in ("task", "person"))   # relative to s2_residual
                 D = tau + pi + 1
                 vpc = tau / D
@@ -536,9 +547,13 @@ class StabilityMixin:
                     else:
                         row["task_lo"], row["task_hi"] = vpc, vpc
             except Exception as err:                           # a fit that fails stays NaN, with a note
-                row["fit_error"] = str(err)[:80]
+                row["fit_error"] = f"{type(err).__name__}: {err}"[:300]
             rows.append(row)
         out = pd.DataFrame(rows)
+        if "fit_error" in out and out["fit_error"].notna().any():
+            bad = out[out["fit_error"].notna()]
+            print(f"mixed model failed for {len(bad)} of {len(out)} variables; first: "
+                  f"{bad.iloc[0]['variable']}: {bad.iloc[0]['fit_error']}")
         out["tier"] = np.where(out["task_d"].isna(), "n/a",
                                np.select([out["task_d"] < cuts[0], out["task_d"] < cuts[1]],
                                          ["stable", "moderate"], "context-dependent"))
