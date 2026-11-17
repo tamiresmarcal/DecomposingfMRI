@@ -554,7 +554,8 @@ def window_name(cfg):
 
 # ------------------------------------------------------------------ stability (manuscript figure 3)
 ORANGE = "#eb6834"
-NICE = {"transition_fit": "Transition structure (fit to reference)", "switch_rate": "Switch rate",
+NICE = {"transition_fit": "Transition structure (fit to reference)",
+        "occupancy_fit": "Occupancy profile (fit to reference)", "switch_rate": "Switch rate",
         "mean_dwell_s": "Mean dwell", "entropy_rate_bits": "Entropy rate", "dispersion": "Dispersion",
         "n_distinct_transitions": "Distinct transitions"}
 
@@ -612,7 +613,7 @@ def fixed_range(co, v):
     so its range is 0 to the 99th percentile of the subjects' values, rounded up -- the same in
     every figure of a state set. `cfg.ranges` overrides any of these."""
     K = co.cfg.K
-    if v.startswith("occ_") or "->" in v or v == "transition_fit":
+    if v.startswith("occ_") or "->" in v or v in ("transition_fit", "occupancy_fit"):
         return (0.0, 1.0)
     if v in co.cfg.ranges:
         return tuple(co.cfg.ranges[v])
@@ -781,7 +782,7 @@ def _tier_panel(ax, st, variables):
     ax.set_yticks(y, [nice(v) for v in t["variable"]], fontsize=8)
     top = len(t) - .3
     for x, lab in ((.1, "stable"), (.35, "moderate"), (max(.75, d.max() * .7), "context-dependent")):
-        ax.text(x, top + (.45 if lab == "moderate" else 0), lab, ha="center", fontsize=8, color=TIER_COL[lab])
+        ax.text(x, top, lab, ha="center", fontsize=10, color=TIER_COL[lab], gid="scaled")   # fixed size: fits its band
     ax.set_xlim(0, max(1.0, float(d.max()) * 1.1))
     ax.set_ylim(-.7, len(t) + .2)
     ax.set_xlabel("|d| movie vs rest, same people (95% CI)", fontsize=9)
@@ -790,13 +791,15 @@ def _tier_panel(ax, st, variables):
     ax.tick_params(axis="y", length=0)
 
 
-def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0):
+def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupancy="each", name="figure3"):
     """Manuscript Figure 3 as one figure, rest and movie together (each person's mean of the
     conditions they have; `groups(tasks="all")`).
     A  every cohort: occupancy, p(j | i) and the dynamic metrics (mean, 90% CI);
     B  the reference transition graph: the mean of the cohorts in A, each cohort once;
     C  which properties depend on context (`stability` tiers: movie vs rest, same people).
-    font scales every text; diagram_fs the diagram's own (its labels are placed for that size)."""
+    font scales every text; diagram_fs the diagram's own (its labels are placed for that size).
+    occupancy="each": C lists every state's occupancy; "fit": one row, the occupancy profile's
+    correlation with the reference (`occupancy_fit`; st must include it)."""
     from matplotlib.gridspec import GridSpec
 
     cfg, K = co.cfg, co.cfg.K
@@ -826,7 +829,6 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0):
         axo.tick_params(labelsize=7)
         if i == 0:
             axo.set_ylabel("occupancy", fontsize=8)
-            axo.text(-.45, 1.3, "A", transform=axo.transAxes, fontsize=13, fontweight="bold")
         axm = fig.add_subplot(gA[1, i])
         axm.imshow(T, cmap="Blues", vmin=0, vmax=1)
         axm.set_xticks(range(K))
@@ -857,20 +859,15 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0):
     gB = gs[1].subgridspec(1, 2, width_ratios=[1.25, 1], wspace=.35)
     ax = fig.add_subplot(gB[0])
     hp.diagram(ax, T_ref, o_ref, edges, 1.0, 1.0, fs=diagram_fs)
-    p_min = min(T_ref[e] for e in edges)
-    ax.text(.5, -.02, f"Circle area = share of time; loop and arrow width ∝ p(j | i).\n"
-            f"Arrows: the {len(edges)} most likely transitions between states (p ≥ {p_min:.2f}).",
-            transform=ax.transAxes, ha="center", va="top", fontsize=8, color=hp.INK2)
-    ax.text(.0, 1.0, "B", transform=ax.transAxes, fontsize=13, fontweight="bold")
+    co.diagram_p_min = min(T_ref[e] for e in edges)       # for the legend: the thinnest arrow drawn
     ax = fig.add_subplot(gB[1])
-    _tier_panel(ax, st, tier_variables or ["transition_fit", *co.dyn, *co.occ])
-    ax.set_title("Which properties depend on context", fontsize=11, loc="left")
-    ax.text(-.55, 1.07, "C", transform=ax.transAxes, fontsize=13, fontweight="bold")
+    occ = co.occ if occupancy == "each" else ["occupancy_fit"]
+    _tier_panel(ax, st, tier_variables or ["transition_fit", *co.dyn, *occ])
     for t in fig.findobj(plt.matplotlib.text.Text):              # every text larger, but the diagram's:
         if t.get_gid() != "scaled":                              # its labels were placed at diagram_fs
             t.set_fontsize(t.get_fontsize() * font)
     fig.suptitle(f"Figure 3 · {ht.set_label(cfg.space)}", x=.02, ha="left", fontsize=12)
-    save(fig, "figure3", cfg)
+    save(fig, name, cfg)
     _show(fig)
     return fig
 

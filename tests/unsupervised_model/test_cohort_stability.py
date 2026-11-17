@@ -120,6 +120,11 @@ def test_figure3_draws():
     st = co.stability(["transition_fit", "switch_rate", "entropy_rate_bits"], n_boot=20)
     fig = cp.fig_figure3(co, st, ["transition_fit", "switch_rate", "entropy_rate_bits"])
     assert len(fig.axes) > 6
+    st2 = co.stability(["transition_fit", "occupancy_fit", "switch_rate"], n_boot=0)
+    assert "occupancy_fit" in set(st2["variable"])
+    fig = cp.fig_figure3(co, st2, occupancy="fit")
+    labels = [t.get_text() for t in fig.axes[-1].get_yticklabels()]
+    assert "Occupancy profile (fit to reference)" in labels and not any(l.startswith("Occupancy S") for l in labels)
     pairs, _ = co.replication(balance="time", hours=2, n_boot=10)
     assert len(cp.fig_replication(co, pairs).axes) == 1
 

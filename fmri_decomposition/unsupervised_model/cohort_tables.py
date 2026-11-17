@@ -156,9 +156,22 @@ class StabilityMixin:
                 d["transition_fit"] = (Xc @ Rc) / np.sqrt((Xc ** 2).sum(1) * (Rc ** 2).sum())
         return "transition_fit"
 
+    def occupancy_fit(self):
+        """Per subject and scan kind: Pearson r between the subject's occupancy (share of time in
+        each state) and the reference occupancy (the mean over every cohort and both kinds, each
+        cohort once). The occupancy profile as one per-subject variable, like `transition_fit`."""
+        R = pd.concat([v[self.occ].mean() for v in self.data.values()], axis=1).mean(axis=1).to_numpy(float)
+        Rc = R - R.mean()
+        for key, d in [*self.data.items(), *getattr(self, "by_task", {}).items()]:
+            X = d[self.occ].to_numpy(float)
+            Xc = X - X.mean(1, keepdims=True)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                d["occupancy_fit"] = (Xc @ Rc) / np.sqrt((Xc ** 2).sum(1) * (Rc ** 2).sum())
+        return "occupancy_fit"
+
     def stability_variables(self):
         fit = self.transition_fit()
-        return [fit, *self.dyn, *self.occ, *self.strongest()]
+        return [fit, self.occupancy_fit(), *self.dyn, *self.occ, *self.strongest()]
 
     def paired_rest_movie(self):
         """{variable-ready}: rest and movie of the people with both, one row each, indexed
@@ -194,6 +207,8 @@ class StabilityMixin:
         vs = variables or self.stability_variables()
         if "transition_fit" in vs:
             self.transition_fit()                  # computed on demand, not stored in the tables
+        if "occupancy_fit" in vs:
+            self.occupancy_fit()
         rng = np.random.default_rng(seed)
         coh, agr = self.cohen(vs), self.agreement(vs)
         r, m = self.paired_rest_movie()
