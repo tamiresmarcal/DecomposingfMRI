@@ -948,7 +948,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     agree = co.agreement(co.dyn, groups=G)
 
     fig = plt.figure(figsize=(17, 15))
-    gs = GridSpec(2, 1, figure=fig, height_ratios=[1, 1.15], hspace=.12)
+    gs = GridSpec(2, 1, figure=fig, height_ratios=[1, .95], hspace=.12)
     n = len(cohorts)
     gA = gs[0].subgridspec(2, n + 1, height_ratios=[.35, 1], width_ratios=[1] * n + [1.25], hspace=.12, wspace=.35)
     for i, c in enumerate(cohorts):
@@ -995,14 +995,17 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
         axd.tick_params(labelsize=7)
         axd.set_title(nice(v), fontsize=8, pad=2)
 
-    gB = gs[1].subgridspec(1, 2, width_ratios=[1, 1], wspace=.3)
-    ax = fig.add_subplot(gB[0])
+    # bottom: the task x person panel on the LEFT and wide; the diagram on the right in a narrower slot
+    # (its equal-aspect box would leave the rest of a wide slot empty), both the same height
+    tp = panel == "task_person" and "var_person" in st
+    gB = gs[1].subgridspec(1, 2, width_ratios=[1.55, 1] if tp else [1, 1], wspace=.12 if tp else .3)
+    ax = fig.add_subplot(gB[1] if tp else gB[0])
     hp.diagram(ax, T_ref, o_ref, edges, 1.0, 1.0, fs=diagram_fs)
     co.diagram_p_min = min(T_ref[e] for e in edges)       # for the legend: the thinnest arrow drawn
-    ax = fig.add_subplot(gB[1])
+    ax = fig.add_subplot(gB[0] if tp else gB[1])
     occ = co.occ if occupancy == "each" else ["occupancy_fit"]
-    if panel == "task_person" and "var_person" in st:   # VPC task x VPC person (mixed model)
-        ax.set_box_aspect(3.5 / 3.2)             # the diagram's box: both panels the same size
+    if tp:                                       # VPC task x VPC person (mixed model)
+        ax.set_box_aspect(3.5 / 3.2 / 1.55)      # as tall as the diagram, 1.55 times as wide
         _task_person_panel(ax, co, st, st_transitions, tier_variables or ["transition_fit", *co.dyn, *occ],
                            fs=9 / font, guides=guides)   # scaled back up with every text below
     else:                                        # "tiers": the share due to task, with tiers and stars
@@ -1228,7 +1231,7 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
                for k, c in FAMILY_COL.items()]
     if st_transitions is not None:
         handles.insert(1, Line2D([], [], ls="none", marker="o", ms=5, color=TRANSITION_LIGHT, label="transitions p(j | i)"))
-    ax.legend(handles=handles, frameon=False, loc="upper right")
+    ax.legend(handles=handles, frameon=False, loc="center right")   # off the upper right, where points go
 
 
 def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_person", min_occ=0.01, guides=None):
