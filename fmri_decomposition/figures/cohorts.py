@@ -793,7 +793,7 @@ def fmt_p(p):
     return "<.001" if p < .001 else f"{p:.3f}".lstrip("0") if p < .01 else f"{p:.2f}".lstrip("0") if p < .995 else "1"
 
 
-def _p_columns(ax, t, y, pvalue, tests):
+def _p_columns(ax, t, y, pvalue, tests, x0=1.07):
     """Confidence right of the panel, one column per test, exact or as stars.
     tier: P(tier), the share of bootstrap |d| in the tier of the observed |d| (stars: * >= .90,
           ** >= .95, *** >= .99);
@@ -803,7 +803,7 @@ def _p_columns(ax, t, y, pvalue, tests):
         col, head = P_COLS[test]
         if col not in t:
             continue
-        x = 1.07 + .22 * k
+        x = x0 + .22 * k
         ax.text(x, len(t) - .3, head, transform=ax.get_yaxis_transform(), ha="center",
                 va="bottom", fontsize=8, color=hp.INK2)
         fmt = {("tier", "stars"): tier_stars, ("tier", "exact"): fmt_tier}.get(
@@ -826,7 +826,19 @@ def family(v):
     return "dynamics"
 
 
-def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, sort=True):
+def _mean_column(ax, t, y, x=1.1):
+    """Mean rest -> movie in the same people, beside each row: is a large |d| a small change?"""
+    ax.text(x, len(t) - .3, "mean\nrest → movie", transform=ax.get_yaxis_transform(), ha="center",
+            va="bottom", fontsize=8, color=hp.INK2)
+    f = lambda a: "" if not np.isfinite(a) else f"{a:.2f}".lstrip("0") if abs(a) < 1 else f"{a:.3g}"
+    for yi, a, b in zip(y, t.get("task_mean_rest", pd.Series(np.nan, index=t.index)),
+                        t.get("task_mean_movie", pd.Series(np.nan, index=t.index))):
+        if np.isfinite(a) and np.isfinite(b):
+            ax.text(x, yi, f"{f(a)} → {f(b)}", transform=ax.get_yaxis_transform(), ha="center",
+                    va="center", fontsize=7, color=hp.INK)
+
+
+def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, sort=True, means=False):
     """pvalue: None, "exact" or "stars"; test: "tier" (P(tier)), "difference", "tost", "both"
     (difference + tost), "all", or a list (see _p_columns). A thin line separates the families
     (transitions, occupancy, dynamic metrics). A row with too few people scanned in both
@@ -874,8 +886,10 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
     for s in ("top", "right", "left"):
         ax.spines[s].set_visible(False)
     ax.tick_params(axis="y", length=0)
+    if means:
+        _mean_column(ax, t, y)
     if pvalue:
-        _p_columns(ax, t, y, pvalue, _tests(test))
+        _p_columns(ax, t, y, pvalue, _tests(test), x0=1.36 if means else 1.07)
 
 
 def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupancy="each", name="figure3",
@@ -976,7 +990,8 @@ def fig_replication(co, pairs, name="Sd_replication"):
     return fig
 
 
-def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation", pvalue=None, test="tier"):
+def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation", pvalue=None, test="tier",
+                          means=True):
     """Does one number per family lose information? Movie vs rest |d_av| (same people, 95% CI); transitions
     on the left, dynamic metrics over occupancy on the right: the family's profile r with the reference on top, then every member of the family --
     transitions p(j | i) (rows of states with mean occupancy >= min_occ), occupancy of each state,
@@ -988,12 +1003,12 @@ def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation
     st = co.stability([v for _, f, m in fams for v in [f, *m]], n_boot=n_boot)
     from matplotlib.gridspec import GridSpec
     h = [len(m) + 1 for _, _, m in fams]
-    fig = plt.figure(figsize=(14, max(6, .2 * h[0] + 2)))
-    gs = GridSpec(2, 2, figure=fig, height_ratios=h[1:], wspace=1.1 if pvalue else .9, hspace=.35,
-                  left=.2, right=.95)
+    fig = plt.figure(figsize=(16 if means else 14, max(6, .2 * h[0] + 2)))
+    gs = GridSpec(2, 2, figure=fig, height_ratios=h[1:], wspace=(1.1 if pvalue else .9) + (.5 if means else 0), hspace=.35,
+                  left=.2, right=.86)
     axs = [fig.add_subplot(gs[:, 0]), fig.add_subplot(gs[0, 1]), fig.add_subplot(gs[1, 1])]
     for ax, (title, f, members) in zip(axs, fams):            # transitions left; metrics over occupancy right
-        _tier_panel(ax, st, [f, *members], pvalue, test)
+        _tier_panel(ax, st, [f, *members], pvalue, test, means=means)
         ax.axhline(len(members) - .5, color="#c9c8c2", lw=.8)       # the profile above, members below
         ax.set_title(title, fontsize=12, loc="left")
         ax.tick_params(axis="y", labelsize=7 if len(members) > 20 else 9)

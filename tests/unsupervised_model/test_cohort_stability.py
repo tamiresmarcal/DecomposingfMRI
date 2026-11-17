@@ -290,6 +290,32 @@ def test_load_pools_counts_per_person(tmp_path):
     assert np.isclose(r.loc["A", "0->1"], .1) and np.isclose(r.loc["A", "1->0"], .2)   # pooled, not averaged
     assert np.isnan(r.loc["B", "1->0"]) and np.isnan(r.loc["B", "1->1"])              # never left 1: NaN
     assert np.isclose(r.loc["B", "0->0"], 1.0)
+    m = data["c", "movie"]
+    assert np.isclose(m.loc["B", "1->0"], .5)          # B left 1 ten times in the movie: >= 5 over all
+
+
+def test_load_threshold_over_both_conditions(tmp_path):
+    """Eligibility is per person over rest and movie together, not per condition."""
+    K = 2
+    cells = [f"{i}->{j}" for i in range(K) for j in range(K)]
+
+    def scan(sub, task, C):
+        C = np.asarray(C, float)
+        n = C.sum()
+        return {"sub": sub, "task": task, **dict(zip(cells, C.ravel() / n)), "n_transitions": n,
+                "occ_0": .5, "occ_1": .5, "switch_rate": .2, "n_windows": n + 1, "stride_s": 6.0}
+
+    files = {"rest": [tmp_path / "r.parquet"], "movie": [tmp_path / "m.parquet"]}
+    pd.DataFrame([scan("A", "rest", [[10, 1], [1, 2]])]).to_parquet(files["rest"][0])     # 3 exits from 1
+    pd.DataFrame([scan("A", "movie", [[10, 1], [1, 2]])]).to_parquet(files["movie"][0])   # 3 more: 6 in all
+    co = ct.Cohorts.__new__(ct.Cohorts)
+    co.cfg = ct.Settings(space=dict(atlas="x", window_s=30.0, states="HMM2_umap3_2"),
+                         cohorts={"c": dict(dirs=["c"], role="train")}, dynamics=["switch_rate"],
+                         min_out_transitions=5)
+    co._files = lambda label: files
+    data = co._load()
+    assert np.isclose(data["c", "rest"].loc["A", "1->1"], 2 / 3)       # 3 < 5 here, but 6 over both
+    assert np.isclose(data["c", "movie"].loc["A", "1->1"], 2 / 3)
 
 
 def test_tier_panel_sorted_within_family():

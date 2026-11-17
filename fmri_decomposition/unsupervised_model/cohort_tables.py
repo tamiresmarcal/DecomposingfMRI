@@ -72,7 +72,8 @@ class Settings:
     # Scans shorter than the target are NaN.
     distinct_minutes: float | str | None = None
     # a person's p(j | i) comes from their counts summed over scans; row i is NaN (not 0) when they
-    # leave state i fewer times than this in all: never visiting i says nothing about where i leads.
+    # leave state i fewer times than this in ALL their scans, rest and movie together (and NaN in a
+    # condition where they never leave it): never visiting i says nothing about where i leads.
     min_out_transitions: int = 5
 
     @property
@@ -292,6 +293,7 @@ class StabilityMixin:
                        between_hi=abs(cv.loc[i, "d"]) + (cv.loc[i, "hi"] - cv.loc[i, "d"]),
                        between_cohort=cv.loc[i, "cohort"],
                        between_equivalent=bool(agr.loc[agr["variable"] == v, "equivalent"].all()),
+                       task_mean_rest=float(np.mean(rv[ok])), task_mean_movie=float(np.mean(mv_[ok])),
                        task_d=d_av, task_lo=np.nanpercentile(bd, 2.5) if n_boot else np.nan,
                        task_hi=np.nanpercentile(bd, 97.5) if n_boot else np.nan,
                        # confidence in the tier: share of bootstrap |d| in the observed |d|'s tier
@@ -592,6 +594,7 @@ class Cohorts(StabilityMixin):
         K, data = self.cfg.K, {}
         self.by_task = {}                                                     # (cohort, rest|movie, task) -> subjects
         units = []                                                            # one row per scan: counts + duration
+        nout = {}                                                             # id(table) -> exits per person x state
         raw = {(label, kind): pd.concat(map(pd.read_parquet, files), ignore_index=True)
                for label in self.cfg.cohorts for kind, files in self._files(label).items() if files}
         target = self.cfg.distinct_minutes
@@ -629,20 +632,37 @@ class Cohorts(StabilityMixin):
                 out = g[other].mean()
                 Cs = counts.loc[t.index].groupby(t["sub"]).sum().loc[out.index].to_numpy(float).reshape(len(out), K, K)
                 n_out = Cs.sum(2, keepdims=True)
-                with np.errstate(invalid="ignore", divide="ignore"):
+                with np.errstate(invalid="ignore", divide="ignore"):   # never left i here: undefined
                     P = np.where(n_out > 0, Cs / np.where(n_out > 0, n_out, 1), np.nan)
-                    P[(n_out < max(m_out, 1)).repeat(K, 2)] = np.nan
-                    H = -np.where(P > 0, P * np.log2(P), 0).sum(2)
-                H[np.isnan(P).any(2)] = np.nan                           # H(p(. | i)) per state i
                 out[self.cells] = P.reshape(len(out), -1)
-                out[self.row_h] = H
-                return out[[*self.cells, *self.occ, *self.row_h, *[v for v in other if v not in self.occ]]].assign(
+                out[self.row_h] = np.nan                                  # set below, once rows are final
+                res = out[[*self.cells, *self.occ, *self.row_h, *[v for v in other if v not in self.occ]]].assign(
                     scan_s=g["scan_s"].sum(min_count=1))
+                nout[id(res)] = pd.DataFrame(n_out[..., 0], index=out.index)
+                return res
             data[label, kind] = per_sub(d)
             for task, t in d.groupby(d["task"].astype(str)):              # and one table per task (film)
                 self.by_task[label, kind, task] = per_sub(t)
         if not data:
             raise SystemExit(f"no transition tables under {self.base}")
+        # Who has a row i at all is decided on the PERSON, all their scans of every condition
+        # together: left i fewer than min_out_transitions times in total -> row i is NaN everywhere.
+        # A condition (or task) in which an eligible person never left i stays NaN there only.
+        m_out = max(self.cfg.min_out_transitions, 1)
+        for label in self.cfg.cohorts:
+            tabs = [t for key, t in [*data.items(), *self.by_task.items()] if key[0] == label]
+            if not tabs:
+                continue
+            total = pd.concat([nout[id(t)] for (c, k), t in data.items() if c == label]).groupby(level=0).sum()
+            for t in tabs:
+                few = (total.reindex(t.index).fillna(0).to_numpy() < m_out)               # people x states
+                P = t[self.cells].to_numpy(float).reshape(len(t), K, K)
+                P[few] = np.nan
+                t[self.cells] = P.reshape(len(t), -1)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    H = -np.where(P > 0, P * np.log2(P), 0).sum(2)
+                H[np.isnan(P).any(2)] = np.nan                           # H(p(. | i)) per state i
+                t[self.row_h] = H
         self.units = pd.concat(units, ignore_index=True)
         return data
 
