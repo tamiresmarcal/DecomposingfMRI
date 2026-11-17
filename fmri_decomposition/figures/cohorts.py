@@ -768,7 +768,35 @@ def _replication_panel(ax, pairs):
     ax.set_axisbelow(True)
 
 
-def _tier_panel(ax, st, variables):
+P_COLS = {"difference": ("task_p_fdr", "difference"), "tost": ("task_p_tost_fdr", "equivalence")}
+
+
+def stars(p):
+    return "" if not np.isfinite(p) else "***" if p < .001 else "**" if p < .01 else "*" if p < .05 else ""
+
+
+def fmt_p(p):
+    if not np.isfinite(p):
+        return ""
+    return "<.001" if p < .001 else f"{p:.3f}".lstrip("0") if p < .01 else f"{p:.2f}".lstrip("0") if p < .995 else "1"
+
+
+def _p_columns(ax, t, y, pvalue, tests):
+    """p-values (BH-FDR) right of the panel, one column per test: exact, or stars (* <.05,
+    ** <.01, *** <.001). difference = paired t-test movie vs rest; equivalence = TOST at
+    +-sesoi_d SD (a small p = shown to lie within the bounds, i.e. stable)."""
+    for k, test in enumerate(tests):
+        col, head = P_COLS[test]
+        x = 1.07 + .22 * k
+        ax.text(x, len(t) - .3, f"p\n{head}", transform=ax.get_yaxis_transform(), ha="center",
+                va="bottom", fontsize=8, color=hp.INK2)
+        for yi, p in zip(y, t[col].to_numpy(float)):
+            ax.text(x, yi, (stars if pvalue == "stars" else fmt_p)(p), transform=ax.get_yaxis_transform(),
+                    ha="center", va="center", fontsize=8 if pvalue == "exact" else 10, color=hp.INK)
+
+
+def _tier_panel(ax, st, variables, pvalue=None, test="both"):
+    """pvalue: None, "exact" or "stars"; test: "difference", "tost" or "both" (see _p_columns)."""
     t = st.set_index("variable").loc[[v for v in variables if v in set(st["variable"])]].reset_index()
     y = np.arange(len(t))[::-1]
     ax.axvspan(0, .2, color="#e8f0fb")
@@ -790,9 +818,12 @@ def _tier_panel(ax, st, variables):
     for s in ("top", "right", "left"):
         ax.spines[s].set_visible(False)
     ax.tick_params(axis="y", length=0)
+    if pvalue:
+        _p_columns(ax, t, y, pvalue, ["difference", "tost"] if test == "both" else [test])
 
 
-def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupancy="each", name="figure3"):
+def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupancy="each", name="figure3",
+                pvalue=None, test="both"):
     """Manuscript Figure 3 as one figure, rest and movie together (each person's mean of the
     conditions they have; `groups(tasks="all")`).
     A  every cohort: occupancy, p(j | i) and the dynamic metrics (mean, 90% CI);
@@ -800,7 +831,9 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     C  which properties depend on context (`stability` tiers: movie vs rest, same people).
     font scales every text; diagram_fs the diagram's own (its labels are placed for that size).
     occupancy="each": C lists every state's occupancy; "fit": one row, the occupancy profile's
-    correlation with the reference (`occupancy_fit`; st must include it)."""
+    correlation with the reference (`occupancy_fit`; st must include it).
+    pvalue / test: the p-value column(s) right of C (`_tier_panel`): None, "exact" or "stars";
+    "difference" (paired t), "tost" (equivalence) or "both"."""
     from matplotlib.gridspec import GridSpec
 
     cfg, K = co.cfg, co.cfg.K
@@ -863,7 +896,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     co.diagram_p_min = min(T_ref[e] for e in edges)       # for the legend: the thinnest arrow drawn
     ax = fig.add_subplot(gB[1])
     occ = co.occ if occupancy == "each" else ["occupancy_fit"]
-    _tier_panel(ax, st, tier_variables or ["transition_fit", *co.dyn, *occ])
+    _tier_panel(ax, st, tier_variables or ["transition_fit", *co.dyn, *occ], pvalue, test)
     for t in fig.findobj(plt.matplotlib.text.Text):              # every text larger, but the diagram's:
         if t.get_gid() != "scaled":                              # its labels were placed at diagram_fs
             t.set_fontsize(t.get_fontsize() * font)
@@ -884,7 +917,7 @@ def fig_replication(co, pairs, name="Sd_replication"):
     return fig
 
 
-def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation"):
+def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation", pvalue=None, test="both"):
     """Does one number per family lose information? Movie vs rest |d_av| (same people, 95% CI), three
     panels: the family's profile r with the reference on top, then every member of the family --
     transitions p(j | i) (rows of states with mean occupancy >= min_occ), occupancy of each state,
@@ -895,9 +928,9 @@ def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation
             ("Dynamic metrics", "dynamics_fit", list(co.dyn))]
     st = co.stability([v for _, f, m in fams for v in [f, *m]], n_boot=n_boot)
     h = [len(m) + 1 for _, _, m in fams]
-    fig, axs = plt.subplots(1, 3, figsize=(18, max(6, .2 * max(h) + 2)), gridspec_kw=dict(wspace=.75))
+    fig, axs = plt.subplots(1, 3, figsize=(18, max(6, .2 * max(h) + 2)), gridspec_kw=dict(wspace=1.0 if pvalue else .75))
     for ax, (title, f, members) in zip(axs, fams):
-        _tier_panel(ax, st, [f, *members])
+        _tier_panel(ax, st, [f, *members], pvalue, test)
         ax.axhline(len(members) - .5, color="#c9c8c2", lw=.8)       # the profile above, members below
         ax.set_title(title, fontsize=12, loc="left")
         ax.tick_params(axis="y", labelsize=7 if len(members) > 20 else 9)

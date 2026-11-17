@@ -259,6 +259,10 @@ class StabilityMixin:
                        task_hi=np.nanpercentile(bd, 97.5) if n_boot else np.nan,
                        task_equivalent=bool((diff.mean() - h > -bound) and (diff.mean() + h < bound)),
                        task_p=stats.ttest_rel(mv_[ok], rv[ok]).pvalue, n_paired=int(ok.sum()),
+                       # TOST: both one-sided tests against +-bound must reject; p = the larger
+                       task_p_tost=(max(stats.t.sf((diff.mean() + bound) / se, len(diff) - 1),
+                                        stats.t.cdf((diff.mean() - bound) / se, len(diff) - 1))
+                                    if se > 0 and len(diff) > 1 else np.nan),
                        icc=icc, icc_lo=np.nanpercentile(bi, 2.5) if n_boot else np.nan,
                        icc_hi=np.nanpercentile(bi, 97.5) if n_boot else np.nan)
             for c in r["cohort"].unique():
@@ -267,6 +271,7 @@ class StabilityMixin:
             rows.append(row)
         out = pd.DataFrame(rows)
         out["task_p_fdr"] = stats.false_discovery_control(out["task_p"].fillna(1))
+        out["task_p_tost_fdr"] = stats.false_discovery_control(out["task_p_tost"].fillna(1))
         out["stable"] = out["between_equivalent"] & out["task_equivalent"]
         a = out["task_d"].abs()
         out["tier"] = np.select([a < .2, a < .5], ["stable", "moderate"], "context-dependent")

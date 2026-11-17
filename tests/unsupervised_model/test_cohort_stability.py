@@ -218,3 +218,18 @@ def test_aggregation_check_draws():
     fig, st = cp.fig_aggregation_check(co, n_boot=0)
     assert len(fig.axes) == 3
     assert {"transition_fit", "occupancy_fit", "dynamics_fit"} <= set(st["variable"])
+
+
+def test_p_value_columns():
+    import matplotlib
+    matplotlib.use("Agg")
+    from fmri_decomposition.figures import cohorts as cp
+    co = _toy()
+    st = co.stability(["transition_fit", "switch_rate", "entropy_rate_bits"], n_boot=0)
+    assert {"task_p_tost", "task_p_tost_fdr"} <= set(st.columns)
+    assert st["task_p_tost"].between(0, 1).all()
+    for pv, test, n_cols in (("stars", "both", 2), ("exact", "tost", 1)):
+        fig = cp.fig_figure3(co, st, ["transition_fit", "switch_rate", "entropy_rate_bits"], pvalue=pv, test=test)
+        heads = [t for t in fig.axes[-1].texts if t.get_text().startswith("p\n")]
+        assert len(heads) == n_cols
+    assert cp.stars(.0005) == "***" and cp.stars(.2) == "" and cp.fmt_p(.0004) == "<.001"
