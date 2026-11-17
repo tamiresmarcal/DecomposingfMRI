@@ -1015,7 +1015,7 @@ def fig_replication(co, pairs, name="Sd_replication"):
 
 
 def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation", pvalue=None, test="tier",
-                          means=False, measure="task"):
+                          means=False, measure="task", combine="random"):
     """Does one number per family lose information? Movie vs rest |d_av| (same people, 95% CI); transitions
     on the left, dynamic metrics over occupancy on the right: the family's profile r with the reference on top, then every member of the family --
     transitions p(j | i) (rows of states with mean occupancy >= min_occ), occupancy of each state,
@@ -1025,7 +1025,8 @@ def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation
     fams = [("Transitions", "transition_fit", keep), ("Dynamic metrics", "dynamics_fit", list(co.dyn)),
             ("Occupancy", "occupancy_fit", list(co.occ))]
     vs = [v for _, f, m in fams for v in [f, *m]]
-    st = co.task_variation(vs, n_boot=n_boot) if measure == "task" else co.stability(vs, n_boot=n_boot)
+    st = (co.task_variation(vs, n_boot=n_boot, combine=combine) if measure == "task"
+          else co.stability(vs, n_boot=n_boot))
     # measure: "task" = omega^2 of task, every task of every cohort; "rest_movie" = |d_av| (old)
     from matplotlib.gridspec import GridSpec
     h = [len(m) + 1 for _, _, m in fams]

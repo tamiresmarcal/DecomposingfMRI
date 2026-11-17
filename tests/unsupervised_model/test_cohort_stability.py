@@ -391,7 +391,7 @@ def test_task_variation_is_the_mean_of_cohort_omegas():
     rng = np.random.default_rng(1)
     for (c, k, t), d in co.by_task.items():
         d[v] = rng.normal(0, 1, len(d)) + (0.8 if t.endswith("1") else 0)
-    st = co.task_variation([v], n_boot=0)
+    st = co.task_variation([v], n_boot=0, combine="equal", min_people=1)
     F = co.films(rest=True)
     oms = []
     for c in sorted({c for c, _ in F}):
@@ -415,3 +415,17 @@ def test_task_variation_jackknife_ci_contains_estimate():
     st = co.task_variation([v], n_boot=1)
     r = st.iloc[0]
     assert r.task_lo < r.task_d < r.task_hi and 0 <= r.task_p_tier <= 1
+
+
+
+def test_combine_random_effects():
+    est = np.array([[.10], [.12], [.50]])
+    var = np.array([[.0001], [.0001], [.04]])               # the third cohort: tiny and noisy
+    eq, _ = ct._combine(est, var, "equal")
+    fx, se_fx = ct._combine(est, var, "fixed")
+    rd, se_rd = ct._combine(est, var, "random")
+    assert np.isclose(eq[0], .24)
+    assert fx[0] < .12 and abs(rd[0] - .11) < .05           # the noisy cohort barely moves it
+    assert se_rd[0] >= se_fx[0]
+    one, _ = ct._combine(np.array([[.3], [np.nan]]), np.array([[.01], [np.nan]]), "random")
+    assert np.isclose(one[0], .3)

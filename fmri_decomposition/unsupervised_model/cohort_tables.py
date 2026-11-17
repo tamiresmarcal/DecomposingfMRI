@@ -81,6 +81,29 @@ class Settings:
         return ht.n_states(self.space["states"])
 
 
+def _combine(est, var, how="random"):
+    """Cohorts' estimates (cohorts x variables) and their variances -> (combined, SE).
+    "equal": plain mean; "fixed": inverse-variance; "random": DerSimonian-Laird random effects."""
+    ok = np.isfinite(est) & np.isfinite(var)
+    k = ok.sum(0)
+    if how == "equal":
+        m = np.nanmean(np.where(ok, est, np.nan), 0)
+        return m, np.sqrt(np.nansum(np.where(ok, var, 0), 0)) / np.maximum(k, 1)
+    v = np.where(ok, np.maximum(var, 1e-10), np.inf)
+    w = np.where(ok, 1 / v, 0)
+    e = np.where(ok, est, 0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        fixed = (w * e).sum(0) / w.sum(0)
+        if how == "fixed":
+            return np.where(k > 0, fixed, np.nan), np.where(k > 0, np.sqrt(1 / w.sum(0)), np.nan)
+        Q = (w * (e - fixed) ** 2).sum(0)
+        tau2 = np.maximum(0, (Q - (k - 1)) / (w.sum(0) - (w ** 2).sum(0) / w.sum(0)))
+        tau2 = np.where(k > 1, tau2, 0)
+        ws = np.where(ok, 1 / (v + tau2), 0)
+        m = (ws * e).sum(0) / ws.sum(0)
+        return np.where(k > 0, m, np.nan), np.where(k > 0, np.sqrt(1 / ws.sum(0)), np.nan)
+
+
 TIER_CUTS = (0.2, 0.5)                                   # |d|: stable < .2 <= moderate < .5 <= context-dependent
 
 
@@ -324,7 +347,8 @@ class StabilityMixin:
                                np.select([a < .2, a < .5], ["stable", "moderate"], "context-dependent"))
         return out
 
-    def task_variation(self, variables=None, n_boot=2000, seed=0, ci="jackknife"):
+    def task_variation(self, variables=None, n_boot=2000, seed=0, ci="jackknife", combine="random",
+                       min_people=3):
         """How much each property depends on the TASK: every task of every cohort, rest included as
         one task (`films(rest=True)`, so the halves of an episode are one task). One row per variable.
 
@@ -337,6 +361,12 @@ class StabilityMixin:
         is conservative for cohorts whose people did several tasks (HCP, CNeuroMod).
         Tiers (Cohen 1988, the variance-explained form of d = .2 / .5): < .01 stable,
         .01-.06 moderate, >= .06 task-dependent.
+        combine: how the cohorts' omega^2 become one. "random" (default): random-effects
+        meta-analysis (DerSimonian & Laird 1986) with each cohort's jackknife variance -- weights
+        1 / (v_c + tau^2), nearly equal when the cohorts disagree, by precision when they agree;
+        "fixed": inverse-variance weights (tau^2 = 0); "equal": the plain mean, each cohort once.
+        min_people: a task group (cohort x task) needs this many people to enter (fewer gives
+        omega^2 near 1 by chance, e.g. a transition row only 1-2 people have in a film).
         ci="jackknife" (default): 95% CI and P(tier) from the delete-one-person jackknife SE within
         each cohort (a person leaves with all their tasks), normal approximation; n_boot only turns
         it on (> 0) or off (0). ci="bootstrap": n_boot resamples of people -- biased upward for
@@ -367,6 +397,8 @@ class StabilityMixin:
             np.add.at(n_g, g_id, W)
             np.add.at(S_g, g_id, W * X0)
             np.add.at(Q_g, g_id, W * X0 ** 2)
+            small = n_g < min_people                        # too few people in this task for this variable
+            n_g[small], S_g[small], Q_g[small] = 0, 0, 0
             # per cohort: its own one-way omega^2 of task; then the mean over cohorts, each once
             Z = lambda: np.zeros((n_c, X.shape[1]))
             n_cc, S_c, T_c, Sb, Sw = Z(), Z(), Z(), Z(), Z()
@@ -390,7 +422,7 @@ class StabilityMixin:
 
         om, means, om_c = omega(np.ones(len(L)))
         c_names = list(pd.unique(pd.Series(g_lab).str.split("|").str[0]))      # c_of_g's order
-        if ci == "jackknife" and n_boot:
+        if ci == "jackknife" and (n_boot or combine != "equal"):
             # delete-one-person jackknife within each cohort (a person leaves with all their tasks).
             # The bootstrap is biased upward here: a resample repeats people, identical copies shrink
             # the within-task variance, and with 5 people (CNeuroMod) omega^2 jumps towards 1.
@@ -410,8 +442,7 @@ class StabilityMixin:
                     J.append(omega(w)[2][k])
                 J = np.array(J)
                 var_c[k] = (n - 1) / n * np.nansum((J - np.nanmean(J, 0)) ** 2, 0)
-            ok = np.isfinite(om_c)
-            se = np.sqrt(np.nansum(np.where(ok, var_c, 0), 0)) / np.maximum(ok.sum(0), 1)   # SE of the mean
+            om, se = _combine(om_c, var_c, combine)
             cuts_ = (.01, .06)
             lo_, hi_ = om - 1.96 * se, om + 1.96 * se
             band = np.digitize(om, cuts_)
