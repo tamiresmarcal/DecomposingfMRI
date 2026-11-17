@@ -429,3 +429,22 @@ def test_combine_random_effects():
     assert se_rd[0] >= se_fx[0]
     one, _ = ct._combine(np.array([[.3], [np.nan]]), np.array([[.01], [np.nan]]), "random")
     assert np.isclose(one[0], .3)
+
+
+def test_task_vpc_mixed():
+    co = _toy_films()
+    v = co.dyn[0]
+    rng = np.random.default_rng(3)
+    shift = {t: k for k, t in enumerate(sorted({t for _, _, t in co.by_task}))}
+    for (c, k, t), d in co.by_task.items():
+        d[v] = rng.normal(0, 1, len(d)) + 1.5 * shift[t]
+    st = co.task_variation([v], n_boot=1, combine="mixed")
+    r = st.iloc[0]
+    assert r.task_d > .3 and r.task_lo <= r.task_d <= r.task_hi and 0 <= r.task_p_tier <= 1
+    null = []
+    for seed in range(5):                                   # no task effect: small (5 tasks only, so noisy)
+        g = np.random.default_rng(seed)
+        for (c, k, t), d in co.by_task.items():
+            d[v] = g.normal(0, 1, len(d))
+        null.append(co.task_variation([v], n_boot=0, combine="mixed").iloc[0].task_d)
+    assert np.median(null) < .1

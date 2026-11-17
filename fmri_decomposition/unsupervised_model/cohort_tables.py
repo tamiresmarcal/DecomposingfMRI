@@ -364,7 +364,10 @@ class StabilityMixin:
         combine: how the cohorts' omega^2 become one. "random" (default): random-effects
         meta-analysis (DerSimonian & Laird 1986) with each cohort's jackknife variance -- weights
         1 / (v_c + tau^2), nearly equal when the cohorts disagree, by precision when they agree;
-        "fixed": inverse-variance weights (tau^2 = 0); "equal": the plain mean, each cohort once.
+        "fixed": inverse-variance weights (tau^2 = 0); "equal": the plain mean, each cohort once;
+        "mixed": no per-cohort omega^2 -- one linear mixed model per variable on all the data,
+        value ~ cohort + (1 | task in cohort) + (1 | person), and the share of the variance that is
+        the task's (variance partition coefficient, Nakagawa & Schielzeth 2010; see `_task_vpc`).
         min_people: a task group (cohort x task) needs this many people to enter (fewer gives
         omega^2 near 1 by chance, e.g. a transition row only 1-2 people have in a film).
         ci="jackknife" (default): 95% CI and P(tier) from the delete-one-person jackknife SE within
@@ -420,6 +423,8 @@ class StabilityMixin:
                 om = np.nanmean(om_c, 0)
             return om, means, om_c
 
+        if combine == "mixed":
+            return self._task_vpc(L, variables, min_people, ci=bool(n_boot))
         om, means, om_c = omega(np.ones(len(L)))
         c_names = list(pd.unique(pd.Series(g_lab).str.split("|").str[0]))      # c_of_g's order
         if ci == "jackknife" and (n_boot or combine != "equal"):
@@ -474,6 +479,69 @@ class StabilityMixin:
             "n_tasks": (np.isfinite(means)).sum(0), "n_paired": valid.sum(0)})
         out["tier"] = np.where(np.isnan(om), "n/a",
                                np.select([om < cuts[0], om < cuts[1]], ["stable", "moderate"], "context-dependent"))
+        out.attrs["scale"] = "omega2"
+        return out
+
+    def _task_vpc(self, L, variables, min_people=3, ci=True):
+        """task_variation(combine="mixed"). Per variable, REML fit of
+            value ~ C(cohort) + (1 | task) + (1 | person),   task and person nested in cohort,
+        (statsmodels MixedLM, cohort as the block, task and person as variance components), and
+            VPC_task = s2_task / (s2_task + s2_person + s2_residual).
+        Repeated measures are modelled (HCP, CNeuroMod: the same people in many tasks), cohorts are
+        neither averaged nor weighted, and cohort differences are the fixed effect, not the task's.
+        95% CI and P(tier): delta method on the logit of the VPC from the REML covariance of the
+        variance parameters (asymptotic; at a variance on its boundary, 0, the CI collapses there).
+        Same columns as task_variation; st.attrs["scale"] = "omega2" (same tiers)."""
+        import warnings
+        import statsmodels.formula.api as smf
+        from scipy.stats import norm
+        rows = []
+        cuts = (.01, .06)
+        for v in variables:
+            df = pd.DataFrame({"y": L[v].to_numpy(float), "cohort": L["_c"].to_numpy(),
+                               "task": (L["_c"] + "|" + L["_t"]).to_numpy(), "person": L["_s"].to_numpy()})
+            df = df[np.isfinite(df["y"])]
+            df = df[df.groupby("task")["y"].transform("size") >= min_people]
+            means = df.groupby("task")["y"].mean()
+            row = dict(variable=v, task_d=np.nan, task_lo=np.nan, task_hi=np.nan, task_p_tier=np.nan,
+                       task_mean_lo=means.min() if len(means) else np.nan,
+                       task_mean_hi=means.max() if len(means) else np.nan,
+                       n_tasks=int(df["task"].nunique()), n_paired=len(df))
+            if df.groupby("cohort")["task"].nunique().max() < 2 or df["y"].std() == 0:
+                rows.append(row)
+                continue
+            df["y"] = (df["y"] - df["y"].mean()) / df["y"].std()          # scale-free; the VPC is unchanged
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    r = smf.mixedlm("y ~ C(cohort)", df, groups="cohort", re_formula="0",
+                                    vc_formula={"task": "0 + C(task)", "person": "0 + C(person)"}).fit(reml=True)
+                tau, pi = (float(r.params[f"{n} Var"]) for n in ("task", "person"))   # relative to s2_residual
+                D = tau + pi + 1
+                vpc = tau / D
+                row["task_d"] = vpc
+                if ci:
+                    C = r.cov_params().loc[["task Var", "person Var"], ["task Var", "person Var"]].to_numpy(float)
+                    g = np.array([(pi + 1) / D ** 2, -tau / D ** 2])               # d VPC / d (tau, pi)
+                    se = float(np.sqrt(max(g @ C @ g, 0)))
+                    if 0 < vpc < 1 and se > 0:
+                        lg, se_l = np.log(vpc / (1 - vpc)), se / (vpc * (1 - vpc))   # logit scale
+                        expit = lambda z: 1 / (1 + np.exp(-z))
+                        row["task_lo"], row["task_hi"] = expit(lg - 1.96 * se_l), expit(lg + 1.96 * se_l)
+                        band = int(np.digitize(vpc, cuts))
+                        e = [0.0, *cuts, 1.0]
+                        lgt = lambda x: np.log(x / (1 - x)) if 0 < x < 1 else (-np.inf if x <= 0 else np.inf)
+                        row["task_p_tier"] = float(norm.cdf((lgt(e[band + 1]) - lg) / se_l)
+                                                   - norm.cdf((lgt(e[band]) - lg) / se_l))
+                    else:
+                        row["task_lo"], row["task_hi"] = vpc, vpc
+            except Exception as err:                           # a fit that fails stays NaN, with a note
+                row["fit_error"] = str(err)[:80]
+            rows.append(row)
+        out = pd.DataFrame(rows)
+        out["tier"] = np.where(out["task_d"].isna(), "n/a",
+                               np.select([out["task_d"] < cuts[0], out["task_d"] < cuts[1]],
+                                         ["stable", "moderate"], "context-dependent"))
         out.attrs["scale"] = "omega2"
         return out
 
