@@ -1063,20 +1063,23 @@ def _ordered(co, st, variables):
     return t.loc[key.sort_values(["f", "fit", "d"], kind="stable").index].reset_index(drop=True)
 
 
-def fig_variance_partition(co, st, variables=None, name="variance_partition"):
+def fig_variance_partition(co, st, variables=None, name="variance_partition", cohort=True):
     """One stacked bar per property: the share of its TOTAL variance due to cohort, task, person
     and residual, from `task_variation(combine="mixed")` (shares from one mixed model). Beside each
-    bar, the VPC of the task within cohorts (Figure 3, bottom right)."""
+    bar, the VPC of the task within cohorts (Figure 3, bottom right). cohort=False: three colours,
+    the variance WITHIN cohorts (task, person, residual), so the orange part is that VPC itself."""
     if "share_task" not in st:
         raise SystemExit('fig_variance_partition needs task_variation(..., combine="mixed")')
     variables = variables or ["transition_fit", *co.dyn, *co.occ]
     t = _ordered(co, st, variables)
     y = np.arange(len(t))[::-1]
     fig, ax = plt.subplots(figsize=(10, .42 * len(t) + 1.8))
+    parts = [k for k in PART_COL if cohort or k != "cohort"]
     for yi, r in zip(y, t.itertuples()):
         left = 0.0
-        for k in PART_COL:
-            w = getattr(r, f"share_{k}")
+        within = sum(getattr(r, f"var_{k}") for k in parts)
+        for k in parts:
+            w = getattr(r, f"share_{k}") if cohort else getattr(r, f"var_{k}") / within
             if np.isfinite(w):
                 ax.barh(yi, w, left=left, color=PART_COL[k], height=.72, edgecolor="white", lw=.5)
                 left += w
@@ -1091,15 +1094,15 @@ def fig_variance_partition(co, st, variables=None, name="variance_partition"):
     ax.set_yticks(y, [nice(v) for v in t["variable"]], fontsize=10)
     ax.set_xlim(0, 1)
     ax.set_ylim(-.6, len(t) - .4)
-    ax.set_xlabel("share of the total variance", fontsize=10)
+    ax.set_xlabel("share of the total variance" if cohort else "share of the variance within cohorts", fontsize=10)
     for sp in ("top", "right", "left"):
         ax.spines[sp].set_visible(False)
     ax.tick_params(axis="y", length=0)
     from matplotlib.patches import Patch
     h = .42 * len(t) + 1.8
     fig.subplots_adjust(bottom=1.3 / h, top=1 - .7 / h, left=.25, right=.86)
-    fig.legend(handles=[Patch(color=c, label=k) for k, c in PART_COL.items()], loc="lower center",
-               ncol=4, frameon=False, fontsize=9)
+    fig.legend(handles=[Patch(color=PART_COL[k], label=k) for k in parts], loc="lower center",
+               ncol=len(parts), frameon=False, fontsize=9)
     fig.suptitle(f"Variance partition · {ht.set_label(co.cfg.space)}", x=.02, ha="left", fontsize=12)
     save(fig, name, co.cfg)
     _show(fig)

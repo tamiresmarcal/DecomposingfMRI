@@ -466,5 +466,7 @@ def test_variance_partition_figure_and_table():
     assert (st["share_cohort"] > .3).all()                                  # the cohort effect shows
     fig = cp.fig_variance_partition(co, st, list(co.dyn))
     assert fig.axes
+    fig = cp.fig_variance_partition(co, st, list(co.dyn), cohort=False)
+    assert len(fig.legends[0].get_texts()) == 3
     tab = cp.variance_table(co, st, list(co.dyn))
     assert list(tab["property"]) and "VPC task" in tab
