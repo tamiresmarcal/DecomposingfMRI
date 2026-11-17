@@ -1208,7 +1208,7 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
     cands = [(dx, dy) for r_ in (28, 45, 65, 85) for dx, dy in
              ((r_, r_ * .5), (r_, -r_ * .5), (-r_, r_ * .5), (-r_, -r_ * .5), (0, r_), (0, -r_), (r_, 0), (-r_, 0))]
     for (xi, yi), (px, py), v in zip(np.c_[x[ok], y[ok]], pts, t["variable"][ok]):
-        lab = nice(v)
+        lab = nice(v).replace(" (fit to reference)", "")
         w, h = 6.2 * len(lab), 12
         for dx, dy in cands:
             cx, cy = px + dx * fig.dpi / 72, py + dy * fig.dpi / 72
