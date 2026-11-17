@@ -857,7 +857,8 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
     (difference + tost), "all", or a list (see _p_columns). A thin line separates the families
     (transitions, occupancy, dynamic metrics). A row with too few people scanned in both
     conditions to estimate (NaN) says so, with its n."""
-    omega = st.attrs.get("scale") == "omega2"             # task_variation: omega^2 of task, not |d|
+    omega = st.attrs.get("scale") == "omega2"             # task_variation: share of variance, not |d|
+    vpc = st.attrs.get("measure") == "vpc"
     cuts = (.01, .06) if omega else (.2, .5)
     t = st.set_index("variable").loc[[v for v in variables if v in set(st["variable"])]].reset_index()
     if sort:   # families in the order given; inside each, the profile r first, then by |d| (top = smallest)
@@ -905,7 +906,8 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
                 gid="scaled")                                                       # fixed size: fits its band
     ax.set_xlim(0, xmax)
     ax.set_ylim(-.7, len(t) + .2)
-    ax.set_xlabel("variance explained by task, ω² (95% CI)" if omega else
+    ax.set_xlabel(("share of variance due to task (95% CI)" if vpc else "variance explained by task, ω² (95% CI)")
+                  if omega else
                   "|d| movie vs rest, same people (95% CI)", fontsize=9)
     for s in ("top", "right", "left"):
         ax.spines[s].set_visible(False)

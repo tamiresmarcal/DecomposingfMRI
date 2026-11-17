@@ -559,6 +559,7 @@ class StabilityMixin:
                                np.select([out["task_d"] < cuts[0], out["task_d"] < cuts[1]],
                                          ["stable", "moderate"], "context-dependent"))
         out.attrs["scale"] = "omega2"
+        out.attrs["measure"] = "vpc"
         return out
 
     def replication(self, kind="movie", n_split=20, min_occ=0.01, seed=0, balance=None, hours=10.0,
