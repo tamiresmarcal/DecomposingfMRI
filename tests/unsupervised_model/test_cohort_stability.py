@@ -438,7 +438,8 @@ def test_task_vpc_mixed():
     shift = {t: k for k, t in enumerate(sorted({t for _, _, t in co.by_task}))}
     for (c, k, t), d in co.by_task.items():
         d[v] = rng.normal(0, 1, len(d)) + 1.5 * shift[t]
-    st = co.task_variation([v], n_boot=1, combine="mixed")
+    st = co.task_variation([v, co.dyn[1]], n_boot=1, combine="mixed")    # 2 variables: the 2nd fit must work too
+    assert st["task_d"].notna().all()
     r = st.iloc[0]
     assert r.task_d > .3 and r.task_lo <= r.task_d <= r.task_hi and 0 <= r.task_p_tier <= 1
     null = []

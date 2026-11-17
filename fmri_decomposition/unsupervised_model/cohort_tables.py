@@ -532,9 +532,10 @@ class StabilityMixin:
                 vpc = tau / D
                 row["task_d"] = vpc
                 if ci:
-                    C = r.cov_params().loc[["task Var", "person Var"], ["task Var", "person Var"]].to_numpy(float)
+                    # not named C: patsy evaluates the formula's C(...) in THIS function's namespace
+                    cov = r.cov_params().loc[["task Var", "person Var"], ["task Var", "person Var"]].to_numpy(float)
                     g = np.array([(pi + 1) / D ** 2, -tau / D ** 2])               # d VPC / d (tau, pi)
-                    se = float(np.sqrt(max(g @ C @ g, 0)))
+                    se = float(np.sqrt(max(g @ cov @ g, 0)))
                     if 0 < vpc < 1 and se > 0:
                         lg, se_l = np.log(vpc / (1 - vpc)), se / (vpc * (1 - vpc))   # logit scale
                         expit = lambda z: 1 / (1 + np.exp(-z))
