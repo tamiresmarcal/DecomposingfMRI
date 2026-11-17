@@ -404,3 +404,14 @@ def test_task_variation_is_the_mean_of_cohort_omegas():
         msw = ssw / (len(allv) - len(gs))
         oms.append((ssb - (len(gs) - 1) * msw) / (ssb + ssw + msw))
     assert np.isclose(st.loc[0, "task_d"], np.mean(oms))
+
+
+def test_task_variation_jackknife_ci_contains_estimate():
+    co = _toy_films()
+    v = co.dyn[0]
+    rng = np.random.default_rng(2)
+    for (c, k, t), d in co.by_task.items():
+        d[v] = rng.normal(0, 1, len(d)) + (0.6 if t.endswith("1") else 0)
+    st = co.task_variation([v], n_boot=1)
+    r = st.iloc[0]
+    assert r.task_lo < r.task_d < r.task_hi and 0 <= r.task_p_tier <= 1

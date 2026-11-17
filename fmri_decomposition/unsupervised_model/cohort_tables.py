@@ -324,7 +324,7 @@ class StabilityMixin:
                                np.select([a < .2, a < .5], ["stable", "moderate"], "context-dependent"))
         return out
 
-    def task_variation(self, variables=None, n_boot=2000, seed=0):
+    def task_variation(self, variables=None, n_boot=2000, seed=0, ci="jackknife"):
         """How much each property depends on the TASK: every task of every cohort, rest included as
         one task (`films(rest=True)`, so the halves of an episode are one task). One row per variable.
 
@@ -336,8 +336,11 @@ class StabilityMixin:
         per cohort, df_task = tasks_c - 1. Values are treated as independent, which
         is conservative for cohorts whose people did several tasks (HCP, CNeuroMod).
         Tiers (Cohen 1988, the variance-explained form of d = .2 / .5): < .01 stable,
-        .01-.06 moderate, >= .06 task-dependent. 95% CI and P(tier) from n_boot resamples of people
-        within each cohort (a person keeps all their tasks).
+        .01-.06 moderate, >= .06 task-dependent.
+        ci="jackknife" (default): 95% CI and P(tier) from the delete-one-person jackknife SE within
+        each cohort (a person leaves with all their tasks), normal approximation; n_boot only turns
+        it on (> 0) or off (0). ci="bootstrap": n_boot resamples of people -- biased upward for
+        omega^2 with few people per cohort (repeated people shrink the within-task variance).
         Columns named as `stability` (task_d = omega^2, task_lo, task_hi, tier, task_p_tier), plus
         task_mean_lo / task_mean_hi: the lowest and highest task mean. st.attrs["scale"] = "omega2"."""
         if variables is None:
@@ -383,26 +386,59 @@ class StabilityMixin:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", RuntimeWarning)
                 om = np.nanmean(om_c, 0)
-            return om, means
+            return om, means, om_c
 
-        om, means = omega(np.ones(len(L)))
+        om, means, om_c = omega(np.ones(len(L)))
+        c_names = list(pd.unique(pd.Series(g_lab).str.split("|").str[0]))      # c_of_g's order
+        if ci == "jackknife" and n_boot:
+            # delete-one-person jackknife within each cohort (a person leaves with all their tasks).
+            # The bootstrap is biased upward here: a resample repeats people, identical copies shrink
+            # the within-task variance, and with 5 people (CNeuroMod) omega^2 jumps towards 1.
+            from scipy.stats import norm
+            var_c = np.zeros_like(om_c)
+            sub_c = pd.Series(s_lab).str.split(":").str[0].to_numpy()
+            for k, c in enumerate(c_names):
+                people = np.flatnonzero(sub_c == c)
+                n = len(people)
+                if n < 3:
+                    var_c[k] = np.nan
+                    continue
+                J = []
+                for sp in people:
+                    w = np.ones(len(L))
+                    w[s_id == sp] = 0
+                    J.append(omega(w)[2][k])
+                J = np.array(J)
+                var_c[k] = (n - 1) / n * np.nansum((J - np.nanmean(J, 0)) ** 2, 0)
+            ok = np.isfinite(om_c)
+            se = np.sqrt(np.nansum(np.where(ok, var_c, 0), 0)) / np.maximum(ok.sum(0), 1)   # SE of the mean
+            cuts_ = (.01, .06)
+            lo_, hi_ = om - 1.96 * se, om + 1.96 * se
+            band = np.digitize(om, cuts_)
+            edges = np.array([-np.inf, *cuts_, np.inf])
+            with np.errstate(invalid="ignore", divide="ignore"):
+                p_tier = norm.cdf((edges[band + 1] - om) / se) - norm.cdf((edges[band] - om) / se)
+            p_tier[~np.isfinite(om)] = np.nan
+            B = None
         rng = np.random.default_rng(seed)
         boots = []
-        subs_by_c = [np.flatnonzero(s_coh == k) for k in range(s_coh.max() + 1)]
-        for _ in range(n_boot):
+        subs_by_c = [np.flatnonzero(s_coh == k) for k in range(s_coh.max() + 1)] if ci == "bootstrap" else []
+        for _ in range(n_boot if ci == "bootstrap" else 0):
             m = np.zeros(len(s_lab))
             for idx in subs_by_c:
                 np.add.at(m, rng.choice(idx, len(idx)), 1)
             boots.append(omega(m[s_id])[0])
-        B = np.array(boots) if n_boot else np.empty((0, len(variables)))
+        if ci == "bootstrap":
+            B = np.array(boots) if n_boot else np.empty((0, len(variables)))
         cuts = (.01, .06)
         tier = lambda a: np.digitize(a, cuts)
         out = pd.DataFrame({
             "variable": variables, "task_d": om,
-            "task_lo": np.nanpercentile(B, 2.5, axis=0) if n_boot else np.nan,
-            "task_hi": np.nanpercentile(B, 97.5, axis=0) if n_boot else np.nan,
-            "task_p_tier": ([float(np.mean(tier(B[:, k]) == tier(om[k]))) if np.isfinite(om[k]) else np.nan
-                             for k in range(len(variables))] if n_boot else np.nan),
+            "task_lo": (lo_ if ci == "jackknife" else np.nanpercentile(B, 2.5, axis=0)) if n_boot else np.nan,
+            "task_hi": (hi_ if ci == "jackknife" else np.nanpercentile(B, 97.5, axis=0)) if n_boot else np.nan,
+            "task_p_tier": ((p_tier if ci == "jackknife" else
+                             [float(np.mean(tier(B[:, k]) == tier(om[k]))) if np.isfinite(om[k]) else np.nan
+                              for k in range(len(variables))]) if n_boot else np.nan),
             "task_mean_lo": np.nanmin(means, 0), "task_mean_hi": np.nanmax(means, 0),
             "n_tasks": (np.isfinite(means)).sum(0), "n_paired": valid.sum(0)})
         out["tier"] = np.where(np.isnan(om), "n/a",
