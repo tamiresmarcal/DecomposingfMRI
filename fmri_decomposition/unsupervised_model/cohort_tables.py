@@ -71,6 +71,9 @@ class Settings:
     #, from its transition counts; "min" = the shortest scan read, so none is lost.
     # Scans shorter than the target are NaN.
     distinct_minutes: float | str | None = None
+    # p(j | i) of a state left fewer times than this in a scan is NaN (not 0): a person who never
+    # visits state i says nothing about where i leads. 0 = the old behaviour (empty rows are 0).
+    min_out_transitions: int = 5
 
     @property
     def K(self):
@@ -151,9 +154,14 @@ class StabilityMixin:
         R = ref.to_numpy(float)[rows]
         for key, d in [*self.data.items(), *getattr(self, "by_task", {}).items()]:
             X = d[self.cells].to_numpy(float)[:, rows]
-            Xc, Rc = X - X.mean(1, keepdims=True), R - R.mean()
-            with np.errstate(invalid="ignore", divide="ignore"):
-                d["transition_fit"] = (Xc @ Rc) / np.sqrt((Xc ** 2).sum(1) * (Rc ** 2).sum())
+            ok = np.isfinite(X) & np.isfinite(R)                  # each person's own observed rows
+            fit = np.full(len(X), np.nan)
+            for n_, (x, m) in enumerate(zip(X, ok)):
+                if m.sum() >= 3:
+                    xc, rc = x[m] - x[m].mean(), R[m] - R[m].mean()
+                    den = np.sqrt((xc ** 2).sum() * (rc ** 2).sum())
+                    fit[n_] = (xc @ rc) / den if den > 0 else np.nan
+            d["transition_fit"] = fit
         return "transition_fit"
 
     def occupancy_fit(self):
@@ -573,11 +581,19 @@ class Cohorts(StabilityMixin):
             u["minutes"] = ((d["n_windows"] * d["stride_s"]).astype(float) / 60
                             if {"n_windows", "stride_s"} <= set(d) else np.nan)
             units.append(u.assign(cohort=label, kind=kind))
+            # outgoing transitions per state: a row with fewer than min_out_transitions is not a
+            # 0 probability but no information -- NaN, so p(j | i) never mixes in occupancy
+            out_n = (d[self.cells].to_numpy(float) * d["n_transitions"].to_numpy(float)[:, None]
+                     ).reshape(len(d), K, K).sum(2)
             d[self.cells] = ht.as_p_cond(d, K)
+            if self.cfg.min_out_transitions:
+                Pm = d[self.cells].to_numpy(float).reshape(len(d), K, K)
+                Pm[out_n < self.cfg.min_out_transitions] = np.nan
+                d[self.cells] = Pm.reshape(len(d), -1)
             P = d[self.cells].to_numpy(float).reshape(len(d), K, K)        # each subject's row entropies
             with np.errstate(divide="ignore", invalid="ignore"):
                 H = -np.where(P > 0, P * np.log2(P), 0).sum(2)
-            H[P.sum(2) == 0] = np.nan                                      # a state the subject never left
+            H[~(np.nansum(P, 2) > 0) | np.isnan(P).any(2)] = np.nan       # a state left too rarely
             d[self.row_h] = H
             cols = [*self.cells, *self.occ, *self.row_h, *[v for v in self.cfg.dynamics if v in d]]
             # the scan time used: windows x their stride (provenance written by `transitions`), summed
@@ -633,7 +649,7 @@ class Cohorts(StabilityMixin):
     # -- figure 1 -------------------------------------------------------------------------------
     def _graph(self, means):
         K = self.cfg.K
-        T = means[self.cells].to_numpy(float).reshape(K, K).copy()
+        T = np.nan_to_num(means[self.cells].to_numpy(float).reshape(K, K))   # a row nobody left: 0
         T /= np.where(T.sum(1, keepdims=True) > 0, T.sum(1, keepdims=True), 1)
         return T, means[self.occ].to_numpy(float)
 
