@@ -801,7 +801,7 @@ def fmt_p(p):
     return "<.001" if p < .001 else f"{p:.3f}".lstrip("0") if p < .01 else f"{p:.2f}".lstrip("0") if p < .995 else "1"
 
 
-def _p_columns(ax, t, y, pvalue, tests, x0=1.07):
+def _p_columns(ax, t, y, pvalue, tests, x0=1.07, headers=False):
     """Confidence right of the panel, one column per test, exact or as stars.
     tier: P(tier), the share of bootstrap |d| in the tier of the observed |d| (stars: * >= .90,
           ** >= .95, *** >= .99);
@@ -812,8 +812,9 @@ def _p_columns(ax, t, y, pvalue, tests, x0=1.07):
         if col not in t:
             continue
         x = x0 + .22 * k
-        ax.text(x, len(t) - .3, head, transform=ax.get_yaxis_transform(), ha="center",
-                va="bottom", fontsize=8, color=hp.INK2)
+        if headers:                                          # off: explained in the legend
+            ax.text(x, len(t) - .3, head, transform=ax.get_yaxis_transform(), ha="center",
+                    va="bottom", fontsize=8, color=hp.INK2)
         fmt = {("tier", "stars"): tier_stars, ("tier", "exact"): fmt_tier}.get(
             (test, pvalue), stars if pvalue == "stars" else fmt_p)
         for yi, p in zip(y, t[col].to_numpy(float)):
@@ -850,7 +851,8 @@ def _mean_column(ax, t, y, x=1.1):
                     va="center", fontsize=7, color=hp.INK)
 
 
-def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, sort=True, means=False):
+def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, sort=True, means=False,
+                headers=False):
     """pvalue: None, "exact" or "stars"; test: "tier" (P(tier)), "difference", "tost", "both"
     (difference + tost), "all", or a list (see _p_columns). A thin line separates the families
     (transitions, occupancy, dynamic metrics). A row with too few people scanned in both
@@ -897,8 +899,8 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
     ax.set_yticks(y, [nice(v) for v in t["variable"]], fontsize=8)
     top = len(t) - .3
     xmax = max(cuts[1] * 2, float(np.nanmax(np.r_[d.to_numpy(float), 0])) * 1.1)
-    for x, lab in ((cuts[0] / 2, "stable"), ((cuts[0] + cuts[1]) / 2, "moderate"),
-                   (max(cuts[1] * 1.5, (cuts[1] + xmax) / 2), "task-dependent" if omega else "context-dependent")):
+    for x, lab in (() if not headers else ((cuts[0] / 2, "stable"), ((cuts[0] + cuts[1]) / 2, "moderate"),
+                   (max(cuts[1] * 1.5, (cuts[1] + xmax) / 2), "task-dependent" if omega else "context-dependent"))):
         ax.text(x, top, lab, ha="center", fontsize=10, color=TIER_COL["context-dependent" if lab == "task-dependent" else lab],
                 gid="scaled")                                                       # fixed size: fits its band
     ax.set_xlim(0, xmax)
@@ -911,7 +913,7 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
     if means:
         _mean_column(ax, t, y)
     if pvalue:
-        _p_columns(ax, t, y, pvalue, _tests(test), x0=1.36 if means else 1.07)
+        _p_columns(ax, t, y, pvalue, _tests(test), x0=1.36 if means else 1.07, headers=headers)
 
 
 def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupancy="each", name="figure3",

@@ -328,12 +328,12 @@ class StabilityMixin:
         """How much each property depends on the TASK: every task of every cohort, rest included as
         one task (`films(rest=True)`, so the halves of an episode are one task). One row per variable.
 
-        omega^2 (Hays) of task within cohort: the share of the variance between person x task values
-        that the task explains, after each cohort's own mean is removed (so scanner and population,
-        shown per cohort in Figure 3 top, are not counted as a task effect). omega^2 rather than
+        omega^2 (Hays) of task, computed in each cohort on its own and averaged over cohorts, each
+        cohort once (a large cohort does not outweigh a small one; scanner and population, shown
+        per cohort in Figure 3 top, are not counted as a task effect). omega^2 rather than
         eta^2: eta^2 is inflated when tasks have few people (NNDb films, CNeuroMod episodes).
             omega^2 = (SS_task - df_task MS_within) / (SS_task + SS_within + MS_within),
-        sums over cohorts, df_task = sum_c (tasks_c - 1). Values are treated as independent, which
+        per cohort, df_task = tasks_c - 1. Values are treated as independent, which
         is conservative for cohorts whose people did several tasks (HCP, CNeuroMod).
         Tiers (Cohen 1988, the variance-explained form of d = .2 / .5): < .01 stable,
         .01-.06 moderate, >= .06 task-dependent. 95% CI and P(tier) from n_boot resamples of people
@@ -364,21 +364,25 @@ class StabilityMixin:
             np.add.at(n_g, g_id, W)
             np.add.at(S_g, g_id, W * X0)
             np.add.at(Q_g, g_id, W * X0 ** 2)
-            n_cc, S_c = np.zeros((n_c, X.shape[1])), np.zeros((n_c, X.shape[1]))
+            # per cohort: its own one-way omega^2 of task; then the mean over cohorts, each once
+            Z = lambda: np.zeros((n_c, X.shape[1]))
+            n_cc, S_c, T_c, Sb, Sw = Z(), Z(), Z(), Z(), Z()
             np.add.at(n_cc, c_of_g, n_g)
             np.add.at(S_c, c_of_g, S_g)
+            np.add.at(T_c, c_of_g, (n_g > 0).astype(float))
             with np.errstate(invalid="ignore", divide="ignore"):
-                ss_w = np.nansum(np.where(n_g > 0, Q_g - S_g ** 2 / n_g, 0), 0)
-                ss_b = np.nansum(np.where(n_g > 0, S_g ** 2 / n_g, 0), 0) - np.nansum(
-                    np.where(n_cc > 0, S_c ** 2 / n_cc, 0), 0)
-                T_c = np.zeros((n_c, X.shape[1]))
-                np.add.at(T_c, c_of_g, (n_g > 0).astype(float))
-                df_b = np.where(T_c > 0, T_c - 1, 0).sum(0)
-                df_w = n_g.sum(0) - T_c.sum(0)
-                ms_w = ss_w / df_w
-                om = (ss_b - df_b * ms_w) / (ss_b + ss_w + ms_w)
-                means = np.where(n_g >= 2, S_g / n_g, np.nan)
-            om[(df_b < 1) | (df_w < 1)] = np.nan
+                np.add.at(Sw, c_of_g, np.where(n_g > 0, Q_g - S_g ** 2 / np.where(n_g > 0, n_g, 1), 0))
+                np.add.at(Sb, c_of_g, np.where(n_g > 0, S_g ** 2 / np.where(n_g > 0, n_g, 1), 0))
+                ss_b = Sb - np.where(n_cc > 0, S_c ** 2 / np.where(n_cc > 0, n_cc, 1), 0)
+                df_b, df_w = T_c - 1, n_cc - T_c
+                ms_w = Sw / df_w
+                om_c = (ss_b - df_b * ms_w) / (ss_b + Sw + ms_w)
+                om_c[(df_b < 1) | (df_w < 1)] = np.nan
+                means = np.where(n_g >= 2, S_g / np.where(n_g > 0, n_g, 1), np.nan)
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                om = np.nanmean(om_c, 0)
             return om, means
 
         om, means = omega(np.ones(len(L)))

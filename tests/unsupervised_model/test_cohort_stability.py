@@ -230,10 +230,14 @@ def test_p_value_columns():
     st = co.stability(["transition_fit", "switch_rate", "entropy_rate_bits"], n_boot=0)
     assert {"task_p_tost", "task_p_tost_fdr"} <= set(st.columns)
     assert st["task_p_tost"].between(0, 1).all()
+    import matplotlib.pyplot as plt
     for pv, test, n_cols in (("stars", "both", 2), ("exact", "tost", 1)):
-        fig = cp.fig_figure3(co, st, ["transition_fit", "switch_rate", "entropy_rate_bits"], pvalue=pv, test=test)
-        heads = [t for t in fig.axes[-1].texts if t.get_text().startswith("p\n")]
+        fig, ax = plt.subplots()
+        cp._tier_panel(ax, st, ["transition_fit", "switch_rate", "entropy_rate_bits"], pv, test, headers=True)
+        heads = [t for t in ax.texts if t.get_text().startswith("p\n")]
         assert len(heads) == n_cols
+    fig = cp.fig_figure3(co, st, ["transition_fit", "switch_rate", "entropy_rate_bits"], pvalue="stars")
+    assert not [t for t in fig.axes[-1].texts if t.get_text().startswith("p\n") or t.get_text() == "stable"]
     assert cp.stars(.0005) == "***" and cp.stars(.2) == "" and cp.fmt_p(.0004) == "<.001"
 
 
@@ -246,8 +250,10 @@ def test_tier_probability():
     st = co.stability(["transition_fit", "switch_rate", "entropy_rate_bits"], n_boot=200)
     assert st["task_p_tier"].between(0, 1).all()
     assert (ct._tier_index(np.array([.1, .3, .9])) == [0, 1, 2]).all()
-    fig = cp.fig_figure3(co, st, ["transition_fit", "switch_rate", "entropy_rate_bits"], pvalue="exact")
-    assert [t for t in fig.axes[-1].texts if t.get_text() == "P(tier)"]
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots()
+    cp._tier_panel(ax, st, ["transition_fit", "switch_rate", "entropy_rate_bits"], "exact", headers=True)
+    assert [t for t in ax.texts if t.get_text() == "P(tier)"]
     assert cp.tier_stars(.96) == "**" and cp.tier_stars(.5) == ""
     assert co.stability(["switch_rate"], n_boot=0)["task_p_tier"].isna().all()
 
@@ -377,3 +383,24 @@ def test_task_variation_omega2():
     st = co.task_variation([v], n_boot=50)
     assert st.loc[0, "task_d"] > .5 and st.loc[0, "tier"] == "context-dependent"
     assert 0 <= st.loc[0, "task_p_tier"] <= 1 and st.loc[0, "task_mean_hi"] > st.loc[0, "task_mean_lo"]
+
+
+def test_task_variation_is_the_mean_of_cohort_omegas():
+    co = _toy_films()
+    v = co.dyn[0]
+    rng = np.random.default_rng(1)
+    for (c, k, t), d in co.by_task.items():
+        d[v] = rng.normal(0, 1, len(d)) + (0.8 if t.endswith("1") else 0)
+    st = co.task_variation([v], n_boot=0)
+    F = co.films(rest=True)
+    oms = []
+    for c in sorted({c for c, _ in F}):
+        gs = [F[k][v].dropna().to_numpy() for k in F if k[0] == c]
+        if len(gs) < 2:
+            continue
+        allv = np.concatenate(gs)
+        ssb = sum(len(g) * (g.mean() - allv.mean()) ** 2 for g in gs)
+        ssw = sum(((g - g.mean()) ** 2).sum() for g in gs)
+        msw = ssw / (len(allv) - len(gs))
+        oms.append((ssb - (len(gs) - 1) * msw) / (ssb + ssw + msw))
+    assert np.isclose(st.loc[0, "task_d"], np.mean(oms))
