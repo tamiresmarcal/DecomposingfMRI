@@ -305,3 +305,27 @@ def test_tier_panel_sorted_within_family():
     ticks = sorted(zip(ax.get_yticks(), [t.get_text() for t in ax.get_yticklabels()]), reverse=True)
     labels = [l for _, l in ticks]                                        # top to bottom
     assert labels == [cp.nice(v) for v in ["transition_fit", "entropy_rate_bits", "switch_rate", "occ_1", "occ_0"]]
+
+
+
+def test_transitions_grouped_by_source_then_sorted():
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from fmri_decomposition.figures import cohorts as cp
+    vs = ["transition_fit", "1->0", "0->1", "0->0", "1->1"]
+    st = pd.DataFrame({"variable": vs, "task_d": [.1, .2, .9, .3, .05], "task_lo": np.nan, "task_hi": np.nan,
+                       "tier": ["stable"] * 5})
+    fig, ax = plt.subplots()
+    cp._tier_panel(ax, st, vs)
+    ticks = sorted(zip(ax.get_yticks(), [t.get_text() for t in ax.get_yticklabels()]), reverse=True)
+    assert [l for _, l in ticks] == [cp.nice(v) for v in ["transition_fit", "0->0", "0->1", "1->1", "1->0"]]
+
+
+def test_film_summary_survives_an_empty_variable():
+    co = _toy_films()
+    v = co.dyn[0]
+    first = next(iter(co.by_task))
+    co.by_task[first][v] = np.nan
+    fs = co.film_summary([v])
+    assert len(fs)

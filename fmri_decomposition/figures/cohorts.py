@@ -834,10 +834,12 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
     t = st.set_index("variable").loc[[v for v in variables if v in set(st["variable"])]].reset_index()
     if sort:   # families in the order given; inside each, the profile r first, then by |d| (top = smallest)
         fam_rank = {f: k for k, f in enumerate(dict.fromkeys(family(v) for v in t["variable"]))}
+        # transitions also grouped by the state they leave: all i -> . together, i in order
         key = pd.DataFrame({"f": [fam_rank[family(v)] for v in t["variable"]],
                             "fit": [0 if v.endswith("_fit") else 1 for v in t["variable"]],
+                            "src": [int(v.split("->")[0]) if "->" in v else -1 for v in t["variable"]],
                             "d": t["task_d"].abs().fillna(np.inf)})
-        t = t.loc[key.sort_values(["f", "fit", "d"], kind="stable").index].reset_index(drop=True)
+        t = t.loc[key.sort_values(["f", "fit", "src", "d"], kind="stable").index].reset_index(drop=True)
     y = np.arange(len(t))[::-1]
     ax.axvspan(0, .2, color="#e8f0fb")
     ax.axvspan(.2, .5, color="#f3f6fb")
@@ -854,6 +856,10 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
         if not np.isfinite(dv):
             ax.text(.02, yi, f"too few people with both conditions (n = {int(n) if np.isfinite(n) else 0})",
                     va="center", fontsize=6.5, color=hp.MUTED)
+    src = [v.split("->")[0] if "->" in v else None for v in t["variable"]]
+    for k in range(1, len(src)):                                   # a faint line between source states
+        if src[k] is not None and src[k - 1] is not None and src[k] != src[k - 1]:
+            ax.axhline(y[k] + .5, color="#e2e1dc", lw=.6)
     fam = [family(v) for v in t["variable"]] if separators else []
     for k in range(1, len(fam)):
         if fam[k] != fam[k - 1]:

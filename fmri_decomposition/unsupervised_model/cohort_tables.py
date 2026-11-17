@@ -452,7 +452,7 @@ class StabilityMixin:
                         diff = dd.mean()
                         eq = bool((diff - hh > -bound) and (diff + hh < bound))
                         pv = stats.ttest_1samp(dd, 0).pvalue
-                elif pooled is not None:
+                elif pooled is not None and len(x) >= 2 and pooled[v].notna().sum() >= 2:
                     y = pooled[v].dropna()
                     va, vb = x.var(ddof=1) / len(x), y.var(ddof=1) / len(y)
                     se = np.sqrt(va + vb)
@@ -461,7 +461,7 @@ class StabilityMixin:
                     hh = stats.t.ppf(.95, df) * se
                     eq = bool((diff - hh > -bound) and (diff + hh < bound))
                     pv = stats.ttest_ind(x, y, equal_var=False).pvalue
-                rows.append(dict(cohort=c, film=t, variable=v, n=n, mean=x.mean(), lo=x.mean() - h,
+                rows.append(dict(cohort=c, film=t, variable=v, n=n, mean=x.mean() if n else np.nan, lo=x.mean() - h,
                                  hi=x.mean() + h, within=within, diff=diff, d=diff / sd[v] if sd[v] > 0 else np.nan,
                                  equivalent=eq, p=pv))
         out = pd.DataFrame(rows)
