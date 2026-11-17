@@ -531,6 +531,19 @@ class StabilityMixin:
                 D = tau + pi + 1
                 vpc = tau / D
                 row["task_d"] = vpc
+                # the whole partition, cohort included: the cohort's share is the variance of the
+                # fixed-effect predictions (Nakagawa & Schielzeth 2013's marginal R^2); task, person
+                # and residual from the same fit. Shares of the TOTAL variance; task_d stays the VPC
+                # within cohorts (cohort out of the denominator).
+                s2 = float(r.scale)
+                comp = {"cohort": float(np.var(r.model.exog @ r.fe_params.to_numpy())),
+                        "task": tau * s2, "person": pi * s2, "residual": s2}
+                tot = sum(comp.values())
+                for k_, v_ in comp.items():
+                    row[f"var_{k_}"] = v_
+                    row[f"share_{k_}"] = v_ / tot if tot > 0 else np.nan
+                row["r2_marginal"] = row["share_cohort"]
+                row["r2_conditional"] = 1 - row["share_residual"]
                 if ci:
                     # not named C: patsy evaluates the formula's C(...) in THIS function's namespace
                     cov = r.cov_params().loc[["task Var", "person Var"], ["task Var", "person Var"]].to_numpy(float)

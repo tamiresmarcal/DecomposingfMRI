@@ -1047,3 +1047,75 @@ def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation
     save(fig, name, co.cfg)
     _show(fig)
     return fig, st
+
+
+# ------------------------------------------------------------------ variance partition (mixed model)
+PART_COL = {"cohort": "#9b9a95", "task": ORANGE, "person": hp.BLUE, "residual": "#dcdbd5"}
+
+
+def _ordered(co, st, variables):
+    """Figure 3's order: transitions, dynamic metrics, occupancy; inside, profile first, then by VPC."""
+    t = st.set_index("variable").loc[[v for v in variables if v in set(st["variable"])]].reset_index()
+    fam_rank = {f: k for k, f in enumerate(dict.fromkeys(family(v) for v in t["variable"]))}
+    key = pd.DataFrame({"f": [fam_rank[family(v)] for v in t["variable"]],
+                        "fit": [0 if v.endswith("_fit") else 1 for v in t["variable"]],
+                        "d": t["task_d"].fillna(np.inf)})
+    return t.loc[key.sort_values(["f", "fit", "d"], kind="stable").index].reset_index(drop=True)
+
+
+def fig_variance_partition(co, st, variables=None, name="variance_partition"):
+    """One stacked bar per property: the share of its TOTAL variance due to cohort, task, person
+    and residual, from `task_variation(combine="mixed")` (shares from one mixed model). Beside each
+    bar, the VPC of the task within cohorts (Figure 3, bottom right)."""
+    if "share_task" not in st:
+        raise SystemExit('fig_variance_partition needs task_variation(..., combine="mixed")')
+    variables = variables or ["transition_fit", *co.dyn, *co.occ]
+    t = _ordered(co, st, variables)
+    y = np.arange(len(t))[::-1]
+    fig, ax = plt.subplots(figsize=(10, .42 * len(t) + 1.8))
+    for yi, r in zip(y, t.itertuples()):
+        left = 0.0
+        for k in PART_COL:
+            w = getattr(r, f"share_{k}")
+            if np.isfinite(w):
+                ax.barh(yi, w, left=left, color=PART_COL[k], height=.72, edgecolor="white", lw=.5)
+                left += w
+        if np.isfinite(r.task_d):
+            ax.text(1.02, yi, f"{r.task_d:.3f}", va="center", fontsize=9, transform=ax.get_yaxis_transform())
+    ax.text(1.02, len(t) - .35, "VPC task\n(within cohorts)", va="bottom", fontsize=8, color=hp.INK2,
+            transform=ax.get_yaxis_transform())
+    fam = [family(v) for v in t["variable"]]
+    for k in range(1, len(fam)):
+        if fam[k] != fam[k - 1]:
+            ax.axhline(y[k] + .5, color="white", lw=4)
+    ax.set_yticks(y, [nice(v) for v in t["variable"]], fontsize=10)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(-.6, len(t) - .4)
+    ax.set_xlabel("share of the total variance", fontsize=10)
+    for sp in ("top", "right", "left"):
+        ax.spines[sp].set_visible(False)
+    ax.tick_params(axis="y", length=0)
+    from matplotlib.patches import Patch
+    h = .42 * len(t) + 1.8
+    fig.subplots_adjust(bottom=1.3 / h, top=1 - .7 / h, left=.25, right=.86)
+    fig.legend(handles=[Patch(color=c, label=k) for k, c in PART_COL.items()], loc="lower center",
+               ncol=4, frameon=False, fontsize=9)
+    fig.suptitle(f"Variance partition · {ht.set_label(co.cfg.space)}", x=.02, ha="left", fontsize=12)
+    save(fig, name, co.cfg)
+    _show(fig)
+    return fig
+
+
+def variance_table(co, st, variables=None, digits=3):
+    """The partition as a table, Figure 3's order: variance components (on z-scored values), the
+    VPC of the task within cohorts with its 95% CI, and Nakagawa's marginal / conditional R^2."""
+    variables = variables or ["transition_fit", *co.dyn, *co.occ]
+    t = _ordered(co, st, variables)
+    out = pd.DataFrame({
+        "property": [nice(v) for v in t["variable"]],
+        "σ² cohort": t["var_cohort"], "σ² task": t["var_task"], "σ² person": t["var_person"],
+        "σ² residual": t["var_residual"],
+        "VPC task": t["task_d"], "VPC 95% CI": [f"{a:.{digits}f}–{b:.{digits}f}" if np.isfinite(a) else ""
+                                                 for a, b in zip(t["task_lo"], t["task_hi"])],
+        "R² marginal": t["r2_marginal"], "R² conditional": t["r2_conditional"]})
+    return out.round(digits)

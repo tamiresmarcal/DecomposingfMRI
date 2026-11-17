@@ -449,3 +449,22 @@ def test_task_vpc_mixed():
             d[v] = g.normal(0, 1, len(d))
         null.append(co.task_variation([v], n_boot=0, combine="mixed").iloc[0].task_d)
     assert np.median(null) < .1
+
+
+def test_variance_partition_figure_and_table():
+    import matplotlib
+    matplotlib.use("Agg")
+    from fmri_decomposition.figures import cohorts as cp
+    co = _toy_films()
+    rng = np.random.default_rng(4)
+    for (c, k, t), d in co.by_task.items():
+        for v in co.dyn:
+            d[v] = rng.normal(0, 1, len(d)) + (2 if c == "a" else 0)       # a cohort effect
+    st = co.task_variation(list(co.dyn), n_boot=1, combine="mixed")
+    shares = st[[f"share_{k}" for k in ("cohort", "task", "person", "residual")]].sum(1)
+    assert np.allclose(shares, 1)
+    assert (st["share_cohort"] > .3).all()                                  # the cohort effect shows
+    fig = cp.fig_variance_partition(co, st, list(co.dyn))
+    assert fig.axes
+    tab = cp.variance_table(co, st, list(co.dyn))
+    assert list(tab["property"]) and "VPC task" in tab
