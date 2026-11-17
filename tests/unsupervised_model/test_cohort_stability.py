@@ -292,6 +292,9 @@ def test_load_pools_counts_per_person(tmp_path):
     assert np.isclose(r.loc["B", "0->0"], 1.0)
     m = data["c", "movie"]
     assert np.isclose(m.loc["B", "1->0"], .5)          # B left 1 ten times in the movie: >= 5 over all
+    pooled = co.pooled["c"]                            # every scan of a person together, no rest/movie split
+    assert np.isclose(pooled.loc["A", "0->1"], 6 / 20) and np.isclose(pooled.loc["A", "1->0"], 7 / 20)
+    assert co.groups(tasks="all")["c"] is co.pooled["c"]
 
 
 def test_load_threshold_over_both_conditions(tmp_path):

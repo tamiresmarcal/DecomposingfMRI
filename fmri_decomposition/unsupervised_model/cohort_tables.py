@@ -151,17 +151,21 @@ def _paired(r, m):
 class StabilityMixin:
     """Methods of `Cohorts` behind the stability panels; split out only for reading."""
 
+    def _ref_tables(self):
+        """The reference: every cohort once, each person over all their scans (any task)."""
+        return list(getattr(self, "pooled", {}).values()) or list(self.data.values())
+
     def transition_fit(self, min_occ=0.01):
         """Per subject and scan kind: Pearson r between the subject's p(j | i) and the reference
-        p(j | i) (the mean over every cohort and both kinds, each cohort once), on the rows of the
+        p(j | i) (`_ref_tables`: every cohort once, all its scans), on the rows of the
         states the reference occupies >= min_occ. One number for 'does this person move between
         states the way people do' -- the transition structure as a per-subject variable."""
         K = self.cfg.K
-        ref = pd.concat([v[self.cells].mean() for v in self.data.values()], axis=1).mean(axis=1)
-        occ = pd.concat([v[self.occ].mean() for v in self.data.values()], axis=1).mean(axis=1).to_numpy()
+        ref = pd.concat([v[self.cells].mean() for v in self._ref_tables()], axis=1).mean(axis=1)
+        occ = pd.concat([v[self.occ].mean() for v in self._ref_tables()], axis=1).mean(axis=1).to_numpy()
         rows = np.repeat(occ >= min_occ, K)
         R = ref.to_numpy(float)[rows]
-        for key, d in [*self.data.items(), *getattr(self, "by_task", {}).items()]:
+        for key, d in [*self.data.items(), *getattr(self, "by_task", {}).items(), *getattr(self, "pooled", {}).items()]:
             X = d[self.cells].to_numpy(float)[:, rows]
             ok = np.isfinite(X) & np.isfinite(R)                  # each person's own observed rows
             fit = np.full(len(X), np.nan)
@@ -186,11 +190,11 @@ class StabilityMixin:
 
     def occupancy_fit(self):
         """Per subject and scan kind: Pearson r between the subject's occupancy (share of time in
-        each state) and the reference occupancy (the mean over every cohort and both kinds, each
-        cohort once). The occupancy profile as one per-subject variable, like `transition_fit`."""
-        R = pd.concat([v[self.occ].mean() for v in self.data.values()], axis=1).mean(axis=1).to_numpy(float)
+        each state) and the reference occupancy (`_ref_tables`: every cohort once, all its
+        scans). The occupancy profile as one per-subject variable, like `transition_fit`."""
+        R = pd.concat([v[self.occ].mean() for v in self._ref_tables()], axis=1).mean(axis=1).to_numpy(float)
         Rc = R - R.mean()
-        for key, d in [*self.data.items(), *getattr(self, "by_task", {}).items()]:
+        for key, d in [*self.data.items(), *getattr(self, "by_task", {}).items(), *getattr(self, "pooled", {}).items()]:
             X = d[self.occ].to_numpy(float)
             Xc = X - X.mean(1, keepdims=True)
             with np.errstate(invalid="ignore", divide="ignore"):
@@ -199,14 +203,14 @@ class StabilityMixin:
 
     def dynamics_fit(self):
         """Per subject and scan kind: Pearson r between the subject's dynamic metrics and the
-        reference's (the mean over every cohort and both kinds, each cohort once), each metric
+        reference's (`_ref_tables`: every cohort once, all its scans), each metric
         divided by its SD over all subjects so units do not decide the profile. With only a few
         metrics this r is coarse: a check, not a measure to report on its own."""
         allv = pd.concat(list(self.data.values()))
         sd = allv[self.dyn].std().to_numpy(float)
-        R = pd.concat([v[self.dyn].mean() for v in self.data.values()], axis=1).mean(axis=1).to_numpy(float) / sd
+        R = pd.concat([v[self.dyn].mean() for v in self._ref_tables()], axis=1).mean(axis=1).to_numpy(float) / sd
         Rc = R - R.mean()
-        for key, d in [*self.data.items(), *getattr(self, "by_task", {}).items()]:
+        for key, d in [*self.data.items(), *getattr(self, "by_task", {}).items(), *getattr(self, "pooled", {}).items()]:
             if not set(self.dyn) <= set(d):
                 continue
             X = d[self.dyn].to_numpy(float) / sd
@@ -594,7 +598,7 @@ class Cohorts(StabilityMixin):
         K, data = self.cfg.K, {}
         self.by_task = {}                                                     # (cohort, rest|movie, task) -> subjects
         units = []                                                            # one row per scan: counts + duration
-        nout = {}                                                             # id(table) -> exits per person x state
+        frames = {}                                                           # cohort -> its scans, every kind
         raw = {(label, kind): pd.concat(map(pd.read_parquet, files), ignore_index=True)
                for label in self.cfg.cohorts for kind, files in self._files(label).items() if files}
         target = self.cfg.distinct_minutes
@@ -617,52 +621,48 @@ class Cohorts(StabilityMixin):
             u["minutes"] = ((d["n_windows"] * d["stride_s"]).astype(float) / 60
                             if {"n_windows", "stride_s"} <= set(d) else np.nan)
             units.append(u.assign(cohort=label, kind=kind))
-            # p(j | i) per PERSON, from the transition counts summed over their scans (runs, films)
-            # -- not a mean of per-scan p(j | i): a scan that never leaves state i has no row i, and
-            # averaging it in as 0 mixed occupancy into the transitions. A person who leaves state i
-            # fewer than min_out_transitions times in all their scans together gets NaN for row i.
-            C = d[self.cells].to_numpy(float) * d["n_transitions"].to_numpy(float)[:, None]
-            counts = pd.DataFrame(C, columns=self.cells, index=d.index)
-            other = [*self.occ, *[v for v in self.cfg.dynamics if v in d]]
             d["scan_s"] = (d["n_windows"] * d["stride_s"]).astype(float) if {"n_windows", "stride_s"} <= set(d) else np.nan
-            m_out = self.cfg.min_out_transitions
+            frames.setdefault(label, []).append(d.assign(_kind=kind))
+        if not frames:
+            raise SystemExit(f"no transition tables under {self.base}")
 
-            def per_sub(t):
+        # p(j | i) per PERSON, from the transition counts summed over their scans -- not a mean of
+        # per-scan p(j | i): a scan that never leaves state i has no row i, and averaging it in as 0
+        # mixed occupancy into the transitions. Whether a person has a row i at all is decided on ALL
+        # their scans, every task and condition together: fewer than min_out_transitions exits from
+        # i in total -> NaN everywhere; a task in which an eligible person never left i -> NaN there.
+        m_out = max(self.cfg.min_out_transitions, 1)
+        self.pooled = {}                                                      # cohort -> person, all scans
+        for label, ds in frames.items():
+            d = pd.concat(ds, ignore_index=True)
+            counts = d[self.cells].to_numpy(float) * d["n_transitions"].to_numpy(float)[:, None]
+            other = [*self.occ, *[v for v in self.cfg.dynamics if v in d]]
+
+            def per_sub(t, eligible=None):
                 g = t.groupby("sub")
                 out = g[other].mean()
-                Cs = counts.loc[t.index].groupby(t["sub"]).sum().loc[out.index].to_numpy(float).reshape(len(out), K, K)
+                Cs = (pd.DataFrame(counts[t.index], index=t.index).groupby(t["sub"]).sum()
+                      .loc[out.index].to_numpy(float).reshape(len(out), K, K))
                 n_out = Cs.sum(2, keepdims=True)
-                with np.errstate(invalid="ignore", divide="ignore"):   # never left i here: undefined
+                with np.errstate(invalid="ignore", divide="ignore"):
                     P = np.where(n_out > 0, Cs / np.where(n_out > 0, n_out, 1), np.nan)
-                out[self.cells] = P.reshape(len(out), -1)
-                out[self.row_h] = np.nan                                  # set below, once rows are final
-                res = out[[*self.cells, *self.occ, *self.row_h, *[v for v in other if v not in self.occ]]].assign(
-                    scan_s=g["scan_s"].sum(min_count=1))
-                nout[id(res)] = pd.DataFrame(n_out[..., 0], index=out.index)
-                return res
-            data[label, kind] = per_sub(d)
-            for task, t in d.groupby(d["task"].astype(str)):              # and one table per task (film)
-                self.by_task[label, kind, task] = per_sub(t)
-        if not data:
-            raise SystemExit(f"no transition tables under {self.base}")
-        # Who has a row i at all is decided on the PERSON, all their scans of every condition
-        # together: left i fewer than min_out_transitions times in total -> row i is NaN everywhere.
-        # A condition (or task) in which an eligible person never left i stays NaN there only.
-        m_out = max(self.cfg.min_out_transitions, 1)
-        for label in self.cfg.cohorts:
-            tabs = [t for key, t in [*data.items(), *self.by_task.items()] if key[0] == label]
-            if not tabs:
-                continue
-            total = pd.concat([nout[id(t)] for (c, k), t in data.items() if c == label]).groupby(level=0).sum()
-            for t in tabs:
-                few = (total.reindex(t.index).fillna(0).to_numpy() < m_out)               # people x states
-                P = t[self.cells].to_numpy(float).reshape(len(t), K, K)
-                P[few] = np.nan
-                t[self.cells] = P.reshape(len(t), -1)
+                if eligible is not None:
+                    P[~eligible.reindex(out.index).fillna(False).to_numpy(bool)] = np.nan
                 with np.errstate(invalid="ignore", divide="ignore"):
                     H = -np.where(P > 0, P * np.log2(P), 0).sum(2)
-                H[np.isnan(P).any(2)] = np.nan                           # H(p(. | i)) per state i
-                t[self.row_h] = H
+                H[np.isnan(P).any(2)] = np.nan                               # H(p(. | i)) per state i
+                out[self.cells] = P.reshape(len(out), -1)
+                out[self.row_h] = H
+                res = out[[*self.cells, *self.occ, *self.row_h, *[v for v in other if v not in self.occ]]]
+                return res.assign(scan_s=g["scan_s"].sum(min_count=1)), pd.DataFrame(n_out[..., 0], index=out.index)
+
+            _, total = per_sub(d)
+            eligible = total >= m_out                                          # people x states
+            self.pooled[label], _ = per_sub(d, eligible)
+            for kind, t in d.groupby("_kind"):
+                data[label, kind], _ = per_sub(t, eligible)
+                for task, tt in t.groupby(t["task"].astype(str)):              # and one table per task
+                    self.by_task[label, kind, task], _ = per_sub(tt, eligible)
         self.units = pd.concat(units, ignore_index=True)
         return data
 
@@ -758,14 +758,16 @@ class Cohorts(StabilityMixin):
     # -- figures 2 and 4: equivalence ----------------------------------------------------------
     def groups(self, by="cohort", tasks="kind", cohort=None):
         """{label: one row per subject} -- what figures 2 and 4 compare.
-        by="cohort": each cohort's movie (the default); tasks="all": rest and movie, each person's
-        values averaged over the two conditions they have.
+        by="cohort": each cohort's movie (the default); tasks="all": each person over all their
+        scans, every task (rest included) pooled -- transitions from the summed counts.
         by="task", tasks="kind": rest vs movie; tasks="film": every movie task (film, episode) apart.
         cohort = one cohort label to stay within; None pools every cohort (a film is then "cohort:film").
         Rest vs movie are often the same people: the tests treat the groups as independent, which is
         conservative for the difference and makes equivalence harder to show, not easier."""
         if by == "cohort":
-            if tasks == "all":                            # rest and movie: each person's mean of the two
+            if tasks == "all" and getattr(self, "pooled", None):   # each person over ALL their scans
+                return dict(self.pooled)
+            if tasks == "all":                            # (toy objects without `pooled`)
                 out = {}
                 for c in self.cfg.cohorts:
                     parts = [self.data[c, k] for k in ("rest", "movie") if (c, k) in self.data]
