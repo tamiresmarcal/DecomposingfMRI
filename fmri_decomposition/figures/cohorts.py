@@ -1142,3 +1142,68 @@ def variance_table(co, st, variables=None, digits=3):
                                                  for a, b in zip(t["task_lo"], t["task_hi"])],
         "R² marginal": t["r2_marginal"], "R² conditional": t["r2_conditional"]})
     return out.round(digits)
+
+
+FAMILY_COL = {"transitions": hp.BLUE, "dynamics": "#2a9d6f", "occupancy": ORANGE}
+
+
+def _vpc_within(t, k):
+    tot = t["var_task"] + t["var_person"] + t["var_residual"]
+    return t[f"var_{k}"] / tot
+
+
+def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_person", min_occ=0.01):
+    """One point per property: x = VPC of the task, y = VPC of the person, both shares of the
+    variance within cohorts (`task_variation(combine="mixed")`). Colour = family. Upper left:
+    individual and task-invariant; lower right: task-driven and not individual. st_transitions
+    adds every transition p(j | i) as small unlabelled points (rows of states with mean occupancy
+    >= min_occ). Labels are placed off the points with a leader line, avoiding each other."""
+    if "var_person" not in st:
+        raise SystemExit('fig_task_person needs task_variation(..., combine="mixed")')
+    from matplotlib.lines import Line2D
+    variables = variables or ["transition_fit", *co.dyn, *co.occ]
+    t = st.set_index("variable").loc[[v for v in variables if v in set(st["variable"])]].reset_index()
+    fig, ax = plt.subplots(figsize=(10, 7))
+    if st_transitions is not None:
+        occ = pd.concat([v[co.occ].mean() for v in co._ref_tables()], axis=1).mean(axis=1).to_numpy()
+        cells = [c for c in co.cells if occ[int(c.split("->")[0])] >= min_occ]
+        tc = st_transitions.set_index("variable").loc[[c for c in cells if c in set(st_transitions["variable"])]]
+        ax.scatter(_vpc_within(tc, "task"), _vpc_within(tc, "person"), s=18, color=FAMILY_COL["transitions"],
+                   alpha=.45, edgecolor="none", zorder=2)
+    x, y = _vpc_within(t, "task").to_numpy(float), _vpc_within(t, "person").to_numpy(float)
+    ok = np.isfinite(x) & np.isfinite(y)
+    ax.scatter(x[ok], y[ok], s=75, c=[FAMILY_COL[family(v)] for v in t["variable"][ok]], edgecolor="white", zorder=3)
+    xmax = max(.1, np.nanmax(x) * 1.15)
+    ymax = max(.2, np.nanmax(y) * 1.2)
+    ax.set_xlim(-.01 * xmax, xmax)
+    ax.set_ylim(0, ymax)
+    fig.canvas.draw()
+    # labels: for each point, the first candidate offset whose box overlaps no placed label nor point
+    placed, pts = [], ax.transData.transform(np.c_[x[ok], y[ok]])
+    cands = [(dx, dy) for r_ in (28, 45, 65, 85) for dx, dy in
+             ((r_, r_ * .5), (r_, -r_ * .5), (-r_, r_ * .5), (-r_, -r_ * .5), (0, r_), (0, -r_), (r_, 0), (-r_, 0))]
+    for (xi, yi), (px, py), v in zip(np.c_[x[ok], y[ok]], pts, t["variable"][ok]):
+        lab = nice(v)
+        w, h = 6.2 * len(lab), 12
+        for dx, dy in cands:
+            cx, cy = px + dx * fig.dpi / 72, py + dy * fig.dpi / 72
+            box = (cx - (0 if dx > 0 else w if dx < 0 else w / 2), cy - h / 2,
+                   cx + (w if dx > 0 else 0 if dx < 0 else w / 2), cy + h / 2)
+            clash = any(not (box[2] < b[0] or box[0] > b[2] or box[3] < b[1] or box[1] > b[3]) for b in placed)
+            clash |= any(box[0] - 6 < qx < box[2] + 6 and box[1] - 6 < qy < box[3] + 6 for qx, qy in pts)
+            if not clash:
+                break
+        placed.append(box)
+        ax.annotate(lab, (xi, yi), xytext=(dx, dy), textcoords="offset points", fontsize=9, color=hp.INK,
+                    ha="left" if dx > 0 else "right" if dx < 0 else "center", va="center",
+                    arrowprops=dict(arrowstyle="-", color="#9b9a95", lw=.7, shrinkA=0, shrinkB=4))
+    ax.set_xlabel("VPC task (share of the variance within cohorts)", fontsize=10)
+    ax.set_ylabel("VPC person (share of the variance within cohorts)", fontsize=10)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    ax.legend(handles=[Line2D([], [], ls="none", marker="o", ms=8, color=c, label=k) for k, c in FAMILY_COL.items()],
+              frameon=False, loc="upper right")
+    fig.suptitle(f"Task vs person · {ht.set_label(co.cfg.space)}", x=.02, ha="left", fontsize=12)
+    save(fig, name, co.cfg)
+    _show(fig)
+    return fig

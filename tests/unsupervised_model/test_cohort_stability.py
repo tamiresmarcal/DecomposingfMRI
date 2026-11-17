@@ -471,5 +471,7 @@ def test_variance_partition_figure_and_table():
     stc = co.task_variation(["transition_fit", *co.cells], n_boot=0, combine="mixed")
     fig = cp.fig_variance_partition(co, st, list(co.dyn), st_transitions=stc, cohort=False)
     assert len(fig.axes) == 2
+    fig = cp.fig_task_person(co, st, st_transitions=stc, variables=list(co.dyn))
+    assert len(fig.axes[0].texts) == len(co.dyn)
     tab = cp.variance_table(co, st, list(co.dyn))
     assert list(tab["property"]) and "VPC task" in tab
