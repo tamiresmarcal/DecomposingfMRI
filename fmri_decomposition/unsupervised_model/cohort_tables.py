@@ -169,6 +169,24 @@ class StabilityMixin:
                 d["occupancy_fit"] = (Xc @ Rc) / np.sqrt((Xc ** 2).sum(1) * (Rc ** 2).sum())
         return "occupancy_fit"
 
+    def dynamics_fit(self):
+        """Per subject and scan kind: Pearson r between the subject's dynamic metrics and the
+        reference's (the mean over every cohort and both kinds, each cohort once), each metric
+        divided by its SD over all subjects so units do not decide the profile. With only a few
+        metrics this r is coarse: a check, not a measure to report on its own."""
+        allv = pd.concat(list(self.data.values()))
+        sd = allv[self.dyn].std().to_numpy(float)
+        R = pd.concat([v[self.dyn].mean() for v in self.data.values()], axis=1).mean(axis=1).to_numpy(float) / sd
+        Rc = R - R.mean()
+        for key, d in [*self.data.items(), *getattr(self, "by_task", {}).items()]:
+            if not set(self.dyn) <= set(d):
+                continue
+            X = d[self.dyn].to_numpy(float) / sd
+            Xc = X - X.mean(1, keepdims=True)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                d["dynamics_fit"] = (Xc @ Rc) / np.sqrt((Xc ** 2).sum(1) * (Rc ** 2).sum())
+        return "dynamics_fit"
+
     def stability_variables(self):
         fit = self.transition_fit()
         return [fit, self.occupancy_fit(), *self.dyn, *self.occ, *self.strongest()]
@@ -209,6 +227,8 @@ class StabilityMixin:
             self.transition_fit()                  # computed on demand, not stored in the tables
         if "occupancy_fit" in vs:
             self.occupancy_fit()
+        if "dynamics_fit" in vs:
+            self.dynamics_fit()
         rng = np.random.default_rng(seed)
         coh, agr = self.cohen(vs), self.agreement(vs)
         r, m = self.paired_rest_movie()

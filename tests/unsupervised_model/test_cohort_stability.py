@@ -208,3 +208,13 @@ def test_replication_versus_mean_one_row_per_cohort():
     vm = pairs[pairs["kind"] == "vs mean"]
     assert len(vm) == len({c for c, k in co.data if k == "movie"})
     assert (vm["b"] == "mean of the others").all()
+
+
+def test_aggregation_check_draws():
+    import matplotlib
+    matplotlib.use("Agg")
+    from fmri_decomposition.figures import cohorts as cp
+    co = _toy()
+    fig, st = cp.fig_aggregation_check(co, n_boot=0)
+    assert len(fig.axes) == 3
+    assert {"transition_fit", "occupancy_fit", "dynamics_fit"} <= set(st["variable"])

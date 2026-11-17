@@ -555,7 +555,8 @@ def window_name(cfg):
 # ------------------------------------------------------------------ stability (manuscript figure 3)
 ORANGE = "#eb6834"
 NICE = {"transition_fit": "Transition structure (fit to reference)",
-        "occupancy_fit": "Occupancy profile (fit to reference)", "switch_rate": "Switch rate",
+        "occupancy_fit": "Occupancy profile (fit to reference)",
+        "dynamics_fit": "Dynamics profile (fit to reference)", "switch_rate": "Switch rate",
         "mean_dwell_s": "Mean dwell", "entropy_rate_bits": "Entropy rate", "dispersion": "Dispersion",
         "n_distinct_transitions": "Distinct transitions"}
 
@@ -613,7 +614,7 @@ def fixed_range(co, v):
     so its range is 0 to the 99th percentile of the subjects' values, rounded up -- the same in
     every figure of a state set. `cfg.ranges` overrides any of these."""
     K = co.cfg.K
-    if v.startswith("occ_") or "->" in v or v in ("transition_fit", "occupancy_fit"):
+    if v.startswith("occ_") or "->" in v or v in ("transition_fit", "occupancy_fit", "dynamics_fit"):
         return (0.0, 1.0)
     if v in co.cfg.ranges:
         return tuple(co.cfg.ranges[v])
@@ -881,3 +882,26 @@ def fig_replication(co, pairs, name="Sd_replication"):
     save(fig, name, co.cfg)
     _show(fig)
     return fig
+
+
+def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation"):
+    """Does one number per family lose information? Movie vs rest |d_av| (same people, 95% CI), three
+    panels: the family's profile r with the reference on top, then every member of the family --
+    transitions p(j | i) (rows of states with mean occupancy >= min_occ), occupancy of each state,
+    and each dynamic metric. Same tiers as Figure 3C."""
+    occ = pd.concat([v[co.occ].mean() for v in co.data.values()], axis=1).mean(axis=1).to_numpy()
+    keep = [c for c in co.cells if occ[int(c.split("->")[0])] >= min_occ]
+    fams = [("Transitions", "transition_fit", keep), ("Occupancy", "occupancy_fit", list(co.occ)),
+            ("Dynamic metrics", "dynamics_fit", list(co.dyn))]
+    st = co.stability([v for _, f, m in fams for v in [f, *m]], n_boot=n_boot)
+    h = [len(m) + 1 for _, _, m in fams]
+    fig, axs = plt.subplots(1, 3, figsize=(18, max(6, .2 * max(h) + 2)), gridspec_kw=dict(wspace=.75))
+    for ax, (title, f, members) in zip(axs, fams):
+        _tier_panel(ax, st, [f, *members])
+        ax.axhline(len(members) - .5, color="#c9c8c2", lw=.8)       # the profile above, members below
+        ax.set_title(title, fontsize=12, loc="left")
+        ax.tick_params(axis="y", labelsize=7 if len(members) > 20 else 9)
+    fig.suptitle(f"Aggregation check · {ht.set_label(co.cfg.space)} · |d_av| movie vs rest", x=.02, ha="left", fontsize=12)
+    save(fig, name, co.cfg)
+    _show(fig)
+    return fig, st
