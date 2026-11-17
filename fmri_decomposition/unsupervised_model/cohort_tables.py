@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from fmri_decomposition.io import latents_root, transitions_root, tree_root
+from fmri_decomposition.io import latents_root, transitions_root, tree_root, unsupervised_root, _fmt_window, _key
 from fmri_decomposition.supervised_model import hads as ht
 
 DYNAMICS = ["switch_rate", "mean_dwell_s", "entropy_rate_bits", "dispersion", "n_distinct_transitions"]
@@ -1169,3 +1169,49 @@ def available_sets(root, cohorts, modelling_version=None):
     rows = [dict(atlas=a, window_s=w, states=s) for (a, w, s), have in sorted(found.items())
             if all(set(c["dirs"]) & have for c in cohorts.values())]
     return pd.DataFrame(rows)
+
+
+
+# -- the mixed models, computed once (tools/mixed_model_sweep.py, slurm/mixed_model.sbatch) -----
+MIXED_SETTINGS = ("entropy_estimator", "distinct_minutes", "min_out_transitions", "rest_pattern", "film_merge")
+
+
+def mixed_dir(cfg: Settings) -> Path:
+    """<outputs>/modelling/version=<v>/unsupervised_model/mixed_model/atlas=/window_s=/states=."""
+    sp = cfg.space
+    return (unsupervised_root(cfg.root, cfg.modelling_version) / "mixed_model" / f"atlas={_key(sp['atlas'])}"
+            / f"window_s={_key(_fmt_window(sp['window_s']))}" / f"states={_key(sp['states'])}")
+
+
+def _mixed_meta(co) -> dict:
+    return {"cohorts": sorted(co.cfg.cohorts), **{k: str(getattr(co.cfg, k)) for k in MIXED_SETTINGS}}
+
+
+def mixed_tables(co, n_boot=1, recompute=False, save=True, min_occ=0.01):
+    """(properties, transitions): task_variation(combine="mixed") for the transition structure,
+    occupancy profile, dynamic metrics and occupancies, and for the transition structure and every
+    transition p(j | i). Read from `mixed_dir` when there (written by tools/mixed_model_sweep.py),
+    else fitted here and written there. A cache made with other settings (cohorts, entropy
+    estimator, rarefaction, row threshold) is not used: it is refitted."""
+    import json
+    d = mixed_dir(co.cfg)
+    files = d / "vpc_properties.csv", d / "vpc_transitions.csv"
+    meta = _mixed_meta(co)
+    if not recompute and all(f.exists() for f in files) and (d / "meta.json").exists():
+        if json.loads((d / "meta.json").read_text()) == meta:
+            out = []
+            for f in files:
+                t = pd.read_csv(f)
+                t.attrs.update(scale="omega2", measure="vpc")
+                out.append(t)
+            print(f"mixed models read from {d}")
+            return tuple(out)
+        print(f"{d}: made with other settings; refitting")
+    props = co.task_variation(["transition_fit", "occupancy_fit", *co.dyn, *co.occ], n_boot=n_boot, combine="mixed")
+    cells = co.task_variation(["transition_fit", *co.cells], n_boot=n_boot, combine="mixed")
+    if save:
+        d.mkdir(parents=True, exist_ok=True)
+        props.to_csv(files[0], index=False)
+        cells.to_csv(files[1], index=False)
+        (d / "meta.json").write_text(json.dumps(meta, indent=1))
+    return props, cells

@@ -480,3 +480,14 @@ def test_variance_partition_figure_and_table():
     stc2 = co.task_variation(co.cells, n_boot=0, combine="mixed")
     tab = cp.variance_table(co, st, list(co.dyn), st_transitions=stc2)
     assert (tab["family"] == "transition p(j | i)").sum() == len(co.cells) and "VPC person" in tab
+
+
+def test_mixed_tables_cache(tmp_path):
+    co = _toy_films()
+    co.cfg.root = tmp_path
+    co.cfg.space = dict(atlas="x", window_s=30.0, states=co.cfg.space["states"])
+    p1, c1 = ct.mixed_tables(co)
+    assert (ct.mixed_dir(co.cfg) / "vpc_properties.csv").exists()
+    p2, c2 = ct.mixed_tables(co)                         # read back, same numbers, same attrs
+    assert np.allclose(p1["task_d"].astype(float), p2["task_d"].astype(float), equal_nan=True)
+    assert p2.attrs["measure"] == "vpc" and len(c2) == len(c1)
