@@ -1059,22 +1059,14 @@ def _ordered(co, st, variables):
     fam_rank = {f: k for k, f in enumerate(dict.fromkeys(family(v) for v in t["variable"]))}
     key = pd.DataFrame({"f": [fam_rank[family(v)] for v in t["variable"]],
                         "fit": [0 if v.endswith("_fit") else 1 for v in t["variable"]],
+                        "src": [int(v.split("->")[0]) if "->" in v else -1 for v in t["variable"]],
                         "d": t["task_d"].fillna(np.inf)})
-    return t.loc[key.sort_values(["f", "fit", "d"], kind="stable").index].reset_index(drop=True)
+    return t.loc[key.sort_values(["f", "fit", "src", "d"], kind="stable").index].reset_index(drop=True)
 
 
-def fig_variance_partition(co, st, variables=None, name="variance_partition", cohort=True):
-    """One stacked bar per property: the share of its TOTAL variance due to cohort, task, person
-    and residual, from `task_variation(combine="mixed")` (shares from one mixed model). Beside each
-    bar, the VPC of the task within cohorts (Figure 3, bottom right). cohort=False: three colours,
-    the variance WITHIN cohorts (task, person, residual), so the orange part is that VPC itself."""
-    if "share_task" not in st:
-        raise SystemExit('fig_variance_partition needs task_variation(..., combine="mixed")')
-    variables = variables or ["transition_fit", *co.dyn, *co.occ]
-    t = _ordered(co, st, variables)
-    y = np.arange(len(t))[::-1]
-    fig, ax = plt.subplots(figsize=(10, .42 * len(t) + 1.8))
+def _partition_panel(ax, t, cohort, fs=10):
     parts = [k for k in PART_COL if cohort or k != "cohort"]
+    y = np.arange(len(t))[::-1]
     for yi, r in zip(y, t.itertuples()):
         left = 0.0
         within = sum(getattr(r, f"var_{k}") for k in parts)
@@ -1084,23 +1076,51 @@ def fig_variance_partition(co, st, variables=None, name="variance_partition", co
                 ax.barh(yi, w, left=left, color=PART_COL[k], height=.72, edgecolor="white", lw=.5)
                 left += w
         if np.isfinite(r.task_d):
-            ax.text(1.02, yi, f"{r.task_d:.3f}", va="center", fontsize=9, transform=ax.get_yaxis_transform())
+            ax.text(1.02, yi, f"{r.task_d:.3f}", va="center", fontsize=fs - 1, transform=ax.get_yaxis_transform())
     ax.text(1.02, len(t) - .35, "VPC task\n(within cohorts)", va="bottom", fontsize=8, color=hp.INK2,
             transform=ax.get_yaxis_transform())
-    fam = [family(v) for v in t["variable"]]
-    for k in range(1, len(fam)):
-        if fam[k] != fam[k - 1]:
-            ax.axhline(y[k] + .5, color="white", lw=4)
-    ax.set_yticks(y, [nice(v) for v in t["variable"]], fontsize=10)
+    vs = list(t["variable"])
+    for k in range(1, len(vs)):                                  # white gaps: families, and source states
+        src = [v.split("->")[0] if "->" in v else None for v in (vs[k], vs[k - 1])]
+        if family(vs[k]) != family(vs[k - 1]) or vs[k - 1].endswith("_fit") or (src[0] and src[0] != src[1]):
+            ax.axhline(y[k] + .5, color="white", lw=3)
+    ax.set_yticks(y, [nice(v) for v in vs], fontsize=fs)
     ax.set_xlim(0, 1)
     ax.set_ylim(-.6, len(t) - .4)
     ax.set_xlabel("share of the total variance" if cohort else "share of the variance within cohorts", fontsize=10)
     for sp in ("top", "right", "left"):
         ax.spines[sp].set_visible(False)
     ax.tick_params(axis="y", length=0)
+    return parts
+
+
+def fig_variance_partition(co, st, variables=None, name="variance_partition", cohort=True, st_transitions=None,
+                           min_occ=0.01):
+    """One stacked bar per property: the share of its TOTAL variance due to cohort, task, person
+    and residual, from `task_variation(combine="mixed")` (shares from one mixed model). Beside each
+    bar, the VPC of the task within cohorts (Figure 3, bottom right). cohort=False: three colours,
+    the variance WITHIN cohorts (task, person, residual) -- each part over their sum, so the orange
+    part is that VPC itself. st_transitions: the same for every transition p(j | i) (rows of states
+    with mean occupancy >= min_occ; grouped by the state left, then by VPC), drawn on the left."""
     from matplotlib.patches import Patch
-    h = .42 * len(t) + 1.8
-    fig.subplots_adjust(bottom=1.3 / h, top=1 - .7 / h, left=.25, right=.86)
+    if "share_task" not in st:
+        raise SystemExit('fig_variance_partition needs task_variation(..., combine="mixed")')
+    variables = variables or ["transition_fit", *co.dyn, *co.occ]
+    t = _ordered(co, st, variables)
+    if st_transitions is not None:
+        occ = pd.concat([v[co.occ].mean() for v in co._ref_tables()], axis=1).mean(axis=1).to_numpy()
+        cells = ["transition_fit", *[c for c in co.cells if occ[int(c.split("->")[0])] >= min_occ]]
+        tt = _ordered(co, st_transitions, cells)
+        h = max(.42 * len(t), .2 * len(tt)) + 2
+        fig, (axl, ax) = plt.subplots(1, 2, figsize=(17, h), gridspec_kw=dict(wspace=.55))
+        _partition_panel(axl, tt, cohort, fs=7)
+        axl.set_title("Transitions", loc="left", fontsize=11)
+        ax.set_title("Transition structure, dynamic metrics and occupancy", loc="left", fontsize=11)
+    else:
+        h = .42 * len(t) + 1.8
+        fig, ax = plt.subplots(figsize=(10, h))
+    parts = _partition_panel(ax, t, cohort)
+    fig.subplots_adjust(bottom=1.3 / h, top=1 - .8 / h, left=.12 if st_transitions is not None else .25, right=.93)
     fig.legend(handles=[Patch(color=PART_COL[k], label=k) for k in parts], loc="lower center",
                ncol=len(parts), frameon=False, fontsize=9)
     fig.suptitle(f"Variance partition · {ht.set_label(co.cfg.space)}", x=.02, ha="left", fontsize=12)
