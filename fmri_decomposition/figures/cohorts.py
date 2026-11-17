@@ -919,7 +919,7 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
 
 
 def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupancy="each", name="figure3",
-                pvalue=None, test="tier"):
+                pvalue=None, test="tier", panel="task_person", st_transitions=None):
     """Manuscript Figure 3 as one figure, rest and movie together (each person's mean of the
     conditions they have; `groups(tasks="all")`).
     A  every cohort: occupancy, p(j | i) and the dynamic metrics (mean, 95% CI);
@@ -928,6 +928,8 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     font scales every text; diagram_fs the diagram's own (its labels are placed for that size).
     occupancy="each": C lists every state's occupancy; "fit": one row, the occupancy profile's
     correlation with the reference (`occupancy_fit`; st must include it).
+    panel: bottom right, "task_person" (VPC task x VPC person, needs combine="mixed"; st_transitions
+    adds every transition as small points) or "tiers" (task share with tiers and stars).
     pvalue / test: the p-value column(s) right of C (`_tier_panel`): None, "exact" or "stars";
     "tier" (P(tier), default), "difference" (paired t), "tost" (equivalence), "both", "all"."""
     from matplotlib.gridspec import GridSpec
@@ -995,7 +997,11 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     co.diagram_p_min = min(T_ref[e] for e in edges)       # for the legend: the thinnest arrow drawn
     ax = fig.add_subplot(gB[1])
     occ = co.occ if occupancy == "each" else ["occupancy_fit"]
-    _tier_panel(ax, st, tier_variables or ["transition_fit", *co.dyn, *occ], pvalue, test)
+    if panel == "task_person" and "var_person" in st:   # VPC task x VPC person (mixed model)
+        _task_person_panel(ax, co, st, st_transitions, tier_variables or ["transition_fit", *co.dyn, *occ],
+                           fs=9 / font)          # scaled back up with every text below
+    else:                                        # "tiers": the share due to task, with tiers and stars
+        _tier_panel(ax, st, tier_variables or ["transition_fit", *co.dyn, *occ], pvalue, test)
     for t in fig.findobj(plt.matplotlib.text.Text):              # every text larger, but the diagram's:
         if t.get_gid() != "scaled":                              # its labels were placed at diagram_fs
             t.set_fontsize(t.get_fontsize() * font)
@@ -1152,18 +1158,11 @@ def _vpc_within(t, k):
     return t[f"var_{k}"] / tot
 
 
-def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_person", min_occ=0.01):
-    """One point per property: x = VPC of the task, y = VPC of the person, both shares of the
-    variance within cohorts (`task_variation(combine="mixed")`). Colour = family. Upper left:
-    individual and task-invariant; lower right: task-driven and not individual. st_transitions
-    adds every transition p(j | i) as small unlabelled points (rows of states with mean occupancy
-    >= min_occ). Labels are placed off the points with a leader line, avoiding each other."""
-    if "var_person" not in st:
-        raise SystemExit('fig_task_person needs task_variation(..., combine="mixed")')
+def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=0.01, fs=9):
     from matplotlib.lines import Line2D
+    fig = ax.figure
     variables = variables or ["transition_fit", *co.dyn, *co.occ]
     t = st.set_index("variable").loc[[v for v in variables if v in set(st["variable"])]].reset_index()
-    fig, ax = plt.subplots(figsize=(10, 7))
     if st_transitions is not None:
         occ = pd.concat([v[co.occ].mean() for v in co._ref_tables()], axis=1).mean(axis=1).to_numpy()
         cells = [c for c in co.cells if occ[int(c.split("->")[0])] >= min_occ]
@@ -1194,7 +1193,7 @@ def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_p
             if not clash:
                 break
         placed.append(box)
-        ax.annotate(lab, (xi, yi), xytext=(dx, dy), textcoords="offset points", fontsize=9, color=hp.INK,
+        ax.annotate(lab, (xi, yi), xytext=(dx, dy), textcoords="offset points", fontsize=fs, color=hp.INK,
                     ha="left" if dx > 0 else "right" if dx < 0 else "center", va="center",
                     arrowprops=dict(arrowstyle="-", color="#9b9a95", lw=.7, shrinkA=0, shrinkB=4))
     ax.set_xlabel("VPC task (share of the variance within cohorts)", fontsize=10)
@@ -1203,6 +1202,18 @@ def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_p
         ax.spines[sp].set_visible(False)
     ax.legend(handles=[Line2D([], [], ls="none", marker="o", ms=8, color=c, label=k) for k, c in FAMILY_COL.items()],
               frameon=False, loc="upper right")
+
+
+def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_person", min_occ=0.01):
+    """One point per property: x = VPC of the task, y = VPC of the person, both shares of the
+    variance within cohorts (`task_variation(combine="mixed")`). Colour = family. Upper left:
+    individual and task-invariant; lower right: task-driven and not individual. st_transitions
+    adds every transition p(j | i) as small unlabelled points (rows of states with mean occupancy
+    >= min_occ). Labels are placed off the points with a leader line, avoiding each other."""
+    if "var_person" not in st:
+        raise SystemExit('fig_task_person needs task_variation(..., combine="mixed")')
+    fig, ax = plt.subplots(figsize=(10, 7))
+    _task_person_panel(ax, co, st, st_transitions, variables, min_occ)
     fig.suptitle(f"Task vs person · {ht.set_label(co.cfg.space)}", x=.02, ha="left", fontsize=12)
     save(fig, name, co.cfg)
     _show(fig)
