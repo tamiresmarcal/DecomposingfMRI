@@ -291,15 +291,17 @@ class StabilityMixin:
         return pd.DataFrame(pairs), pd.Series(ceil, name="split_half_r")
 
     # -- variation between films ----------------------------------------------------------
-    def films(self):
+    def films(self, rest=False):
         """{(cohort, film): one row per subject} for every movie task (film, episode, run). Tasks
         whose labels `film_merge` maps to the same film (the halves of an episode) are one film: a
-        person's values are averaged over its parts."""
+        person's values are averaged over its parts. rest=True adds each cohort's rest as one more
+        task, "rest" (its runs averaged per person), first in the cohort."""
         pat, sub = self.cfg.film_merge or (None, None)
         groups = {}
-        for (c, k, t), d in sorted(self.by_task.items()):
-            if k == "movie":
-                name = re.sub(pat, sub, t) if pat else t
+        items = sorted(self.by_task.items(), key=lambda kv: (kv[0][0], kv[0][1] != "rest", kv[0][2]))
+        for (c, k, t), d in items:
+            if k == "movie" or rest:
+                name = "rest" if k == "rest" else (re.sub(pat, sub, t) if pat else t)
                 groups.setdefault((c, name), []).append(d)
         return {key: (ds[0] if len(ds) == 1 else pd.concat(ds).groupby(level=0).mean())
                 for key, ds in groups.items()}
@@ -330,7 +332,7 @@ class StabilityMixin:
             out.loc[q.index, "p_fdr"] = stats.false_discovery_control(q)
         return out
 
-    def film_summary(self, variables=None):
+    def film_summary(self, variables=None, rest=False):
         """One row per (film, variable): mean and 95% CI over the film's viewers, and whether the
         film is equivalent to the OTHER films of its cohort (TOST at 5%, bounds +- sesoi_d x the
         variable's SD over every film).
@@ -346,7 +348,7 @@ class StabilityMixin:
             variables = [self.transition_fit(), *self.dyn, *self.occ, *self.cells]
         else:
             self.transition_fit()
-        F = self.films()
+        F = self.films(rest=rest)
         allv = pd.concat(F.values())
         sd = allv[variables].std()
         rows = []
@@ -399,6 +401,7 @@ class StabilityMixin:
         coh = self.cohen(list(st["variable"]))
         out = st[["variable"]].copy()
         out["rest_vs_movie"] = st["task_d"].abs().to_numpy()
+        fs = fs[fs["film"] != "rest"]                     # film vs film only
         w = fs[fs["within"]].groupby("variable")["d"].apply(lambda x: x.abs().median())
         out["film_vs_film_same_people"] = out["variable"].map(w)
         out["movie_across_cohorts"] = out["variable"].map(coh.groupby("variable")["d"].apply(lambda x: x.abs().median()))
@@ -640,12 +643,20 @@ class Cohorts(StabilityMixin):
     # -- figures 2 and 4: equivalence ----------------------------------------------------------
     def groups(self, by="cohort", tasks="kind", cohort=None):
         """{label: one row per subject} -- what figures 2 and 4 compare.
-        by="cohort": each cohort's movie (the default).
+        by="cohort": each cohort's movie (the default); tasks="all": rest and movie, each person's
+        values averaged over the two conditions they have.
         by="task", tasks="kind": rest vs movie; tasks="film": every movie task (film, episode) apart.
         cohort = one cohort label to stay within; None pools every cohort (a film is then "cohort:film").
         Rest vs movie are often the same people: the tests treat the groups as independent, which is
         conservative for the difference and makes equivalence harder to show, not easier."""
         if by == "cohort":
+            if tasks == "all":                            # rest and movie: each person's mean of the two
+                out = {}
+                for c in self.cfg.cohorts:
+                    parts = [self.data[c, k] for k in ("rest", "movie") if (c, k) in self.data]
+                    if parts:
+                        out[c] = pd.concat(parts).groupby(level=0).mean(numeric_only=True)
+                return out
             return {c: self.data[c, "movie"] for c in self.cfg.cohorts if (c, "movie") in self.data}
         if by != "task":
             raise SystemExit(f'by must be "cohort" or "task", not {by!r}')

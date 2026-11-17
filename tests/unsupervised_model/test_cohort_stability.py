@@ -117,12 +117,21 @@ def test_figure3_draws():
     from fmri_decomposition.figures import cohorts as cp
     co = _toy()
     co.cfg.dynamics = ["switch_rate", "entropy_rate_bits"]
-    marks, _ = co.task_change()
     st = co.stability(["transition_fit", "switch_rate", "entropy_rate_bits"], n_boot=20)
-    pairs, _ = co.replication(balance="time", hours=2, n_boot=10)
-    fig = cp.fig_figure3(co, co.graphs(), marks, st, pairs, co.agreement(co.dyn),
-                         ["transition_fit", "switch_rate", "entropy_rate_bits"])
+    fig = cp.fig_figure3(co, st, ["transition_fit", "switch_rate", "entropy_rate_bits"])
     assert len(fig.axes) > 6
+    pairs, _ = co.replication(balance="time", hours=2, n_boot=10)
+    assert len(cp.fig_replication(co, pairs).axes) == 1
+
+
+def test_films_with_rest_first():
+    co = _toy_films()
+    co.by_task[("b", "rest", "Rest")] = next(iter(co.by_task.values())).copy()
+    F = co.films(rest=True)
+    assert ("b", "rest") in F and list(F)[0] == ("b", "rest") or [k for k in F if k[0] == "b"][0] == ("b", "rest")
+    assert ("b", "rest") not in co.films()
+    fs = co.film_summary(["switch_rate"], rest=True)
+    assert "rest" in set(fs["film"])
 
 
 def test_context_summary_three_comparisons():

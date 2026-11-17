@@ -698,7 +698,7 @@ def fig_films_matrices(co, fs, per_row=6):
     nrow = int(np.ceil(n / per_row))
     fig, axs = plt.subplots(nrow, per_row, figsize=(1.9 * per_row, 2.1 * nrow + .6), squeeze=False)
     mean = np.mean([m["mean"].to_numpy(float) for m in M.values()], axis=0).reshape(K, K)
-    panels = [("mean of the films", mean)] + [(f"{c} · {f}", m["mean"].to_numpy(float).reshape(K, K))
+    panels = [("mean of the tasks", mean)] + [(f"{c} · {f}", m["mean"].to_numpy(float).reshape(K, K))
                                               for (c, f), m in M.items()]
     for k, (title, T) in enumerate(panels):
         ax = axs[k // per_row, k % per_row]
@@ -764,7 +764,7 @@ def _tier_panel(ax, st, variables):
     ax.set_yticks(y, [nice(v) for v in t["variable"]], fontsize=8)
     top = len(t) - .3
     for x, lab in ((.1, "stable"), (.35, "moderate"), (max(.75, d.max() * .7), "context-dependent")):
-        ax.text(x, top, lab, ha="center", fontsize=8, color=TIER_COL[lab])
+        ax.text(x, top + (.45 if lab == "moderate" else 0), lab, ha="center", fontsize=8, color=TIER_COL[lab])
     ax.set_xlim(0, max(1.0, float(d.max()) * 1.1))
     ax.set_ylim(-.7, len(t) + .2)
     ax.set_xlabel("|d| movie vs rest, same people (95% CI)", fontsize=9)
@@ -773,61 +773,44 @@ def _tier_panel(ax, st, variables):
     ax.tick_params(axis="y", length=0)
 
 
-def fig_figure3(co, graphs, marks, st, pairs, agree=None, tier_variables=None):
-    """Manuscript Figure 3 as one figure.
-    A.1 the reference graph (every cohort and condition, each once) with its pace;
-    A.2 movie vs rest in the same people (the 'mean' row of task_change);
-    B   every cohort's movie: occupancy, p(j | i) and the dynamic metrics (mean, 90% CI);
-    C   the transition structure replicates (`replication`, ideally balance="time");
-    D   which properties depend on context (`stability` tiers)."""
+def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0):
+    """Manuscript Figure 3 as one figure, rest and movie together (each person's mean of the
+    conditions they have; `groups(tasks="all")`).
+    A  every cohort: occupancy, p(j | i) and the dynamic metrics (mean, 90% CI);
+    B  the reference transition graph: the mean of the cohorts in A, each cohort once;
+    C  which properties depend on context (`stability` tiers: movie vs rest, same people).
+    font scales every text; diagram_fs the diagram's own (its labels are placed for that size)."""
     from matplotlib.gridspec import GridSpec
 
     cfg, K = co.cfg, co.cfg.K
     col = colours(cfg)
-    cohorts = [c for c in cfg.cohorts if (c, "movie") in graphs]
-    ref = [graphs[k] for k in graphs if k[0] != "mean"]
-    T_ref = np.mean([g[0] for g in ref], axis=0)
-    o_ref = np.mean([g[1] for g in ref], axis=0)
+    G = co.groups(by="cohort", tasks="all")
+    cohorts = list(G)
+    graphs = {c: co._graph(d.mean(numeric_only=True)) for c, d in G.items()}
+    T_ref = np.mean([g[0] for g in graphs.values()], axis=0)
+    o_ref = np.mean([g[1] for g in graphs.values()], axis=0)
     off = [(a, b) for a in range(K) for b in range(K) if a != b]
-    base = sorted(sorted(off, key=lambda e: -T_ref[e])[:cfg.edge_top])
-    wmax, omax = 1.0, 1.0                  # absolute 0-1 scales: arrow width and node area mean the same everywhere
+    edges = sorted(sorted(off, key=lambda e: -T_ref[e])[:cfg.edge_top])
+    agree = co.agreement(co.dyn, groups=G)
 
-    fig = plt.figure(figsize=(17, 21))
-    gs = GridSpec(3, 1, figure=fig, height_ratios=[1, .95, .9], hspace=.28)
-    gA = gs[0].subgridspec(1, 2, width_ratios=[1.3, 1], wspace=.05)
-    ax = fig.add_subplot(gA[0])
-    hp.diagram(ax, T_ref, o_ref, base, wmax, omax)
-    dyn_ref = {v: np.mean([co.data[k][v].mean() for k in co.data]) for v in co.dyn}
-    ax.set_title("A.1  Reference: every cohort and condition, each once\n" +
-                 " · ".join(f"{nice(v)} {dyn_ref[v]:.2f}" for v in co.dyn[:3]), fontsize=11, loc="left")
-    ax = fig.add_subplot(gA[1])
-    if ("mean", "movie") in graphs:
-        t = marks[(marks["cohort"] == "mean") & marks["variable"].isin(co.cells)].set_index("variable").reindex(co.cells)
-        hit = t["hit"].fillna(False).to_numpy(bool).reshape(K, K)
-        nt = np.full((K, K), "", dtype=object)
-        if ("mean", "rest") in graphs:
-            nt = np.vectorize(ht.pp)(graphs["mean", "movie"][0] - graphs["mean", "rest"][0])
-            nt[~hit] = ""
-        edges = sorted(set(base) | {e for e in off if hit[e]})
-        hp.diagram(ax, *graphs["mean", "movie"], edges, wmax, omax, hit_T=hit, note_T=nt, colour=hp.BLUE)
-    ax.set_title("A.2  Movie vs rest, same people\nblue = differs (paired, FDR)", fontsize=11, loc="left")
-
+    fig = plt.figure(figsize=(17, 15))
+    gs = GridSpec(2, 1, figure=fig, height_ratios=[1, 1.15], hspace=.12)
     n = len(cohorts)
-    gB = gs[1].subgridspec(2, n + 1, height_ratios=[.3, 1], width_ratios=[1] * n + [1.3], hspace=.12, wspace=.3)
+    gA = gs[0].subgridspec(2, n + 1, height_ratios=[.35, 1], width_ratios=[1] * n + [1.25], hspace=.25, wspace=.35)
     for i, c in enumerate(cohorts):
-        T, o = graphs[c, "movie"]
-        axo = fig.add_subplot(gB[0, i])
+        T, o = graphs[c]
+        axo = fig.add_subplot(gA[0, i])
         axo.bar(range(K), o, color=col[c], width=.7)
         axo.set_xticks([])
         axo.set_ylim(0, 1)
         axo.set_title(f"{c}{' *' if co.role(c) == 'train' else ''}", fontsize=10)
-        for s in ("top", "right"):
-            axo.spines[s].set_visible(False)
+        for sp in ("top", "right"):
+            axo.spines[sp].set_visible(False)
         axo.tick_params(labelsize=7)
         if i == 0:
             axo.set_ylabel("occupancy", fontsize=8)
-            axo.text(-.35, 1.25, "B", transform=axo.transAxes, fontsize=15, fontweight="bold")
-        axm = fig.add_subplot(gB[1, i])
+            axo.text(-.45, 1.3, "A", transform=axo.transAxes, fontsize=13, fontweight="bold")
+        axm = fig.add_subplot(gA[1, i])
         axm.imshow(T, cmap="Blues", vmin=0, vmax=1)
         axm.set_xticks(range(K))
         axm.set_yticks(range(K))
@@ -835,35 +818,48 @@ def fig_figure3(co, graphs, marks, st, pairs, agree=None, tier_variables=None):
         axm.set_xlabel("to state j", fontsize=8)
         if i == 0:
             axm.set_ylabel("from state i", fontsize=8)
-    if agree is not None:
-        gD = gB[:, n].subgridspec(len(co.dyn), 1, hspace=1.0)
-        labels = list(agree["cohort"].unique())
-        for r_, v in enumerate(co.dyn):
-            axd = fig.add_subplot(gD[r_])
-            t = agree[agree["variable"] == v]
-            for j, rr in enumerate(t.itertuples()):
-                yy = -j * .3
-                axd.plot([rr.mean_lo, rr.mean_hi], [yy, yy], color=col[rr.cohort], lw=1.3)
-                axd.plot(rr.mean, yy, "o", ms=4, color=col[rr.cohort],
-                         mfc=col[rr.cohort] if co.role(rr.cohort) == "train" else "white")
-            axd.set_yticks([])
-            axd.set_ylim(-.3 * len(labels), .3)
-            lo_, hi_ = fixed_range(co, v)
-            if np.isfinite(lo_):
-                axd.set_xlim(lo_, hi_)
-            for s in ("top", "right", "left"):
-                axd.spines[s].set_visible(False)
-            axd.tick_params(labelsize=7)
-            axd.set_title(nice(v), fontsize=8, pad=2)
+    gD = gA[:, n].subgridspec(len(co.dyn), 1, hspace=1.1)
+    for r_, v in enumerate(co.dyn):
+        axd = fig.add_subplot(gD[r_])
+        t = agree[agree["variable"] == v]
+        for j, rr in enumerate(t.itertuples()):
+            yy = -j * .3
+            axd.plot([rr.mean_lo, rr.mean_hi], [yy, yy], color=col[rr.cohort], lw=1.3)
+            axd.plot(rr.mean, yy, "o", ms=4, color=col[rr.cohort],
+                     mfc=col[rr.cohort] if co.role(rr.cohort) == "train" else "white")
+        axd.set_yticks([])
+        axd.set_ylim(-.3 * len(cohorts), .3)
+        lo_, hi_ = fixed_range(co, v)
+        if np.isfinite(lo_):
+            axd.set_xlim(lo_, hi_)
+        for sp in ("top", "right", "left"):
+            axd.spines[sp].set_visible(False)
+        axd.tick_params(labelsize=7)
+        axd.set_title(nice(v), fontsize=8, pad=2)
 
-    gC = gs[2].subgridspec(1, 2, wspace=.55)
-    ax = fig.add_subplot(gC[0])
-    _replication_panel(ax, pairs)
-    ax.set_title("C  The transition structure replicates", fontsize=11, loc="left")
-    ax = fig.add_subplot(gC[1])
+    gB = gs[1].subgridspec(1, 2, width_ratios=[1.25, 1], wspace=.35)
+    ax = fig.add_subplot(gB[0])
+    hp.diagram(ax, T_ref, o_ref, edges, 1.0, 1.0, fs=diagram_fs)
+    ax.text(.0, 1.0, "B", transform=ax.transAxes, fontsize=13, fontweight="bold")
+    ax = fig.add_subplot(gB[1])
     _tier_panel(ax, st, tier_variables or ["transition_fit", *co.dyn, *co.occ])
-    ax.set_title("D  Which properties depend on context", fontsize=11, loc="left")
+    ax.set_title("Which properties depend on context", fontsize=11, loc="left")
+    ax.text(-.55, 1.07, "C", transform=ax.transAxes, fontsize=13, fontweight="bold")
+    for t in fig.findobj(plt.matplotlib.text.Text):              # every text larger, but the diagram's:
+        if t.get_gid() != "scaled":                              # its labels were placed at diagram_fs
+            t.set_fontsize(t.get_fontsize() * font)
     fig.suptitle(f"Figure 3 · {ht.set_label(cfg.space)}", x=.02, ha="left", fontsize=12)
     save(fig, "figure3", cfg)
+    _show(fig)
+    return fig
+
+
+def fig_replication(co, pairs, name="Sd_replication"):
+    """Supplementary: the transition structure replicates (`replication`)."""
+    fig, ax = plt.subplots(figsize=(8, .45 * len(pairs) + 1.6))
+    _replication_panel(ax, pairs)
+    ax.set_title("The transition structure replicates", fontsize=11, loc="left")
+    _bigger(fig, 1.3)
+    save(fig, name, co.cfg)
     _show(fig)
     return fig
