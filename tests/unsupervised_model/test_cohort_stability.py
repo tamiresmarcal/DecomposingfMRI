@@ -215,8 +215,10 @@ def test_aggregation_check_draws():
     matplotlib.use("Agg")
     from fmri_decomposition.figures import cohorts as cp
     co = _toy()
-    fig, st = cp.fig_aggregation_check(co, n_boot=0)
+    fig, st = cp.fig_aggregation_check(co, n_boot=0, measure="rest_movie")
     assert len(fig.axes) == 3
+    fig, st2 = cp.fig_aggregation_check(_toy_films(), n_boot=20)          # omega^2 of task
+    assert st2.attrs["scale"] == "omega2" and len(fig.axes) == 3
     assert {"transition_fit", "occupancy_fit", "dynamics_fit"} <= set(st["variable"])
 
 
@@ -358,3 +360,20 @@ def test_film_summary_survives_an_empty_variable():
     co.by_task[first][v] = np.nan
     fs = co.film_summary([v])
     assert len(fs)
+
+
+def test_task_variation_omega2():
+    co = _toy_films()
+    v = co.dyn[0]
+    rng = np.random.default_rng(0)
+    for (c, k, t), d in co.by_task.items():           # no task effect: values are noise
+        d[v] = rng.normal(0, 1, len(d))
+    st = co.task_variation([v], n_boot=50)
+    assert st.attrs["scale"] == "omega2"
+    assert abs(st.loc[0, "task_d"]) < .1
+    shift = {t: k for k, t in enumerate(sorted({t for _, _, t in co.by_task}))}
+    for (c, k, t), d in co.by_task.items():           # a large task effect
+        d[v] = rng.normal(0, .3, len(d)) + 3 * shift[t]
+    st = co.task_variation([v], n_boot=50)
+    assert st.loc[0, "task_d"] > .5 and st.loc[0, "tier"] == "context-dependent"
+    assert 0 <= st.loc[0, "task_p_tier"] <= 1 and st.loc[0, "task_mean_hi"] > st.loc[0, "task_mean_lo"]

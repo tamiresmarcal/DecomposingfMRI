@@ -827,14 +827,18 @@ def family(v):
 
 
 def _mean_column(ax, t, y, x=1.1):
-    """Mean rest -> movie in the same people, beside each row: is a large |d| a small change?"""
-    ax.text(x, len(t) - .3, "mean\nrest → movie", transform=ax.get_yaxis_transform(), ha="center",
-            va="bottom", fontsize=8, color=hp.INK2)
+    """Beside each row, the values behind the effect: is a large effect a small change? With
+    task_variation, the lowest and highest task mean; with stability, the mean rest -> movie."""
+    rng_ = "task_mean_lo" in t
+    a_col, b_col = ("task_mean_lo", "task_mean_hi") if rng_ else ("task_mean_rest", "task_mean_movie")
+    ax.text(x, len(t) - .3, "task means\nmin – max" if rng_ else "mean\nrest → movie",
+            transform=ax.get_yaxis_transform(), ha="center", va="bottom", fontsize=8, color=hp.INK2)
+    arrow = " – " if rng_ else " → "
     f = lambda a: "" if not np.isfinite(a) else f"{a:.2f}".lstrip("0") if abs(a) < 1 else f"{a:.3g}"
-    for yi, a, b in zip(y, t.get("task_mean_rest", pd.Series(np.nan, index=t.index)),
-                        t.get("task_mean_movie", pd.Series(np.nan, index=t.index))):
+    for yi, a, b in zip(y, t.get(a_col, pd.Series(np.nan, index=t.index)),
+                        t.get(b_col, pd.Series(np.nan, index=t.index))):
         if np.isfinite(a) and np.isfinite(b):
-            ax.text(x, yi, f"{f(a)} → {f(b)}", transform=ax.get_yaxis_transform(), ha="center",
+            ax.text(x, yi, f"{f(a)}{arrow}{f(b)}", transform=ax.get_yaxis_transform(), ha="center",
                     va="center", fontsize=7, color=hp.INK)
 
 
@@ -843,6 +847,8 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
     (difference + tost), "all", or a list (see _p_columns). A thin line separates the families
     (transitions, occupancy, dynamic metrics). A row with too few people scanned in both
     conditions to estimate (NaN) says so, with its n."""
+    omega = st.attrs.get("scale") == "omega2"             # task_variation: omega^2 of task, not |d|
+    cuts = (.01, .06) if omega else (.2, .5)
     t = st.set_index("variable").loc[[v for v in variables if v in set(st["variable"])]].reset_index()
     if sort:   # families in the order given; inside each, the profile r first, then by |d| (top = smallest)
         fam_rank = {f: k for k, f in enumerate(dict.fromkeys(family(v) for v in t["variable"]))}
@@ -853,20 +859,24 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
                             "d": t["task_d"].abs().fillna(np.inf)})
         t = t.loc[key.sort_values(["f", "fit", "src", "d"], kind="stable").index].reset_index(drop=True)
     y = np.arange(len(t))[::-1]
-    ax.axvspan(0, .2, color="#e8f0fb")
-    ax.axvspan(.2, .5, color="#f3f6fb")
-    d = t["task_d"].abs()
+    ax.axvspan(0, cuts[0], color="#e8f0fb")
+    ax.axvspan(cuts[0], cuts[1], color="#f3f6fb")
+    d = t["task_d"].clip(lower=0) if omega else t["task_d"].abs()
     has = t["task_lo"].notna().to_numpy() & t["task_hi"].notna().to_numpy()   # per row: one NaN must not
     if has.any():                                                             # hide every other CI
-        lo = np.minimum(t["task_lo"].abs(), t["task_hi"].abs())
-        hi = np.maximum(t["task_lo"].abs(), t["task_hi"].abs())
-        lo[np.sign(t["task_lo"]) != np.sign(t["task_hi"])] = 0       # the CI crosses 0
+        if omega:
+            lo, hi = t["task_lo"].clip(lower=0), t["task_hi"].clip(lower=0)
+        else:
+            lo = np.minimum(t["task_lo"].abs(), t["task_hi"].abs())
+            hi = np.maximum(t["task_lo"].abs(), t["task_hi"].abs())
+            lo[np.sign(t["task_lo"]) != np.sign(t["task_hi"])] = 0       # the CI crosses 0
         ax.hlines(y[has], lo[has], hi[has], color="#9b9a95", lw=1)
     cols = [TIER_COL.get(x, "#c9c8c2") for x in t["tier"]]
     ax.scatter(d, y, c=cols, s=45, zorder=3, edgecolor="white")
     for yi, dv, n in zip(y, d, t.get("n_paired", pd.Series(np.nan, index=t.index))):
         if not np.isfinite(dv):
-            ax.text(.02, yi, f"too few people with both conditions (n = {int(n) if np.isfinite(n) else 0})",
+            ax.text(cuts[0] / 10, yi, ("too few values to estimate" if omega else
+                                       f"too few people with both conditions (n = {int(n) if np.isfinite(n) else 0})"),
                     va="center", fontsize=6.5, color=hp.MUTED)
     src = [v.split("->")[0] if "->" in v else None for v in t["variable"]]
     for k in range(1, len(src)):                                   # a faint line between source states
@@ -878,11 +888,15 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
             ax.axhline(y[k] + .5, color="#c9c8c2", lw=.8)
     ax.set_yticks(y, [nice(v) for v in t["variable"]], fontsize=8)
     top = len(t) - .3
-    for x, lab in ((.1, "stable"), (.35, "moderate"), (max(.75, d.max() * .7), "context-dependent")):
-        ax.text(x, top, lab, ha="center", fontsize=10, color=TIER_COL[lab], gid="scaled")   # fixed size: fits its band
-    ax.set_xlim(0, max(1.0, float(d.max()) * 1.1))
+    xmax = max(cuts[1] * 2, float(np.nanmax(np.r_[d.to_numpy(float), 0])) * 1.1)
+    for x, lab in ((cuts[0] / 2, "stable"), ((cuts[0] + cuts[1]) / 2, "moderate"),
+                   (max(cuts[1] * 1.5, (cuts[1] + xmax) / 2), "task-dependent" if omega else "context-dependent")):
+        ax.text(x, top, lab, ha="center", fontsize=10, color=TIER_COL["context-dependent" if lab == "task-dependent" else lab],
+                gid="scaled")                                                       # fixed size: fits its band
+    ax.set_xlim(0, xmax)
     ax.set_ylim(-.7, len(t) + .2)
-    ax.set_xlabel("|d| movie vs rest, same people (95% CI)", fontsize=9)
+    ax.set_xlabel("variance explained by task, ω² (95% CI)" if omega else
+                  "|d| movie vs rest, same people (95% CI)", fontsize=9)
     for s in ("top", "right", "left"):
         ax.spines[s].set_visible(False)
     ax.tick_params(axis="y", length=0)
@@ -991,7 +1005,7 @@ def fig_replication(co, pairs, name="Sd_replication"):
 
 
 def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation", pvalue=None, test="tier",
-                          means=True):
+                          means=True, measure="task"):
     """Does one number per family lose information? Movie vs rest |d_av| (same people, 95% CI); transitions
     on the left, dynamic metrics over occupancy on the right: the family's profile r with the reference on top, then every member of the family --
     transitions p(j | i) (rows of states with mean occupancy >= min_occ), occupancy of each state,
@@ -1000,7 +1014,9 @@ def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation
     keep = [c for c in co.cells if occ[int(c.split("->")[0])] >= min_occ]
     fams = [("Transitions", "transition_fit", keep), ("Dynamic metrics", "dynamics_fit", list(co.dyn)),
             ("Occupancy", "occupancy_fit", list(co.occ))]
-    st = co.stability([v for _, f, m in fams for v in [f, *m]], n_boot=n_boot)
+    vs = [v for _, f, m in fams for v in [f, *m]]
+    st = co.task_variation(vs, n_boot=n_boot) if measure == "task" else co.stability(vs, n_boot=n_boot)
+    # measure: "task" = omega^2 of task, every task of every cohort; "rest_movie" = |d_av| (old)
     from matplotlib.gridspec import GridSpec
     h = [len(m) + 1 for _, _, m in fams]
     fig = plt.figure(figsize=(16 if means else 14, max(6, .2 * h[0] + 2)))
@@ -1013,7 +1029,8 @@ def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation
         ax.set_title(title, fontsize=12, loc="left")
         ax.tick_params(axis="y", labelsize=7 if len(members) > 20 else 9)
     axs[1].set_xlabel("")                                      # one x label in the right column, at the bottom
-    fig.suptitle(f"Aggregation check · {ht.set_label(co.cfg.space)} · |d_av| movie vs rest", x=.02, ha="left", fontsize=12)
+    what = "ω² of task, every task of every cohort" if measure == "task" else "|d_av| movie vs rest"
+    fig.suptitle(f"Aggregation check · {ht.set_label(co.cfg.space)} · {what}", x=.02, ha="left", fontsize=12)
     save(fig, name, co.cfg)
     _show(fig)
     return fig, st

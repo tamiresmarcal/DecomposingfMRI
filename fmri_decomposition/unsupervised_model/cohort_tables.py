@@ -324,6 +324,88 @@ class StabilityMixin:
                                np.select([a < .2, a < .5], ["stable", "moderate"], "context-dependent"))
         return out
 
+    def task_variation(self, variables=None, n_boot=2000, seed=0):
+        """How much each property depends on the TASK: every task of every cohort, rest included as
+        one task (`films(rest=True)`, so the halves of an episode are one task). One row per variable.
+
+        omega^2 (Hays) of task within cohort: the share of the variance between person x task values
+        that the task explains, after each cohort's own mean is removed (so scanner and population,
+        shown per cohort in Figure 3 top, are not counted as a task effect). omega^2 rather than
+        eta^2: eta^2 is inflated when tasks have few people (NNDb films, CNeuroMod episodes).
+            omega^2 = (SS_task - df_task MS_within) / (SS_task + SS_within + MS_within),
+        sums over cohorts, df_task = sum_c (tasks_c - 1). Values are treated as independent, which
+        is conservative for cohorts whose people did several tasks (HCP, CNeuroMod).
+        Tiers (Cohen 1988, the variance-explained form of d = .2 / .5): < .01 stable,
+        .01-.06 moderate, >= .06 task-dependent. 95% CI and P(tier) from n_boot resamples of people
+        within each cohort (a person keeps all their tasks).
+        Columns named as `stability` (task_d = omega^2, task_lo, task_hi, tier, task_p_tier), plus
+        task_mean_lo / task_mean_hi: the lowest and highest task mean. st.attrs["scale"] = "omega2"."""
+        if variables is None:
+            variables = ["transition_fit", "occupancy_fit", *self.dyn, *self.occ]
+        for f in ("transition_fit", "occupancy_fit", "dynamics_fit"):
+            if f in variables:
+                getattr(self, f)()
+        F = self.films(rest=True)
+        L = pd.concat([d.reindex(columns=variables).assign(_c=c, _t=t, _s=[f"{c}:{x}" for x in d.index])
+                       for (c, t), d in F.items()], ignore_index=True)
+        X = L[variables].to_numpy(float)
+        valid = np.isfinite(X)
+        X0 = np.where(valid, X, 0.0)
+        g_id, g_lab = pd.factorize(L["_c"] + "|" + L["_t"])                 # task groups
+        c_of_g = pd.factorize(pd.Series(g_lab).str.split("|").str[0])[0]     # their cohort
+        n_c = c_of_g.max() + 1
+        s_id, s_lab = pd.factorize(L["_s"])                                  # people
+        s_coh = pd.factorize(pd.Series(s_lab).str.split(":").str[0])[0]
+
+        def omega(w):                                       # w: weight per row (bootstrap multiplicity)
+            W = valid * w[:, None]
+            G = len(g_lab)
+            n_g, S_g, Q_g = (np.zeros((G, X.shape[1])) for _ in range(3))
+            np.add.at(n_g, g_id, W)
+            np.add.at(S_g, g_id, W * X0)
+            np.add.at(Q_g, g_id, W * X0 ** 2)
+            n_cc, S_c = np.zeros((n_c, X.shape[1])), np.zeros((n_c, X.shape[1]))
+            np.add.at(n_cc, c_of_g, n_g)
+            np.add.at(S_c, c_of_g, S_g)
+            with np.errstate(invalid="ignore", divide="ignore"):
+                ss_w = np.nansum(np.where(n_g > 0, Q_g - S_g ** 2 / n_g, 0), 0)
+                ss_b = np.nansum(np.where(n_g > 0, S_g ** 2 / n_g, 0), 0) - np.nansum(
+                    np.where(n_cc > 0, S_c ** 2 / n_cc, 0), 0)
+                T_c = np.zeros((n_c, X.shape[1]))
+                np.add.at(T_c, c_of_g, (n_g > 0).astype(float))
+                df_b = np.where(T_c > 0, T_c - 1, 0).sum(0)
+                df_w = n_g.sum(0) - T_c.sum(0)
+                ms_w = ss_w / df_w
+                om = (ss_b - df_b * ms_w) / (ss_b + ss_w + ms_w)
+                means = np.where(n_g >= 2, S_g / n_g, np.nan)
+            om[(df_b < 1) | (df_w < 1)] = np.nan
+            return om, means
+
+        om, means = omega(np.ones(len(L)))
+        rng = np.random.default_rng(seed)
+        boots = []
+        subs_by_c = [np.flatnonzero(s_coh == k) for k in range(s_coh.max() + 1)]
+        for _ in range(n_boot):
+            m = np.zeros(len(s_lab))
+            for idx in subs_by_c:
+                np.add.at(m, rng.choice(idx, len(idx)), 1)
+            boots.append(omega(m[s_id])[0])
+        B = np.array(boots) if n_boot else np.empty((0, len(variables)))
+        cuts = (.01, .06)
+        tier = lambda a: np.digitize(a, cuts)
+        out = pd.DataFrame({
+            "variable": variables, "task_d": om,
+            "task_lo": np.nanpercentile(B, 2.5, axis=0) if n_boot else np.nan,
+            "task_hi": np.nanpercentile(B, 97.5, axis=0) if n_boot else np.nan,
+            "task_p_tier": ([float(np.mean(tier(B[:, k]) == tier(om[k]))) if np.isfinite(om[k]) else np.nan
+                             for k in range(len(variables))] if n_boot else np.nan),
+            "task_mean_lo": np.nanmin(means, 0), "task_mean_hi": np.nanmax(means, 0),
+            "n_tasks": (np.isfinite(means)).sum(0), "n_paired": valid.sum(0)})
+        out["tier"] = np.where(np.isnan(om), "n/a",
+                               np.select([om < cuts[0], om < cuts[1]], ["stable", "moderate"], "context-dependent"))
+        out.attrs["scale"] = "omega2"
+        return out
+
     def replication(self, kind="movie", n_split=20, min_occ=0.01, seed=0, balance=None, hours=10.0,
                     n_boot=200, versus="pairs"):
         """Does the transition STRUCTURE replicate across cohorts, whatever their levels?
