@@ -260,3 +260,33 @@ def test_stability_survives_a_variable_missing_in_a_cohort():
             co.data[key][v] = np.nan                       # e.g. a row no one in this cohort leaves
     st = co.stability([v, "transition_fit"], n_boot=20)
     assert len(st) == 2
+
+
+def test_load_pools_counts_per_person(tmp_path):
+    """p(j | i) from counts summed over a person's scans; a row they never leave is NaN, not 0."""
+    K = 2
+    cells = [f"{i}->{j}" for i in range(K) for j in range(K)]
+
+    def scan(sub, task, C):
+        C = np.asarray(C, float)
+        n = C.sum()
+        return {"sub": sub, "task": task, **dict(zip(cells, C.ravel() / n)), "n_transitions": n,
+                "occ_0": .5, "occ_1": .5, "switch_rate": .2, "n_windows": n + 1, "stride_s": 6.0}
+
+    rest = pd.DataFrame([scan("A", "rest", [[9, 1], [0, 0]]),        # A never leaves 1 in run 1
+                         scan("A", "rest", [[0, 0], [2, 8]]),
+                         scan("B", "rest", [[10, 0], [0, 0]])])       # B never visits 1 at all
+    movie = pd.DataFrame([scan("A", "movie", [[5, 5], [5, 5]]), scan("B", "movie", [[5, 5], [5, 5]])])
+    files = {"rest": [tmp_path / "r.parquet"], "movie": [tmp_path / "m.parquet"]}
+    rest.to_parquet(files["rest"][0])
+    movie.to_parquet(files["movie"][0])
+    co = ct.Cohorts.__new__(ct.Cohorts)
+    co.cfg = ct.Settings(space=dict(atlas="x", window_s=30.0, states="HMM2_umap3_2"),
+                         cohorts={"c": dict(dirs=["c"], role="train")}, dynamics=["switch_rate"],
+                         min_out_transitions=5)
+    co._files = lambda label: files
+    data = co._load()
+    r = data["c", "rest"]
+    assert np.isclose(r.loc["A", "0->1"], .1) and np.isclose(r.loc["A", "1->0"], .2)   # pooled, not averaged
+    assert np.isnan(r.loc["B", "1->0"]) and np.isnan(r.loc["B", "1->1"])              # never left 1: NaN
+    assert np.isclose(r.loc["B", "0->0"], 1.0)

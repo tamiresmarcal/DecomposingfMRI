@@ -826,11 +826,12 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier"):
     ax.axvspan(0, .2, color="#e8f0fb")
     ax.axvspan(.2, .5, color="#f3f6fb")
     d = t["task_d"].abs()
-    if t["task_lo"].notna().all():
+    has = t["task_lo"].notna().to_numpy() & t["task_hi"].notna().to_numpy()   # per row: one NaN must not
+    if has.any():                                                             # hide every other CI
         lo = np.minimum(t["task_lo"].abs(), t["task_hi"].abs())
         hi = np.maximum(t["task_lo"].abs(), t["task_hi"].abs())
         lo[np.sign(t["task_lo"]) != np.sign(t["task_hi"])] = 0       # the CI crosses 0
-        ax.hlines(y, lo, hi, color="#9b9a95", lw=1)
+        ax.hlines(y[has], lo[has], hi[has], color="#9b9a95", lw=1)
     cols = [TIER_COL.get(x, "#c9c8c2") for x in t["tier"]]
     sure = (t["task_p_tier"] >= TIER_SOLID).to_numpy() if t.get("task_p_tier", pd.Series(dtype=float)).notna().any() \
         else np.ones(len(t), bool)

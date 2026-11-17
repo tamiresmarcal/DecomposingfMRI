@@ -71,8 +71,8 @@ class Settings:
     #, from its transition counts; "min" = the shortest scan read, so none is lost.
     # Scans shorter than the target are NaN.
     distinct_minutes: float | str | None = None
-    # p(j | i) of a state left fewer times than this in a scan is NaN (not 0): a person who never
-    # visits state i says nothing about where i leads. 0 = the old behaviour (empty rows are 0).
+    # a person's p(j | i) comes from their counts summed over scans; row i is NaN (not 0) when they
+    # leave state i fewer times than this in all: never visiting i says nothing about where i leads.
     min_out_transitions: int = 5
 
     @property
@@ -603,24 +603,30 @@ class Cohorts(StabilityMixin):
             u["minutes"] = ((d["n_windows"] * d["stride_s"]).astype(float) / 60
                             if {"n_windows", "stride_s"} <= set(d) else np.nan)
             units.append(u.assign(cohort=label, kind=kind))
-            # outgoing transitions per state: a row with fewer than min_out_transitions is not a
-            # 0 probability but no information -- NaN, so p(j | i) never mixes in occupancy
-            out_n = (d[self.cells].to_numpy(float) * d["n_transitions"].to_numpy(float)[:, None]
-                     ).reshape(len(d), K, K).sum(2)
-            d[self.cells] = ht.as_p_cond(d, K)
-            if self.cfg.min_out_transitions:
-                Pm = d[self.cells].to_numpy(float).reshape(len(d), K, K)
-                Pm[out_n < self.cfg.min_out_transitions] = np.nan
-                d[self.cells] = Pm.reshape(len(d), -1)
-            P = d[self.cells].to_numpy(float).reshape(len(d), K, K)        # each subject's row entropies
-            with np.errstate(divide="ignore", invalid="ignore"):
-                H = -np.where(P > 0, P * np.log2(P), 0).sum(2)
-            H[~(np.nansum(P, 2) > 0) | np.isnan(P).any(2)] = np.nan       # a state left too rarely
-            d[self.row_h] = H
-            cols = [*self.cells, *self.occ, *self.row_h, *[v for v in self.cfg.dynamics if v in d]]
-            # the scan time used: windows x their stride (provenance written by `transitions`), summed
+            # p(j | i) per PERSON, from the transition counts summed over their scans (runs, films)
+            # -- not a mean of per-scan p(j | i): a scan that never leaves state i has no row i, and
+            # averaging it in as 0 mixed occupancy into the transitions. A person who leaves state i
+            # fewer than min_out_transitions times in all their scans together gets NaN for row i.
+            C = d[self.cells].to_numpy(float) * d["n_transitions"].to_numpy(float)[:, None]
+            counts = pd.DataFrame(C, columns=self.cells, index=d.index)
+            other = [*self.occ, *[v for v in self.cfg.dynamics if v in d]]
             d["scan_s"] = (d["n_windows"] * d["stride_s"]).astype(float) if {"n_windows", "stride_s"} <= set(d) else np.nan
-            per_sub = lambda t: t.groupby("sub")[cols].mean().assign(scan_s=t.groupby("sub")["scan_s"].sum(min_count=1))
+            m_out = self.cfg.min_out_transitions
+
+            def per_sub(t):
+                g = t.groupby("sub")
+                out = g[other].mean()
+                Cs = counts.loc[t.index].groupby(t["sub"]).sum().loc[out.index].to_numpy(float).reshape(len(out), K, K)
+                n_out = Cs.sum(2, keepdims=True)
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    P = np.where(n_out > 0, Cs / np.where(n_out > 0, n_out, 1), np.nan)
+                    P[(n_out < max(m_out, 1)).repeat(K, 2)] = np.nan
+                    H = -np.where(P > 0, P * np.log2(P), 0).sum(2)
+                H[np.isnan(P).any(2)] = np.nan                           # H(p(. | i)) per state i
+                out[self.cells] = P.reshape(len(out), -1)
+                out[self.row_h] = H
+                return out[[*self.cells, *self.occ, *self.row_h, *[v for v in other if v not in self.occ]]].assign(
+                    scan_s=g["scan_s"].sum(min_count=1))
             data[label, kind] = per_sub(d)
             for task, t in d.groupby(d["task"].astype(str)):              # and one table per task (film)
                 self.by_task[label, kind, task] = per_sub(t)
