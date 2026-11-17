@@ -233,3 +233,18 @@ def test_p_value_columns():
         heads = [t for t in fig.axes[-1].texts if t.get_text().startswith("p\n")]
         assert len(heads) == n_cols
     assert cp.stars(.0005) == "***" and cp.stars(.2) == "" and cp.fmt_p(.0004) == "<.001"
+
+
+
+def test_tier_probability():
+    import matplotlib
+    matplotlib.use("Agg")
+    from fmri_decomposition.figures import cohorts as cp
+    co = _toy()
+    st = co.stability(["transition_fit", "switch_rate", "entropy_rate_bits"], n_boot=200)
+    assert st["task_p_tier"].between(0, 1).all()
+    assert (ct._tier_index(np.array([.1, .3, .9])) == [0, 1, 2]).all()
+    fig = cp.fig_figure3(co, st, ["transition_fit", "switch_rate", "entropy_rate_bits"], pvalue="exact")
+    assert [t for t in fig.axes[-1].texts if t.get_text() == "P(tier)"]
+    assert cp.tier_stars(.96) == "**" and cp.tier_stars(.5) == ""
+    assert co.stability(["switch_rate"], n_boot=0)["task_p_tier"].isna().all()

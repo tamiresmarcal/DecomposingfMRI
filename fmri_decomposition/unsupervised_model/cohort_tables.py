@@ -80,6 +80,14 @@ class Settings:
         return ht.n_states(self.space["states"])
 
 
+TIER_CUTS = (0.2, 0.5)                                   # |d|: stable < .2 <= moderate < .5 <= context-dependent
+
+
+def _tier_index(a):
+    """0 stable, 1 moderate, 2 context-dependent (Cohen's small / medium cuts on |d|)."""
+    return np.digitize(a, TIER_CUTS)
+
+
 def _scan_minutes(d: pd.DataFrame) -> pd.Series:
     if not {"n_windows", "stride_s"} <= set(d):
         raise SystemExit("distinct_minutes needs n_windows and stride_s in the transition tables")
@@ -265,6 +273,9 @@ class StabilityMixin:
                        between_equivalent=bool(agr.loc[agr["variable"] == v, "equivalent"].all()),
                        task_d=d_av, task_lo=np.nanpercentile(bd, 2.5) if n_boot else np.nan,
                        task_hi=np.nanpercentile(bd, 97.5) if n_boot else np.nan,
+                       # confidence in the tier: share of bootstrap |d| in the observed |d|'s tier
+                       task_p_tier=(float(np.mean(_tier_index(np.abs(np.asarray(bd, float)))
+                                                  == _tier_index(abs(d_av)))) if n_boot else np.nan),
                        task_equivalent=bool((diff.mean() - h > -bound) and (diff.mean() + h < bound)),
                        task_p=stats.ttest_rel(mv_[ok], rv[ok]).pvalue, n_paired=int(ok.sum()),
                        # TOST: both one-sided tests against +-bound must reject; p = the larger

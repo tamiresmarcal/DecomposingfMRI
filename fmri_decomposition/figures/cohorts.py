@@ -768,11 +768,22 @@ def _replication_panel(ax, pairs):
     ax.set_axisbelow(True)
 
 
-P_COLS = {"difference": ("task_p_fdr", "difference"), "tost": ("task_p_tost_fdr", "equivalence")}
+P_COLS = {"difference": ("task_p_fdr", "p\ndifference"), "tost": ("task_p_tost_fdr", "p\nequivalence"),
+          "tier": ("task_p_tier", "P(tier)")}
+TIER_STARS = (.90, .95, .99)                              # P(tier) for *, **, ***
+TIER_SOLID = .95                                          # a filled marker: P(tier) at least this
 
 
 def stars(p):
     return "" if not np.isfinite(p) else "***" if p < .001 else "**" if p < .01 else "*" if p < .05 else ""
+
+
+def tier_stars(p):
+    return "" if not np.isfinite(p) else "*" * int(sum(p >= c for c in TIER_STARS))
+
+
+def fmt_tier(p):
+    return "" if not np.isfinite(p) else f"{p:.2f}"
 
 
 def fmt_p(p):
@@ -782,21 +793,34 @@ def fmt_p(p):
 
 
 def _p_columns(ax, t, y, pvalue, tests):
-    """p-values (BH-FDR) right of the panel, one column per test: exact, or stars (* <.05,
-    ** <.01, *** <.001). difference = paired t-test movie vs rest; equivalence = TOST at
-    +-sesoi_d SD (a small p = shown to lie within the bounds, i.e. stable)."""
+    """Confidence right of the panel, one column per test, exact or as stars.
+    tier: P(tier), the share of bootstrap |d| in the tier of the observed |d| (stars: * >= .90,
+          ** >= .95, *** >= .99);
+    difference: paired t-test movie vs rest, BH-FDR (* <.05, ** <.01, *** <.001);
+    tost: equivalence at +-sesoi_d SD, BH-FDR (a small p = within the bounds, i.e. stable)."""
     for k, test in enumerate(tests):
         col, head = P_COLS[test]
+        if col not in t:
+            continue
         x = 1.07 + .22 * k
-        ax.text(x, len(t) - .3, f"p\n{head}", transform=ax.get_yaxis_transform(), ha="center",
+        ax.text(x, len(t) - .3, head, transform=ax.get_yaxis_transform(), ha="center",
                 va="bottom", fontsize=8, color=hp.INK2)
+        fmt = {("tier", "stars"): tier_stars, ("tier", "exact"): fmt_tier}.get(
+            (test, pvalue), stars if pvalue == "stars" else fmt_p)
         for yi, p in zip(y, t[col].to_numpy(float)):
-            ax.text(x, yi, (stars if pvalue == "stars" else fmt_p)(p), transform=ax.get_yaxis_transform(),
+            ax.text(x, yi, fmt(p), transform=ax.get_yaxis_transform(),
                     ha="center", va="center", fontsize=8 if pvalue == "exact" else 10, color=hp.INK)
 
 
-def _tier_panel(ax, st, variables, pvalue=None, test="both"):
-    """pvalue: None, "exact" or "stars"; test: "difference", "tost" or "both" (see _p_columns)."""
+def _tests(test):
+    return {"both": ["difference", "tost"], "all": ["tier", "difference", "tost"]}.get(
+        test, [test] if isinstance(test, str) else list(test))
+
+
+def _tier_panel(ax, st, variables, pvalue=None, test="tier"):
+    """pvalue: None, "exact" or "stars"; test: "tier" (P(tier)), "difference", "tost", "both"
+    (difference + tost), "all", or a list (see _p_columns). Marker filled when P(tier) >= TIER_SOLID,
+    hollow when the tier is uncertain (and filled for all when P(tier) was not computed)."""
     t = st.set_index("variable").loc[[v for v in variables if v in set(st["variable"])]].reset_index()
     y = np.arange(len(t))[::-1]
     ax.axvspan(0, .2, color="#e8f0fb")
@@ -807,7 +831,12 @@ def _tier_panel(ax, st, variables, pvalue=None, test="both"):
         hi = np.maximum(t["task_lo"].abs(), t["task_hi"].abs())
         lo[np.sign(t["task_lo"]) != np.sign(t["task_hi"])] = 0       # the CI crosses 0
         ax.hlines(y, lo, hi, color="#9b9a95", lw=1)
-    ax.scatter(d, y, c=[TIER_COL[x] for x in t["tier"]], s=45, zorder=3, edgecolor="white")
+    cols = [TIER_COL[x] for x in t["tier"]]
+    sure = (t["task_p_tier"] >= TIER_SOLID).to_numpy() if t.get("task_p_tier", pd.Series(dtype=float)).notna().any() \
+        else np.ones(len(t), bool)
+    ax.scatter(d[sure], y[sure], c=[c for c, k in zip(cols, sure) if k], s=45, zorder=3, edgecolor="white")
+    ax.scatter(d[~sure], y[~sure], facecolor="white", edgecolor=[c for c, k in zip(cols, sure) if not k],
+               s=45, zorder=3, linewidth=1.5)
     ax.set_yticks(y, [nice(v) for v in t["variable"]], fontsize=8)
     top = len(t) - .3
     for x, lab in ((.1, "stable"), (.35, "moderate"), (max(.75, d.max() * .7), "context-dependent")):
@@ -819,11 +848,11 @@ def _tier_panel(ax, st, variables, pvalue=None, test="both"):
         ax.spines[s].set_visible(False)
     ax.tick_params(axis="y", length=0)
     if pvalue:
-        _p_columns(ax, t, y, pvalue, ["difference", "tost"] if test == "both" else [test])
+        _p_columns(ax, t, y, pvalue, _tests(test))
 
 
 def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupancy="each", name="figure3",
-                pvalue=None, test="both"):
+                pvalue=None, test="tier"):
     """Manuscript Figure 3 as one figure, rest and movie together (each person's mean of the
     conditions they have; `groups(tasks="all")`).
     A  every cohort: occupancy, p(j | i) and the dynamic metrics (mean, 90% CI);
@@ -833,7 +862,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     occupancy="each": C lists every state's occupancy; "fit": one row, the occupancy profile's
     correlation with the reference (`occupancy_fit`; st must include it).
     pvalue / test: the p-value column(s) right of C (`_tier_panel`): None, "exact" or "stars";
-    "difference" (paired t), "tost" (equivalence) or "both"."""
+    "tier" (P(tier), default), "difference" (paired t), "tost" (equivalence), "both", "all"."""
     from matplotlib.gridspec import GridSpec
 
     cfg, K = co.cfg, co.cfg.K
@@ -917,7 +946,7 @@ def fig_replication(co, pairs, name="Sd_replication"):
     return fig
 
 
-def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation", pvalue=None, test="both"):
+def fig_aggregation_check(co, n_boot=2000, min_occ=0.01, name="check_aggregation", pvalue=None, test="tier"):
     """Does one number per family lose information? Movie vs rest |d_av| (same people, 95% CI), three
     panels: the family's profile r with the reference on top, then every member of the family --
     transitions p(j | i) (rows of states with mean occupancy >= min_occ), occupancy of each state,
