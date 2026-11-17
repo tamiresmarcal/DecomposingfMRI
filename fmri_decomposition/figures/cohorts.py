@@ -3,6 +3,7 @@ dynamics column are notebook 10's (figures.hads), with all their label rules."""
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy import stats
 from matplotlib.lines import Line2D
 
 from fmri_decomposition.figures import hads as hp
@@ -817,10 +818,19 @@ def _tests(test):
         test, [test] if isinstance(test, str) else list(test))
 
 
+def family(v):
+    if v == "transition_fit" or "->" in v:
+        return "transitions"
+    if v == "occupancy_fit" or v.startswith("occ_"):
+        return "occupancy"
+    return "dynamics"
+
+
 def _tier_panel(ax, st, variables, pvalue=None, test="tier"):
     """pvalue: None, "exact" or "stars"; test: "tier" (P(tier)), "difference", "tost", "both"
-    (difference + tost), "all", or a list (see _p_columns). Marker filled when P(tier) >= TIER_SOLID,
-    hollow when the tier is uncertain (and filled for all when P(tier) was not computed)."""
+    (difference + tost), "all", or a list (see _p_columns). A thin line separates the families
+    (transitions, occupancy, dynamic metrics). A row with too few people scanned in both
+    conditions to estimate (NaN) says so, with its n."""
     t = st.set_index("variable").loc[[v for v in variables if v in set(st["variable"])]].reset_index()
     y = np.arange(len(t))[::-1]
     ax.axvspan(0, .2, color="#e8f0fb")
@@ -833,11 +843,15 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier"):
         lo[np.sign(t["task_lo"]) != np.sign(t["task_hi"])] = 0       # the CI crosses 0
         ax.hlines(y[has], lo[has], hi[has], color="#9b9a95", lw=1)
     cols = [TIER_COL.get(x, "#c9c8c2") for x in t["tier"]]
-    sure = (t["task_p_tier"] >= TIER_SOLID).to_numpy() if t.get("task_p_tier", pd.Series(dtype=float)).notna().any() \
-        else np.ones(len(t), bool)
-    ax.scatter(d[sure], y[sure], c=[c for c, k in zip(cols, sure) if k], s=45, zorder=3, edgecolor="white")
-    ax.scatter(d[~sure], y[~sure], facecolor="white", edgecolor=[c for c, k in zip(cols, sure) if not k],
-               s=45, zorder=3, linewidth=1.5)
+    ax.scatter(d, y, c=cols, s=45, zorder=3, edgecolor="white")
+    for yi, dv, n in zip(y, d, t.get("n_paired", pd.Series(np.nan, index=t.index))):
+        if not np.isfinite(dv):
+            ax.text(.02, yi, f"too few people with both conditions (n = {int(n) if np.isfinite(n) else 0})",
+                    va="center", fontsize=6.5, color=hp.MUTED)
+    fam = [family(v) for v in t["variable"]]
+    for k in range(1, len(fam)):
+        if fam[k] != fam[k - 1]:
+            ax.axhline(y[k] + .5, color="#c9c8c2", lw=.8)
     ax.set_yticks(y, [nice(v) for v in t["variable"]], fontsize=8)
     top = len(t) - .3
     for x, lab in ((.1, "stable"), (.35, "moderate"), (max(.75, d.max() * .7), "context-dependent")):
@@ -884,7 +898,10 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     for i, c in enumerate(cohorts):
         T, o = graphs[c]
         axo = fig.add_subplot(gA[0, i])
-        axo.bar(range(K), o, color=col[c], width=.7)
+        oc = G[c][co.occ]                                    # 95% CI of the mean over the cohort's people
+        h = stats.t.ppf(.975, np.maximum(oc.count() - 1, 1)) * oc.std(ddof=1) / np.sqrt(oc.count())
+        axo.bar(range(K), o, color=col[c], width=.7, yerr=h.to_numpy(float),
+                error_kw=dict(ecolor=hp.INK2, elinewidth=1, capsize=2))
         axo.set_xticks([])
         axo.set_ylim(0, 1)
         axo.set_title(f"{cname(c)}{' *' if co.role(c) == 'train' else ''}", fontsize=10)
@@ -909,7 +926,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
             yy = -j * .3
             axd.plot([rr.mean_lo, rr.mean_hi], [yy, yy], color=col[rr.cohort], lw=1.3)
             axd.plot(rr.mean, yy, "o", ms=4, color=col[rr.cohort],
-                     mfc=col[rr.cohort] if co.role(rr.cohort) == "train" else "white")
+                     mfc=col[rr.cohort])
         axd.set_yticks([])
         axd.set_ylim(-.3 * len(cohorts), .3)
         lo_, hi_ = fixed_range(co, v)
@@ -926,7 +943,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     co.diagram_p_min = min(T_ref[e] for e in edges)       # for the legend: the thinnest arrow drawn
     ax = fig.add_subplot(gB[1])
     occ = co.occ if occupancy == "each" else ["occupancy_fit"]
-    _tier_panel(ax, st, tier_variables or ["transition_fit", *co.dyn, *occ], pvalue, test)
+    _tier_panel(ax, st, tier_variables or ["transition_fit", *occ, *co.dyn], pvalue, test)
     for t in fig.findobj(plt.matplotlib.text.Text):              # every text larger, but the diagram's:
         if t.get_gid() != "scaled":                              # its labels were placed at diagram_fs
             t.set_fontsize(t.get_fontsize() * font)

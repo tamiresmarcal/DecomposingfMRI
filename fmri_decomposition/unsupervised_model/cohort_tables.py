@@ -172,6 +172,17 @@ class StabilityMixin:
             d["transition_fit"] = fit
         return "transition_fit"
 
+    def row_coverage(self):
+        """Per (cohort, rest|movie) and state i: people, how many have p(j | i) (left i at least
+        min_out_transitions times over their scans), and the mean occupancy of i. Why a transition
+        row can be missing from the movie-vs-rest comparison."""
+        rows = []
+        for (c, k), d in self.data.items():
+            for i in range(self.cfg.K):
+                rows.append(dict(cohort=c, kind=k, state=i, people=len(d),
+                                 with_row=int(d[f"{i}->{i}"].notna().sum()), occupancy=d[f"occ_{i}"].mean()))
+        return pd.DataFrame(rows)
+
     def occupancy_fit(self):
         """Per subject and scan kind: Pearson r between the subject's occupancy (share of time in
         each state) and the reference occupancy (the mean over every cohort and both kinds, each
