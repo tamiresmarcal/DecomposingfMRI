@@ -254,9 +254,19 @@ class StabilityMixin:
         rows = []
         for v in vs:
             cv = coh[coh["variable"] == v]
-            i = cv["d"].abs().idxmax()
+            if cv["d"].notna().any():
+                i = cv["d"].abs().idxmax()
+            else:                                         # no cohort comparable: keep the row, NaN
+                cv = cv.assign(d=np.nan, hi=np.nan).iloc[:1]
+                i = cv.index[0]
             rv, mv_ = r[v].to_numpy(float), m[v].to_numpy(float)
             ok = np.isfinite(rv) & np.isfinite(mv_)
+            if ok.sum() < 3:                              # too few people with both: nothing to estimate
+                rows.append(dict(variable=v, between_d=abs(cv.loc[i, "d"]), between_cohort=cv.loc[i, "cohort"],
+                                 between_equivalent=False, task_d=np.nan, task_lo=np.nan, task_hi=np.nan,
+                                 task_p_tier=np.nan, task_equivalent=False, task_p=np.nan, task_p_tost=np.nan,
+                                 n_paired=int(ok.sum()), icc=np.nan, icc_lo=np.nan, icc_hi=np.nan))
+                continue
             d_av = _paired(pd.Series(rv[ok]), pd.Series(mv_[ok]))
             bd = [_paired(pd.Series(rv[b][ok[b]]), pd.Series(mv_[b][ok[b]])) for b in boot]
             diff = (mv_ - rv)[ok]
@@ -293,7 +303,8 @@ class StabilityMixin:
         out["task_p_tost_fdr"] = stats.false_discovery_control(out["task_p_tost"].fillna(1))
         out["stable"] = out["between_equivalent"] & out["task_equivalent"]
         a = out["task_d"].abs()
-        out["tier"] = np.select([a < .2, a < .5], ["stable", "moderate"], "context-dependent")
+        out["tier"] = np.where(a.isna(), "n/a",
+                               np.select([a < .2, a < .5], ["stable", "moderate"], "context-dependent"))
         return out
 
     def replication(self, kind="movie", n_split=20, min_occ=0.01, seed=0, balance=None, hours=10.0,
@@ -753,6 +764,12 @@ class Cohorts(StabilityMixin):
             bound = self.cfg.sesoi_d * mv[v].std()
             for label in mv["cohort"].unique():
                 a, b = mv.loc[mv["cohort"] == label, v].dropna(), mv.loc[mv["cohort"] != label, v].dropna()
+                if len(a) < 2 or len(b) < 2:
+                    rows.append(dict(variable=v, cohort=label, n=len(a), diff=np.nan, lo=np.nan, hi=np.nan,
+                                     bound=bound, equivalent=False, mean=a.mean() if len(a) else np.nan,
+                                     mean_lo=np.nan, mean_hi=np.nan, others=b.mean() if len(b) else np.nan,
+                                     p=np.nan))
+                    continue
                 va, vb = a.var(ddof=1) / len(a), b.var(ddof=1) / len(b)
                 se = np.sqrt(va + vb)
                 df = (va + vb) ** 2 / (va ** 2 / max(len(a) - 1, 1) + vb ** 2 / max(len(b) - 1, 1))
@@ -774,6 +791,9 @@ class Cohorts(StabilityMixin):
             for label in mv["cohort"].unique():
                 a, b = mv.loc[mv["cohort"] == label, v].dropna(), mv.loc[mv["cohort"] != label, v].dropna()
                 na, nb = len(a), len(b)
+                if na < 2 or nb < 2:                  # e.g. p(j | i) of a state no one here leaves
+                    rows.append(dict(variable=v, cohort=label, n=na, d=np.nan, lo=np.nan, hi=np.nan))
+                    continue
                 sd = np.sqrt(((na - 1) * a.var() + (nb - 1) * b.var()) / max(na + nb - 2, 1))
                 d = (a.mean() - b.mean()) / sd if sd > 0 else 0.0
                 se = np.sqrt(1 / na + 1 / nb + d ** 2 / (2 * (na + nb)))

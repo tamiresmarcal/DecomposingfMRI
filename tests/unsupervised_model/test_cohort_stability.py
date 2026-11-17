@@ -248,3 +248,15 @@ def test_tier_probability():
     assert [t for t in fig.axes[-1].texts if t.get_text() == "P(tier)"]
     assert cp.tier_stars(.96) == "**" and cp.tier_stars(.5) == ""
     assert co.stability(["switch_rate"], n_boot=0)["task_p_tier"].isna().all()
+
+
+
+def test_stability_survives_a_variable_missing_in_a_cohort():
+    co = _toy()
+    v = co.dyn[0]
+    first = next(iter(co.data))
+    for key in co.data:
+        if key[0] == first[0]:
+            co.data[key][v] = np.nan                       # e.g. a row no one in this cohort leaves
+    st = co.stability([v, "transition_fit"], n_boot=20)
+    assert len(st) == 2

@@ -831,7 +831,7 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier"):
         hi = np.maximum(t["task_lo"].abs(), t["task_hi"].abs())
         lo[np.sign(t["task_lo"]) != np.sign(t["task_hi"])] = 0       # the CI crosses 0
         ax.hlines(y, lo, hi, color="#9b9a95", lw=1)
-    cols = [TIER_COL[x] for x in t["tier"]]
+    cols = [TIER_COL.get(x, "#c9c8c2") for x in t["tier"]]
     sure = (t["task_p_tier"] >= TIER_SOLID).to_numpy() if t.get("task_p_tier", pd.Series(dtype=float)).notna().any() \
         else np.ones(len(t), bool)
     ax.scatter(d[sure], y[sure], c=[c for c, k in zip(cols, sure) if k], s=45, zorder=3, edgecolor="white")
