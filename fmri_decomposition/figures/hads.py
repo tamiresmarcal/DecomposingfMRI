@@ -403,7 +403,7 @@ def fig_factors(rows, cfg):
         plt.show()
 
 def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None,
-                    share_label=None):
+                    share_label=None, show=True, name="E1_performance"):
     """E1: one model, one panel per phenotype; x = bstm | fcm, colour = task, a line per task
     from bstm to fcm; mean ± sd over the fold seeds (and each seed as a dot, from `seeds`), over
     that model's Age + Sex baseline. legend = the label of each tree (what was selected).
@@ -489,8 +489,45 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None,
                loc="lower center", ncol=4, fontsize=7.5)
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
     layout(fig, cfg, rect=(0, .1, 1, .96))
-    save(fig, "E1_performance", cfg)
+    save(fig, name, cfg)
+    if show:
+        plt.show()
+    return fig
+
+
+def _pixels(fig, dpi=200):
+    """A drawn figure as an RGBA array (for composing finished figures side by side)."""
+    import io
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return plt.imread(buf)
+
+
+def fig_figure4(left, right, cfg, titles=("Train in 80% Cam-CAN → test in 20% Cam-CAN",
+                                         "Train in 100% Cam-CAN → test in 100% HCP"),
+                name="figure4", dpi=200):
+    """Manuscript Figure 4: two finished E1 figures (fig_performance(..., show=False)) side by side,
+    each under its title, a dashed line between them. Left: cross-validated in Cam-CAN; right:
+    trained on all of Cam-CAN and tested once on HCP. Composed as images, so each half keeps
+    exactly its own layout."""
+    a, b = _pixels(left, dpi), _pixels(right, dpi)
+    h = max(a.shape[0], b.shape[0])
+    w = a.shape[1] + b.shape[1]
+    fig = plt.figure(figsize=(w / dpi, h / dpi * 1.08))
+    gs = fig.add_gridspec(1, 2, width_ratios=[a.shape[1], b.shape[1]], wspace=.04,
+                          left=0, right=1, bottom=0, top=.93)
+    for k, (img, t) in enumerate(((a, titles[0]), (b, titles[1]))):
+        ax = fig.add_subplot(gs[k])
+        ax.imshow(img)
+        ax.set_axis_off()
+        ax.set_title(t, fontsize=14, fontweight="bold", pad=12)
+    fig.add_artist(Line2D([a.shape[1] / w] * 2, [.03, .97], ls="--",
+                          color=MUTED, lw=1, transform=fig.transFigure))
+    save(fig, name, cfg)
     plt.show()
+    return fig
 
 
 # ---------------------------------------------------------------------- SHAP -----
