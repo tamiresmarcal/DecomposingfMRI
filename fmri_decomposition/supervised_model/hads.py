@@ -347,6 +347,24 @@ def oof_shap(X, y, model, seed):
                 S[te] = shap.TreeExplainer(m).shap_values(X[te])
     return S, pred
 
+def full_shap(X, y, model, seed):
+    """SHAP of ONE model fitted on every subject (no folds), explained on those same subjects:
+    the model `fmri-decomp transfer` fits on the training cohort and applies to the test one."""
+    from sklearn.base import clone
+    from threadpoolctl import threadpool_limits
+    from fmri_decomposition.supervised_model.bstm_selection import make_model
+    m = clone(make_model(model, seed)[0])
+    with threadpool_limits(1):
+        m.fit(X, y)
+        pred = m.predict(X)
+        if model == "ridge":
+            S = m[-1].coef_ * m[0].transform(X)
+        else:
+            import shap
+            S = shap.TreeExplainer(m).shap_values(X)
+    return S, pred
+
+
 def _mean_abs(X, y, model, seed):
     return np.abs(oof_shap(X, y, model, seed)[0]).mean(0)
 
@@ -1060,6 +1078,38 @@ class Study:
                   "order differ (e.g. --restrict-subjects in the selection run, or another phenotype file), so\n"
                   "these SHAP values describe a close cousin of the ranked model, not the model itself.")
         return check
+
+    def full(self, space, model):
+        """deep()'s shape for the model fitted on EVERY subject (the transfer's training fit), SHAP
+        on those subjects; one fit per seed of seeds_stab (a tree's random state; ridge is the same
+        fit each time). model_marks() reads it as it reads deep()."""
+        c = self.cfg
+        seeds = list(dict.fromkeys([c.shap_seed, *c.seeds_stab]))
+
+        def compute():
+            panels = {}
+            for task in c.tasks:
+                for lab in c.targets:
+                    X, y, names, blocks = self.matrix(space, task, lab, model["arm"])
+                    panels[task, lab] = dict(X=X, y=y, names=names, blocks=blocks, by_seed={}, sign_by_seed={})
+            jobs = [(k, s) for k in panels for s in seeds]
+            print(f"fitting {len(jobs)} models ({model['model']}) on every subject, {min(c.n_jobs, len(jobs))} core(s)")
+            res = Parallel(n_jobs=min(c.n_jobs, len(jobs)))(
+                delayed(full_shap)(panels[k]["X"], panels[k]["y"], model["model"], s) for k, s in jobs)
+            for (k, s), (S, pred) in zip(jobs, res):
+                p = panels[k]
+                p["by_seed"][s], p["sign_by_seed"][s] = np.abs(S).mean(0), direction(p["X"], S)
+                if s == c.shap_seed:
+                    p["S"], p["pred"] = S, pred
+            for p in panels.values():
+                p["by_seed"] = np.array([p["by_seed"][s] for s in c.seeds_stab])
+                p["sign_by_seed"] = np.array([p["sign_by_seed"][s] for s in c.seeds_stab])
+                p["rho"] = stats.spearmanr(p["pred"], p["y"]).statistic       # in-sample, not a score
+            return panels
+
+        key = (space["atlas"], space["window_s"], space["states"], model["model"], model["arm"],
+               tuple(seeds), tuple(c.covariates))
+        return self._cached("full", key, compute, pickle=True)
 
     def model_marks(self, space, deep, pooled):
         """E3: the model's top `highlight_top` graph variables by mean |SHAP| (shap_seed). Red when

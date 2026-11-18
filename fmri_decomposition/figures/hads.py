@@ -403,7 +403,7 @@ def fig_factors(rows, cfg):
         plt.show()
 
 def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None,
-                    share_label=None, show=True, name="E1_performance"):
+                    share_label=None, show=True, name="E1_performance", baseline=True):
     """E1: one model, one panel per phenotype; x = bstm | fcm, colour = task, a line per task
     from bstm to fcm; mean ± sd over the fold seeds (and each seed as a dot, from `seeds`), over
     that model's Age + Sex baseline. legend = the label of each tree (what was selected).
@@ -423,8 +423,10 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None,
             ax.tick_params(labelleft=False)
         p = perf[perf["phenotype"] == lab]
         ax.set_xlim(-.4, 1.4)
-        if len(p):
+        if len(p) and baseline:                                # the Age + Sex baseline band
             draw_band(ax, p["base_mean"].iloc[0], p["base_sd"].iloc[0])
+        else:
+            ax.axhline(0, color=MUTED, lw=.6)
         ends = []                                              # (y, x, task): the line's name at its end
         for k, task in enumerate(tasks):
             h = p[p["task"] == task].set_index("tree").reindex(trees)
@@ -484,7 +486,8 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None,
             ax.set_title(f"bstm · what the {model} model uses ({lab})", fontsize=9)
     fig.legend(handles=[Line2D([], [], ls="none", marker=marker[t], ms=7, color=colour[t], label=t) for t in tasks] +
                        ([Patch(color=BLOCK_COLOUR[b], label=b) for b in order] if shares is not None else []) +
-                       [Patch(color=MUTED, alpha=.35, label=f"{model} on Age + Sex only (the baseline) ± sd")] +
+                       ([Patch(color=MUTED, alpha=.35, label=f"{model} on Age + Sex only (the baseline) ± sd")]
+                        if baseline else []) +
                        [Line2D([], [], ls="none", label=f"{tree} = {legend[tree]}") for tree in trees],
                loc="lower center", ncol=4, fontsize=7.5)
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
