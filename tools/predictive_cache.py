@@ -25,6 +25,17 @@ from fmri_decomposition.supervised_model import hads as ht
 from fmri_decomposition.supervised_model import report as rp
 
 
+def grid(st, states, exclude=()):
+    """(atlas, window_s, model, arm) select-bstm ran for `states`, every model, the graph_arms."""
+    s = st.summ
+    s = s[(s["tree"] == "bstm") & (s["states"] == states) & s["arm"].isin(st.cfg.graph_arms)
+          & s["model"].isin(st.models())]
+    out = sorted({(r.atlas, float(r.window_s), r.model, r.arm) for r in s.itertuples()})
+    skip = {tuple(x.split(",")[:2]) + tuple(x.split(",")[2:]) for x in exclude}
+    return [c for c in out if (c[0], f"{c[1]:g}", c[2], c[3]) not in skip
+            and (c[0], str(c[1]), c[2], c[3]) not in skip]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--space", nargs="+", help="atlas,window_s,states, one or more (default: the notebook's best)")
@@ -36,9 +47,30 @@ def main(argv=None):
     ap.add_argument("--rank", type=int, default=0)
     ap.add_argument("--skip", nargs="*", default=[], choices=["cam", "shares", "transfer", "contrib"])
     ap.add_argument("--n-jobs", type=int, default=None)
+    ap.add_argument("--grid", metavar="STATES",
+                    help="every atlas x window x model x arm (graph_arms) select-bstm ran for these states; "
+                         "with --task-id, only that one combination (a job array)")
+    ap.add_argument("--task-id", type=int, default=None)
+    ap.add_argument("--exclude", nargs="*", default=[],
+                    help='combinations to leave out, "atlas,window_s,model,arm" (e.g. ones already running)')
+    ap.add_argument("--list", action="store_true", help="with --grid: print the combinations and their count, fit nothing")
     a = ap.parse_args(argv)
 
     over = {"n_jobs": a.n_jobs} if a.n_jobs else {}
+    if a.grid:
+        combos = grid(ht.Study(rp.cam_settings(**over)), a.grid, a.exclude)
+        if a.list:
+            for k, c in enumerate(combos):
+                print(k, *c, sep="\t")
+            print(f"N={len(combos)}")
+            return
+        if a.task_id is not None:
+            combos = [combos[a.task_id]]
+        a.space = sorted({f"{c[0]},{c[1]},{a.grid}" for c in combos})
+        a.model = sorted({c[2] for c in combos})
+        a.arm = sorted({c[3] for c in combos})
+        if a.task_id is not None:
+            a.skip = sorted(set(a.skip) | {"shares", "contrib"})   # shared tables: not in every task
     spaces = a.space or [None]
     models = a.model or [None]
     combos = [(sp, m, arm) for sp in spaces for m in models for arm in a.arm]

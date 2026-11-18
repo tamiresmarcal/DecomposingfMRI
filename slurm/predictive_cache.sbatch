@@ -31,6 +31,10 @@ for a in "$@"; do
   else echo "put options after a bare --" >&2; exit 1; fi
 done
 
+for i in "${!EXTRA[@]}"; do                     # array task: its combination
+  [[ "${EXTRA[$i]}" == "--task-id-from-array" ]] && EXTRA[$i]="--task-id=${SLURM_ARRAY_TASK_ID:?not an array job}"
+done
+
 REPO="${SLURM_SUBMIT_DIR:-$PWD}"
 [[ -f "$REPO/slurm/env.sh" ]] && source "$REPO/slurm/env.sh"
 SIF="${SIF:-${FMRIDECOMP_SIF_SHAP:-/project/6008063/tamires/singularity/fmri_decomp_stage45_shap.sif}}"
