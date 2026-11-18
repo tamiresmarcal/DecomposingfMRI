@@ -106,6 +106,9 @@ def cached(train, name, key, compute):
     if p.exists():
         print(f"{name}: read {p}")
         return pd.read_parquet(p)
+    if getattr(train, "cache_only", False):
+        raise SystemExit(f"{name} is not cached for {key} and the Study is cache_only: run "
+                         f"slurm/predictive_cache.sbatch with the notebook's parameters, then rerun this cell.")
     t0 = time.time()
     out = compute()
     d.mkdir(parents=True, exist_ok=True)

@@ -573,6 +573,12 @@ class Study:
         if p.exists():
             print(f"{name}: read {p}")
             return joblib.load(p) if pickle else pd.read_parquet(p)
+        if getattr(self, "cache_only", False):
+            raise SystemExit(
+                f"{name} is not cached for this choice ({key[:5] if isinstance(key, tuple) else ''}...) and this "
+                f"Study is cache_only: it is fitted by the cluster job, not in a notebook kernel (which may not "
+                f"even have `shap`). Run, with the notebook's parameters:\n  sbatch slurm/predictive_cache.sbatch "
+                f"-- --space ATLAS,WINDOW_S,STATES --model MODEL --arm \"ARM\"\nthen rerun this cell.")
         t0 = time.time()
         out = compute()
         p.parent.mkdir(parents=True, exist_ok=True)
