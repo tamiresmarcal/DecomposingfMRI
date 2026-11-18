@@ -1187,27 +1187,37 @@ def _mixed_meta(co) -> dict:
     return {"cohorts": sorted(co.cfg.cohorts), **{k: str(getattr(co.cfg, k)) for k in MIXED_SETTINGS}}
 
 
-def mixed_tables(co, n_boot=1, recompute=False, save=True, min_occ=0.01):
+def mixed_tables(co, n_boot=1, recompute=False, save=True, min_occ=0.01, fit_missing=True):
     """(properties, transitions): task_variation(combine="mixed") for the transition structure,
     occupancy profile, dynamic metrics and occupancies, and for the transition structure and every
-    transition p(j | i). Read from `mixed_dir` when there (written by tools/mixed_model_sweep.py),
-    else fitted here and written there. A cache made with other settings (cohorts, entropy
-    estimator, rarefaction, row threshold) is not used: it is refitted."""
+    transition p(j | i). Read from `mixed_dir` when there (written by tools/mixed_model_sweep.py /
+    slurm/mixed_model.sbatch); a cache made with other settings is still read, with a warning naming
+    what differs (recompute=True refits). When absent: fitted here and written there, or, with
+    fit_missing=False, an error saying to run the sbatch."""
     import json
+    import warnings
     d = mixed_dir(co.cfg)
     files = d / "vpc_properties.csv", d / "vpc_transitions.csv"
     meta = _mixed_meta(co)
-    if not recompute and all(f.exists() for f in files) and (d / "meta.json").exists():
-        if json.loads((d / "meta.json").read_text()) == meta:
-            out = []
-            for f in files:
-                t = pd.read_csv(f)
-                t.attrs.update(scale="omega2", measure="vpc")
-                out.append(t)
-            print(f"mixed models read from {d}")
-            return tuple(out)
-        print(f"{d}: made with other settings; refitting")
-    props = co.task_variation(["transition_fit", "occupancy_fit", *co.dyn, *co.occ], n_boot=n_boot, combine="mixed")
+    if not recompute and all(f.exists() for f in files):
+        stored = json.loads((d / "meta.json").read_text()) if (d / "meta.json").exists() else {}
+        diff = {k: (stored.get(k), v) for k, v in meta.items() if stored.get(k) != v}
+        if diff:
+            warnings.warn(f"{d}: made with other settings ({diff}, stored vs now); read anyway -- "
+                          f"recompute=True to refit", stacklevel=2)
+        out = []
+        for f in files:
+            t = pd.read_csv(f)
+            t.attrs.update(scale="omega2", measure="vpc")
+            out.append(t)
+        print(f"mixed models read from {d}")
+        return tuple(out)
+    if not recompute and not fit_missing:
+        raise SystemExit(f"no mixed models in {d}: run `sbatch slurm/mixed_model.sbatch -- --atlas "
+                         f"{co.cfg.space['atlas']} --window-s {co.cfg.space['window_s']:g} --states "
+                         f"'{co.cfg.space['states']}'`, or call mixed_tables(co, fit_missing=True) to fit here")
+    props = co.task_variation(["transition_fit", "occupancy_fit", "dynamics_fit", *co.dyn, *co.occ], n_boot=n_boot,
+                              combine="mixed")
     cells = co.task_variation(["transition_fit", *co.cells], n_boot=n_boot, combine="mixed")
     if save:
         d.mkdir(parents=True, exist_ok=True)
