@@ -531,7 +531,8 @@ def fig_figure4(left, right, cfg, titles=("Train in 80% Cam-CAN → test in 20% 
 
 
 # ---------------------------------------------------------------------- SHAP -----
-def fig_shares(contrib, cfg, title):
+def fig_shares(contrib, cfg, title, xlabel="share of the model's mean |SHAP| (out-of-fold)", name="C_shares",
+               score="ρ"):
     """C: one bar per model, grouped by model type, best CV first; segments = share of its mean |SHAP|."""
     order = ["covariates", "cells", "occupancy", "dynamics"]
 
@@ -544,7 +545,7 @@ def fig_shares(contrib, cfg, title):
             ax.barh(range(len(share)), share[b], left=left, height=.75, color=BLOCK_COLOUR[b], edgecolor=SURFACE, lw=1)
             left += share[b].to_numpy()
         cv = c.groupby("label")["cv"].first()
-        ax.set_yticks(range(len(share)), [f"{l}   ρ={cv[l]:.2f}" for l in share.index], fontsize=6.5)
+        ax.set_yticks(range(len(share)), [f"{l}   {score}={cv[l]:.2f}" for l in share.index], fontsize=6.5)
         ax.set_xlim(0, 1)
         ax.xaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1))
         bottom_up = first["model"].to_numpy()[::-1]
@@ -561,12 +562,12 @@ def fig_shares(contrib, cfg, title):
         plot(axes[i, j], contrib[(contrib["task"] == task) & (contrib["phenotype"] == lab)])
         axes[i, j].set_title(f"{task} · {lab}", fontsize=10)
     for ax in axes[-1]:
-        ax.set_xlabel("share of the model's mean |SHAP| (out-of-fold)")
+        ax.set_xlabel(xlabel)
     fig.legend(handles=[Patch(color=BLOCK_COLOUR[b], label=b) for b in order], loc="upper right",
                ncol=4, fontsize=8, bbox_to_anchor=(1, 1.0))
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
     layout(fig, cfg, rect=(0, 0, 1, 1 - .3 / h))
-    save(fig, "C_shares", cfg)
+    save(fig, name, cfg)
     plt.show()
 
 def fig_predicted(deep, cfg, title):
