@@ -6,6 +6,9 @@
 #   sbatch slurm/predictive_cache.sbatch
 #   sbatch slurm/predictive_cache.sbatch -- --space harvardoxford,30,HMM2_umap3_8 --model hgb
 #   sbatch slurm/predictive_cache.sbatch -- --skip shares contrib      # only what 07 needs
+#   # several choices at once (every combination of --space x --model x --arm):
+#   sbatch slurm/predictive_cache.sbatch -- --space harvardoxford,30,HMM2_umap3_8 yeo7,30,HMM2_umap3_8 \
+#          harvardoxford,-1,HMM2_umap3_8 yeo7,-1,HMM2_umap3_8 --model hgb ridge --arm "all [cond]" "all [joint]"
 #
 # Options after a bare -- go to the script. Whatever is already cached is read, not refitted,
 # so a time-out can simply be resubmitted.
@@ -14,7 +17,7 @@
 #SBATCH --account=rpp-aevans-ab
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --output=slurm_logs/predictive_cache_%j.out
 #SBATCH --error=slurm_logs/predictive_cache_%j.err
 
