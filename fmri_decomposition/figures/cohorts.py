@@ -1478,3 +1478,54 @@ def fig_window_stats(co, ws, ps, name="window_stats", fs=11):
     fig.tight_layout()
     save(fig, name, co.cfg)
     return fig
+
+
+def fig_mapper(co, graphs, colour="state", titles=None, name=None, fs=11, panel_size=4.6):
+    """Mapper shape graphs side by side, {title: (rows, nodes, edges, positions)} from
+    ct.mapper_graph + ct.graph_layout. A dot per node (area = how many windows it holds), a line
+    per shared window. colour: the node's most common "cohort", "state", "task" or "kind", or its
+    mean "time" in the film (0 = start, 1 = end)."""
+    col = colours(co.cfg)
+    fig, axes = plt.subplots(1, len(graphs), figsize=(panel_size * len(graphs), panel_size), squeeze=False)
+    handles = {}
+    for ax, (title, (E, nodes, edges, P)) in zip(axes[0], graphs.items()):
+        from matplotlib.collections import LineCollection
+        ax.add_collection(LineCollection(P[edges], colors=hp.MUTED, lw=.5, alpha=.6, zorder=1))
+        size = np.array([len(n) for n in nodes], float)
+        area = 6 + 120 * np.sqrt(size / size.max())
+        if colour == "time":
+            t = E["stimulus_start_s"].astype(float)
+            t = (t / t.groupby([E["cohort"], E["task"]]).transform("max").replace(0, np.nan)).to_numpy()
+            v = [np.nanmean(t[n]) for n in nodes]
+            sc = ax.scatter(P[:, 0], P[:, 1], s=area, c=v, cmap="plasma", vmin=0, vmax=1, lw=.3,
+                            edgecolor="white", zorder=2)
+        else:
+            key = E[colour].astype(str).to_numpy() if colour != "state" else E["state"].astype(int).to_numpy()
+            dom = [pd.Series(key[n]).mode().iloc[0] for n in nodes]
+            if colour == "cohort":
+                cmap = {k: col.get(k, hp.INK2) for k in set(dom)}
+                label = cname
+            elif colour == "state":
+                cmap = {k: (hp.MUTED if int(k) < 0 else _hex(plt.cm.tab10(int(k) % 10))) for k in set(dom)}
+                label = lambda k: f"S{k}" if int(k) >= 0 else "no state"
+            elif colour == "kind":
+                cmap = {k: hp.INK2 if k == "rest" else ORANGE for k in set(dom)}
+                label = str
+            else:
+                ks = sorted(set(E[colour].astype(str)))
+                cmap = {k: _hex(plt.cm.tab20(ks.index(k) % 20)) for k in set(dom)}
+                label = str
+            ax.scatter(P[:, 0], P[:, 1], s=area, c=[cmap[k] for k in dom], lw=.3, edgecolor="white", zorder=2)
+            for k in sorted(set(dom), key=str):
+                handles[label(k)] = Line2D([], [], marker="o", ls="", color=cmap[k], ms=6)
+        m = E.attrs.get("mapper", {})
+        ax.set_title(f"{title}\n{len(nodes)} nodes · {len(edges)} edges · {len(E):,} windows", fontsize=fs)
+        ax.set_axis_off()
+    if colour == "time":
+        fig.colorbar(sc, ax=axes[0].tolist(), shrink=.6, label="time in film (0 = start, 1 = end)")
+    elif handles:
+        fig.legend(handles.values(), handles.keys(), loc="center right", frameon=False, fontsize=fs - 1,
+                   title=colour)
+    if name:
+        save(fig, name, co.cfg)
+    return fig

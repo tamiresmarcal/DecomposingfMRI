@@ -1516,3 +1516,82 @@ def moment_share(lat, cols=("x", "y", "z"), min_people=5):
         rows.append(dict(cohort=c, task=str(t), people=g["sub"].nunique(), moments=k, windows=n,
                          eta2=ssb / tot, epsilon2=(ssb - (k - 1) * msw) / tot))
     return pd.DataFrame(rows)
+
+
+def mapper_graph(E, n_bins=12, overlap=.5, cols=("x", "y", "z"), min_samples=3, eps=None, max_points=30000,
+                 seed=0):
+    """A Mapper shape graph of an embedding (Xian et al.'s STIM, after Saggar et al.): the 3-D space
+    cut into n_bins^3 overlapping cubes (each overlapping its neighbours by `overlap`), the points in
+    each cube clustered with DBSCAN, every cluster a node, two nodes joined when they share a point.
+    Unlike STIM the clustering is on the embedding itself, not on the original features (the
+    notebook holds only the coordinates). eps: DBSCAN radius; None = 1.5 x the median distance to
+    the 5th neighbour. Returns (E's rows used, nodes: a list of row-index arrays, edges: (i, j) pairs)."""
+    from scipy import sparse
+    from sklearn.cluster import DBSCAN
+    from sklearn.neighbors import NearestNeighbors
+    E = E.sample(max_points, random_state=seed) if len(E) > max_points else E
+    E = E.reset_index(drop=True)
+    X = E[list(cols)].to_numpy(float)
+    if eps is None:
+        S = X[np.random.default_rng(seed).choice(len(X), min(len(X), 5000), replace=False)]
+        d, _ = NearestNeighbors(n_neighbors=min(6, len(S))).fit(S).kneighbors(S)
+        eps = 1.5 * float(np.median(d[:, -1]))
+    member = []
+    for a in range(X.shape[1]):
+        lo, hi = X[:, a].min(), X[:, a].max()
+        w = (hi - lo) / (n_bins - (n_bins - 1) * overlap)
+        starts = lo + np.arange(n_bins) * w * (1 - overlap)
+        member.append((X[:, a, None] >= starts - 1e-12) & (X[:, a, None] <= starts + w + 1e-12))
+    nodes = []
+    for i in range(n_bins):
+        mi = member[0][:, i]
+        if mi.sum() < min_samples:
+            continue
+        for j in range(n_bins):
+            mij = mi & member[1][:, j]
+            if mij.sum() < min_samples:
+                continue
+            for k in range(n_bins):
+                idx = np.flatnonzero(mij & member[2][:, k])
+                if len(idx) < min_samples:
+                    continue
+                lab = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(X[idx])
+                nodes += [idx[lab == c] for c in np.unique(lab) if c >= 0]
+    if not nodes:
+        raise SystemExit("no Mapper nodes: raise eps or lower min_samples / n_bins")
+    M = sparse.csr_matrix((np.ones(sum(map(len, nodes))), (np.concatenate(nodes),
+                           np.repeat(np.arange(len(nodes)), list(map(len, nodes))))), shape=(len(X), len(nodes)))
+    A = sparse.triu(M.T @ M, k=1).tocoo()
+    edges = np.c_[A.row, A.col]
+    E.attrs.update(mapper=dict(n_bins=n_bins, overlap=overlap, eps=eps, min_samples=min_samples))
+    return E, nodes, edges
+
+
+def graph_layout(nodes, edges, E, cols=("x", "y", "z"), n_iter=150, gravity=.05, seed=0):
+    """2-D positions for a Mapper graph: force-directed (Fruchterman-Reingold), started from the
+    first two principal axes of the nodes' centroids so the drawing keeps the embedding's main
+    direction; a weak pull to the centre (gravity) keeps disconnected pieces close."""
+    X = E[list(cols)].to_numpy(float)
+    C = np.array([X[n].mean(0) for n in nodes])
+    C = C - C.mean(0)
+    _, _, vt = np.linalg.svd(C, full_matrices=False)
+    P = C @ vt[:2].T
+    P = P / (np.abs(P).max() or 1)
+    n = len(P)
+    k = 1 / np.sqrt(n)
+    t = .1
+    for _ in range(n_iter):
+        D = (P[:, None] - P[None]).astype(np.float32)
+        d2 = np.maximum((D ** 2).sum(2), 1e-8)
+        F = (D * (k ** 2 / d2)[..., None]).sum(1).astype(float)          # repulsion, k^2 / distance
+        if len(edges):
+            d = P[edges[:, 0]] - P[edges[:, 1]]
+            L = np.maximum(np.linalg.norm(d, axis=1), 1e-4)
+            f = d / L[:, None] * (L ** 2 / k)[:, None]
+            np.add.at(F, edges[:, 0], -f)
+            np.add.at(F, edges[:, 1], f)
+        F -= gravity * P / k                       # keeps components that share nothing in view
+        step = np.linalg.norm(F, axis=1)
+        P += F / np.maximum(step, 1e-9)[:, None] * np.minimum(step, t)[:, None]
+        t *= .97
+    return P
