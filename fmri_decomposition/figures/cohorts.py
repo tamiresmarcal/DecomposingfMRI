@@ -1490,15 +1490,19 @@ def fig_window_stats(co, ws, ps, name="window_stats", fs=11):
     return fig
 
 
-def fig_mapper(co, graphs, colour="state", titles=None, name=None, fs=11, panel_size=4.6):
+def fig_mapper(co, graphs, colour="state", titles=None, name=None, fs=11, panel_size=4.6, ncols=None, title=None):
     """Mapper shape graphs side by side, {title: (rows, nodes, edges, positions)} from
     ct.mapper_graph + ct.graph_layout. A dot per node (area = how many windows it holds), a line
     per shared window. colour: the node's most common "cohort", "state", "task" or "kind", or its
     mean "time" in the film (0 = start, 1 = end)."""
     col = colours(co.cfg)
-    fig, axes = plt.subplots(1, len(graphs), figsize=(panel_size * len(graphs), panel_size), squeeze=False)
+    nc = min(ncols or len(graphs), len(graphs))
+    nr = -(-len(graphs) // nc)
+    fig, axes = plt.subplots(nr, nc, figsize=(panel_size * nc, panel_size * nr), squeeze=False)
+    for ax in axes.flat[len(graphs):]:
+        ax.set_axis_off()
     handles = {}
-    for ax, (title, (E, nodes, edges, P)) in zip(axes[0], graphs.items()):
+    for ax, (ptitle, (E, nodes, edges, P)) in zip(axes.flat, graphs.items()):
         from matplotlib.collections import LineCollection
         ax.add_collection(LineCollection(P[edges], colors=hp.MUTED, lw=.5, alpha=.6, zorder=1))
         size = np.array([len(n) for n in nodes], float)
@@ -1529,13 +1533,15 @@ def fig_mapper(co, graphs, colour="state", titles=None, name=None, fs=11, panel_
             for k in sorted(set(dom), key=str):
                 handles[label(k)] = Line2D([], [], marker="o", ls="", color=cmap[k], ms=6)
         m = E.attrs.get("mapper", {})
-        ax.set_title(f"{title}\n{len(nodes)} nodes · {len(edges)} edges · {len(E):,} windows", fontsize=fs)
+        ax.set_title(f"{ptitle}\n{len(nodes)} nodes · {len(edges)} edges · {len(E):,} points", fontsize=fs)
         ax.set_axis_off()
     if colour == "time":
-        fig.colorbar(sc, ax=axes[0].tolist(), shrink=.6, label="time in film (0 = start, 1 = end)")
+        fig.colorbar(sc, ax=axes.ravel().tolist(), shrink=.6, label="time in film (0 = start, 1 = end)")
     elif handles:
         fig.legend(handles.values(), handles.keys(), loc="center right", frameon=False, fontsize=fs - 1,
                    title=colour)
+    if title:
+        fig.suptitle(title, fontsize=fs + 1, y=1 + .12 / nr)
     if name:
         save(fig, name, co.cfg)
     return fig

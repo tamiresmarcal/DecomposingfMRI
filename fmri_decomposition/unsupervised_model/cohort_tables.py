@@ -1485,6 +1485,9 @@ def film_trajectory(lat, cohort, task, zscore=True, cols=("x", "y", "z")):
     g["stimulus_start_s"] = g["stimulus_start_s"].astype(float).round(1)
     m = g.groupby("stimulus_start_s", as_index=False)[list(cols)].mean()
     m = m.assign(cohort=cohort, task=str(task), sub="mean", variant="group mean")
+    if "state" in g:                                   # the state most viewers are in at that moment
+        st = g[g["state"] >= 0].groupby("stimulus_start_s")["state"].agg(lambda x: x.mode().iloc[0])
+        m["state"] = m["stimulus_start_s"].map(st).fillna(-1).astype(int).to_numpy()
     n = g.groupby("stimulus_start_s")["sub"].nunique()
     m["n_people"] = m["stimulus_start_s"].map(n).to_numpy()
     out = pd.concat([g.assign(variant="individual windows"), m], ignore_index=True)
