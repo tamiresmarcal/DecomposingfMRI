@@ -1365,11 +1365,12 @@ VARIANT_NAMES = {"official": "official fit", "official_z": "official fit, z-scor
 
 
 def fig_embeddings(co, E, panel="variant", colour="cohort", panels=None, titles=None, max_points=15000,
-                   seed=0, height=480, ncols=3, name=None, title=None):
+                   seed=0, height=480, ncols=3, name=None, title=None, size=2, lines=()):
     """One interactive 3D panel per value of `panel` (plotly), a dot per window, at most `max_points`
     per panel (at random). colour: "cohort", "role", "kind" (rest | movie), "task" (each film),
     "state", "sub" (one gradient over people) or "time" (the window's place in its film, 0 = start,
-    1 = end). Each panel keeps its own axes."""
+    1 = end). Each panel keeps its own axes. size: marker size, a number or {panel value: size};
+    lines: panel values drawn as a path in time order (stimulus_start_s), e.g. a group trajectory."""
     try:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
@@ -1388,6 +1389,7 @@ def fig_embeddings(co, E, panel="variant", colour="cohort", panels=None, titles=
     for j, p in enumerate(panels):
         r, c = j // ncol + 1, j % ncol + 1
         g = E[E[panel] == p]
+        sz = size.get(p, 2) if isinstance(size, dict) else size
         if len(g) > max_points:
             g = g.sample(max_points, random_state=seed)
         hover = g["cohort"].map(cname) + " · " + g["sub"].astype(str) + " · " + g["task"].astype(str)
@@ -1396,7 +1398,7 @@ def fig_embeddings(co, E, panel="variant", colour="cohort", panels=None, titles=
             show = label not in seen
             seen.add(label)
             fig.add_trace(go.Scatter3d(x=h["x"], y=h["y"], z=h["z"], mode="markers", name=label, legendgroup=label,
-                                       showlegend=show, marker=dict(size=2, color=colour_, opacity=.5),
+                                       showlegend=show, marker=dict(size=sz, color=colour_, opacity=.5),
                                        text=hover.loc[h.index], hoverinfo="text"), r, c)
         if colour == "time" and "stimulus_start_s" not in g:
             raise SystemExit("colour='time' needs stimulus_start_s: load_latents(..., extra=('stimulus_start_s',))")
@@ -1425,8 +1427,13 @@ def fig_embeddings(co, E, panel="variant", colour="cohort", panels=None, titles=
                 t = g["stimulus_start_s"].astype(float)
                 v = t / t.groupby([g["cohort"], g["task"]]).transform("max").replace(0, np.nan)
                 scale, label = "Plasma", "time in film (0 = start, 1 = end)"
-            fig.add_trace(go.Scatter3d(x=g["x"], y=g["y"], z=g["z"], mode="markers", showlegend=False, text=hover,
-                                       hoverinfo="text", marker=dict(size=2, opacity=.5, color=v, colorscale=scale,
+            if p in lines:
+                o = g["stimulus_start_s"].astype(float).argsort().to_numpy()
+                g, v, hover = g.iloc[o], v.iloc[o], hover.iloc[o]
+            fig.add_trace(go.Scatter3d(x=g["x"], y=g["y"], z=g["z"], mode="markers+lines" if p in lines else "markers",
+                                       showlegend=False, text=hover, line=dict(color="rgba(80,80,80,.35)", width=2),
+                                       hoverinfo="text", marker=dict(size=sz, opacity=.5 if p not in lines else .9,
+                                                                     color=v, colorscale=scale,
                                        colorbar=dict(title=label, len=.5, thickness=10) if j == 0 else None,
                                        showscale=j == 0)), r, c)
         else:

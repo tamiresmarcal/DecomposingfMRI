@@ -1371,18 +1371,22 @@ def window_stats(co):
     return tuple(out)
 
 
-def diagnostic_embeddings(co, variants=("base", "all_rows", "no_scaler", "person_scaled", "nndb_only")):
+def diagnostic_embeddings(co, variants=("base", "all_rows", "no_scaler", "person_scaled", "nndb_only"),
+                          window_s=None):
     """The UMAP refits of `latent_diagnostics.sbatch` (one per variant), the same sampled windows in
     each: variant, cohort (label), role, task, sub, window_id, stimulus_start_s, state, x, y, z. A
-    variant not yet computed is skipped with a note."""
+    variant not yet computed is skipped with a note. window_s: another window size than cfg.space's
+    (each is its own sbatch run, --window-s)."""
     import json
-    d = diagnostics_dir(co)
+    d = diagnostics_dir(co, window_s=window_s)
     lab = _label_of(co)
     parts, meta = [], {}
     for v in variants:
         f = d / f"umap_{v}.parquet"
         if not f.exists():
-            print(f"{v}: not computed yet (sbatch --array=0-0 slurm/latent_diagnostics.sbatch {v})")
+            w = _fmt_window(float(co.cfg.space["window_s"] if window_s is None else window_s))
+            print(f"{v} at {w} s: not computed yet (sbatch --array=0-0 slurm/latent_diagnostics.sbatch {v} "
+                  f"-- --atlas {co.cfg.space['atlas']} --window-s {w})")
             continue
         t = pd.read_parquet(f).assign(variant=v)
         t["cohort"] = t["cohort"].map(lambda x: lab.get(x, x))
@@ -1461,3 +1465,54 @@ def as_panel(co, lat, name):
     t["state"] = t["state"].fillna(-1).astype(int)
     t.attrs.update(lat.attrs)
     return t
+
+
+def film_trajectory(lat, cohort, task, zscore=True, cols=("x", "y", "z")):
+    """One film's windows (or frames) and their group trajectory, STIM's way: each person's
+    coordinates z-scored over their own windows of that film (zscore=True), then averaged over people
+    at every moment of the film (stimulus_start_s, the clock every viewer shares). Returns the
+    individual rows (variant "individual windows") and the mean (variant "group mean", sub "mean")
+    stacked, for fig_embeddings(..., colour="time"). Only one film: a moment means the same scene
+    for everyone only within it."""
+    g = lat[(lat["cohort"] == cohort) & (lat["task"].astype(str) == str(task))].copy()
+    if g.empty:
+        raise SystemExit(f"no rows for {cohort} / {task}; tasks there: "
+                         f"{sorted(lat.loc[lat['cohort'] == cohort, 'task'].astype(str).unique())}")
+    if "stimulus_start_s" not in g:
+        raise SystemExit("needs stimulus_start_s: load_latents(..., extra=('stimulus_start_s',))")
+    if zscore:
+        g = zscore_within(g, by=("cohort", "sub"), cols=cols)
+    g["stimulus_start_s"] = g["stimulus_start_s"].astype(float).round(1)
+    m = g.groupby("stimulus_start_s", as_index=False)[list(cols)].mean()
+    m = m.assign(cohort=cohort, task=str(task), sub="mean", variant="group mean")
+    n = g.groupby("stimulus_start_s")["sub"].nunique()
+    m["n_people"] = m["stimulus_start_s"].map(n).to_numpy()
+    out = pd.concat([g.assign(variant="individual windows"), m], ignore_index=True)
+    out.attrs.update(lat.attrs)
+    return out
+
+
+def moment_share(lat, cols=("x", "y", "z"), min_people=5):
+    """How much the moment of the film places a window, per (cohort, film): epsilon^2 of
+    stimulus_start_s, (SS_between - (g - 1) MS_within) / SS_total, over the windows of every person,
+    moments with at least `min_people` viewers. Adjusted because a film has hundreds of moments and
+    the plain eta^2 of that many groups is far above 0 by chance. 0 = the film's timeline does not
+    organise the space; STIM's premise is that it does once people are averaged."""
+    rows = []
+    for (c, t), g in lat.groupby(["cohort", "task"]):
+        if "stimulus_start_s" not in g:
+            continue
+        g = g.assign(m=g["stimulus_start_s"].astype(float).round(1))
+        keep = g.groupby("m")["sub"].transform("nunique") >= min_people
+        g = g[keep]
+        k, n = g["m"].nunique(), len(g)
+        if k < 2 or n <= k:
+            continue
+        X = g[list(cols)].to_numpy(float)
+        tot = ((X - X.mean(0)) ** 2).sum()
+        means = pd.DataFrame(X).groupby(g["m"].to_numpy()).transform("mean").to_numpy()
+        ssb = ((means - X.mean(0)) ** 2).sum()
+        msw = (tot - ssb) / (n - k)
+        rows.append(dict(cohort=c, task=str(t), people=g["sub"].nunique(), moments=k, windows=n,
+                         eta2=ssb / tot, epsilon2=(ssb - (k - 1) * msw) / tot))
+    return pd.DataFrame(rows)

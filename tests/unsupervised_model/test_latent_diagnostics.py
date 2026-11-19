@@ -69,3 +69,28 @@ def test_with_states_marks_unlabelled_windows():
     lab = pd.DataFrame({"task": ["m", "m"], "sub": ["A", "A"], "window_id": [0, 2], "state": [3, 5]})
     assert ld.with_states(ident, lab)["state"].tolist() == [3, -1, 5]
     assert ld.with_states(ident, None)["state"].tolist() == [-1, -1, -1]
+
+
+def film(shared, seed=0):
+    """20 people x 50 moments of one film; `shared` = how much the moment places everyone alike."""
+    rng = np.random.default_rng(seed)
+    path = rng.normal(0, 1, (50, 3))
+    rows = []
+    for s in range(20):
+        off = rng.normal(0, 3, 3)
+        for m in range(50):
+            rows.append(["c", f"S{s}", "f", m * 2.0, *(off + shared * path[m] + rng.normal(0, 1, 3))])
+    return pd.DataFrame(rows, columns=["cohort", "sub", "task", "stimulus_start_s", "x", "y", "z"])
+
+
+def test_moment_share_finds_a_shared_timeline_and_not_a_missing_one():
+    hit = ct.moment_share(ct.zscore_within(film(2.0))).iloc[0]["epsilon2"]
+    miss = ct.moment_share(ct.zscore_within(film(0.0))).iloc[0]["epsilon2"]
+    assert hit > .5 and abs(miss) < .05
+
+
+def test_film_trajectory_averages_people_per_moment():
+    T = ct.film_trajectory(film(2.0), "c", "f")
+    mean = T[T["variant"] == "group mean"]
+    assert len(mean) == 50 and (mean["n_people"] == 20).all()
+    assert (T["variant"] == "individual windows").sum() == 1000
