@@ -1124,12 +1124,13 @@ def latent_options(co, atlas=None, window_s=None):
     return t
 
 
-def load_latents(co, embedding="umap3", max_windows=150, seed=0, atlas=None, window_s=None, states=None):
+def load_latents(co, embedding="umap3", max_windows=150, seed=0, atlas=None, window_s=None, states=None,
+                 extra=()):
     """Every cohort's windows in the latent space (stage 4, latents/atlas=/window_s=/cohort=/data.parquet):
     sub, task, the embedding's 3 coordinates and the state column `states` when the latents carry it.
     atlas / window_s / states: any that stage 4 wrote (latent_options lists them); None = cfg.space's.
     At most `max_windows` windows per (cohort, subject), drawn at random, so a cohort with long scans
-    (cneuromod) does not bury the others."""
+    (cneuromod) does not bury the others. extra: more latents columns to keep, e.g. ("stimulus_start_s",)."""
     import pyarrow.parquet as pq
     c = co.cfg
     atlas = atlas or c.space["atlas"]
@@ -1145,7 +1146,8 @@ def load_latents(co, embedding="umap3", max_windows=150, seed=0, atlas=None, win
                 have = set(pq.read_schema(f).names)
                 if not set(xyz) <= have:
                     raise SystemExit(f"{f} has no {embedding} columns ({xyz}); was it fitted?")
-                cols = ["sub", "task", *xyz, *([states] if states in have else [])]
+                cols = ["sub", "task", *xyz, *([states] if states in have else []),
+                        *[e for e in extra if e in have]]
                 frames.append(pd.read_parquet(f, columns=cols).assign(cohort=label))
     if not frames:
         raise SystemExit(f"no latents under {base}; latent_options(co) lists what exists")
@@ -1328,3 +1330,134 @@ def by_role(co, lat):
     lat2 = lat.assign(sub=lat["cohort"] + ":" + lat["sub"].astype(str), cohort=lat["cohort"].map(roles))
     lat2.attrs.update(lat.attrs)
     return co2, lat2
+
+
+# -- why the latent space looks the way it does (notebook 08, tools/latent_diagnostics.py) ---------
+def diagnostics_dir(co, atlas=None, window_s=None) -> Path:
+    """<outputs>/modelling/version=<v>/unsupervised_model/latent_diagnostics/atlas=/window_s=."""
+    c = co.cfg
+    atlas = atlas or c.space["atlas"]
+    window_s = c.space["window_s"] if window_s is None else window_s
+    return (unsupervised_root(c.root, c.modelling_version) / "latent_diagnostics" / f"atlas={_key(atlas)}"
+            / f"window_s={_key(_fmt_window(float(window_s)))}")
+
+
+def _label_of(co):
+    """cohort= directory -> the cohort label it belongs to (camcan_rest -> camcan)."""
+    return {d: lab for lab, s in co.cfg.cohorts.items() for d in s["dirs"]}
+
+
+def _need(f: Path, part: str, co):
+    if not f.exists():
+        sp = co.cfg.space
+        raise SystemExit(f"{f} is not there yet: sbatch --array=0-0 slurm/latent_diagnostics.sbatch {part} -- "
+                         f"--atlas {sp['atlas']} --window-s {_fmt_window(float(sp['window_s']))} "
+                         f"--states '{sp['states']}'")
+    return f
+
+
+def window_stats(co):
+    """(per window, per person) dFC statistics written by `latent_diagnostics.sbatch stats`, cohort
+    labels as in cfg.cohorts. Per window: mean |r|, mean r, SD of r over the edges, volumes
+    (n_tr_effective). Per (cohort, task, person): edge_var = each edge's variance over that person's
+    windows, averaged over edges; n_tr = median volumes per window."""
+    d = diagnostics_dir(co)
+    lab = _label_of(co)
+    out = []
+    for name in ("window_stats.parquet", "person_stats.parquet"):
+        t = pd.read_parquet(_need(d / name, "stats", co))
+        t["cohort"] = t["cohort"].map(lambda x: lab.get(x, x))
+        out.append(t[t["cohort"].isin(co.cfg.cohorts)].reset_index(drop=True))
+    return tuple(out)
+
+
+def diagnostic_embeddings(co, variants=("base", "all_rows", "no_scaler", "person_scaled", "nndb_only")):
+    """The UMAP refits of `latent_diagnostics.sbatch` (one per variant), the same sampled windows in
+    each: variant, cohort (label), role, task, sub, window_id, stimulus_start_s, state, x, y, z. A
+    variant not yet computed is skipped with a note."""
+    import json
+    d = diagnostics_dir(co)
+    lab = _label_of(co)
+    parts, meta = [], {}
+    for v in variants:
+        f = d / f"umap_{v}.parquet"
+        if not f.exists():
+            print(f"{v}: not computed yet (sbatch --array=0-0 slurm/latent_diagnostics.sbatch {v})")
+            continue
+        t = pd.read_parquet(f).assign(variant=v)
+        t["cohort"] = t["cohort"].map(lambda x: lab.get(x, x))
+        t["sub"] = _norm_sub(t["sub"]).to_numpy()
+        parts.append(t[t["cohort"].isin(co.cfg.cohorts)])
+        if (d / f"umap_{v}.json").exists():
+            meta[v] = json.loads((d / f"umap_{v}.json").read_text())
+    if not parts:
+        raise SystemExit(f"no UMAP variants under {d}: sbatch --array=0-5 slurm/latent_diagnostics.sbatch")
+    E = pd.concat(parts, ignore_index=True)
+    E["kind"] = np.where(E["task"].astype(str).str.fullmatch(co.cfg.rest_pattern, case=False), "rest", "movie")
+    E.attrs["meta"] = meta
+    return E
+
+
+def zscore_within(lat, by=("cohort", "sub"), cols=("x", "y", "z")):
+    """Each coordinate z-scored within each person: STIM's normalisation, AFTER the reduction
+    (Xian et al.: each subject's embedding z-scored across its volumes). Removes every person's
+    offset and spread; what is left is how each person moves around their own centre."""
+    out = lat.copy()
+    g = out.groupby(list(by))[list(cols)]
+    out[list(cols)] = (out[list(cols)] - g.transform("mean")) / g.transform("std").replace(0, np.nan)
+    out.attrs.update(lat.attrs)
+    return out.dropna(subset=list(cols))
+
+
+def _eta2(X, groups):
+    """Share of the total sum of squares (over the 3 coordinates) between the group means."""
+    X = np.asarray(X, float)
+    tot = ((X - X.mean(0)) ** 2).sum()
+    if tot == 0:
+        return np.nan
+    means = pd.DataFrame(X).groupby(np.asarray(groups)).transform("mean").to_numpy()
+    return float(((means - X.mean(0)) ** 2).sum() / tot)
+
+
+def variance_shares(lat, panel=None, cols=("x", "y", "z")):
+    """How much of the embedding each grouping explains (eta^2 = between-group sum of squares /
+    total, over the three coordinates; 0 = the groups overlap, 1 = each is a point):
+      cohort        over every window;
+      person        within each cohort (each cohort's own total), weighted by windows;
+      task | person within each person who did more than one task (films, rest runs), weighted by
+                    windows: the tasks told apart once the person is fixed (NNDb's people saw one
+                    film each, so they add nothing here);
+      rest | person the same for rest vs movie.
+    One row per value of `panel` (e.g. "variant"), or one row. Overlapping windows and slow drifts
+    inflate person and film alike, so the numbers compare spaces; they are not tests."""
+    def one(g):
+        X = g[list(cols)].to_numpy(float)
+        row = {"windows": len(g), "cohort": _eta2(X, g["cohort"])}
+        w = num = 0.0
+        for _, h in g.groupby("cohort"):
+            if h["sub"].nunique() > 1:
+                num += _eta2(h[list(cols)], h["sub"]) * len(h); w += len(h)
+        row["person"] = num / w if w else np.nan
+        for name, col in (("task | person", "task"), ("rest | person", "kind")):
+            w = num = 0.0
+            if col in g:
+                for _, h in g.groupby(["cohort", "sub"]):
+                    if h[col].nunique() > 1:
+                        num += _eta2(h[list(cols)], h[col].astype(str)) * len(h); w += len(h)
+            row[name] = num / w if w else np.nan
+        return pd.Series(row)
+    if panel is None:
+        return one(lat).to_frame().T
+    return lat.groupby(panel, sort=False).apply(one)
+
+
+def as_panel(co, lat, name):
+    """load_latents' table in diagnostic_embeddings' shape (variant = name, role, state), so the
+    official space and the refits can be drawn and measured side by side."""
+    st = lat.attrs.get("states")
+    t = lat.rename(columns={st: "state"}) if st in lat else lat.assign(state=-1)
+    t = t.assign(variant=name, role=t["cohort"].map(lambda c: co.cfg.cohorts[c]["role"]),
+                 sub=_norm_sub(t["sub"]).to_numpy())
+    t["state"] = t["state"].fillna(-1).astype(int)
+    t.attrs.update(lat.attrs)
+    return t

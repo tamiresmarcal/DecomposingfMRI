@@ -1354,3 +1354,120 @@ def fig_state_detail(co, F, M, tl, state, n_regions=18, n_traces=3, title="", na
     save(fig, name or f"state_detail_S{state}", co.cfg)
     _show(fig)
     return fig
+
+
+# ------------------------------------------------------------------ latent-space diagnostics (notebook 08)
+VARIANT_NAMES = {"official": "official fit", "official_z": "official fit, z-scored per person after",
+                 "base": "z-score per edge, UMAP on 30k windows (as the official)",
+                 "all_rows": "UMAP on every training window", "no_scaler": "no z-score before the UMAP",
+                 "person_scaled": "edges z-scored per person before the UMAP",
+                 "nndb_only": "fitted on NNDb alone (as the old version)"}
+
+
+def fig_embeddings(co, E, panel="variant", colour="cohort", panels=None, titles=None, max_points=15000,
+                   seed=0, height=480, ncols=3, name=None, title=None):
+    """One interactive 3D panel per value of `panel` (plotly), a dot per window, at most `max_points`
+    per panel (at random). colour: "cohort", "role", "kind" (rest | movie), "task" (each film),
+    "state", "sub" (one gradient over people) or "time" (the window's place in its film, 0 = start,
+    1 = end). Each panel keeps its own axes."""
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        raise SystemExit("needs plotly: pip install --user plotly")
+    panels = list(panels or dict.fromkeys(E[panel]))
+    titles = titles or {}
+    rows = -(-len(panels) // ncols)
+    ncol = min(ncols, len(panels))
+    fig = make_subplots(rows, ncol, specs=[[{"type": "scene"}] * ncol] * rows, horizontal_spacing=.01,
+                        vertical_spacing=.06, subplot_titles=[titles.get(p, VARIANT_NAMES.get(p, str(p))) for p in panels])
+    col = colours(co.cfg)
+    tasks = sorted(E["task"].astype(str).unique(), key=lambda t: (t.lower() != "rest", t)) if "task" in E else []
+    tcol = {t: (hp.INK2 if t.lower() == "rest" else _hex(plt.cm.tab20(k % 20))) for k, t in enumerate(tasks)}
+    seen = set()
+    for j, p in enumerate(panels):
+        r, c = j // ncol + 1, j % ncol + 1
+        g = E[E[panel] == p]
+        if len(g) > max_points:
+            g = g.sample(max_points, random_state=seed)
+        hover = g["cohort"].map(cname) + " · " + g["sub"].astype(str) + " · " + g["task"].astype(str)
+
+        def add(h, colour_, label):
+            show = label not in seen
+            seen.add(label)
+            fig.add_trace(go.Scatter3d(x=h["x"], y=h["y"], z=h["z"], mode="markers", name=label, legendgroup=label,
+                                       showlegend=show, marker=dict(size=2, color=colour_, opacity=.5),
+                                       text=hover.loc[h.index], hoverinfo="text"), r, c)
+        if colour == "time" and "stimulus_start_s" not in g:
+            raise SystemExit("colour='time' needs stimulus_start_s: load_latents(..., extra=('stimulus_start_s',))")
+        if colour == "cohort":
+            for k, h in g.groupby("cohort", sort=False):
+                add(h, col.get(k, hp.INK2), cname(k))
+        elif colour == "role":
+            for k, h in g.groupby("role", sort=False):
+                add(h, PALETTE[0] if k == "train" else PALETTE[2], "training cohorts" if k == "train" else "projected cohorts")
+        elif colour == "kind":
+            for k, h in g.groupby("kind", sort=False):
+                add(h, hp.INK2 if k == "rest" else ORANGE, k)
+        elif colour == "task":
+            for k, h in g.groupby(g["task"].astype(str), sort=False):
+                add(h, tcol[k], k)
+        elif colour == "state":
+            for k, h in g.groupby("state", sort=True):
+                if int(k) >= 0:
+                    add(h, _hex(plt.cm.tab10(int(k) % 10)), f"S{int(k)}")
+        elif colour in ("sub", "time"):
+            if colour == "sub":
+                key = g["cohort"] + ":" + g["sub"].astype(str)
+                v = key.map({s_: k for k, s_ in enumerate(sorted(key.unique()))})
+                scale, label = "Viridis", "person"
+            else:
+                t = g["stimulus_start_s"].astype(float)
+                v = t / t.groupby([g["cohort"], g["task"]]).transform("max").replace(0, np.nan)
+                scale, label = "Plasma", "time in film (0 = start, 1 = end)"
+            fig.add_trace(go.Scatter3d(x=g["x"], y=g["y"], z=g["z"], mode="markers", showlegend=False, text=hover,
+                                       hoverinfo="text", marker=dict(size=2, opacity=.5, color=v, colorscale=scale,
+                                       colorbar=dict(title=label, len=.5, thickness=10) if j == 0 else None,
+                                       showscale=j == 0)), r, c)
+        else:
+            raise SystemExit(f"colour={colour!r}: cohort, role, kind, task, state, sub or time")
+        fig.update_layout(**{f"scene{'' if j == 0 else j + 1}": dict(aspectmode="cube", xaxis_title="1",
+                                                                       yaxis_title="2", zaxis_title="3")})
+    fig.update_layout(height=height * rows, width=460 * ncol, margin=dict(l=0, r=0, t=70, b=0),
+                      legend=dict(itemsizing="constant"),
+                      title=title or f"one dot per window · colour = {colour}")
+    if co.cfg.save_dir and name:
+        hp.Path(co.cfg.save_dir).mkdir(parents=True, exist_ok=True)
+        fig.write_html(hp.Path(co.cfg.save_dir) / f"{name}.html", include_plotlyjs="cdn")
+    return fig
+
+
+def fig_window_stats(co, ws, ps, name="window_stats", fs=11):
+    """Does the number of volumes in a window change the correlations it yields? Left: each person's
+    mean |r| over windows and edges against the volumes per window. Right: each edge's variance over
+    a person's windows (mean over edges) against the same, with the variance a correlation would
+    have from sampling alone if the connectivity never changed, (1 - r^2)^2 / (n - 1) at the median
+    r. A cohort above its neighbours on the right is noisier because its windows are shorter in
+    volumes, not because its connectivity moves more. One dot per person x task."""
+    col = colours(co.cfg)
+    pm = (ws.groupby(["cohort", "task", "sub"], as_index=False)
+          .agg(mean_abs_r=("mean_abs_r", "mean"), n_tr=("n_tr_effective", "median")))
+    fig, ax = plt.subplots(1, 2, figsize=(11, 4.2))
+    for c in [x for x in co.cfg.cohorts if x in set(ps["cohort"])]:
+        a, b = pm[pm["cohort"] == c], ps[ps["cohort"] == c]
+        kw = dict(s=9, alpha=.45, color=col[c], lw=0)
+        ax[0].scatter(a["n_tr"], a["mean_abs_r"], label=f"{cname(c)} ({a['n_tr'].median():.0f} volumes)", **kw)
+        ax[1].scatter(b["n_tr"], b["edge_var"], **kw)
+    n = np.linspace(max(4, ps["n_tr"].min() * .9), ps["n_tr"].max() * 1.05, 100)
+    r = float(np.median(ps["mean_r"]))
+    ax[1].plot(n, (1 - r ** 2) ** 2 / (n - 1), color=hp.INK2, ls="--", lw=1.2,
+               label=f"sampling alone, r = {r:.2f}")
+    ax[0].set(xlabel="volumes per window", ylabel="mean |r| (edges, windows)")
+    ax[1].set(xlabel="volumes per window", ylabel="variance of an edge over a person's windows")
+    ax[0].legend(fontsize=fs - 2, frameon=False, markerscale=2)
+    ax[1].legend(fontsize=fs - 2, frameon=False)
+    for a in ax:
+        a.spines[["top", "right"]].set_visible(False)
+    fig.tight_layout()
+    save(fig, name, co.cfg)
+    return fig
