@@ -63,6 +63,9 @@ def main(argv=None):
                          "(ALL = every state set too); "
                          "with --task-id, only that one combination (a job array)")
     ap.add_argument("--task-id", type=int, default=None)
+    ap.add_argument("--n-tasks", type=int, default=None,
+                    help="with --grid and --task-id: the array has this many tasks, task i takes "
+                         "combinations i, i + n, i + 2n, ... (default: one combination per task)")
     ap.add_argument("--exclude", nargs="*", default=[],
                     help='combinations to leave out, "atlas,window_s,model,arm" (e.g. ones already running)')
     ap.add_argument("--list", action="store_true", help="with --grid: print the combinations and their count, fit nothing")
@@ -76,8 +79,11 @@ def main(argv=None):
                 print(k, *c, sep="\t")
             print(f"N={len(combos)}")
             return
-        if a.task_id is not None:
-            combos = [combos[a.task_id]]
+        if a.task_id is not None:                  # this task's share: every n_tasks-th combination
+            combos = combos[a.task_id::a.n_tasks or len(combos)]
+            print(f"task {a.task_id} of {a.n_tasks or len(combos)}: {len(combos)} combination(s)", flush=True)
+            if not combos:
+                return
         a.space = sorted({f"{c[0]},{c[1]},{c[2]}" for c in combos})
         a.model = sorted({c[3] for c in combos})
         a.arm = sorted({c[4] for c in combos})
