@@ -121,8 +121,13 @@ def main(argv=None):
                 if sp and not pick:                    # the notebook's PICK: its parameters
                     atlas, w, states = sp.split(",")
                     pick = dict(atlas=atlas, window_s=float(w), states=states, **({"model": m} if m else {}))
-                    if arm in set(rows["arm"]):
-                        pick["arm"] = arm
+                    have = set(rows["arm"])               # the transfer names "all [cond]" plain "all"
+                    a_t = arm if arm in have else arm.split(" [")[0] if arm.split(" [")[0] in have else None
+                    if a_t is None:
+                        print(f"  SKIPPED transfer {sp} {m} {arm}: no such arm in the transfer rows "
+                              f"({sorted(have)})", flush=True)
+                        continue
+                    pick["arm"] = a_t
                 try:
                     best, _, _ = rp.choose_best(rows, pick, a.rank)
                     print("transfer:", best["label"], best["arm"], best["model"], flush=True)
