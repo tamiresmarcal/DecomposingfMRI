@@ -1,16 +1,19 @@
 #!/bin/bash
-# Every model, window and atlas for one state set, ONE SEPARATE JOB PER COMBINATION (all in
-# parallel): the SHAP caches of notebooks 06 / 07 (tools/predictive_cache.py --grid).
+# Every combination select-bstm ran -- atlas x window x state set x model x arm (graph_arms) -- the
+# SHAP caches of notebooks 06 / 07 (tools/predictive_cache.py --grid), ONE ARRAY TASK PER
+# COMBINATION, all in parallel (at most MAXPAR at a time).
 #
-#   ./slurm/predictive_cache_grid.sh                     # HMM2_umap3_8
-#   ./slurm/predictive_cache_grid.sh HMM2_pca3_8
+#   ./slurm/predictive_cache_grid.sh              # every state set (ALL)
+#   ./slurm/predictive_cache_grid.sh HMM2_umap3_8 # one state set
+#   MAXPAR=50 ./slurm/predictive_cache_grid.sh    # fewer at once
 #
-# Lists the combinations first (in the container, a few seconds), then submits the array.
-# Left out: the four already submitted by hand (hgb · all [cond] · harvardoxford/yeo7 · 30/-1);
-# set EXCLUDE="" to include them. Cached combinations are read, not refitted, so resubmitting is safe.
+# Lists the combinations first (in the container, a few seconds), then submits the array. A
+# combination already cached is read, not refitted, so resubmitting the whole grid is safe and cheap.
+# EXCLUDE: "atlas,window_s,model,arm" or "atlas,window_s,states,model,arm", ';'-separated.
 set -euo pipefail
-STATES="${1:-HMM2_umap3_8}"
-EXCLUDE="${EXCLUDE-harvardoxford,30,hgb,all [cond];harvardoxford,-1,hgb,all [cond];yeo7,30,hgb,all [cond];yeo7,-1,hgb,all [cond]}"
+STATES="${1:-ALL}"
+EXCLUDE="${EXCLUDE-}"
+MAXPAR="${MAXPAR:-100}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 [[ -f "$REPO/slurm/env.sh" ]] && source "$REPO/slurm/env.sh"
 SIF="${SIF:-${FMRIDECOMP_SIF_SHAP:-/project/6008063/tamires/singularity/fmri_decomp_stage45_shap.sif}}"
@@ -20,16 +23,14 @@ IFS=';' read -r -a EX <<< "$EXCLUDE"
 EXARGS=(); [[ ${#EX[@]} -gt 0 && -n "${EX[0]}" ]] && EXARGS=(--exclude "${EX[@]}")
 cd "$REPO"
 LIST=$(APPTAINERENV_PYTHONPATH="$REPO:$PYLIBS" apptainer exec --bind "$REPO" ${FMRIDECOMP_OUTPUTS:+--bind "$FMRIDECOMP_OUTPUTS"} \
-       "$SIF" python tools/predictive_cache.py --grid "$STATES" --list "${EXARGS[@]}")
-echo "$LIST"
+       "$SIF" python tools/predictive_cache.py --grid "$STATES" --list ${EXARGS[@]+"${EXARGS[@]}"})
+echo "$LIST" | tail -25
 N=$(echo "$LIST" | sed -n 's/^N=//p')
 [[ "$N" -gt 0 ]] || { echo "nothing to run"; exit 0; }
 mkdir -p slurm_logs
-# one separate job per combination, all submitted now: they run in parallel, each on its own node share
-echo "$LIST" | grep -v '^N=' | while IFS=$'\t' read -r K ATLAS W MODEL ARM; do
-  NAME="predcache_${ATLAS}_${W}_${MODEL}_${ARM//[^a-z]/}"
-  sbatch --job-name="$NAME" --time=12:00:00 --cpus-per-task=16 --mem=64G \
-         --output="slurm_logs/${NAME}_%j.out" --error="slurm_logs/${NAME}_%j.err" \
-         slurm/predictive_cache.sbatch -- --space "${ATLAS},${W},${STATES}" --model "$MODEL" --arm "$ARM" \
-         --fc-arm edges --skip shares contrib
-done
+# The array index is the row of the list above: every task recomputes the same sorted list and takes
+# its own row, so nothing is passed but the index.
+sbatch --array="0-$((N - 1))%${MAXPAR}" --job-name="predcache_grid" --time=12:00:00 --cpus-per-task=16 --mem=64G \
+       --output="slurm_logs/predcache_grid_%A_%a.out" --error="slurm_logs/predcache_grid_%A_%a.err" \
+       slurm/predictive_cache.sbatch -- --grid "$STATES" --task-id-from-array --fc-arm edges --skip shares contrib \
+       ${EXARGS[@]+"${EXARGS[@]}"}

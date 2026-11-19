@@ -26,14 +26,25 @@ from fmri_decomposition.supervised_model import report as rp
 
 
 def grid(st, states, exclude=()):
-    """(atlas, window_s, model, arm) select-bstm ran for `states`, every model, the graph_arms."""
+    """(atlas, window_s, states, model, arm) select-bstm ran, every model, the graph_arms; for one
+    state set, or every state set with states="ALL". `exclude`: "atlas,window_s,model,arm" (any
+    state set) or "atlas,window_s,states,model,arm"."""
     s = st.summ
-    s = s[(s["tree"] == "bstm") & (s["states"] == states) & s["arm"].isin(st.cfg.graph_arms)
-          & s["model"].isin(st.models())]
-    out = sorted({(r.atlas, float(r.window_s), r.model, r.arm) for r in s.itertuples()})
-    skip = {tuple(x.split(",")[:2]) + tuple(x.split(",")[2:]) for x in exclude}
-    return [c for c in out if (c[0], f"{c[1]:g}", c[2], c[3]) not in skip
-            and (c[0], str(c[1]), c[2], c[3]) not in skip]
+    s = s[(s["tree"] == "bstm") & s["arm"].isin(st.cfg.graph_arms) & s["model"].isin(st.models())]
+    if states != "ALL":
+        s = s[s["states"] == states]
+    out = sorted({(r.atlas, float(r.window_s), r.states, r.model, r.arm) for r in s.itertuples()})
+    skip = [x.split(",") for x in exclude]
+
+    def hit(c):
+        for x in skip:
+            w = f"{c[1]:g}"
+            if len(x) == 4 and (x[0], x[1], x[2], x[3]) in {(c[0], w, c[3], c[4]), (c[0], str(c[1]), c[3], c[4])}:
+                return True
+            if len(x) == 5 and (x[0], x[1], x[2], x[3], x[4]) in {(c[0], w, *c[2:]), (c[0], str(c[1]), *c[2:])}:
+                return True
+        return False
+    return [c for c in out if not hit(c)]
 
 
 def main(argv=None):
@@ -48,7 +59,8 @@ def main(argv=None):
     ap.add_argument("--skip", nargs="*", default=[], choices=["cam", "shares", "transfer", "contrib"])
     ap.add_argument("--n-jobs", type=int, default=None)
     ap.add_argument("--grid", metavar="STATES",
-                    help="every atlas x window x model x arm (graph_arms) select-bstm ran for these states; "
+                    help="every atlas x window x model x arm (graph_arms) select-bstm ran for these states "
+                         "(ALL = every state set too); "
                          "with --task-id, only that one combination (a job array)")
     ap.add_argument("--task-id", type=int, default=None)
     ap.add_argument("--exclude", nargs="*", default=[],
@@ -66,9 +78,9 @@ def main(argv=None):
             return
         if a.task_id is not None:
             combos = [combos[a.task_id]]
-        a.space = sorted({f"{c[0]},{c[1]},{a.grid}" for c in combos})
-        a.model = sorted({c[2] for c in combos})
-        a.arm = sorted({c[3] for c in combos})
+        a.space = sorted({f"{c[0]},{c[1]},{c[2]}" for c in combos})
+        a.model = sorted({c[3] for c in combos})
+        a.arm = sorted({c[4] for c in combos})
         if a.task_id is not None:
             a.skip = sorted(set(a.skip) | {"shares", "contrib"})   # shared tables: not in every task
     spaces = a.space or [None]
