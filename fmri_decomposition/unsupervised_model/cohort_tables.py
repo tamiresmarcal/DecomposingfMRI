@@ -1312,3 +1312,19 @@ def state_activation(co, cohort, task, states=None, atlas=None, window_s=None):
     M = pd.DataFrame({k: v[0] / v[1] for k, v in sorted(maps.items())}, index=feats).T
     M.index.name = "state"
     return F, M, tl
+
+
+def by_role(co, lat):
+    """(co, lat) with the cohorts pooled by their role: one 'training cohorts' and one 'projected
+    cohorts' group, so fig_latents draws two panels instead of one per cohort."""
+    import copy
+    import dataclasses
+    name = {"train": "training cohorts", "projected": "projected cohorts"}
+    roles = {c: name.get(s["role"], s["role"]) for c, s in co.cfg.cohorts.items()}
+    groups = {g: dict(dirs=[], role=next(s["role"] for c, s in co.cfg.cohorts.items() if roles[c] == g))
+              for g in dict.fromkeys(roles.values())}
+    co2 = copy.copy(co)
+    co2.cfg = dataclasses.replace(co.cfg, cohorts=groups)
+    lat2 = lat.assign(sub=lat["cohort"] + ":" + lat["sub"].astype(str), cohort=lat["cohort"].map(roles))
+    lat2.attrs.update(lat.attrs)
+    return co2, lat2
