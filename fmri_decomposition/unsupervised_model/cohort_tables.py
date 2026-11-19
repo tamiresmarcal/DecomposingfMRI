@@ -1519,13 +1519,16 @@ def moment_share(lat, cols=("x", "y", "z"), min_people=5):
 
 
 def mapper_graph(E, n_bins=12, overlap=.5, cols=("x", "y", "z"), min_samples=3, eps=None, max_points=30000,
-                 seed=0):
+                 seed=0, min_node=1, min_jaccard=0.0):
     """A Mapper shape graph of an embedding (Xian et al.'s STIM, after Saggar et al.): the 3-D space
     cut into n_bins^3 overlapping cubes (each overlapping its neighbours by `overlap`), the points in
     each cube clustered with DBSCAN, every cluster a node, two nodes joined when they share a point.
     Unlike STIM the clustering is on the embedding itself, not on the original features (the
     notebook holds only the coordinates). eps: DBSCAN radius; None = 1.5 x the median distance to
-    the 5th neighbour. Returns (E's rows used, nodes: a list of row-index arrays, edges: (i, j) pairs)."""
+    the 5th neighbour. Clean-up for drawing: min_node drops nodes with fewer windows; min_jaccard
+    drops edges whose shared windows are a smaller share of the two nodes' union (weak overlaps that
+    tie a dense cloud into a lattice). Returns (E's rows used, nodes: a list of row-index arrays,
+    edges: (i, j) pairs)."""
     from scipy import sparse
     from sklearn.cluster import DBSCAN
     from sklearn.neighbors import NearestNeighbors
@@ -1559,11 +1562,18 @@ def mapper_graph(E, n_bins=12, overlap=.5, cols=("x", "y", "z"), min_samples=3, 
                 nodes += [idx[lab == c] for c in np.unique(lab) if c >= 0]
     if not nodes:
         raise SystemExit("no Mapper nodes: raise eps or lower min_samples / n_bins")
-    M = sparse.csr_matrix((np.ones(sum(map(len, nodes))), (np.concatenate(nodes),
-                           np.repeat(np.arange(len(nodes)), list(map(len, nodes))))), shape=(len(X), len(nodes)))
+    nodes = [n for n in nodes if len(n) >= min_node]
+    if not nodes:
+        raise SystemExit(f"no Mapper node holds >= {min_node} windows: lower min_node")
+    size = np.array(list(map(len, nodes)), float)
+    M = sparse.csr_matrix((np.ones(int(size.sum())), (np.concatenate(nodes),
+                           np.repeat(np.arange(len(nodes)), size.astype(int)))), shape=(len(X), len(nodes)))
     A = sparse.triu(M.T @ M, k=1).tocoo()
-    edges = np.c_[A.row, A.col]
-    E.attrs.update(mapper=dict(n_bins=n_bins, overlap=overlap, eps=eps, min_samples=min_samples))
+    jac = A.data / (size[A.row] + size[A.col] - A.data)          # shared / union
+    keep = jac >= min_jaccard
+    edges = np.c_[A.row[keep], A.col[keep]]
+    E.attrs.update(mapper=dict(n_bins=n_bins, overlap=overlap, eps=eps, min_samples=min_samples,
+                               min_node=min_node, min_jaccard=min_jaccard), mapper_weights=jac[keep])
     return E, nodes, edges
 
 
@@ -1572,6 +1582,8 @@ def graph_layout(nodes, edges, E, cols=("x", "y", "z"), n_iter=150, gravity=.05,
     first two principal axes of the nodes' centroids so the drawing keeps the embedding's main
     direction; a weak pull to the centre (gravity) keeps disconnected pieces close."""
     X = E[list(cols)].to_numpy(float)
+    wts = np.asarray(E.attrs.get("mapper_weights", np.ones(len(edges))), float)
+    wts = wts / wts.max() if len(wts) and wts.max() > 0 else wts
     C = np.array([X[n].mean(0) for n in nodes])
     C = C - C.mean(0)
     _, _, vt = np.linalg.svd(C, full_matrices=False)
@@ -1587,7 +1599,7 @@ def graph_layout(nodes, edges, E, cols=("x", "y", "z"), n_iter=150, gravity=.05,
         if len(edges):
             d = P[edges[:, 0]] - P[edges[:, 1]]
             L = np.maximum(np.linalg.norm(d, axis=1), 1e-4)
-            f = d / L[:, None] * (L ** 2 / k)[:, None]
+            f = d / L[:, None] * (L ** 2 / k)[:, None] * wts[:, None]
             np.add.at(F, edges[:, 0], -f)
             np.add.at(F, edges[:, 1], f)
         F -= gravity * P / k                       # keeps components that share nothing in view
@@ -1595,3 +1607,39 @@ def graph_layout(nodes, edges, E, cols=("x", "y", "z"), n_iter=150, gravity=.05,
         P += F / np.maximum(step, 1e-9)[:, None] * np.minimum(step, t)[:, None]
         t *= .97
     return P
+
+
+def hads_scores(raw=True):
+    """Cam-CAN's HADS per person: sub, anxiety, depression. raw=True: the 0-21 sums
+    (additional_HADS_anxiety / _depression, the 9999 "no answer" code dropped); False: the bands
+    coded 0 Normal .. 3 Severe. Read the way the supervised model reads them (report.cam_settings)."""
+    from fmri_decomposition.supervised_model import hads as hs
+    from fmri_decomposition.supervised_model import report
+    if raw:
+        cfg = report.cam_settings(targets={"anxiety": "additional_HADS_anxiety", "depression": "additional_HADS_depression"},
+                                  target_range={"anxiety": (0, 21), "depression": (0, 21)})
+    else:
+        cfg = report.cam_settings()
+    ph = hs.Study(cfg)._pheno()
+    ph["sub"] = _norm_sub(ph["sub"]).to_numpy()
+    return ph[["sub", "anxiety", "depression"]].dropna(how="all").drop_duplicates("sub")
+
+
+def symptom_fit(L, scores, cols=("x", "y", "z")):
+    """How well a person's place in the space predicts a symptom score: each person's mean
+    coordinates, a linear regression of the score on them, R^2 and its 5-fold cross-validated
+    version (out of sample; ~0 or below = nothing), per variant. One row per (variant, score)."""
+    from sklearn.linear_model import LinearRegression
+    from sklearn.model_selection import cross_val_score
+    rows = []
+    for v, g in L.groupby("variant", sort=False):
+        m = g.groupby("sub")[list(cols)].mean().join(scores.set_index("sub"), how="inner")
+        for s in [c for c in scores if c != "sub"]:
+            d = m.dropna(subset=[s])
+            if len(d) < 20:
+                continue
+            X, y = d[list(cols)].to_numpy(), d[s].to_numpy()
+            r2 = LinearRegression().fit(X, y).score(X, y)
+            cv = cross_val_score(LinearRegression(), X, y, cv=5, scoring="r2").mean()
+            rows.append(dict(variant=v, score=s, people=len(d), r2=r2, r2_cv=cv))
+    return pd.DataFrame(rows)

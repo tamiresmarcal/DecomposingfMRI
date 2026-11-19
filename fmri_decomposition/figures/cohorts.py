@@ -1436,8 +1436,18 @@ def fig_embeddings(co, E, panel="variant", colour="cohort", panels=None, titles=
                                                                      color=v, colorscale=scale,
                                        colorbar=dict(title=label, len=.5, thickness=10) if j == 0 else None,
                                        showscale=j == 0)), r, c)
+        elif colour in g and pd.api.types.is_numeric_dtype(g[colour]):
+            has = g[colour].notna()
+            if (~has).any():
+                add(g[~has], hp.MUTED, "no score")
+            h = g[has]
+            fig.add_trace(go.Scatter3d(x=h["x"], y=h["y"], z=h["z"], mode="markers", showlegend=False,
+                                       text=hover.loc[h.index] + " · " + colour + " " + h[colour].round(1).astype(str),
+                                       hoverinfo="text", marker=dict(size=sz, opacity=.6, color=h[colour], colorscale="Viridis",
+                                       cmin=E[colour].min(), cmax=E[colour].max(), showscale=j == 0,
+                                       colorbar=dict(title=colour, len=.5, thickness=10) if j == 0 else None)), r, c)
         else:
-            raise SystemExit(f"colour={colour!r}: cohort, role, kind, task, state, sub or time")
+            raise SystemExit(f"colour={colour!r}: cohort, role, kind, task, state, sub, time or a numeric column")
         fig.update_layout(**{f"scene{'' if j == 0 else j + 1}": dict(aspectmode="cube", xaxis_title="1",
                                                                        yaxis_title="2", zaxis_title="3")})
     fig.update_layout(height=height * rows, width=460 * ncol, margin=dict(l=0, r=0, t=70, b=0),
