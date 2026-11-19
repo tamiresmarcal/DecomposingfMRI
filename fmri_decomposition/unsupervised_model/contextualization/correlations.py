@@ -375,7 +375,7 @@ def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
     return grp, subj
 
 
-def _read_frames(root, atlas, cohort, feats, band, zscore, kept):
+def _read_frames(root, atlas, cohort, feats, band, zscore, kept, task=None):
     """Per-TR activation frames for the latents' subjects -> (ident, X, dropped).
 
     Two things make this cheap across many state sets and robust to bad data:
@@ -393,20 +393,21 @@ def _read_frames(root, atlas, cohort, feats, band, zscore, kept):
 
     from fmri_decomposition import frames
 
-    tag = f"{atlas}_{cohort}_band-{'none' if not band else '-'.join(map(str, band))}_z-{int(zscore)}"
+    tag = (f"{atlas}_{cohort}{'' if task is None else f'_task-{task}'}"
+           f"_band-{'none' if not band else '-'.join(map(str, band))}_z-{int(zscore)}")
     cache = reference_maps_dir() / "cache" / f"frames_{tag}.npz"
     if cache.exists():
         z = np.load(cache, allow_pickle=True)
         ident = pd.DataFrame({c: z[f"ident_{c}"] for c in z["ident_cols"]})
         X, dropped = z["X"], [tuple(d) for d in z["dropped"]]
     else:
-        everyone = {tuple(x) for x in _all_subjects(frames.shard_paths(root, atlas, cohort))}
+        everyone = {tuple(x) for x in _all_subjects(frames.shard_paths(root, atlas, cohort, task=task))}
         dropped, subjects = [], set(everyone)
         while True:
             try:
                 ident, X = frames.read_cohort(
                     root, atlas, cohort, feats, band=band, zscore=zscore, log=lambda *_: None,
-                    censor={"policy": "readable", "subjects": subjects, "windows": None})[:2]
+                    censor={"policy": "readable", "subjects": subjects, "windows": None}, task=task)[:2]
                 break
             except SystemExit as e:
                 msg = str(e)

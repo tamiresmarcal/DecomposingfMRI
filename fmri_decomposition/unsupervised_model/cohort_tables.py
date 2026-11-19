@@ -1281,7 +1281,8 @@ def state_activation(co, cohort, task, states=None, atlas=None, window_s=None):
             continue
         feats = fr.feature_columns(shards[0])
         on_disk = _all_subjects(shards)                    # (task, sub) as the shards spell them
-        ident, X, _ = _read_frames(c.root, atlas, d, feats, fr.DEFAULT_BANDPASS, True, on_disk)
+        # one task at a time: a cohort's tasks can have different TRs (Cam-CAN: rest 1.97 s, movie 2.47 s)
+        ident, X, _ = _read_frames(c.root, atlas, d, feats, fr.DEFAULT_BANDPASS, True, on_disk, task=str(task))
         f = pd.DataFrame(X, columns=feats)
         f.insert(0, "t", ident["stimulus_start_s"].astype(float).round(1).to_numpy())
         f.insert(0, "sub", _norm_sub(ident["sub"]).to_numpy())
