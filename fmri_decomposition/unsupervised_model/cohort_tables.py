@@ -1703,19 +1703,3 @@ def band_check(co):
     out = p.merge(m, on=["cohort", "task", "sub", "band"], how="left")
     out["cohort"] = out["cohort"].map(lambda x: lab.get(x, x))
     return out[out["cohort"].isin(co.cfg.cohorts)].reset_index(drop=True)
-
-
-def state_maps_table(co, atlas=None, window_s=None, states=None):
-    """The state maps notebook 04 wrote (contextualization/<states>_window-<w>*/<atlas>/state_means.csv),
-    rows = states; None when notebook 04 has not been run for this state set."""
-    c = co.cfg
-    atlas = atlas or c.space["atlas"]
-    states = states or c.space["states"]
-    w = _fmt_window(float(c.space["window_s"] if window_s is None else window_s))
-    base = tree_root(c.root, "contextualization", c.modelling_version)
-    hits = sorted(base.glob(f"{states}_window-{w}*/{atlas}/state_means.csv"))
-    if not hits:
-        return None
-    t = pd.read_csv(hits[0], index_col="state")
-    t.attrs["path"] = str(hits[0])
-    return t
