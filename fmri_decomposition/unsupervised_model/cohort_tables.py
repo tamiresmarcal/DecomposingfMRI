@@ -1225,3 +1225,89 @@ def mixed_tables(co, n_boot=1, recompute=False, save=True, min_occ=0.01, fit_mis
         cells.to_csv(files[1], index=False)
         (d / "meta.json").write_text(json.dumps(meta, indent=1))
     return props, cells
+
+
+# -- figure 1: the states in time (notebook 08) ----------------------------------------------------
+def _norm_sub(x):
+    """One spelling of a subject id for joining tables: upper case, without a 'SUB-' prefix."""
+    return pd.Series(x).astype(str).str.strip().str.upper().str.replace(r"^SUB-", "", regex=True)
+
+
+def _dirs_of(co, cohort):
+    return co.cfg.cohorts[cohort]["dirs"] if cohort in co.cfg.cohorts else [cohort]
+
+
+def state_timeline(co, cohort, task, states=None, atlas=None, window_s=None):
+    """Every window of one cohort x task with its state: sub, stimulus_start_s (the window's start in
+    stimulus time, the same clock for every viewer), state. From the latents (stage 4)."""
+    import pyarrow.parquet as pq
+    c = co.cfg
+    atlas = atlas or c.space["atlas"]
+    window_s = c.space["window_s"] if window_s is None else window_s
+    states = states or c.space["states"]
+    base = latents_root(c.root, atlas, window_s, version=c.modelling_version)
+    frames = []
+    for d in _dirs_of(co, cohort):
+        for f in sorted((base / f"cohort={d}").rglob("*.parquet")):
+            have = set(pq.read_schema(f).names)
+            if states not in have or "stimulus_start_s" not in have:
+                continue
+            t = pd.read_parquet(f, columns=["sub", "task", "stimulus_start_s", states])
+            frames.append(t[t["task"].astype(str) == str(task)])
+    if not frames or not sum(len(f) for f in frames):
+        raise SystemExit(f"no windows with {states!r} for {cohort} / task {task!r} under {base}")
+    t = pd.concat(frames, ignore_index=True).rename(columns={states: "state"}).dropna(subset=["state"])
+    t["sub"] = _norm_sub(t["sub"])
+    t["state"] = t["state"].astype(int)
+    t["stimulus_start_s"] = t["stimulus_start_s"].astype(float).round(1)
+    return t.sort_values(["sub", "stimulus_start_s"]).reset_index(drop=True)
+
+
+def state_activation(co, cohort, task, states=None, atlas=None, window_s=None):
+    """Per-TR parcel activation of one cohort x task (outputs/extractions/activation, band-passed and
+    z-scored per run, as the state maps), with each frame's state share:
+    returns (frames: sub, t (stimulus time, s), parcels...; maps: state x parcel mean activation over
+    the frames under that state's windows; timeline: state_timeline)."""
+    from fmri_decomposition import frames as fr
+    from fmri_decomposition.unsupervised_model.contextualization.correlations import _all_subjects, _read_frames
+    c = co.cfg
+    atlas = atlas or c.space["atlas"]
+    window_s = float(c.space["window_s"] if window_s is None else window_s)
+    tl = state_timeline(co, cohort, task, states, atlas, window_s)
+    parts = []
+    for d in _dirs_of(co, cohort):
+        shards = fr.shard_paths(c.root, atlas, d, task=str(task))
+        if not shards:
+            continue
+        feats = fr.feature_columns(shards[0])
+        on_disk = _all_subjects(shards)                    # (task, sub) as the shards spell them
+        ident, X, _ = _read_frames(c.root, atlas, d, feats, fr.DEFAULT_BANDPASS, True, on_disk)
+        f = pd.DataFrame(X, columns=feats)
+        f.insert(0, "t", ident["stimulus_start_s"].astype(float).round(1).to_numpy())
+        f.insert(0, "sub", _norm_sub(ident["sub"]).to_numpy())
+        parts.append(f)
+    if not parts:
+        raise SystemExit(f"no activation frames for {cohort} / task {task!r} at atlas={atlas}")
+    F = pd.concat(parts, ignore_index=True)
+    F = F[F["sub"].isin(set(tl["sub"]))].reset_index(drop=True)      # the latents' viewers only
+    if F.empty:
+        raise SystemExit(f"activation subjects do not match the latents' for {cohort} / {task}")
+    feats = [x for x in F.columns if x not in ("sub", "t")]
+    # each frame's state: the windows covering it (start <= t < start + window), per subject
+    maps, rows = {}, []
+    for sub, g in F.groupby("sub"):
+        w = tl[tl["sub"] == sub]
+        if w.empty:
+            continue
+        T, S0 = g["t"].to_numpy(), w["stimulus_start_s"].to_numpy()
+        cover = (T[None] >= S0[:, None] - 1e-6) & (T[None] < S0[:, None] + window_s - 1e-6)   # windows x frames
+        Xg = g[feats].to_numpy(float)
+        for k in np.unique(w["state"]):
+            wts = cover[w["state"].to_numpy() == k].sum(0).astype(float)
+            if wts.sum():
+                acc = maps.setdefault(int(k), [0.0, 0.0])
+                acc[0] = acc[0] + wts @ Xg
+                acc[1] += wts.sum()
+    M = pd.DataFrame({k: v[0] / v[1] for k, v in sorted(maps.items())}, index=feats).T
+    M.index.name = "state"
+    return F, M, tl

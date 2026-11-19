@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 from fmri_decomposition.figures import hads as hp
 from fmri_decomposition.supervised_model import hads as ht
@@ -1247,5 +1248,109 @@ def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_p
     _task_person_panel(ax, co, st, st_transitions, variables, min_occ, guides=guides)
     fig.suptitle(f"Task vs person · {ht.set_label(co.cfg.space)}", x=.02, ha="left", fontsize=12)
     save(fig, name, co.cfg)
+    _show(fig)
+    return fig
+
+
+# ------------------------------------------------------------------ figure 1: the states in time
+def state_colours(K):
+    return [plt.cm.tab10(k % 10) for k in range(K)]
+
+
+def fig_state_timeline(co, tl, title="", name="state_timeline", max_people=80, seed=0):
+    """Left: one row per viewer, one column per window of the same film, colour = state (at most
+    max_people rows, drawn at random); the strip on top is the most common state at each moment.
+    Right: the share of viewers in each state at each moment of the film."""
+    from matplotlib.colors import ListedColormap
+    K = co.cfg.K
+    cols = state_colours(K)
+    R = tl.pivot_table(index="sub", columns="stimulus_start_s", values="state", aggfunc="first")
+    share = np.array([(R == k).sum(0) / R.notna().sum(0) for k in range(K)])
+    rng = np.random.default_rng(seed)
+    show = R.loc[rng.permutation(R.index)[:max_people]] if len(R) > max_people else R
+    mode = np.nanargmax(share, 0)
+    t = R.columns.to_numpy(float)
+    fig = plt.figure(figsize=(16, 5.2))
+    gs = fig.add_gridspec(2, 2, height_ratios=[.06, 1], width_ratios=[1.5, 1], hspace=.04, wspace=.12)
+    cmap = ListedColormap(cols)
+    ax0 = fig.add_subplot(gs[0, 0])
+    ax0.imshow([mode], aspect="auto", cmap=cmap, vmin=-.5, vmax=K - .5, extent=(t[0], t[-1], 0, 1))
+    ax0.set_axis_off()
+    ax0.set_title("most common state at each moment", fontsize=9, loc="left")
+    ax = fig.add_subplot(gs[1, 0], sharex=ax0)
+    ax.imshow(np.ma.masked_invalid(show.to_numpy(float)), aspect="auto", cmap=cmap, vmin=-.5, vmax=K - .5,
+              interpolation="nearest", extent=(t[0], t[-1], len(show), 0))
+    ax.set_yticks([])
+    ax.set_ylabel(f"viewers ({len(show)} of {len(R)})", fontsize=9)
+    ax.set_xlabel("film time (s, window start)", fontsize=9)
+    ax2 = fig.add_subplot(gs[:, 1])
+    ax2.stackplot(t, share, colors=cols, linewidth=0)
+    ax2.set_xlim(t[0], t[-1])
+    ax2.set_ylim(0, 1)
+    ax2.set_xlabel("film time (s)", fontsize=9)
+    ax2.set_ylabel("share of viewers in each state", fontsize=9)
+    for sp in ("top", "right"):
+        ax2.spines[sp].set_visible(False)
+    fig.legend(handles=[Patch(color=cols[k], label=f"S{k}") for k in range(K)], loc="lower center", ncol=K,
+               frameon=False, fontsize=9, bbox_to_anchor=(.5, -.04))
+    fig.suptitle(title, x=.02, ha="left", fontsize=12)
+    save(fig, name, co.cfg)
+    _show(fig)
+    return fig
+
+
+def fig_state_detail(co, F, M, tl, state, n_regions=18, n_traces=3, title="", name=None, min_share=None):
+    """One state in detail. Right: mean activation of the regions (rows, clustered) in every state
+    (columns), the n_regions most active in `state` and the n_regions least; the chosen state's
+    column framed. Left: the n_traces regions most active in `state`, their activation over the
+    film (mean over viewers, band = SD), on the share of viewers in `state` at each moment (grey
+    fill, right axis)."""
+    from scipy.cluster.hierarchy import leaves_list, linkage
+    K = co.cfg.K
+    cols = state_colours(K)
+    order = M.loc[state].sort_values(ascending=False)
+    regions = list(dict.fromkeys([*order.index[:n_regions // 2 + n_regions % 2], *order.index[-(n_regions // 2):]]))
+    H = M[regions].T                                              # regions x states
+    if len(H) > 2:
+        H = H.iloc[leaves_list(linkage(H.to_numpy(), "average"))]
+    top = list(order.index[:n_traces])
+    g = F.groupby("t")[top]
+    mean, sd = g.mean(), g.std()
+    share = tl.assign(on=tl["state"] == state).groupby("stimulus_start_s")["on"].mean()
+    fig = plt.figure(figsize=(17, max(6, .32 * len(H) + 2)))
+    gs = fig.add_gridspec(len(top), 2, width_ratios=[1.6, 1], wspace=.55, hspace=.25)
+    tr_cols = [plt.cm.Set2(i) for i in range(len(top))]
+    for i, r in enumerate(top):
+        ax = fig.add_subplot(gs[i, 0])
+        axs = ax.twinx()
+        axs.fill_between(share.index, share.to_numpy(), step="post", color="#d9d8d3", lw=0)
+        axs.set_ylim(0, 1)
+        axs.set_ylabel(f"share in S{state}" if i == len(top) // 2 else "", fontsize=8, color="#8a8984")
+        axs.tick_params(labelsize=7, colors="#8a8984")
+        ax.set_zorder(axs.get_zorder() + 1)
+        ax.patch.set_visible(False)
+        ax.plot(mean.index, mean[r], color=tr_cols[i], lw=1.2)
+        ax.fill_between(mean.index, mean[r] - sd[r], mean[r] + sd[r], color=tr_cols[i], alpha=.25, lw=0)
+        ax.set_title(r, fontsize=9, loc="left")
+        ax.tick_params(labelsize=7)
+        ax.set_xlim(mean.index.min(), mean.index.max())
+        if i < len(top) - 1:
+            ax.set_xticklabels([])
+        else:
+            ax.set_xlabel("film time (s)", fontsize=9)
+        ax.set_ylabel("activation (z)", fontsize=8)
+    ax = fig.add_subplot(gs[:, 1])
+    v = np.nanmax(np.abs(H.to_numpy()))
+    im = ax.imshow(H.to_numpy(), aspect="auto", cmap="RdBu_r", vmin=-v, vmax=v)
+    ax.set_xticks(range(K), [f"S{k}" for k in H.columns])
+    for k, tl_ in zip(range(K), ax.get_xticklabels()):
+        tl_.set_color(cols[k])
+    ax.xaxis.tick_top()
+    ax.set_yticks(range(len(H)), H.index, fontsize=8)
+    ax.yaxis.tick_right()
+    ax.add_patch(plt.Rectangle((list(H.columns).index(state) - .5, -.5), 1, len(H), fill=False, ec="k", lw=1.6))
+    fig.colorbar(im, ax=ax, location="left", fraction=.04, pad=.02, label="mean activation (z)")
+    fig.suptitle(title or f"State S{state} in detail", x=.02, ha="left", fontsize=12)
+    save(fig, name or f"state_detail_S{state}", co.cfg)
     _show(fig)
     return fig
