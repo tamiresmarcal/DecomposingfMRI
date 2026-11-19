@@ -1690,3 +1690,16 @@ def nndb_fits(co, windows=(30, 60, 120, 300), variants=("nndb_only", "nndb_all",
     E["panel"] = E["window"].map(lambda w: f"{w:g} s") + " · " + E["variant"].map(NNDB_PANELS)
     E["kind"] = "movie"
     return E
+
+
+def band_check(co):
+    """`latent_diagnostics.sbatch band`: per (cohort, task, person, band) mean |r| over windows and
+    edge variance over windows, the band as extracted vs every cohort filtered 0.01-0.1 Hz."""
+    d = diagnostics_dir(co)
+    w = pd.read_parquet(_need(d / "band_windows.parquet", "band", co))
+    p = pd.read_parquet(d / "band_people.parquet")
+    lab = _label_of(co)
+    m = w.groupby(["cohort", "task", "sub", "band"], as_index=False)[["mean_abs_r", "sd_r"]].mean()
+    out = p.merge(m, on=["cohort", "task", "sub", "band"], how="left")
+    out["cohort"] = out["cohort"].map(lambda x: lab.get(x, x))
+    return out[out["cohort"].isin(co.cfg.cohorts)].reset_index(drop=True)

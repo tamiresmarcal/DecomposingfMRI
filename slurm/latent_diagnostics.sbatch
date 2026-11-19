@@ -6,7 +6,8 @@
 #   sbatch --array=0-5 slurm/latent_diagnostics.sbatch stats base all_rows no_scaler person_scaled nndb_only
 #   sbatch --array=0-0 slurm/latent_diagnostics.sbatch all_rows -- --atlas harvardoxford --window-s 30
 #
-# Positional = the parts: `stats` (window statistics + state edge means, no fit) or a UMAP variant
+# Positional = the parts: `stats` (window statistics + state edge means, no fit), `band` (the NNDb
+# frequency-band check, no fit) or a UMAP variant
 # (base, all_rows, no_scaler, person_scaled, nndb_only, nndb_all, nndb_old). SLURM_ARRAY_TASK_ID picks one, so --array
 # must be 0..(number of parts - 1). Options after a bare -- go to the script (default: harvardoxford,
 # 30 s, HMM2_umap3_8). all_rows fits the UMAP on every training window (~124k x 6,105) and is the
@@ -37,7 +38,7 @@ if (( IDX >= ${#PARTS[@]} )); then
   exit 1
 fi
 PART="${PARTS[$IDX]}"
-if [[ "$PART" == "stats" ]]; then ARGS=(--part stats); else ARGS=(--part umap --variant "$PART"); fi
+if [[ "$PART" == "stats" || "$PART" == "band" ]]; then ARGS=(--part "$PART"); else ARGS=(--part umap --variant "$PART"); fi
 
 REPO="${SLURM_SUBMIT_DIR:-$PWD}"
 [[ -f "$REPO/slurm/env.sh" ]] && source "$REPO/slurm/env.sh"

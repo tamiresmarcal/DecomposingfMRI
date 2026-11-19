@@ -17,6 +17,15 @@ notebook 08 reads them (cohort_tables.diagnostics_dir):
                                                STATES: an edge table becomes node strength
                                                (contextualization.correlations.node_strength).
 
+  --part band      the frequency-band check, no fit: --band-subjects people per cohort (up to 3
+                   tasks each), their per-TR activation windowed exactly as the dFC (window_s, stride
+                   window_s / 5), Pearson per window, twice: the band as extracted (NNDb arrives
+                   0.01-1 Hz from AFNI, the others are filtered 0.01-0.1 Hz at extraction) and every
+                   cohort filtered 0.01-0.1 Hz. If NNDb's low |r| and edge variance come from its
+                   wider band, filtered NNDb joins the other cohorts.
+      band_windows.parquet     per window: cohort, task, sub, band, volumes, mean |r|, SD of r
+      band_people.parquet      per (cohort, task, person, band): edge variance over windows
+
   --part umap --variant V   one UMAP refit, then every cohort's sampled windows put through it:
       umap_<V>.parquet         cohort, task, sub, window_id, stimulus_start_s, n_tr_effective,
                                state (the official label), x, y, z
@@ -204,6 +213,67 @@ def part_stats(a, root, fit, cohorts, edges, d):
             log(f"-> {f}")
 
 
+# ---------------------------------------------------------------------------------- part: band
+BANDS = {"as extracted": None, "0.01-0.1 Hz": (0.01, 0.1)}
+
+
+def part_band(a, root, fit, cohorts, edges, d):
+    from fmri_decomposition import frames as fr
+    win, per = [], []
+    w_s = float(a.window_s)
+    for c in cohorts:
+        paths = fr.shard_paths(root, a.atlas, c)
+        if not paths:
+            log(f"  {c}: no activation shards, skipped")
+            continue
+        cells = sorted({(p.parent.parent.name.split("=", 1)[1], p.parent.name.split("=", 1)[1]) for p in paths})
+        subs = sorted({s_ for _, s_ in cells})[:a.band_subjects]
+        keep = set()
+        for s_ in subs:
+            keep |= set(sorted(t for t, x in cells if x == s_)[:3])
+        keep = {(t, s_) for t, s_ in cells if s_ in subs and t in keep}
+        feats = fr.feature_columns(paths[0])
+        for t in sorted({t for t, _ in keep}):
+            cen = {"subjects": {k for k in keep if k[0] == t}, "windows": None, "policy": "band-check"}
+            for band_name, band in BANDS.items():
+                try:
+                    ident, X, tr = fr.read_cohort(root, a.atlas, c, feats, censor=cen, band=band, zscore=False,
+                                                  log=lambda *x: None, task=t)
+                except SystemExit as e:
+                    log(f"  {c}/{t}: {str(e).splitlines()[0]}")
+                    break
+                n_win, step = int(round(w_s / tr)), max(1, int(round(w_s / 5 / tr)))
+                for sub, idx in ident.groupby("sub").groups.items():
+                    idx = np.asarray(idx)
+                    wid = ident.loc[idx, "window_id"].to_numpy().astype(int)
+                    pos = pd.Series(np.arange(len(idx)), index=wid)
+                    pos = pos[~pos.index.duplicated()]
+                    E = []
+                    for s0 in range(int(wid.min()), int(wid.max()) - n_win + 2, step):
+                        rows = pos.reindex(range(s0, s0 + n_win)).dropna().astype(int).to_numpy()
+                        if len(rows) < .8 * n_win:
+                            continue
+                        B = X[idx[rows]].astype(np.float64)
+                        with np.errstate(invalid="ignore", divide="ignore"):
+                            R = np.corrcoef(B.T)
+                        e = R[np.triu_indices(R.shape[0], 1)]
+                        if np.isnan(e).any():
+                            continue
+                        E.append(e)
+                        win.append(dict(cohort=c, task=t, sub=sub, band=band_name, n_tr=len(rows),
+                                        mean_abs_r=float(np.abs(e).mean()), mean_r=float(e.mean()), sd_r=float(e.std())))
+                    if len(E) >= 3:
+                        E = np.array(E)
+                        per.append(dict(cohort=c, task=t, sub=sub, band=band_name, n_windows=len(E), n_tr=n_win,
+                                        mean_r=float(E.mean()), edge_var=float(E.var(0, ddof=1).mean())))
+                del X
+                gc.collect()
+            log(f"  {c}/{t}: {len(cen['subjects'])} people")
+    pd.DataFrame(win).to_parquet(d / "band_windows.parquet", index=False)
+    pd.DataFrame(per).to_parquet(d / "band_people.parquet", index=False)
+    log(f"-> {d / 'band_windows.parquet'}, {d / 'band_people.parquet'}")
+
+
 # ---------------------------------------------------------------------------------- part: umap
 def part_umap(a, root, fit, cohorts, edges, d):
     import umap
@@ -287,11 +357,12 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--atlas", default="harvardoxford")
     ap.add_argument("--window-s", default="30", help="as in the dfc/latents paths, e.g. 30")
-    ap.add_argument("--part", choices=["stats", "umap"], required=True)
+    ap.add_argument("--part", choices=["stats", "umap", "band"], required=True)
     ap.add_argument("--variant", choices=VARIANTS, default="base")
     ap.add_argument("--states", default="HMM2_umap3_8", help="the official state set (labels, state edges)")
     ap.add_argument("--max-windows", type=int, default=60, help="windows per person put through each UMAP")
     ap.add_argument("--seed", type=int, default=0, help="which windows are put through the UMAP")
+    ap.add_argument("--band-subjects", type=int, default=10, help="people per cohort in --part band")
     ap.add_argument("--output-root", default=None)
     ap.add_argument("--modelling-version", default=None)
     a = ap.parse_args(argv)
@@ -308,7 +379,7 @@ def main(argv=None):
     d = out_dir(root, a.atlas, a.window_s, a.modelling_version)
     d.mkdir(parents=True, exist_ok=True)
     log(f"{len(edges)} edges -> {d}")
-    (part_stats if a.part == "stats" else part_umap)(a, root, fit, cohorts, edges, d)
+    {"stats": part_stats, "umap": part_umap, "band": part_band}[a.part](a, root, fit, cohorts, edges, d)
     return 0
 
 

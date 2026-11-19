@@ -1545,3 +1545,30 @@ def fig_mapper(co, graphs, colour="state", titles=None, name=None, fs=11, panel_
     if name:
         save(fig, name, co.cfg)
     return fig
+
+
+def fig_band_check(co, B, name="band_check", fs=11):
+    """Mean |r| (left) and edge variance over windows (right) per cohort, the band as extracted
+    (hollow) and filtered 0.01-0.1 Hz (filled); a dot per person x task, the line joins the medians."""
+    col = colours(co.cfg)
+    cohorts = [c for c in co.cfg.cohorts if c in set(B["cohort"])]
+    fig, ax = plt.subplots(1, 2, figsize=(10, 3.8))
+    for a, v, lab in ((ax[0], "mean_abs_r", "mean |r| (edges, windows)"),
+                      (ax[1], "edge_var", "variance of an edge over a person's windows")):
+        for i, c in enumerate(cohorts):
+            med = []
+            for k, (b, fill) in enumerate((("as extracted", False), ("0.01-0.1 Hz", True))):
+                y = B.loc[(B["cohort"] == c) & (B["band"] == b), v]
+                x = i + (k - .5) * .3 + np.random.default_rng(0).uniform(-.05, .05, len(y))
+                a.scatter(x, y, s=14, facecolor=col[c] if fill else "none", edgecolor=col[c], lw=.8, alpha=.7)
+                med.append((i + (k - .5) * .3, y.median()))
+            a.plot(*zip(*med), color=col[c], lw=1.5)
+        a.set_xticks(range(len(cohorts)), [cname(c) for c in cohorts])
+        a.set_ylabel(lab)
+        a.spines[["top", "right"]].set_visible(False)
+    ax[0].legend([Line2D([], [], marker="o", ls="", mfc="none", mec=hp.INK2),
+                  Line2D([], [], marker="o", ls="", color=hp.INK2)],
+                 ["band as extracted", "filtered 0.01–0.1 Hz"], frameon=False, fontsize=fs - 2)
+    fig.tight_layout()
+    save(fig, name, co.cfg)
+    return fig
