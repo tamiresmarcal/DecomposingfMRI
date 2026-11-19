@@ -40,6 +40,9 @@ notebook 08 reads them (cohort_tables.diagnostics_dir):
                    apply AFTER the reduction (that one needs no refit; notebook 08 does it)
     nndb_only      fitted on NNDb alone, otherwise as decompose (z-score per edge, 30,000 windows)
     nndb_all       fitted on NNDb alone, z-score per edge, UMAP on EVERY NNDb window
+    fit_only, fit_all, fit_old   the three nndb_* recipes on --fit-cohorts instead of NNDb (any cohort
+                   alone, the training pair, or every cohort together); written as
+                   umap_fit-<cohorts>_<recipe>. nndb_* = fit_* with --fit-cohorts ds002837.
     nndb_old       the project's old pipeline as remembered: NNDb alone, raw r flattened, no
                    normalisation anywhere, UMAP on every window, plus a 3-component PCA (which centres
                    the edges; the old linear KernelPCA did the same)
@@ -75,8 +78,17 @@ from fmri_decomposition.io import (default_output_root, latents_root,  # noqa: E
                                    unsupervised_root)
 from fmri_decomposition.unsupervised_model import decompose as dc  # noqa: E402
 
-VARIANTS = ("base", "all_rows", "no_scaler", "person_scaled", "nndb_only", "nndb_all", "nndb_old")
-NNDB = ("nndb_only", "nndb_all", "nndb_old")
+VARIANTS = ("base", "all_rows", "no_scaler", "person_scaled", "nndb_only", "nndb_all", "nndb_old",
+            "fit_only", "fit_all", "fit_old")
+NNDB = ("nndb_only", "nndb_all", "nndb_old", "fit_only", "fit_all", "fit_old")
+
+
+def fit_stem(v, fit_cohorts):
+    """File stem of a single-group fit: nndb_<recipe> when it is NNDb alone (the first runs' names),
+    fit-<cohort+cohort>_<recipe> otherwise."""
+    recipe = v.split("_", 1)[1]
+    fc = sorted(fit_cohorts)
+    return f"nndb_{recipe}" if fc == ["ds002837"] else f"fit-{'+'.join(fc)}_{recipe}"
 
 
 def log(msg):
@@ -280,9 +292,14 @@ def part_umap(a, root, fit, cohorts, edges, d):
     from sklearn.preprocessing import StandardScaler
     v = a.variant
     seed = int(fit.get("seed", 42))
-    train = ["ds002837"] if v in NNDB else list(fit["train_cohorts"])
+    fitc = (a.fit_cohorts or ["ds002837"]) if v.startswith("fit_") else ["ds002837"]
+    train = fitc if v in NNDB else list(fit["train_cohorts"])
+    missing = [c for c in train if c not in cohorts]
+    if missing:
+        raise SystemExit(f"--fit-cohorts {missing}: not in this cell ({cohorts})")
+    stem = fit_stem(v, train) if v in NNDB else v
     train_tasks = set(map(str, fit.get("train_tasks") or []))
-    fit_rows = 0 if v in ("all_rows", "nndb_all", "nndb_old") else int(fit.get("umap_fit_rows") or 30_000)
+    fit_rows = 0 if v in ("all_rows", "nndb_all", "nndb_old", "fit_all", "fit_old") else int(fit.get("umap_fit_rows") or 30_000)
     fit_parts, fit_id, ev_id, ev_X = [], [], [], []
     for c in cohorts:
         t0 = time.time()
@@ -308,7 +325,7 @@ def part_umap(a, root, fit, cohorts, edges, d):
     Xe = np.vstack(ev_X)
     del ev_X
     gc.collect()
-    if v in ("base", "all_rows", "nndb_only", "nndb_all"):
+    if v in ("base", "all_rows", "nndb_only", "nndb_all", "fit_only", "fit_all"):
         sc = StandardScaler(copy=False).fit(Xf)
         Xf = sc.transform(Xf)
         Xe = sc.transform(Xe)
@@ -324,7 +341,7 @@ def part_umap(a, root, fit, cohorts, edges, d):
     if v in NNDB and len(idx) == len(Xf):            # every window in the fit: keep its fitted position
         F = pd.concat(fit_id, ignore_index=True)
         F[["x", "y", "z"]] = model.embedding_
-    if v == "nndb_old":
+    if v in ("nndb_old", "fit_old"):
         from sklearn.decomposition import PCA
         pca = PCA(n_components=3, random_state=seed).fit(Xf)
         F[["pca_x", "pca_y", "pca_z"]] = pca.transform(Xf)
@@ -337,20 +354,22 @@ def part_umap(a, root, fit, cohorts, edges, d):
     if pca is not None:
         E[["pca_x", "pca_y", "pca_z"]] = pca.transform(Xe)
     if F is not None:
-        F.to_parquet(d / f"umap_{v}_fit.parquet", index=False)
-        log(f"-> {d / f'umap_{v}_fit.parquet'} ({len(F):,} NNDb windows at their fitted positions)")
+        F.to_parquet(d / f"umap_{stem}_fit.parquet", index=False)
+        log(f"-> {d / f'umap_{stem}_fit.parquet'} ({len(F):,} windows of {', '.join(train)} at their fitted positions)")
     E["role"] = np.where(E["cohort"].isin(train), "train", "projected")
-    E.to_parquet(d / f"umap_{v}.parquet", index=False)
-    (d / f"umap_{v}.json").write_text(json.dumps(dict(
+    E.to_parquet(d / f"umap_{stem}.parquet", index=False)
+    (d / f"umap_{stem}.json").write_text(json.dumps(dict(
         variant=v, train_cohorts=train, train_tasks=sorted(train_tasks) or None, fit_rows=int(len(idx)),
         n_train_windows=int(n_train),
         scaler={"base": "per edge, training windows", "all_rows": "per edge, training windows",
                 "nndb_only": "per edge, NNDb windows", "nndb_all": "per edge, NNDb windows", "nndb_old": None,
+                "fit_only": "per edge, the fit cohorts' windows", "fit_all": "per edge, the fit cohorts' windows",
+                "fit_old": None,
                 "no_scaler": None,
                 "person_scaled": "per edge within each person"}[v],
         censor_policy=fit.get("censor_policy"), seed=seed, sample_seed=a.seed, max_windows=a.max_windows,
         states=a.states, umap="umap.UMAP(n_components=3, random_state=seed), defaults otherwise"), indent=1))
-    log(f"-> {d / f'umap_{v}.parquet'}")
+    log(f"-> {d / f'umap_{stem}.parquet'}")
 
 
 def main(argv=None):
@@ -363,6 +382,9 @@ def main(argv=None):
     ap.add_argument("--max-windows", type=int, default=60, help="windows per person put through each UMAP")
     ap.add_argument("--seed", type=int, default=0, help="which windows are put through the UMAP")
     ap.add_argument("--band-subjects", type=int, default=10, help="people per cohort in --part band")
+    ap.add_argument("--fit-cohorts", nargs="+", default=None, metavar="COHORT",
+                    help="fit_* variants: the cohort= directories to fit on (default ds002837), e.g. "
+                         "cneuromod, or camcan camcan_rest, or every cohort of the cell")
     ap.add_argument("--output-root", default=None)
     ap.add_argument("--modelling-version", default=None)
     a = ap.parse_args(argv)

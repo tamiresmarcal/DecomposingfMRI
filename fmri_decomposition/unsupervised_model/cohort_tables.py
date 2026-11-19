@@ -1653,43 +1653,69 @@ def symptom_fit(L, scores, cols=("x", "y", "z")):
     return pd.DataFrame(rows)
 
 
-NNDB_PANELS = {"nndb_only": "current recipe (z-score, 30k windows)", "nndb_all": "current, every window",
-               "nndb_old": "old pipeline · UMAP", "nndb_old_pca": "old pipeline · PCA"}
+FIT_PANELS = {"only": "current recipe (z-score, 30k windows)", "all": "current, every window",
+              "old": "old pipeline · UMAP", "old_pca": "old pipeline · PCA"}
+NNDB_PANELS = {f"nndb_{k}": v for k, v in FIT_PANELS.items()}
 
 
-def nndb_fits(co, windows=(30, 60, 120, 300), variants=("nndb_only", "nndb_all", "nndb_old")):
-    """NNDb-only fits at every window size, as the project's old figures were drawn: for nndb_all
-    and nndb_old every NNDb window at its fitted position (umap_<V>_fit.parquet), for nndb_only
-    (fitted on 30k windows) its NNDb windows put through the model; nndb_old's PCA as a fourth
-    panel. Columns: window, variant, panel ("<w> s · <name>"), cohort, task, sub, stimulus_start_s,
-    x, y, z. A missing (window, variant) is skipped with the sbatch line that makes it."""
+def fit_group(co, fit_on):
+    """FIT_ON -> the cohort= directories fitted on: "train" (the official training cohorts), "all"
+    (every cohort), a cohort label of cfg.cohorts ("camcan" = camcan + camcan_rest), or a list."""
+    if isinstance(fit_on, (list, tuple)):
+        return sorted(fit_on)
+    if fit_on == "train":
+        return sorted(d for s in co.cfg.cohorts.values() if s["role"] == "train" for d in s["dirs"])
+    if fit_on == "all":
+        return sorted(d for s in co.cfg.cohorts.values() for d in s["dirs"])
+    return sorted(co.cfg.cohorts[fit_on]["dirs"]) if fit_on in co.cfg.cohorts else [fit_on]
+
+
+def single_fits(co, fit_on="ds002837", windows=(30, 60, 120, 300), recipes=("only", "all", "old")):
+    """UMAPs fitted on ONE group of cohorts (`fit_on`, see fit_group) at every window size, the
+    group's own windows only, as the project's old figures were drawn: where the UMAP saw every
+    window (recipes all, old) each window at its fitted position (umap_<stem>_fit.parquet);
+    for "only" (30k windows) the group's sampled windows put through the model; "old" also as its
+    PCA. Columns: window, variant, panel ("<w> s · <recipe>"), cohort (label), task, sub,
+    stimulus_start_s, x, y, z. A missing (window, recipe) is skipped with the sbatch line."""
+    dirs = fit_group(co, fit_on)
+    tag = "nndb" if dirs == ["ds002837"] else f"fit-{'+'.join(dirs)}"
+    lab = _label_of(co)
     parts = []
     for w in windows:
         d = diagnostics_dir(co, window_s=w)
-        for v in variants:
-            f = d / f"umap_{v}_fit.parquet"
+        for r in recipes:
+            stem = f"{tag}_{r}"
+            f = d / f"umap_{stem}_fit.parquet"
             if f.exists():
                 t = pd.read_parquet(f)
-            elif (d / f"umap_{v}.parquet").exists():
-                t = pd.read_parquet(d / f"umap_{v}.parquet")
-                t = t[t["cohort"] == "ds002837"]
+            elif (d / f"umap_{stem}.parquet").exists():
+                t = pd.read_parquet(d / f"umap_{stem}.parquet")
             else:
-                print(f"{v} at {w:g} s: sbatch --array=0-0 slurm/latent_diagnostics.sbatch {v} -- --atlas "
-                      f"{co.cfg.space['atlas']} --window-s {w:g} --states {co.cfg.space['states']}")
+                v = f"nndb_{r}" if tag == "nndb" else f"fit_{r}"
+                print(f"{stem} at {w:g} s: sbatch --array=0-0 slurm/latent_diagnostics.sbatch {v} -- --atlas "
+                      f"{co.cfg.space['atlas']} --window-s {w:g} --states {co.cfg.space['states']}"
+                      + ("" if tag == "nndb" else f" --fit-cohorts {' '.join(dirs)}"))
                 continue
-            t = t.assign(window=float(w), variant=v)
+            t = t[t["cohort"].isin(dirs)].assign(window=float(w), variant=r)
             parts.append(t)
             if "pca_x" in t:
                 parts.append(t.drop(columns=["x", "y", "z"]).rename(columns={"pca_x": "x", "pca_y": "y", "pca_z": "z"})
-                             .assign(variant="nndb_old_pca"))
+                             .assign(variant="old_pca"))
     if not parts:
-        raise SystemExit("no NNDb fits yet")
+        raise SystemExit(f"no fits on {dirs} yet")
     E = pd.concat(parts, ignore_index=True)
-    E = E[E["cohort"] == "ds002837"].drop(columns=[c for c in E if c.startswith("pca_")])
+    E = E.drop(columns=[c for c in E if c.startswith("pca_")])
+    E["cohort"] = E["cohort"].map(lambda x: lab.get(x, x))
     E["sub"] = _norm_sub(E["sub"]).to_numpy()
-    E["panel"] = E["window"].map(lambda w: f"{w:g} s") + " · " + E["variant"].map(NNDB_PANELS)
-    E["kind"] = "movie"
+    E["panel"] = E["window"].map(lambda w: f"{w:g} s") + " · " + E["variant"].map(FIT_PANELS)
+    E["kind"] = np.where(E["task"].astype(str).str.fullmatch(co.cfg.rest_pattern, case=False), "rest", "movie")
+    E.attrs["fit_on"] = dirs
     return E
+
+
+def nndb_fits(co, windows=(30, 60, 120, 300), variants=("nndb_only", "nndb_all", "nndb_old")):
+    """single_fits on NNDb (kept for the first runs' name)."""
+    return single_fits(co, "ds002837", windows, tuple(v.split("_", 1)[1] for v in variants))
 
 
 def band_check(co):
