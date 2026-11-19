@@ -733,3 +733,18 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def state_brain_images(atlas: str, state_means: pd.DataFrame, hemi: str = "left", view: str = "lateral",
+                       data: Path | None = None) -> dict:
+    """{state: RGB image} of every state's map (a state_means.csv table: rows = states, one column
+    per parcel) on one inflated hemisphere, one shared colour scale (+-max |value|), for composing
+    into other figures (notebook 08's Figure 1)."""
+    data = Path(data) if data is not None else require_reference_maps()
+    ref = rm.reference_grid(data)
+    spec, _ = rm.state_atlas(atlas, data)
+    parc = rm.Parcellator.build(spec, ref)
+    brains = Brains(parc, rm.load_surface(data), deep=sum(rm.subcortical_structures(data, ref).values()))
+    X = state_means[parc.columns].to_numpy(float)
+    vlim = float(np.nanmax(np.abs(X)))
+    return {s: surface_image(brains, hemi, view, x, vlim) for s, x in zip(state_means.index, X)}

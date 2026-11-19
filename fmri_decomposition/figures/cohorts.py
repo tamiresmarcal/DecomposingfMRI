@@ -1572,3 +1572,144 @@ def fig_band_check(co, B, name="band_check", fs=11):
     fig.tight_layout()
     save(fig, name, co.cfg)
     return fig
+
+
+# ------------------------------------------------------------------ Figure 1 (notebook 08)
+def _cohort_line(c, tasks, rest_pattern, info):
+    if c in (info or {}):
+        return info[c]
+    import re
+    films = [t for t in tasks if not re.fullmatch(rest_pattern, str(t), flags=re.I)]
+    rest = len(films) < len(tasks)
+    return f"{len(films)} film{'s' if len(films) != 1 else ''}" + (" + rest" if rest else "")
+
+
+def fig_figure1(co, lat, timeline, F, state, maps=None, brains=None, stills=None, info=None,
+                n_traces=3, name="figure1", fs=10, max_points=20000, seed=0):
+    """Figure 1. A: the cohorts (model fitting | independent projection), each with its n, its films
+    and its role, over the latent space of each group coloured by state. B: every state's map on the
+    brain (brains = {state: image} from figures.states.state_brain_images; maps alone gives a
+    heat strip when no images). C: the share of viewers in each state over one film (timeline =
+    ct.state_timeline). D: the n_traces regions most active in `state` over that film, mean over
+    viewers with an SD band, on the share of viewers in `state` (grey). stills = {cohort: image
+    path} for the film boxes (a grey placeholder otherwise); info = {cohort: caption line}."""
+    from matplotlib.gridspec import GridSpecFromSubplotSpec
+    cfg, K = co.cfg, co.cfg.K
+    col = state_colours(K)
+    train = [c for c, s in cfg.cohorts.items() if s["role"] == "train"]
+    proj = [c for c, s in cfg.cohorts.items() if s["role"] != "train"]
+    n = lat.groupby("cohort")["sub"].nunique()
+    tasks = lat.groupby("cohort")["task"].agg(lambda x: sorted(set(map(str, x))))
+    st = lat.attrs.get("states", cfg.space["states"])
+
+    fig = plt.figure(figsize=(15, 15.5))
+    outer = fig.add_gridspec(2, 1, height_ratios=[1.35, 1], hspace=.16)
+    top = GridSpecFromSubplotSpec(1, 2, outer[0], width_ratios=[1.55, 1], wspace=.08)
+    A = GridSpecFromSubplotSpec(3, 1, top[0], height_ratios=[.22, .62, 1.3], hspace=.05)
+
+    # A: headers, cohort boxes
+    hdr = fig.add_subplot(A[0]); hdr.set_axis_off(); hdr.set_xlim(0, 1); hdr.set_ylim(0, 1)
+    for x0, x1, t in ((.02, .48, "MODEL FITTING"), (.52, .98, "INDEPENDENT PROJECTION")):
+        hdr.text((x0 + x1) / 2, .78, t, ha="center", fontsize=fs + 2, fontweight="bold")
+        hdr.plot([x0, x0, x1, x1], [.05, .3, .3, .05], color=hp.INK2, lw=1)
+        hdr.plot([(x0 + x1) / 2] * 2, [.3, .5], color=hp.INK2, lw=1)
+    boxes = fig.add_subplot(A[1]); boxes.set_axis_off(); boxes.set_xlim(0, 1); boxes.set_ylim(0, 1)
+    order = train + proj
+    for i, c in enumerate(order):
+        x = .02 + i * .245 + .11
+        boxes.text(x, .96, cname(c), ha="center", va="top", fontsize=fs + 3, fontweight="bold")
+        boxes.text(x, .78, f"$n$ = {int(n.get(c, 0))}", ha="center", va="top", fontsize=fs + 2)
+        for k in range(3):                                   # a stack of stills
+            dx = (2 - k) * .008
+            if stills and c in stills:
+                img = plt.imread(stills[c])
+                boxes.imshow(img, extent=(x - .09 + dx, x + .09 + dx, .2 + dx, .52 + dx), aspect="auto", zorder=3 + k)
+            else:
+                boxes.add_patch(plt.Rectangle((x - .09 + dx, .2 + dx), .18, .32, fc="#55565c", ec="white", lw=1, zorder=3 + k))
+        if not (stills and c in stills):
+            boxes.text(x, .36, "[film still]", ha="center", va="center", fontsize=fs - 3, color="#ddd", zorder=10)
+        boxes.text(x, .1, _cohort_line(c, tasks.get(c, []), cfg.rest_pattern, info), ha="center", fontsize=fs - 1)
+        fit = c in train
+        boxes.text(x, -.04, "fits the model" if fit else "projected, no refit", ha="center", fontsize=fs - 1,
+                   color="#2b6cb0" if fit else "#c0392b")
+    boxes.set_xlim(0, 1)
+
+    # A: the two latent spaces
+    sp = GridSpecFromSubplotSpec(1, 2, A[2], wspace=0)
+    for j, (group, label) in enumerate(((train, "training cohorts"), (proj, "projected cohorts"))):
+        ax = fig.add_subplot(sp[j], projection="3d")
+        g = lat[lat["cohort"].isin(group)]
+        if len(g) > max_points:
+            g = g.sample(max_points, random_state=seed)
+        if st in g:
+            g = g[g[st].notna()]
+            ax.scatter(g["x"], g["y"], g["z"], c=[col[int(k)] for k in g[st]], s=2.5, alpha=.55, lw=0)
+        else:
+            ax.scatter(g["x"], g["y"], g["z"], c=hp.INK2, s=1.2, alpha=.3, lw=0)
+        ax.set_title(f"{label} · {g['sub'].nunique() if len(g) else 0} participants", fontsize=fs, pad=-6, y=.93)
+        for a in (ax.xaxis, ax.yaxis, ax.zaxis):
+            a.set_ticklabels([])
+        ax.set_xlabel("UMAP 1", fontsize=fs - 2, labelpad=-12); ax.set_ylabel("UMAP 2", fontsize=fs - 2, labelpad=-12)
+        ax.set_zlabel("UMAP 3", fontsize=fs - 2, labelpad=-12)
+    fig.legend([Line2D([], [], marker="o", ls="", color=col[k], ms=6) for k in range(K)], [f"S{k}" for k in range(K)],
+               loc="upper center", bbox_to_anchor=(.33, .505), ncol=K, frameon=False, fontsize=fs - 1,
+               handletextpad=.2, columnspacing=1)
+
+    # B: the state maps
+    Bg = GridSpecFromSubplotSpec(K // 2 + K % 2, 2, top[1], hspace=.12, wspace=.04)
+    for k in range(K):
+        ax = fig.add_subplot(Bg[k // 2, k % 2]); ax.set_axis_off()
+        if brains is not None and k in brains:
+            ax.imshow(brains[k])
+        elif maps is not None and k in maps.index:
+            ax.imshow(maps.loc[[k]].select_dtypes("number").drop(columns=[c for c in ("n_rows", "share") if c in maps]),
+                      aspect="auto", cmap="RdBu_r")
+        else:
+            ax.text(.5, .5, "run notebook 04", ha="center", va="center", color=hp.INK2)
+        ax.text(.02, .98, f"S{k}", transform=ax.transAxes, fontsize=fs, fontweight="bold", color=col[k], va="top")
+
+    # C: share of viewers per state over the film
+    bot = GridSpecFromSubplotSpec(1, 2, outer[1], width_ratios=[1, 1.1], wspace=.22)
+    ax = fig.add_subplot(bot[0])
+    share = (timeline.groupby(["stimulus_start_s", "state"]).size().unstack(fill_value=0)
+             .reindex(columns=range(K), fill_value=0))
+    share = share.div(share.sum(1), axis=0)
+    ax.stackplot(share.index, share.T.to_numpy(), colors=col, lw=0)
+    ax.set(xlim=(share.index.min(), share.index.max()), ylim=(0, 1), xlabel="film time (s)",
+           ylabel="share of viewers in each state")
+    ax.spines[["top", "right"]].set_visible(False)
+
+    # D: the state's most active regions over the film
+    D = GridSpecFromSubplotSpec(n_traces, 1, bot[1], hspace=.35)
+    Mstate = F.groupby("t").mean(numeric_only=True)              # mean over viewers
+    on = timeline.assign(on=timeline["state"] == state).groupby("stimulus_start_s")["on"].mean()
+    feats = [x for x in F.columns if x not in ("sub", "t")]
+    if maps is not None and set(feats) <= set(maps.columns):
+        top_r = list(maps.loc[state, feats].sort_values(ascending=False).index[:n_traces])
+    else:                                                        # most active while viewers are in the state
+        w = F["t"].map(on.reindex(F["t"].unique(), method="ffill")).fillna(0).to_numpy()
+        top_r = list(pd.Series(w @ F[feats].to_numpy(float), index=feats).sort_values(ascending=False).index[:n_traces])
+    sd = F.groupby("t")[top_r].std()
+    tcol = [plt.cm.Set2(i) for i in range(n_traces)]
+    for i, r in enumerate(top_r):
+        ax = fig.add_subplot(D[i]); axs = ax.twinx()
+        axs.fill_between(on.index, on.to_numpy(), step="post", color="#d9d8d3", lw=0)
+        axs.set_ylim(0, 1); axs.tick_params(labelsize=fs - 3, colors="#8a8984")
+        if i == n_traces // 2:
+            axs.set_ylabel(f"share in S{state}", fontsize=fs - 2, color="#8a8984")
+        ax.set_zorder(axs.get_zorder() + 1); ax.patch.set_visible(False)
+        ax.plot(Mstate.index, Mstate[r], color=tcol[i], lw=1.2)
+        ax.fill_between(Mstate.index, Mstate[r] - sd[r], Mstate[r] + sd[r], color=tcol[i], alpha=.25, lw=0)
+        ax.set_title(r, fontsize=fs - 1, loc="left")
+        ax.set_xlim(share.index.min(), share.index.max()); ax.tick_params(labelsize=fs - 3)
+        ax.set_ylabel("activation (z)", fontsize=fs - 2)
+        if i < n_traces - 1:
+            ax.set_xticklabels([])
+        else:
+            ax.set_xlabel("film time (s)", fontsize=fs - 1)
+
+    for t, (x, y) in {"A. Cohorts and tasks": (.08, .905), "B. Brain states": (.64, .905),
+                      "C.": (.08, .45), "D.": (.53, .45)}.items():
+        fig.text(x, y, t, fontsize=fs + 5, fontweight="bold")
+    save(fig, name, cfg)
+    return fig
