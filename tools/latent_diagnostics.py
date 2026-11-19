@@ -29,7 +29,14 @@ notebook 08 reads them (cohort_tables.diagnostics_dir):
     person_scaled  each edge z-scored within each PERSON before the UMAP (every window of that
                    person, all tasks): the "before" twin of STIM's per-person z-score, which they
                    apply AFTER the reduction (that one needs no refit; notebook 08 does it)
-    nndb_only      fitted on NNDb alone, as the old version of the project was
+    nndb_only      fitted on NNDb alone, otherwise as decompose (z-score per edge, 30,000 windows)
+    nndb_all       fitted on NNDb alone, z-score per edge, UMAP on EVERY NNDb window
+    nndb_old       the project's old pipeline as remembered: NNDb alone, raw r flattened, no
+                   normalisation anywhere, UMAP on every window, plus a 3-component PCA (which centres
+                   the edges; the old linear KernelPCA did the same)
+
+The nndb_* variants whose UMAP saw every NNDb window also write umap_<V>_fit.parquet: every NNDb
+window at its fitted position (UMAP's own embedding, not a re-projection), as the old figures were.
 
 The training cohorts, their tasks, the censor policy and the seed are read from the official fit
 (the latents' own metadata), so `base` reproduces it up to the sample. The windows put through each
@@ -59,7 +66,8 @@ from fmri_decomposition.io import (default_output_root, latents_root,  # noqa: E
                                    unsupervised_root)
 from fmri_decomposition.unsupervised_model import decompose as dc  # noqa: E402
 
-VARIANTS = ("base", "all_rows", "no_scaler", "person_scaled", "nndb_only")
+VARIANTS = ("base", "all_rows", "no_scaler", "person_scaled", "nndb_only", "nndb_all", "nndb_old")
+NNDB = ("nndb_only", "nndb_all", "nndb_old")
 
 
 def log(msg):
@@ -202,10 +210,10 @@ def part_umap(a, root, fit, cohorts, edges, d):
     from sklearn.preprocessing import StandardScaler
     v = a.variant
     seed = int(fit.get("seed", 42))
-    train = ["ds002837"] if v == "nndb_only" else list(fit["train_cohorts"])
+    train = ["ds002837"] if v in NNDB else list(fit["train_cohorts"])
     train_tasks = set(map(str, fit.get("train_tasks") or []))
-    fit_rows = 0 if v == "all_rows" else int(fit.get("umap_fit_rows") or 30_000)
-    fit_parts, ev_id, ev_X = [], [], []
+    fit_rows = 0 if v in ("all_rows", "nndb_all", "nndb_old") else int(fit.get("umap_fit_rows") or 30_000)
+    fit_parts, fit_id, ev_id, ev_X = [], [], [], []
     for c in cohorts:
         t0 = time.time()
         ident, X = read(root, a.atlas, a.window_s, c, edges, fit.get("censor_policy"))
@@ -215,6 +223,7 @@ def part_umap(a, root, fit, cohorts, edges, d):
             m = (ident["task"].astype(str).isin(train_tasks).to_numpy() if train_tasks
                  else np.ones(len(ident), bool))
             fit_parts.append(X[m] if not m.all() else X)
+            fit_id.append(ident.loc[m, ["cohort", "task", "sub", "window_id", "stimulus_start_s"]].reset_index(drop=True))
         s = sample(ident, a.max_windows, a.seed)
         lab = official_states(root, a.atlas, a.window_s, c, a.states, a.modelling_version)
         ev_id.append(with_states(ident.iloc[s].reset_index(drop=True), lab))
@@ -229,7 +238,7 @@ def part_umap(a, root, fit, cohorts, edges, d):
     Xe = np.vstack(ev_X)
     del ev_X
     gc.collect()
-    if v in ("base", "all_rows", "nndb_only"):
+    if v in ("base", "all_rows", "nndb_only", "nndb_all"):
         sc = StandardScaler(copy=False).fit(Xf)
         Xf = sc.transform(Xf)
         Xe = sc.transform(Xe)
@@ -241,19 +250,33 @@ def part_umap(a, root, fit, cohorts, edges, d):
     model = umap.UMAP(n_components=3, random_state=seed).fit(Xf[idx])
     log(f"  fitted in {time.time() - t0:.0f} s; transforming {len(Xe):,} windows")
     n_train = len(Xf)
+    F = pca = None
+    if v in NNDB and len(idx) == len(Xf):            # every window in the fit: keep its fitted position
+        F = pd.concat(fit_id, ignore_index=True)
+        F[["x", "y", "z"]] = model.embedding_
+    if v == "nndb_old":
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=3, random_state=seed).fit(Xf)
+        F[["pca_x", "pca_y", "pca_z"]] = pca.transform(Xf)
     del Xf
     gc.collect()
     Y = model.transform(Xe)
     E = pd.concat(ev_id, ignore_index=True)[["cohort", "task", "sub", "window_id", "stimulus_start_s",
                                              "n_tr_effective", "state"]]
     E[["x", "y", "z"]] = Y
+    if pca is not None:
+        E[["pca_x", "pca_y", "pca_z"]] = pca.transform(Xe)
+    if F is not None:
+        F.to_parquet(d / f"umap_{v}_fit.parquet", index=False)
+        log(f"-> {d / f'umap_{v}_fit.parquet'} ({len(F):,} NNDb windows at their fitted positions)")
     E["role"] = np.where(E["cohort"].isin(train), "train", "projected")
     E.to_parquet(d / f"umap_{v}.parquet", index=False)
     (d / f"umap_{v}.json").write_text(json.dumps(dict(
         variant=v, train_cohorts=train, train_tasks=sorted(train_tasks) or None, fit_rows=int(len(idx)),
         n_train_windows=int(n_train),
         scaler={"base": "per edge, training windows", "all_rows": "per edge, training windows",
-                "nndb_only": "per edge, NNDb windows", "no_scaler": None,
+                "nndb_only": "per edge, NNDb windows", "nndb_all": "per edge, NNDb windows", "nndb_old": None,
+                "no_scaler": None,
                 "person_scaled": "per edge within each person"}[v],
         censor_policy=fit.get("censor_policy"), seed=seed, sample_seed=a.seed, max_windows=a.max_windows,
         states=a.states, umap="umap.UMAP(n_components=3, random_state=seed), defaults otherwise"), indent=1))

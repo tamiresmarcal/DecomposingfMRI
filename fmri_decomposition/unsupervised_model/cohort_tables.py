@@ -1519,7 +1519,7 @@ def moment_share(lat, cols=("x", "y", "z"), min_people=5):
 
 
 def mapper_graph(E, n_bins=12, overlap=.5, cols=("x", "y", "z"), min_samples=3, eps=None, max_points=30000,
-                 seed=0, min_node=1, min_jaccard=0.0):
+                 seed=0, min_node=1, min_jaccard=0.0, balance=None):
     """A Mapper shape graph of an embedding (Xian et al.'s STIM, after Saggar et al.): the 3-D space
     cut into n_bins^3 overlapping cubes (each overlapping its neighbours by `overlap`), the points in
     each cube clustered with DBSCAN, every cluster a node, two nodes joined when they share a point.
@@ -1527,11 +1527,16 @@ def mapper_graph(E, n_bins=12, overlap=.5, cols=("x", "y", "z"), min_samples=3, 
     notebook holds only the coordinates). eps: DBSCAN radius; None = 1.5 x the median distance to
     the 5th neighbour. Clean-up for drawing: min_node drops nodes with fewer windows; min_jaccard
     drops edges whose shared windows are a smaller share of the two nodes' union (weak overlaps that
-    tie a dense cloud into a lattice). Returns (E's rows used, nodes: a list of row-index arrays,
+    tie a dense cloud into a lattice). balance: a column (e.g. "cohort") whose groups each give the
+    same number of windows to the max_points sample, so the largest cohort does not fill the graph.
+    Returns (E's rows used, nodes: a list of row-index arrays,
     edges: (i, j) pairs)."""
     from scipy import sparse
     from sklearn.cluster import DBSCAN
     from sklearn.neighbors import NearestNeighbors
+    if balance and balance in E and len(E) > max_points:      # the same number of windows from each group
+        per = max_points // E[balance].nunique()
+        E = E.groupby(balance, group_keys=False).apply(lambda g: g.sample(min(per, len(g)), random_state=seed))
     E = E.sample(max_points, random_state=seed) if len(E) > max_points else E
     E = E.reset_index(drop=True)
     X = E[list(cols)].to_numpy(float)
@@ -1643,3 +1648,42 @@ def symptom_fit(L, scores, cols=("x", "y", "z")):
             cv = cross_val_score(LinearRegression(), X, y, cv=5, scoring="r2").mean()
             rows.append(dict(variant=v, score=s, people=len(d), r2=r2, r2_cv=cv))
     return pd.DataFrame(rows)
+
+
+NNDB_PANELS = {"nndb_only": "current recipe (z-score, 30k windows)", "nndb_all": "current, every window",
+               "nndb_old": "old pipeline · UMAP", "nndb_old_pca": "old pipeline · PCA"}
+
+
+def nndb_fits(co, windows=(30, 60, 120, 300), variants=("nndb_only", "nndb_all", "nndb_old")):
+    """NNDb-only fits at every window size, as the project's old figures were drawn: for nndb_all
+    and nndb_old every NNDb window at its fitted position (umap_<V>_fit.parquet), for nndb_only
+    (fitted on 30k windows) its NNDb windows put through the model; nndb_old's PCA as a fourth
+    panel. Columns: window, variant, panel ("<w> s · <name>"), cohort, task, sub, stimulus_start_s,
+    x, y, z. A missing (window, variant) is skipped with the sbatch line that makes it."""
+    parts = []
+    for w in windows:
+        d = diagnostics_dir(co, window_s=w)
+        for v in variants:
+            f = d / f"umap_{v}_fit.parquet"
+            if f.exists():
+                t = pd.read_parquet(f)
+            elif (d / f"umap_{v}.parquet").exists():
+                t = pd.read_parquet(d / f"umap_{v}.parquet")
+                t = t[t["cohort"] == "ds002837"]
+            else:
+                print(f"{v} at {w:g} s: sbatch --array=0-0 slurm/latent_diagnostics.sbatch {v} -- --atlas "
+                      f"{co.cfg.space['atlas']} --window-s {w:g} --states {co.cfg.space['states']}")
+                continue
+            t = t.assign(window=float(w), variant=v)
+            parts.append(t)
+            if "pca_x" in t:
+                parts.append(t.drop(columns=["x", "y", "z"]).rename(columns={"pca_x": "x", "pca_y": "y", "pca_z": "z"})
+                             .assign(variant="nndb_old_pca"))
+    if not parts:
+        raise SystemExit("no NNDb fits yet")
+    E = pd.concat(parts, ignore_index=True)
+    E = E[E["cohort"] == "ds002837"].drop(columns=[c for c in E if c.startswith("pca_")])
+    E["sub"] = _norm_sub(E["sub"]).to_numpy()
+    E["panel"] = E["window"].map(lambda w: f"{w:g} s") + " · " + E["variant"].map(NNDB_PANELS)
+    E["kind"] = "movie"
+    return E

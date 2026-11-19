@@ -7,7 +7,7 @@
 #   sbatch --array=0-0 slurm/latent_diagnostics.sbatch all_rows -- --atlas harvardoxford --window-s 30
 #
 # Positional = the parts: `stats` (window statistics + state edge means, no fit) or a UMAP variant
-# (base, all_rows, no_scaler, person_scaled, nndb_only). SLURM_ARRAY_TASK_ID picks one, so --array
+# (base, all_rows, no_scaler, person_scaled, nndb_only, nndb_all, nndb_old). SLURM_ARRAY_TASK_ID picks one, so --array
 # must be 0..(number of parts - 1). Options after a bare -- go to the script (default: harvardoxford,
 # 30 s, HMM2_umap3_8). all_rows fits the UMAP on every training window (~124k x 6,105) and is the
 # slow one; the others finish in about an hour.
