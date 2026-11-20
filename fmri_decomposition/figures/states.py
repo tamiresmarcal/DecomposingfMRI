@@ -380,7 +380,7 @@ def _label(name: str, fam: str) -> str:
 
 def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7", "behavioural"),
                   top=7, subjects: pd.DataFrame | None = None, measure="mean activation",
-                  title_note="", positive_only=()):
+                  title_note="", positive_only=(), split=None):
     """One row per state: brain in 2 x 3 (L lat · R lat · axial / L med · R med ·
     coronal), then one ranked bar chart per panel family. Bars are the mean r
     over subjects with +-SD when per-subject correlations exist, else the
@@ -441,9 +441,15 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
             pos = fam in positive_only
             if pos:                          # only what the state is associated WITH
                 m = np.where(m > 0, m, np.nan)
-            k = min(top, int(np.isfinite(m).sum())) if fam != "yeo7" else len(nm)
-            order = np.argsort(-np.nan_to_num(np.abs(m), nan=-1))[:k]
-            order = order[np.argsort(-m[order])]
+            if split and fam != "yeo7" and not pos:   # the n_pos most positive and n_neg most negative r
+                n_pos, n_neg = split
+                up = [j for j in np.argsort(-np.nan_to_num(m, nan=-np.inf)) if m[j] > 0][:n_pos]
+                down = [j for j in np.argsort(np.nan_to_num(m, nan=np.inf)) if m[j] < 0][:n_neg]
+                order = np.array(up + down[::-1], dtype=int)
+            else:
+                k = min(top, int(np.isfinite(m).sum())) if fam != "yeo7" else len(nm)
+                order = np.argsort(-np.nan_to_num(np.abs(m), nan=-1))[:k]
+                order = order[np.argsort(-m[order])]
             y = np.arange(len(order))[::-1]
             colors = ([rm.YEO7_COLORS[j] for j in order] if fam == "yeo7" else
                       ["#8a8984"] * len(order) if pos else      # one sign: colour adds nothing
@@ -476,7 +482,8 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
             if i == 0:
                 title = PANEL_TITLES[fam].format(tax=taxonomy_label(res))
                 if fam != "yeo7":
-                    title += f" · top {top} positive r" if fam in positive_only else f" · top {top} by |r|"
+                    title += (f" · top {top} positive r" if fam in positive_only else
+                              f" · top {split[0]} positive, {split[1]} negative r" if split else f" · top {top} by |r|")
                 if res["simulated"]:
                     title += " · SIMULATED"
                 ax.set_title(title, loc="left", fontsize=26, fontweight="bold",
@@ -648,11 +655,14 @@ def load_results(atlas_dir: Path, families) -> tuple[pd.DataFrame, dict, dict]:
 
 def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
          data: Path | None = None, cards: bool = False, overview: bool = False,
-         panels=("yeo7", "behavioural"), top: int = 7, positive_only=()) -> list:
+         panels=("yeo7", "behavioural"), top: int = 7, positive_only=(), split=None) -> list:
     """Draw every atlas under `run_dir`; return the figure paths.
 
     `families` picks the non-behavioural panels; `bn_levels` ("domain",
-    "subcategory", or both) picks the BrainMap depth(s) shown.
+    "subcategory", or both) picks the BrainMap depth(s) shown. `split`:
+    (n_pos, n_neg) -- every bar panel but Yeo 7 shows the n_pos most positive
+    and the n_neg most negative r instead of the `top` largest |r|; None =
+    the `top` largest |r|.
     """
     run_dir = Path(run_dir)
     atlases = atlases or sorted(p.name for p in run_dir.iterdir() if (p / "correlations.csv").exists())
@@ -680,7 +690,7 @@ def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
         subjects = pd.read_parquet(subj_path) if subj_path.exists() else None
         out = d / "states_figure.png"
         states_figure(atlas, sm, names, results, brains, out, panels=panels, top=top,
-                      positive_only=tuple(positive_only),
+                      positive_only=tuple(positive_only), split=split,
                       subjects=subjects, measure=measure,
                       title_note="  (simulated states)" if prov["states"] == "simulate" else "")
         paths.append(out)
