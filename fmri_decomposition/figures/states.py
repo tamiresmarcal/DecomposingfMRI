@@ -524,7 +524,7 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
                      data: Path | None = None, taxonomy: str = "brainmap",
                      behavioural_csv="neurosynth", n_nulls: int = 10000, null: str = "moran",
                      seed: int = 7, drop_other: bool = True,
-                     cortical_only: bool | None = None) -> Path:
+                     cortical_only: bool | None = None, states_table=None) -> Path:
     """How two reference families relate to each other, in one atlas.
 
     `cortical_only`: correlate over the atlas's cortical parcels only. Default
@@ -538,6 +538,10 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
     same spatial null as the state figures -- surrogates of the column map
     that keep its spatial autocorrelation -- BH over the whole matrix.
     Writes reference_matrix_<atlas>_<rows>_x_<cols>.{png,csv}.
+
+    `rows` or `cols` may be "states": the brain states' maps, read from
+    `states_table` (a state_means.csv the correlation step wrote, or that
+    table) -- each state against every map of the other family, the same null.
     """
     import matplotlib.pyplot as plt
 
@@ -552,13 +556,31 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
     ref = rm.reference_grid(data)
     spec, src = rm.state_atlas(atlas, data)
     parc = rm.Parcellator.build(spec, ref)
-    refs = reference_families(data, ref, [rows, cols], behavioural_csv, seed, taxonomy,
-                              parc=parc, atlas=atlas)
-    R, C = refs[rows], refs[cols]
-    keep_c = [j for j, n in enumerate(C.names) if not (drop_other and n.endswith(".Other"))]
-    A = parc.parcellate(R.voxels)
-    B = parc.parcellate(C.voxels)[keep_c]
-    cn = [C.names[j] for j in keep_c]
+    fams = [f for f in (rows, cols) if f != "states"]
+    refs = reference_families(data, ref, fams, behavioural_csv, seed, taxonomy,
+                              parc=parc, atlas=atlas) if fams else {}
+
+    def side(fam):
+        """(names, parcels matrix, source, simulated) of one side of the matrix."""
+        if fam != "states":
+            m = refs[fam]
+            return list(m.names), parc.parcellate(m.voxels), m.source, m.simulated
+        if states_table is None:
+            raise SystemExit('rows/cols="states" needs states_table: the state_means.csv of the run')
+        t = states_table if isinstance(states_table, pd.DataFrame) else pd.read_csv(states_table, index_col="state")
+        missing = [c for c in parc.columns if c not in t.columns]
+        if missing:
+            raise SystemExit(f"states_table has no column for {len(missing)} {atlas} parcels, e.g. "
+                             f"{missing[:3]} -- states from another atlas?")
+        nm = [f"S{i + 1}" + (f" · {n}" if "name" in t and not str(n).startswith("state ") else "")
+              for i, n in enumerate(t["name"] if "name" in t else t.index)]
+        return nm, t[parc.columns].to_numpy(float), "brain states", False
+
+    rn, A, r_src, r_sim = side(rows)
+    cn_all, B, c_src, c_sim = side(cols)
+    keep_c = [j for j, n in enumerate(cn_all) if not (drop_other and n.endswith(".Other"))]
+    B = B[keep_c]
+    cn = [cn_all[j] for j in keep_c]
     if cortical_only is None:
         cortical_only = "yeo7" in (rows, cols)
     keep_p = np.ones(parc.n, bool)
@@ -582,9 +604,11 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
     if str(behavioural_csv).startswith("neurosynth") and taxonomy != "brainmap" \
             and {"behavioural", "behavioural_domain"} & {rows, cols}:
         stem = Path(f"{stem}_{taxonomy}")
-    tab = pd.DataFrame(r, index=R.names, columns=cn)
-    pd.concat({"r": tab, "p_null": pd.DataFrame(res["p"], index=R.names, columns=cn),
-               "q_fdr": pd.DataFrame(q, index=R.names, columns=cn)}, axis=0).to_csv(f"{stem}.csv")
+    if "states" in (rows, cols) and states_table is not None and not isinstance(states_table, pd.DataFrame):
+        stem = Path(f"{stem}_{Path(states_table).parent.parent.name}")   # which state set
+    tab = pd.DataFrame(r, index=rn, columns=cn)
+    pd.concat({"r": tab, "p_null": pd.DataFrame(res["p"], index=rn, columns=cn),
+               "q_fdr": pd.DataFrame(q, index=rn, columns=cn)}, axis=0).to_csv(f"{stem}.csv")
 
     nr, nc = r.shape
     fig, ax = plt.subplots(figsize=(4 + 0.42 * nc, 2.6 + 0.55 * nr), facecolor="white")
@@ -600,7 +624,7 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
                         fontsize=13, fontweight="bold",
                         color="white" if abs(r[i, j]) > 0.55 else INK)
     ax.set_yticks(range(nr))
-    ax.set_yticklabels(R.names, fontsize=12, color=INK)
+    ax.set_yticklabels([_label(n, rows) for n in rn], fontsize=12, color=INK)
     if rows == "yeo7":
         for i, c in enumerate(rm.YEO7_COLORS):
             ax.add_patch(plt.Rectangle((-0.013, i - 0.4), 0.008, 0.8, color=c, clip_on=False,
@@ -627,12 +651,13 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
     cb = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.01, ticks=[-1, -0.5, 0, 0.5, 1])
     cb.set_label("r across parcels", fontsize=11, color=INK2)
     cb.outline.set_visible(False)
-    tax = taxonomy_label({"source": C.source})
-    title = (f"{PANEL_TITLES[rows].format(tax=tax)} × {PANEL_TITLES[cols].format(tax=tax)}"
+    tax = taxonomy_label({"source": c_src if cols != "states" else r_src})
+    ttl = lambda f: "Brain states" if f == "states" else PANEL_TITLES[f].format(tax=tax)
+    title = (f"{ttl(rows)} × {ttl(cols)}"
              f" — {atlas} ({int(keep_p.sum())} {'cortical ' if cortical_only else ''}parcels)")
     note = ("* q<.05, ** q<.01 (spatial null, FDR over the matrix)"
             if np.isfinite(q).any() else f"no p-values: {parc.n} parcels")
-    if C.simulated or R.simulated:
+    if c_sim or r_sim:
         note += " · SIMULATED table"
     ax.set_title(f"{title}\n{note}", loc="left", fontsize=14, fontweight="bold", color=INK,
                  pad=150)
