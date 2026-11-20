@@ -9,6 +9,7 @@
 #   ./slurm/predictive_cache_grid.sh HMM2_umap3_8 # one state set
 #   MAXPAR=50 ./slurm/predictive_cache_grid.sh    # fewer at once
 #   NTASKS=150 ./slurm/predictive_cache_grid.sh   # a smaller array, more combinations per task
+#   ARMS="all [joint]" ./slurm/predictive_cache_grid.sh   # one arm only (the transfer's "all" is [joint])
 #
 # Lists the combinations first (in the container, a few seconds), then submits the array. A
 # combination already cached is read, not refitted, so resubmitting the whole grid is safe and cheap.
@@ -18,6 +19,7 @@ STATES="${1:-ALL}"
 EXCLUDE="${EXCLUDE-}"
 MAXPAR="${MAXPAR:-100}"
 NTASKS="${NTASKS:-300}"
+ARMS="${ARMS-}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 [[ -f "$REPO/slurm/env.sh" ]] && source "$REPO/slurm/env.sh"
 SIF="${SIF:-${FMRIDECOMP_SIF_SHAP:-/project/6008063/tamires/singularity/fmri_decomp_stage45_shap.sif}}"
@@ -25,6 +27,8 @@ PYLIBS="${PYLIBS:-/project/6008063/tamires/singularity/pylibs}"
 module load apptainer 2>/dev/null || module load apptainer/1.3.5
 IFS=';' read -r -a EX <<< "$EXCLUDE"
 EXARGS=(); [[ ${#EX[@]} -gt 0 && -n "${EX[0]}" ]] && EXARGS=(--exclude "${EX[@]}")
+IFS=';' read -r -a AR <<< "$ARMS"
+[[ ${#AR[@]} -gt 0 && -n "${AR[0]}" ]] && EXARGS+=(--grid-arms "${AR[@]}")
 cd "$REPO"
 LIST=$(APPTAINERENV_PYTHONPATH="$REPO:$PYLIBS" apptainer exec --bind "$REPO" ${FMRIDECOMP_OUTPUTS:+--bind "$FMRIDECOMP_OUTPUTS"} \
        "$SIF" python tools/predictive_cache.py --grid "$STATES" --list ${EXARGS[@]+"${EXARGS[@]}"})

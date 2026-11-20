@@ -25,7 +25,7 @@ from fmri_decomposition.supervised_model import hads as ht
 from fmri_decomposition.supervised_model import report as rp
 
 
-def grid(st, states, exclude=()):
+def grid(st, states, exclude=(), arms=None):
     """(atlas, window_s, states, model, arm) select-bstm ran, every model, the graph_arms; for one
     state set, or every state set with states="ALL". `exclude`: "atlas,window_s,model,arm" (any
     state set) or "atlas,window_s,states,model,arm"."""
@@ -33,6 +33,8 @@ def grid(st, states, exclude=()):
     s = s[(s["tree"] == "bstm") & s["arm"].isin(st.cfg.graph_arms) & s["model"].isin(st.models())]
     if states != "ALL":
         s = s[s["states"] == states]
+    if arms:
+        s = s[s["arm"].isin(arms)]
     out = sorted({(r.atlas, float(r.window_s), r.states, r.model, r.arm) for r in s.itertuples()})
     skip = [x.split(",") for x in exclude]
 
@@ -45,6 +47,16 @@ def grid(st, states, exclude=()):
                 return True
         return False
     return [c for c in out if not hit(c)]
+
+
+def transfer_arm(arm, have):
+    """The transfer's name for a Cam-CAN arm, or None. The transfer runs its arms WITHOUT a suffix,
+    so its cells stay as stored, p(i, j): its "all" is Cam-CAN's "all [joint]". "all [cond]"
+    (p(j | i)) has no transfer unless one was run under that name."""
+    if arm in have:
+        return arm
+    base, _, sfx = arm.partition(" [")
+    return base if sfx == "joint]" and base in have else None
 
 
 def main(argv=None):
@@ -62,6 +74,8 @@ def main(argv=None):
                     help="every atlas x window x model x arm (graph_arms) select-bstm ran for these states "
                          "(ALL = every state set too); "
                          "with --task-id, only that one combination (a job array)")
+    ap.add_argument("--grid-arms", nargs="+", default=None, metavar="ARM",
+                    help='with --grid: only these arms, e.g. "all [joint]" (the arm the transfer ran)')
     ap.add_argument("--task-id", type=int, default=None)
     ap.add_argument("--n-tasks", type=int, default=None,
                     help="with --grid and --task-id: the array has this many tasks, task i takes "
@@ -73,7 +87,7 @@ def main(argv=None):
 
     over = {"n_jobs": a.n_jobs} if a.n_jobs else {}
     if a.grid:
-        combos = grid(ht.Study(rp.cam_settings(**over)), a.grid, a.exclude)
+        combos = grid(ht.Study(rp.cam_settings(**over)), a.grid, a.exclude, a.grid_arms)
         if a.list:
             for k, c in enumerate(combos):
                 print(k, *c, sep="\t")
@@ -121,8 +135,8 @@ def main(argv=None):
                 if sp and not pick:                    # the notebook's PICK: its parameters
                     atlas, w, states = sp.split(",")
                     pick = dict(atlas=atlas, window_s=float(w), states=states, **({"model": m} if m else {}))
-                    have = set(rows["arm"])               # the transfer names "all [cond]" plain "all"
-                    a_t = arm if arm in have else arm.split(" [")[0] if arm.split(" [")[0] in have else None
+                    have = set(rows["arm"])
+                    a_t = transfer_arm(arm, have)
                     if a_t is None:
                         print(f"  SKIPPED transfer {sp} {m} {arm}: no such arm in the transfer rows "
                               f"({sorted(have)})", flush=True)
