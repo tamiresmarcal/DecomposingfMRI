@@ -186,7 +186,8 @@ def multiverse_panel(ax, v, by, colours, cfg):
     ax.scatter(v["x"][~sig], y[~sig], s=4, c=c[~sig], alpha=.25, lw=0, rasterized=True)
     ax.scatter(v["x"][sig], y[sig], s=12, c=c[sig], alpha=.95, lw=0, rasterized=True)
     _cuts(ax, v, cfg)
-    label_points(ax, v, lambda t: f"{t.variable} · {t.set}", cfg)
+    from fmri_decomposition.figures import state_names as sn
+    label_points(ax, v, lambda t: f"{sn.var_label(t.variable)} · {t.set}", cfg)
     ax.set_title(f"{v['task'].iloc[0]} · {v['phenotype'].iloc[0]}   ({int(sig.sum()):,} / {len(v):,} {cfg.pass_text})",
                  fontsize=10)
 
@@ -677,8 +678,12 @@ def diagram(ax, T, occ, edges, wmax, omax, compare=False, hit_T=None, hit_occ=No
                          lw=.3 + 4.5 * T[k, k] / wmax,   # the arrows' rule
                          color=colour if hit_T[k, k] else base))
         occ_note = note_occ[k] if hit_occ[k] and note_occ is not None and note_occ[k] else None
-        ax.text(*pos[k], str(k), ha="center", va="center", fontsize=7.5 * fs, gid="scaled", color=INK, zorder=6)
+        from fmri_decomposition.figures import state_names as sn
+        if sn._MODE != "name" or not sn.active():             # the number in the node, unless names only
+            ax.text(*pos[k], str(k), ha="center", va="center", fontsize=7.5 * fs, gid="scaled", color=INK, zorder=6)
         at, lab = pos[k] * (1 + (r + .36) / np.linalg.norm(pos[k])), pct(occ[k]) + (f" ({occ_note})" if occ_note else "")
+        if sn.active():                                       # the state's name above its time in state
+            lab = f"{sn._NAMES.get(k, f'S{k}')}\n{lab}"
         ax.text(*at, lab, ha="center", va="center", fontsize=6.5 * fs, gid="scaled", color=colour if occ_note else INK2, zorder=6)
         placed.append(box(at, lab, fs / room))                           # time in state, beside it
         if hit_T[k, k] and note_T is not None and note_T[k, k]:   # a loop's change: from its outer

@@ -8,6 +8,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 from fmri_decomposition.figures import hads as hp
+from fmri_decomposition.figures import state_names as sn
 from fmri_decomposition.supervised_model import hads as ht
 
 # one colour per cohort, in the order they are listed; a new cohort takes the next
@@ -519,8 +520,8 @@ def fig_latents(co, lat, by="participant", who=None, embedding="umap3", paths=Fa
                 fig.add_trace(dots(h, tcol[t], t, j, group=t, hover=h["sub"] + " · " + t), 1, j)
         elif by == "cluster":
             for k, h in g.groupby(states):
-                fig.add_trace(dots(h, _hex(plt.cm.tab10(int(k) % 10)), f"state {int(k)}", j, group=f"s{int(k)}",
-                                   hover=h["sub"] + f" · state {int(k)}"), 1, j)
+                fig.add_trace(dots(h, _hex(plt.cm.tab10(int(k) % 10)), sn.label(int(k)), j, group=f"s{int(k)}",
+                                   hover=h["sub"] + f" · {sn.label(int(k))}"), 1, j)
         elif by == "single":
             mine = g["sub"] == pick[c]
             fig.add_trace(dots(g[~mine], hp.MUTED, "everyone else", j, opacity=.25, group="others"), 1, j)
@@ -567,9 +568,10 @@ def nice(v):
     if v in NICE:
         return NICE[v]
     if v.startswith("occ_"):
-        return f"Occupancy S{v[4:]}"
+        return f"Occupancy {sn.label(v[4:])}"
     if "->" in v:
-        return f"p(S{v.replace('->', ' → S')})"
+        a, b = v.split("->")
+        return f"p({sn.label(a)} → {sn.label(b)})"
     return v
 
 
@@ -1291,7 +1293,8 @@ def fig_state_timeline(co, tl, title="", name="state_timeline", max_people=80, s
     ax2.set_ylabel("share of viewers in each state", fontsize=9)
     for sp in ("top", "right"):
         ax2.spines[sp].set_visible(False)
-    fig.legend(handles=[Patch(color=cols[k], label=f"S{k}") for k in range(K)], loc="lower center", ncol=K,
+    fig.legend(handles=[Patch(color=cols[k], label=sn.label(k)) for k in range(K)], loc="lower center",
+               ncol=K if not sn.active() else min(K, 4),
                frameon=False, fontsize=9, bbox_to_anchor=(.5, -.04))
     fig.suptitle(title, x=.02, ha="left", fontsize=12)
     save(fig, name, co.cfg)
@@ -1343,7 +1346,8 @@ def fig_state_detail(co, F, M, tl, state, n_regions=18, n_traces=3, title="", na
     ax = fig.add_subplot(gs[:, 1])
     v = np.nanmax(np.abs(H.to_numpy()))
     im = ax.imshow(H.to_numpy(), aspect="auto", cmap="RdBu_r", vmin=-v, vmax=v)
-    ax.set_xticks(range(H.shape[1]), [f"S{k}" for k in H.columns])
+    ax.set_xticks(range(H.shape[1]), [sn.label(k) for k in H.columns],
+                  rotation=0 if not sn.active() else 60, ha="center" if not sn.active() else "left")
     for k, tl_ in zip(H.columns, ax.get_xticklabels()):
         tl_.set_color(cols[int(k)])
     ax.xaxis.tick_top()
@@ -1359,7 +1363,7 @@ def fig_state_detail(co, F, M, tl, state, n_regions=18, n_traces=3, title="", na
                    above_threshold_color=hp.INK2, link_color_func=lambda _: hp.INK2)
         dax.set_ylim(10 * len(H), 0)                              # leaf i at 5 + 10 i = row i, top down
         dax.set_axis_off()
-    fig.suptitle(title or f"State S{state} in detail", x=.02, ha="left", fontsize=12)
+    fig.suptitle(title or f"State {sn.label(state)} in detail", x=.02, ha="left", fontsize=12)
     save(fig, name or f"state_detail_S{state}", co.cfg)
     _show(fig)
     return fig
@@ -1426,7 +1430,7 @@ def fig_embeddings(co, E, panel="variant", colour="cohort", panels=None, titles=
         elif colour == "state":
             for k, h in g.groupby("state", sort=True):
                 if int(k) >= 0:
-                    add(h, _hex(plt.cm.tab10(int(k) % 10)), f"S{int(k)}")
+                    add(h, _hex(plt.cm.tab10(int(k) % 10)), sn.label(int(k)))
         elif colour in ("sub", "time"):
             if colour == "sub":
                 key = g["cohort"] + ":" + g["sub"].astype(str)
@@ -1530,7 +1534,7 @@ def fig_mapper(co, graphs, colour="state", titles=None, name=None, fs=11, panel_
                 label = cname
             elif colour == "state":
                 cmap = {k: (hp.MUTED if int(k) < 0 else _hex(plt.cm.tab10(int(k) % 10))) for k in set(dom)}
-                label = lambda k: f"S{k}" if int(k) >= 0 else "no state"
+                label = lambda k: sn.label(k) if int(k) >= 0 else "no state"
             elif colour == "kind":
                 cmap = {k: hp.INK2 if k == "rest" else ORANGE for k in set(dom)}
                 label = str

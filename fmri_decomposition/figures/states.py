@@ -572,8 +572,10 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
         if missing:
             raise SystemExit(f"states_table has no column for {len(missing)} {atlas} parcels, e.g. "
                              f"{missing[:3]} -- states from another atlas?")
-        nm = [f"S{i + 1}" + (f" · {n}" if "name" in t and not str(n).startswith("state ") else "")
-              for i, n in enumerate(t["name"] if "name" in t else t.index)]
+        from fmri_decomposition.figures import state_names as sn
+        nm = ([sn.label(k) for k in t.index] if sn.active() else
+              [f"S{i + 1}" + (f" · {n}" if "name" in t and not str(n).startswith("state ") else "")
+               for i, n in enumerate(t["name"] if "name" in t else t.index)])
         return nm, t[parc.columns].to_numpy(float), "brain states", False
 
     rn, A, r_src, r_sim = side(rows)
@@ -719,6 +721,9 @@ def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
         parc = rm.Parcellator.build(spec, ref)
         brains = Brains(parc, surf, deep=deep)
         names = list(sm["name"]) if "name" in sm else [f"state {s}" for s in sm.index]
+        from fmri_decomposition.figures import state_names as sn
+        if sn.active():                               # the names notebook 04 set (state_names)
+            names = [sn.label(st_, "name") for st_ in sm.index]
         null = prov.get("null_method", "moran")
         measure = prov.get("state_measure", "mean activation")
         subj_path = d / "subject_correlations.parquet"
