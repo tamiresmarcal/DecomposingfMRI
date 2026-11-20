@@ -674,10 +674,6 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
                 ax.text((start + j - 1) / 2, -0.07, doms[start], transform=tr, ha="center",
                         va="top", fontsize=12, color=INK, clip_on=False)
                 start = j
-    # with the row labels on the right, the colorbar steps past them: ~0.1 in per character at 12 pt
-    lab_in = .065 * max(len(_label(n, rows)) for n in rown) + .15
-    cb = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.01 if Zr is None else lab_in / (0.42 * nc),
-                      ticks=[-1, -0.5, 0, 0.5, 1])
     fig.canvas.draw()
     pos = ax.get_position()
     dk = dict(color_threshold=0, above_threshold_color=INK2, link_color_func=lambda _: INK2, no_labels=True)
@@ -691,7 +687,11 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
         dendrogram(Zc, orientation="bottom", ax=dax, **dk)
         dax.set_xlim(0, 10 * nc)
         dax.set_axis_off()
-    cb.set_label("r across parcels", fontsize=11, color=INK2)
+    # the Pearson colour bar under everything, centred on the matrix
+    low = pos.y0 - (.16 if Zc is not None else .02) - (.06 if any("." in n for n in cn) and Zc is None else 0)
+    cax = fig.add_axes([pos.x0 + .2 * pos.width, low - .045, .6 * pos.width, .018])
+    cb = fig.colorbar(im, cax=cax, orientation="horizontal", ticks=[-1, -0.5, 0, 0.5, 1])
+    cb.set_label("Pearson r across parcels", fontsize=11, color=INK2)
     cb.outline.set_visible(False)
     tax = taxonomy_label({"source": c_src if cols != "states" else r_src})
     ttl = lambda f: "Brain states" if f == "states" else PANEL_TITLES[f].format(tax=tax)
