@@ -372,7 +372,17 @@ def slice_image(brains: "Brains", mode: str, cut: int, values, vlim: float) -> n
     return _cropped(f)
 
 
+def _network14_names() -> dict:
+    """The 14 networks' short label -> full name (atlases/data/mni_space_of_networks.csv)."""
+    from fmri_decomposition.atlases import registry
+    d = pd.read_csv(Path(registry.__file__).parent / "data" / "mni_space_of_networks.csv")
+    return dict(zip(d["network"].astype(str), d["name"].astype(str)))
+
+
 def _label(name: str, fam: str) -> str:
+    if fam == "networks14":
+        full = _network14_names()
+        return full.get(name, full.get(name.split("_")[0], name))
     if not fam.startswith("behavioural") or "." not in name:
         return name
     return name.split(".")[0][:3] + " · " + rm.short(name)
