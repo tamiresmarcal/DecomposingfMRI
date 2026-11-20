@@ -1311,10 +1311,9 @@ def fig_state_detail(co, F, M, tl, state, n_regions=18, n_traces=3, title="", na
     order = M.loc[state].sort_values(ascending=False)
     regions = list(dict.fromkeys([*order.index[:n_regions // 2 + n_regions % 2], *order.index[-(n_regions // 2):]]))
     H = M[regions].T                                              # regions x states
-    if len(H) > 2:                                                # regions: hierarchical clustering
-        H = H.iloc[leaves_list(linkage(H.to_numpy(), "average"))]
-    if H.shape[1] > 2:                                            # states: the same, on their profiles
-        H = H.iloc[:, leaves_list(linkage(H.to_numpy().T, "average"))]
+    Z = linkage(H.to_numpy(), "average") if len(H) > 2 else None   # regions: hierarchical clustering
+    if Z is not None:
+        H = H.iloc[leaves_list(Z)]
     top = list(order.index[:n_traces])
     g = F.groupby("t")[top]
     mean, sd = g.mean(), g.std()
@@ -1351,7 +1350,15 @@ def fig_state_detail(co, F, M, tl, state, n_regions=18, n_traces=3, title="", na
     ax.set_yticks(range(len(H)), H.index, fontsize=8)
     ax.yaxis.tick_right()
     ax.add_patch(plt.Rectangle((list(H.columns).index(state) - .5, -.5), 1, len(H), fill=False, ec="k", lw=1.6))
-    fig.colorbar(im, ax=ax, location="left", fraction=.04, pad=.02, label="mean activation (z)")
+    fig.colorbar(im, ax=ax, location="bottom", fraction=.03, pad=.02, label="mean activation (z)")
+    if Z is not None:                                             # the regions' dendrogram, beside the rows
+        from scipy.cluster.hierarchy import dendrogram
+        pos = ax.get_position()                                   # after the colorbar took its share
+        dax = fig.add_axes([pos.x0 - .07, pos.y0, .065, pos.height])
+        dendrogram(Z, orientation="left", ax=dax, no_labels=True, color_threshold=0,
+                   above_threshold_color=hp.INK2, link_color_func=lambda _: hp.INK2)
+        dax.set_ylim(10 * len(H), 0)                              # leaf i at 5 + 10 i = row i, top down
+        dax.set_axis_off()
     fig.suptitle(title or f"State S{state} in detail", x=.02, ha="left", fontsize=12)
     save(fig, name or f"state_detail_S{state}", co.cfg)
     _show(fig)
