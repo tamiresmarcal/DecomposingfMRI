@@ -157,7 +157,7 @@ def checked(t: pd.DataFrame, parc: rm.Parcellator, what: str) -> pd.DataFrame:
 
 
 def load_states(states: str, atlas: str, parc, components, seed: int,
-                output_root=None, window_s=None, cohorts=None):
+                output_root=None, window_s=None, cohorts=None, labels_atlas=None):
     """-> (group table, per-subject table or None). The per-subject table is
     indexed by (subject, state), one column per parcel -- what the error bars
     (SD over subjects) are computed from."""
@@ -171,9 +171,9 @@ def load_states(states: str, atlas: str, parc, components, seed: int,
     if cohorts == "train":                 # the cohorts decompose fitted on, from the model
         from fmri_decomposition.unsupervised_model.state_means import load_models
 
-        cohorts = list(load_models(root, atlas, window_s)["train_cohorts"])
+        cohorts = list(load_models(root, labels_atlas or atlas, window_s)["train_cohorts"])
         print(f"[{atlas}] COHORTS='train' -> {cohorts}")
-    grp, subj = state_means_any_layout(root, atlas, window_s, states, cohorts)
+    grp, subj = state_means_any_layout(root, atlas, window_s, states, cohorts, labels_atlas)
     what = f"{states} at atlas={atlas} window_s={window_s}"
     return checked(grp, parc, what), subject_maps(subj, parc, what)
 
@@ -248,7 +248,7 @@ def find_window(root: Path, atlas: str, state_col: str):
 
 
 def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
-                           cohorts=None):
+                           cohorts=None, labels_atlas=None):
     """Group and per-subject state means, in ACTIVATION, for any state set.
 
     Same route for PCA, raw and UMAP state sets: no inverse transform. The
@@ -268,13 +268,21 @@ def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
                       z-scored per run), the activation fit's defaults.
 
     Only the (task, sub) the latents have are read: the set decompose fitted
-    on, after its censor policy. Returns (group table, per-subject table
-    indexed by (subject, state)).
+    on, after its censor policy.
+
+    labels_atlas: read the state LABELS from that atlas's latents and the
+    ACTIVATION from `atlas` -- the states of a model fitted on a coarse atlas
+    (yeo7, 7 parcels: no spatial null) drawn and tested on a finer one. Frames
+    are matched on (task, sub, window_id), which is stimulus time in TRs and so
+    the same in every atlas; windows on stimulus_start_s, the same clock.
+
+    Returns (group table, per-subject table indexed by (subject, state)).
     """
     from fmri_decomposition import frames
     from fmri_decomposition.io import read_file
 
-    files = [p for p in latent_files(root, atlas, window_s, cohorts) if _has_column(p, state_col)]
+    lab_atlas = labels_atlas or atlas
+    files = [p for p in latent_files(root, lab_atlas, window_s, cohorts) if _has_column(p, state_col)]
     if not files:
         raise SystemExit(f"no latents with {state_col!r} at atlas={atlas} window_s={window_s}"
                          f"{'' if cohorts is None else f' for cohorts {cohorts}'} under {root}\n"
@@ -283,7 +291,7 @@ def state_means_any_layout(root: Path, atlas: str, window_s, state_col: str,
     if per_tr:
         from fmri_decomposition.unsupervised_model.state_means import load_models
 
-        models = load_models(root, atlas, window_s)
+        models = load_models(root, lab_atlas, window_s)    # the band / z-score the states saw
         # absent = the fit used frames' default band; None = "as extracted"
         band = models["match_bandpass"] if "match_bandpass" in models else frames.DEFAULT_BANDPASS
         zscore = bool(models.get("zscore_runs", True))
@@ -494,7 +502,7 @@ def reference_families(data: Path, ref, families, behavioural_csv=None, seed: in
 # ------------------------------------------------------------------- run ---
 def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
             out: Path | None = None, data: Path | None = None,
-            output_root=None, window_s=None, cohorts=None, behavioural_csv="neurosynth",
+            output_root=None, window_s=None, cohorts=None, labels_atlas=None, behavioural_csv="neurosynth",
             n_nulls: int = 10000, null: str = "moran", seed: int = 7,
             taxonomy: str = "brainmap",
             verbose: bool = True) -> dict:
@@ -520,6 +528,8 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
     label = "simulated" if states == "simulate" else Path(states).stem
     if window_s is not None and states != "simulate" and Path(states).suffix != ".csv":
         label = f"{states}_window-{window_s}"
+        if labels_atlas:                      # another atlas's states: never overwrite this atlas's own
+            label += f"_labels-{labels_atlas}"
     if str(behavioural_csv).startswith("neurosynth") and taxonomy != "brainmap" and \
             {"behavioural", "behavioural_domain"} & set(families):
         label += f"_{taxonomy}"
@@ -544,7 +554,8 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
         parcel = {f: parc.parcellate(m.voxels) for f, m in refs.items()}
         comps = {n: parcel["yeo7"][k] for k, n in enumerate(rm.YEO7)}
         comps.update({g: parc.parcellate(v) for g, v in subcort.items()})
-        sm, subj = load_states(states, atlas, parc, comps, seed, output_root, window_s, cohorts)
+        sm, subj = load_states(states, atlas, parc, comps, seed, output_root, window_s, cohorts,
+                               labels_atlas=labels_atlas if labels_atlas != atlas else None)
         measure = sm.attrs.get("measure", "mean activation")
         sm.to_csv(d / "state_means.csv")
         X = sm[parc.columns].to_numpy(float)
@@ -569,6 +580,7 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
         (d / "provenance.json").write_text(json.dumps({
             "atlas": atlas, "atlas_source": src, "n_parcels": parc.n,
             "states": states, "window_s": window_s, "cohorts": cohorts,
+            "labels_atlas": labels_atlas or atlas,
             "state_measure": measure,
             "simulation_truth": SIM_STATES if states == "simulate" else None,
             "families": {f: {"source": refs[f].source, "maps": refs[f].names,
@@ -635,9 +647,12 @@ def main(argv=None) -> int:
                         "contextualization/). It reads the state means ONE "
                         "fit produced, so it belongs to that fit's version.")
     p.add_argument("--seed", type=int, default=7)
+    p.add_argument("--labels-atlas", default=None,
+                   help="read the state labels from this atlas's latents, the activation from --atlases "
+                        "(e.g. yeo7 states drawn on harvardoxford's 111 parcels)")
     a = p.parse_args(argv)
     compute(a.states, a.atlases, a.families, out=a.out, data=a.data,
-            output_root=a.output_root, window_s=a.window_s, cohorts=a.cohorts,
+            output_root=a.output_root, window_s=a.window_s, cohorts=a.cohorts, labels_atlas=a.labels_atlas,
             behavioural_csv=None if a.behavioural == "none" else a.behavioural, n_nulls=a.n_nulls, null=a.null, seed=a.seed,
             taxonomy=a.taxonomy)
     return 0

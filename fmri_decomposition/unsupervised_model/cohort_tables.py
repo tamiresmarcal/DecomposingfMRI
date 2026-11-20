@@ -1265,7 +1265,7 @@ def state_timeline(co, cohort, task, states=None, atlas=None, window_s=None):
     return t.sort_values(["sub", "stimulus_start_s"]).reset_index(drop=True)
 
 
-def state_activation(co, cohort, task, states=None, atlas=None, window_s=None):
+def state_activation(co, cohort, task, states=None, atlas=None, window_s=None, act_atlas=None):
     """Per-TR parcel activation of one cohort x task (outputs/extractions/activation, band-passed and
     z-scored per run, as the state maps), with each frame's state share:
     returns (frames: sub, t (stimulus time, s), parcels...; maps: state x parcel mean activation over
@@ -1276,6 +1276,7 @@ def state_activation(co, cohort, task, states=None, atlas=None, window_s=None):
     atlas = atlas or c.space["atlas"]
     window_s = float(c.space["window_s"] if window_s is None else window_s)
     tl = state_timeline(co, cohort, task, states, atlas, window_s)
+    atlas = act_atlas or atlas          # labels from the model's atlas, activation from act_atlas (same frames)
     parts = []
     for d in _dirs_of(co, cohort):
         shards = fr.shard_paths(c.root, atlas, d, task=str(task))
@@ -1303,7 +1304,10 @@ def state_activation(co, cohort, task, states=None, atlas=None, window_s=None):
         if w.empty:
             continue
         T, S0 = g["t"].to_numpy(), w["stimulus_start_s"].to_numpy()
-        cover = (T[None] >= S0[:, None] - 1e-6) & (T[None] < S0[:, None] + window_s - 1e-6)   # windows x frames
+        if window_s > 0:
+            cover = (T[None] >= S0[:, None] - 1e-6) & (T[None] < S0[:, None] + window_s - 1e-6)   # windows x frames
+        else:                           # per-TR states (-1): each label IS one frame, matched on its own time
+            cover = np.abs(T[None] - S0[:, None]) < .05
         Xg = g[feats].to_numpy(float)
         for k in np.unique(w["state"]):
             wts = cover[w["state"].to_numpy() == k].sum(0).astype(float)
