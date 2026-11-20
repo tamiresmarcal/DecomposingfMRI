@@ -524,7 +524,7 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
                      data: Path | None = None, taxonomy: str = "brainmap",
                      behavioural_csv="neurosynth", n_nulls: int = 10000, null: str = "moran",
                      seed: int = 7, drop_other: bool = True,
-                     cortical_only: bool | None = None, states_table=None) -> Path:
+                     cortical_only: bool | None = None, states_table=None, cluster=None) -> Path:
     """How two reference families relate to each other, in one atlas.
 
     `cortical_only`: correlate over the atlas's cortical parcels only. Default
@@ -542,6 +542,10 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
     `rows` or `cols` may be "states": the brain states' maps, read from
     `states_table` (a state_means.csv the correlation step wrote, or that
     table) -- each state against every map of the other family, the same null.
+
+    `cluster`: None (families' own order), "rows", "cols" or "both" -- reorder that side by
+    hierarchical clustering (average linkage, correlation distance on the r profiles) and draw its
+    dendrogram (rows: left of the matrix, labels move right; columns: under the matrix).
     """
     import matplotlib.pyplot as plt
 
@@ -608,12 +612,30 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
         stem = Path(f"{stem}_{taxonomy}")
     if "states" in (rows, cols) and states_table is not None and not isinstance(states_table, pd.DataFrame):
         stem = Path(f"{stem}_{Path(states_table).parent.parent.name}")   # which state set
+    if cluster:
+        stem = Path(f"{stem}_clustered-{cluster}")
     tab = pd.DataFrame(r, index=rn, columns=cn)
     pd.concat({"r": tab, "p_null": pd.DataFrame(res["p"], index=rn, columns=cn),
                "q_fdr": pd.DataFrame(q, index=rn, columns=cn)}, axis=0).to_csv(f"{stem}.csv")
 
+    from scipy.cluster.hierarchy import dendrogram, leaves_list, linkage
+    if cluster not in (None, "rows", "cols", "both"):
+        raise SystemExit(f'cluster must be None, "rows", "cols" or "both", got {cluster!r}')
+    rown = list(rn)
+    row_colours = list(rm.YEO7_COLORS) if rows == "yeo7" else None
+    Zr = Zc = None
+    if cluster in ("rows", "both") and r.shape[0] > 2:
+        Zr = linkage(np.nan_to_num(r), "average", metric="correlation")
+        o = leaves_list(Zr)
+        r, q, rown = r[o], q[o], [rown[i] for i in o]
+        row_colours = [row_colours[i] for i in o] if row_colours else None
+    if cluster in ("cols", "both") and r.shape[1] > 2:
+        Zc = linkage(np.nan_to_num(r.T), "average", metric="correlation")
+        o = leaves_list(Zc)
+        r, q, cn = r[:, o], q[:, o], [cn[j] for j in o]
     nr, nc = r.shape
-    fig, ax = plt.subplots(figsize=(4 + 0.42 * nc, 2.6 + 0.55 * nr), facecolor="white")
+    fig, ax = plt.subplots(figsize=(4 + 0.42 * nc + (1.5 if Zr is not None else 0),
+                                    2.6 + 0.55 * nr + (1.2 if Zc is not None else 0)), facecolor="white")
     im = ax.imshow(r, cmap=diverging_cmap(), vmin=-1, vmax=1, aspect="auto")
     for x in np.arange(-0.5, nc, 1.0):
         ax.axvline(x, color="white", lw=1.2)
@@ -626,9 +648,11 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
                         fontsize=13, fontweight="bold",
                         color="white" if abs(r[i, j]) > 0.55 else INK)
     ax.set_yticks(range(nr))
-    ax.set_yticklabels([_label(n, rows) for n in rn], fontsize=12, color=INK)
-    if rows == "yeo7":
-        for i, c in enumerate(rm.YEO7_COLORS):
+    ax.set_yticklabels([_label(n, rows) for n in rown], fontsize=12, color=INK)
+    if Zr is not None:
+        ax.yaxis.tick_right()
+    if row_colours:
+        for i, c in enumerate(row_colours):
             ax.add_patch(plt.Rectangle((-0.013, i - 0.4), 0.008, 0.8, color=c, clip_on=False,
                                        transform=ax.get_yaxis_transform(), lw=0))
         ax.tick_params(axis="y", pad=12)
@@ -640,7 +664,7 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
     for sp in ax.spines.values():
         sp.set_visible(False)
     doms = [n.split(".")[0] for n in cn]
-    if any("." in n for n in cn):                      # domain brackets under the matrix
+    if any("." in n for n in cn) and Zc is None:      # domain brackets under the matrix (family order only)
         tr = ax.get_xaxis_transform()
         start = 0
         for j in range(1, nc + 1):
@@ -650,7 +674,23 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
                 ax.text((start + j - 1) / 2, -0.07, doms[start], transform=tr, ha="center",
                         va="top", fontsize=12, color=INK, clip_on=False)
                 start = j
-    cb = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.01, ticks=[-1, -0.5, 0, 0.5, 1])
+    # with the row labels on the right, the colorbar steps past them: ~0.1 in per character at 12 pt
+    lab_in = .065 * max(len(_label(n, rows)) for n in rown) + .15
+    cb = fig.colorbar(im, ax=ax, fraction=0.025, pad=0.01 if Zr is None else lab_in / (0.42 * nc),
+                      ticks=[-1, -0.5, 0, 0.5, 1])
+    fig.canvas.draw()
+    pos = ax.get_position()
+    dk = dict(color_threshold=0, above_threshold_color=INK2, link_color_func=lambda _: INK2, no_labels=True)
+    if Zr is not None:                                 # rows: left of the matrix, leaf i at row i
+        dax = fig.add_axes([pos.x0 - .12, pos.y0, .11, pos.height])
+        dendrogram(Zr, orientation="left", ax=dax, **dk)
+        dax.set_ylim(10 * nr, 0)
+        dax.set_axis_off()
+    if Zc is not None:                                 # columns: under the matrix
+        dax = fig.add_axes([pos.x0, pos.y0 - .14, pos.width, .12])
+        dendrogram(Zc, orientation="bottom", ax=dax, **dk)
+        dax.set_xlim(0, 10 * nc)
+        dax.set_axis_off()
     cb.set_label("r across parcels", fontsize=11, color=INK2)
     cb.outline.set_visible(False)
     tax = taxonomy_label({"source": c_src if cols != "states" else r_src})
