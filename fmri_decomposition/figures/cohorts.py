@@ -1311,8 +1311,10 @@ def fig_state_detail(co, F, M, tl, state, n_regions=18, n_traces=3, title="", na
     order = M.loc[state].sort_values(ascending=False)
     regions = list(dict.fromkeys([*order.index[:n_regions // 2 + n_regions % 2], *order.index[-(n_regions // 2):]]))
     H = M[regions].T                                              # regions x states
-    if len(H) > 2:
+    if len(H) > 2:                                                # regions: hierarchical clustering
         H = H.iloc[leaves_list(linkage(H.to_numpy(), "average"))]
+    if H.shape[1] > 2:                                            # states: the same, on their profiles
+        H = H.iloc[:, leaves_list(linkage(H.to_numpy().T, "average"))]
     top = list(order.index[:n_traces])
     g = F.groupby("t")[top]
     mean, sd = g.mean(), g.std()
@@ -1342,9 +1344,9 @@ def fig_state_detail(co, F, M, tl, state, n_regions=18, n_traces=3, title="", na
     ax = fig.add_subplot(gs[:, 1])
     v = np.nanmax(np.abs(H.to_numpy()))
     im = ax.imshow(H.to_numpy(), aspect="auto", cmap="RdBu_r", vmin=-v, vmax=v)
-    ax.set_xticks(range(K), [f"S{k}" for k in H.columns])
-    for k, tl_ in zip(range(K), ax.get_xticklabels()):
-        tl_.set_color(cols[k])
+    ax.set_xticks(range(H.shape[1]), [f"S{k}" for k in H.columns])
+    for k, tl_ in zip(H.columns, ax.get_xticklabels()):
+        tl_.set_color(cols[int(k)])
     ax.xaxis.tick_top()
     ax.set_yticks(range(len(H)), H.index, fontsize=8)
     ax.yaxis.tick_right()
