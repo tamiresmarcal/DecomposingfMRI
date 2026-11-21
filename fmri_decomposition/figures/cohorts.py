@@ -1729,6 +1729,8 @@ def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, in
         out[f"p {k_} < {hi_g:g}"] = np.where(ok_, norm.cdf(z_hi), np.nan)
         out[f"p {k_} > {lo_g:g}"] = np.where(ok_, norm.sf(z_lo), np.nan)
         out[f"p LRT {k_}"] = t[f"{k_}_p_lrt"].to_numpy(float)
+    for k_ in ("task", "person"):                              # the interval as numbers, for the bar plot
+        out[f"{k_}_lo"], out[f"{k_}_hi"] = t[f"{k_}_lo"].to_numpy(float), t[f"{k_}_hi"].to_numpy(float)
     for c in [c for c in out if c.startswith("p ")]:
         out[c.replace("p ", "q ", 1)] = _bh(out[c].to_numpy(float))
     if family_of != "all":
@@ -1742,8 +1744,6 @@ def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, in
     if out[f"P(tier) {sort_by}"].isna().all():
         print(f"no P(tier) {sort_by} in these mixed models (fitted before it was added): rerun "
               f"slurm/mixed_model.sbatch with --overwrite")
-    for k_ in ("task", "person"):                              # the interval as numbers, for the bar plot
-        out[f"{k_}_lo"], out[f"{k_}_hi"] = t[f"{k_}_lo"].to_numpy(float), t[f"{k_}_hi"].to_numpy(float)
     return out.sort_values(f"P(tier) {sort_by}", ascending=False).reset_index(drop=True).round(3)
 
 
