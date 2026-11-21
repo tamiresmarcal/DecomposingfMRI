@@ -1654,12 +1654,31 @@ def fig_band_check(co, B, name="band_check", fs=11):
     return fig
 
 
+def _bh(p):
+    """Benjamini-Hochberg q-values; NaN stays NaN."""
+    p = np.asarray(p, float)
+    q = np.full_like(p, np.nan)
+    ok = np.isfinite(p)
+    if ok.any():
+        v = p[ok]
+        o = np.argsort(v)
+        r = v[o] * len(v) / np.arange(1, len(v) + 1)
+        r = np.minimum.accumulate(r[::-1])[::-1]
+        q_ok = np.empty_like(v)
+        q_ok[o] = np.minimum(r, 1)
+        q[ok] = q_ok
+    return q
+
+
 def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, inside=True, sort_by="task",
                 family_of="all"):
     """The task x person panel as a table: every point with its VPC task and VPC person, each with
     its 95% CI and P(tier) (the probability that the VPC lies in its own band of the guides, from
     the delta-method interval of the mixed model; the person's needs mixed models fitted after it
-    was added -- older caches have no person interval), and the band each falls in.
+    was added -- older caches have no person interval), and the band each falls in. p-values:
+    "p task < .06" (one-sided Wald on the logit, H0: VPC >= .06), "p task > .01" (H0: VPC <= .01),
+    "p LRT task" (H0: no task component; likelihood ratio, mixed models fitted after it was added),
+    the same for person, each with its BH-FDR q over the rows shown.
     inside=True keeps the points with BOTH shares under the upper guide; False = every point.
     sort_by: "task" or "person", the P(tier) the rows are ordered by (most certain first).
     family_of: "all", "occupancy", "dynamics" or "transitions" (structure and p(j | i)).
@@ -1672,7 +1691,8 @@ def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, in
         tc = st_transitions[st_transitions["variable"].isin(cells)]
         parts.append(tc.assign(_fam="transitions"))
     t = pd.concat(parts, ignore_index=True).drop_duplicates("variable")
-    for c in ("task_lo", "task_hi", "task_p_tier", "person_lo", "person_hi", "person_p_tier"):
+    for c in ("task_lo", "task_hi", "task_p_tier", "person_lo", "person_hi", "person_p_tier",
+              "task_p_lrt", "person_p_lrt"):
         if c not in t:
             t[c] = np.nan
     band = lambda x: np.where(np.isnan(x), "", np.where(x < lo_g, f"< {lo_g:g}", np.where(x < hi_g, f"{lo_g:g}-{hi_g:g}", f">= {hi_g:g}")))
@@ -1693,6 +1713,24 @@ def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, in
                         "P(tier) task": t["task_p_tier"].to_numpy(float), "task band": band(vt),
                         "VPC person": vp, "person 95% CI": ci(t["person_lo"], t["person_hi"]),
                         "P(tier) person": t["person_p_tier"].to_numpy(float), "person band": band(vp)})
+    # p-values. Wald, one-sided, on the logit scale of the delta-method interval the model gave
+    # (se = (logit hi - logit lo) / 3.92): "VPC < upper guide" (H0: VPC >= .06, the share is small)
+    # and "VPC > lower guide" (H0: VPC <= .01, it is not negligible). LRT: "the component exists"
+    # (H0: its variance is 0), from the mixed model itself. q = BH-FDR over the rows of the table.
+    from scipy.stats import norm
+    lgt = lambda x: np.log(x / (1 - x))
+    for k_, vv in (("task", vt), ("person", vp)):
+        lo_, hi_ = t[f"{k_}_lo"].to_numpy(float), t[f"{k_}_hi"].to_numpy(float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            se = (lgt(hi_) - lgt(lo_)) / (2 * 1.959964)
+            z_hi = (lgt(vv) - lgt(hi_g)) / se
+            z_lo = (lgt(vv) - lgt(lo_g)) / se
+        ok_ = np.isfinite(se) & (se > 0)
+        out[f"p {k_} < {hi_g:g}"] = np.where(ok_, norm.cdf(z_hi), np.nan)
+        out[f"p {k_} > {lo_g:g}"] = np.where(ok_, norm.sf(z_lo), np.nan)
+        out[f"p LRT {k_}"] = t[f"{k_}_p_lrt"].to_numpy(float)
+    for c in [c for c in out if c.startswith("p ")]:
+        out[c.replace("p ", "q ", 1)] = _bh(out[c].to_numpy(float))
     if family_of != "all":
         if family_of not in ("occupancy", "dynamics", "transitions"):
             raise SystemExit(f'family_of must be "all", "occupancy", "dynamics" or "transitions", got {family_of!r}')

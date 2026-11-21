@@ -487,7 +487,7 @@ class StabilityMixin:
         out.attrs["scale"] = "omega2"
         return out
 
-    def _task_vpc(self, L, variables, min_people=3, ci=True, cohort_term=True):
+    def _task_vpc(self, L, variables, min_people=3, ci=True, cohort_term=True, lrt=True):
         """task_variation(combine="mixed"). Per variable, REML fit of
             value ~ C(cohort) + (1 | task) + (1 | person),   task and person nested in cohort,
         or, with cohort_term=False, value ~ 1 + (1 | task) + (1 | person): no cohort effect, so
@@ -500,7 +500,9 @@ class StabilityMixin:
         neither averaged nor weighted, and cohort differences are the fixed effect, not the task's.
         95% CI and P(tier): delta method on the logit of the VPC from the REML covariance of the
         variance parameters, for VPC_task (task_lo / task_hi / task_p_tier) and VPC_person
-        (person_d / person_lo / person_hi / person_p_tier) alike (asymptotic; at a variance on its boundary, 0, the CI collapses there).
+        (person_d / person_lo / person_hi / person_p_tier) alike. lrt=True: p-values of "no task
+        component" and "no person component" (task_p_lrt / person_p_lrt) by REML likelihood ratio
+        against the model without that component, null = 50:50 mixture of chi2_0 and chi2_1 (asymptotic; at a variance on its boundary, 0, the CI collapses there).
         Same columns as task_variation; st.attrs["scale"] = "omega2" (same tiers)."""
         import warnings
         import statsmodels.formula.api as smf
@@ -524,26 +526,30 @@ class StabilityMixin:
                 rows.append(row)
                 continue
             df["y"] = (df["y"] - df["y"].mean()) / df["y"].std()          # scale-free; the VPC is unchanged
-            try:
+            def fit(vc):
+                """REML fit with these variance components (same fixed part in every model)."""
                 if cohort_term:
-                    model = smf.mixedlm("y ~ C(cohort)", df, groups="cohort", re_formula="0",
-                                        vc_formula={"task": "0 + C(task)", "person": "0 + C(person)"})
+                    m = smf.mixedlm("y ~ C(cohort)", df, groups="cohort", re_formula="0", vc_formula=vc)
                 else:                                  # one block: every task and person crossed in it
-                    model = smf.mixedlm("y ~ 1", df.assign(block=1), groups="block", re_formula="0",
-                                        vc_formula={"task": "0 + C(task)", "person": "0 + C(person)"})
-                r, errs = None, []
+                    m = smf.mixedlm("y ~ 1", df.assign(block=1), groups="block", re_formula="0", vc_formula=vc)
+                res, errs = None, []
                 for method in ("lbfgs", "bfgs", "powell", "nm"):     # the default optimiser can fail
                     try:
                         with warnings.catch_warnings():
                             warnings.simplefilter("ignore")
-                            r = model.fit(reml=True, method=method)
-                        if np.isfinite(r.params.get("task Var", np.nan)):
+                            res = m.fit(reml=True, method=method)
+                        if np.isfinite(res.llf) and all(np.isfinite(res.params.get(f"{k} Var", np.nan)) for k in vc):
                             break
                     except Exception as e:
                         errs.append(f"{method}: {type(e).__name__}: {e}"[:120])
-                        r = None
-                if r is None:
+                        res = None
+                if res is None:
                     raise RuntimeError(" | ".join(errs))
+                return res
+
+            VC = {"task": "0 + C(task)", "person": "0 + C(person)"}
+            try:
+                r = fit(VC)
                 tau, pi = (float(r.params[f"{n} Var"]) for n in ("task", "person"))   # relative to s2_residual
                 D = tau + pi + 1
                 vpc = tau / D
@@ -593,6 +599,20 @@ class StabilityMixin:
                                                      - norm.cdf((lgt(e[band]) - lg) / se_l))
                     else:
                         row["person_lo"], row["person_hi"] = vp_, vp_
+                if lrt:
+                    # H0: no task (person) component -- the model without it, same fixed part, REML
+                    # likelihood ratio; a variance cannot be negative, so the null is the 50:50 mixture of
+                    # chi2_0 and chi2_1 (Self & Liang 1987): p = 0.5 P(chi2_1 > LR), 1 when LR = 0
+                    from scipy.stats import chi2
+                    for comp_ in ("task", "person"):
+                        try:
+                            r0 = fit({k: f for k, f in VC.items() if k != comp_})
+                            lr = max(2 * (float(r.llf) - float(r0.llf)), 0.0)
+                            row[f"{comp_}_lr"] = lr
+                            row[f"{comp_}_p_lrt"] = 0.5 * float(chi2.sf(lr, 1)) if lr > 0 else 1.0
+                        except Exception as e:
+                            row[f"{comp_}_p_lrt"] = np.nan
+                            row["fit_error"] = f"LRT {comp_}: {type(e).__name__}: {e}"[:300]
             except Exception as err:                           # a fit that fails stays NaN, with a note
                 row["fit_error"] = f"{type(err).__name__}: {err}"[:300]
             rows.append(row)

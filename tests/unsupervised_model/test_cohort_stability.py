@@ -532,3 +532,18 @@ def test_task_vpc_gives_the_person_share_an_interval_too():
     tot = r.var_task + r.var_person + r.var_residual
     assert np.isclose(r.person_d, r.var_person / tot)
     assert r.person_lo <= r.person_d <= r.person_hi and 0 <= r.person_p_tier <= 1
+
+
+def test_task_vpc_lrt_finds_a_planted_task_effect_and_not_a_missing_one():
+    co = _toy_films()
+    v = co.dyn[0]
+    rng = np.random.default_rng(8)
+    shift = {t: k for k, t in enumerate(sorted({t for _, _, t in co.by_task}))}
+    for (c, k, t), d in co.by_task.items():
+        d[v] = rng.normal(0, 1, len(d)) + 1.5 * shift[t]
+    hit = co.task_variation([v], n_boot=1, combine="mixed").iloc[0]
+    assert hit.task_p_lrt < .01 and 0 <= hit.person_p_lrt <= 1
+    for (c, k, t), d in co.by_task.items():
+        d[v] = rng.normal(0, 1, len(d))
+    miss = co.task_variation([v], n_boot=1, combine="mixed").iloc[0]
+    assert miss.task_p_lrt > .01
