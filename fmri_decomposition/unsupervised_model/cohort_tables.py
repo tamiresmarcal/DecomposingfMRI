@@ -348,7 +348,7 @@ class StabilityMixin:
         return out
 
     def task_variation(self, variables=None, n_boot=2000, seed=0, ci="jackknife", combine="random",
-                       min_people=3):
+                       min_people=3, cohort_term=True):
         """How much each property depends on the TASK: every task of every cohort, rest included as
         one task (`films(rest=True)`, so the halves of an episode are one task). One row per variable.
 
@@ -424,7 +424,7 @@ class StabilityMixin:
             return om, means, om_c
 
         if combine == "mixed":
-            return self._task_vpc(L, variables, min_people, ci=bool(n_boot))
+            return self._task_vpc(L, variables, min_people, ci=bool(n_boot), cohort_term=cohort_term)
         om, means, om_c = omega(np.ones(len(L)))
         c_names = list(pd.unique(pd.Series(g_lab).str.split("|").str[0]))      # c_of_g's order
         if ci == "jackknife" and (n_boot or combine != "equal"):
@@ -482,9 +482,13 @@ class StabilityMixin:
         out.attrs["scale"] = "omega2"
         return out
 
-    def _task_vpc(self, L, variables, min_people=3, ci=True):
+    def _task_vpc(self, L, variables, min_people=3, ci=True, cohort_term=True):
         """task_variation(combine="mixed"). Per variable, REML fit of
             value ~ C(cohort) + (1 | task) + (1 | person),   task and person nested in cohort,
+        or, with cohort_term=False, value ~ 1 + (1 | task) + (1 | person): no cohort effect, so
+        the differences between cohorts are carried by the task component (every task belongs to
+        one cohort -- Rest of Cam-CAN and REST1 of HCP are different tasks), and VPC_task is then
+        the share of tasks AND cohorts. The person component is unchanged in meaning.
         (statsmodels MixedLM, cohort as the block, task and person as variance components), and
             VPC_task = s2_task / (s2_task + s2_person + s2_residual).
         Repeated measures are modelled (HCP, CNeuroMod: the same people in many tasks), cohorts are
@@ -499,7 +503,8 @@ class StabilityMixin:
         cuts = (.01, .06)
         for v in variables:
             df = pd.DataFrame({"y": L[v].to_numpy(float), "cohort": L["_c"].to_numpy(),
-                               "task": (L["_c"] + "|" + L["_t"]).to_numpy(), "person": L["_s"].to_numpy()})
+                               "task": (L["_c"] + "|" + L["_t"]).to_numpy(),
+                               "person": (L["_c"] + "|" + L["_s"].astype(str)).to_numpy()})
             df = df[np.isfinite(df["y"])]
             df = df[df.groupby("task")["y"].transform("size") >= min_people]
             means = df.groupby("task")["y"].mean()
@@ -507,13 +512,19 @@ class StabilityMixin:
                        task_mean_lo=means.min() if len(means) else np.nan,
                        task_mean_hi=means.max() if len(means) else np.nan,
                        n_tasks=int(df["task"].nunique()), n_paired=len(df))
-            if df.groupby("cohort")["task"].nunique().max() < 2 or df["y"].std() == 0:
+            few = (df.groupby("cohort")["task"].nunique().max() < 2 if cohort_term
+                   else df["task"].nunique() < 2)
+            if few or df["y"].std() == 0:
                 rows.append(row)
                 continue
             df["y"] = (df["y"] - df["y"].mean()) / df["y"].std()          # scale-free; the VPC is unchanged
             try:
-                model = smf.mixedlm("y ~ C(cohort)", df, groups="cohort", re_formula="0",
-                                    vc_formula={"task": "0 + C(task)", "person": "0 + C(person)"})
+                if cohort_term:
+                    model = smf.mixedlm("y ~ C(cohort)", df, groups="cohort", re_formula="0",
+                                        vc_formula={"task": "0 + C(task)", "person": "0 + C(person)"})
+                else:                                  # one block: every task and person crossed in it
+                    model = smf.mixedlm("y ~ 1", df.assign(block=1), groups="block", re_formula="0",
+                                        vc_formula={"task": "0 + C(task)", "person": "0 + C(person)"})
                 r, errs = None, []
                 for method in ("lbfgs", "bfgs", "powell", "nm"):     # the default optimiser can fail
                     try:
@@ -1178,27 +1189,29 @@ def available_sets(root, cohorts, modelling_version=None):
 MIXED_SETTINGS = ("entropy_estimator", "distinct_minutes", "min_out_transitions", "rest_pattern", "film_merge")
 
 
-def mixed_dir(cfg: Settings) -> Path:
-    """<outputs>/modelling/version=<v>/unsupervised_model/mixed_model/atlas=/window_s=/states=."""
+def mixed_dir(cfg: Settings, cohort_term=True) -> Path:
+    """<outputs>/modelling/version=<v>/unsupervised_model/mixed_model[_nocohort]/atlas=/window_s=/states=."""
     sp = cfg.space
-    return (unsupervised_root(cfg.root, cfg.modelling_version) / "mixed_model" / f"atlas={_key(sp['atlas'])}"
-            / f"window_s={_key(_fmt_window(sp['window_s']))}" / f"states={_key(sp['states'])}")
+    return (unsupervised_root(cfg.root, cfg.modelling_version) / ("mixed_model" if cohort_term else "mixed_model_nocohort")
+            / f"atlas={_key(sp['atlas'])}" / f"window_s={_key(_fmt_window(sp['window_s']))}"
+            / f"states={_key(sp['states'])}")
 
 
 def _mixed_meta(co) -> dict:
     return {"cohorts": sorted(co.cfg.cohorts), **{k: str(getattr(co.cfg, k)) for k in MIXED_SETTINGS}}
 
 
-def mixed_tables(co, n_boot=1, recompute=False, save=True, min_occ=0.01, fit_missing=True):
+def mixed_tables(co, n_boot=1, recompute=False, save=True, min_occ=0.01, fit_missing=True, cohort_term=True):
     """(properties, transitions): task_variation(combine="mixed") for the transition structure,
     occupancy profile, dynamic metrics and occupancies, and for the transition structure and every
     transition p(j | i). Read from `mixed_dir` when there (written by tools/mixed_model_sweep.py /
     slurm/mixed_model.sbatch); a cache made with other settings is still read, with a warning naming
     what differs (recompute=True refits). When absent: fitted here and written there, or, with
-    fit_missing=False, an error saying to run the sbatch."""
+    fit_missing=False, an error saying to run the sbatch. cohort_term=False: the model without the
+    cohort effect (_task_vpc), its own cache (mixed_model_nocohort/)."""
     import json
     import warnings
-    d = mixed_dir(co.cfg)
+    d = mixed_dir(co.cfg, cohort_term)
     files = d / "vpc_properties.csv", d / "vpc_transitions.csv"
     meta = _mixed_meta(co)
     if not recompute and all(f.exists() for f in files):
@@ -1217,10 +1230,11 @@ def mixed_tables(co, n_boot=1, recompute=False, save=True, min_occ=0.01, fit_mis
     if not recompute and not fit_missing:
         raise SystemExit(f"no mixed models in {d}: run `sbatch slurm/mixed_model.sbatch -- --atlas "
                          f"{co.cfg.space['atlas']} --window-s {co.cfg.space['window_s']:g} --states "
-                         f"'{co.cfg.space['states']}'`, or call mixed_tables(co, fit_missing=True) to fit here")
+                         f"'{co.cfg.space['states']}'" + ("" if cohort_term else " --no-cohort-term")
+                         + "`, or call mixed_tables(co, fit_missing=True) to fit here")
     props = co.task_variation(["transition_fit", "occupancy_fit", "dynamics_fit", *co.dyn, *co.occ], n_boot=n_boot,
-                              combine="mixed")
-    cells = co.task_variation(["transition_fit", *co.cells], n_boot=n_boot, combine="mixed")
+                              combine="mixed", cohort_term=cohort_term)
+    cells = co.task_variation(["transition_fit", *co.cells], n_boot=n_boot, combine="mixed", cohort_term=cohort_term)
     if save:
         d.mkdir(parents=True, exist_ok=True)
         props.to_csv(files[0], index=False)

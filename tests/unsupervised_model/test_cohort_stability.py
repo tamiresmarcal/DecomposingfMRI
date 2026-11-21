@@ -491,3 +491,19 @@ def test_mixed_tables_cache(tmp_path):
     p2, c2 = ct.mixed_tables(co)                         # read back, same numbers, same attrs
     assert np.allclose(p1["task_d"].astype(float), p2["task_d"].astype(float), equal_nan=True)
     assert p2.attrs["measure"] == "vpc" and len(c2) == len(c1)
+
+
+def test_task_vpc_without_the_cohort_term_absorbs_the_cohorts():
+    """A pure cohort effect: with the cohort term it is a fixed effect, not the task's; without it,
+    the tasks (each in one cohort) carry it."""
+    co = _toy_films()
+    v = co.dyn[0]
+    rng = np.random.default_rng(5)
+    cohorts = sorted({c for c, _, _ in co.by_task})
+    for (c, k, t), d in co.by_task.items():
+        d[v] = rng.normal(0, 1, len(d)) + 3.0 * cohorts.index(c)
+    with_c = co.task_variation([v], n_boot=1, combine="mixed").iloc[0]
+    without = co.task_variation([v], n_boot=1, combine="mixed", cohort_term=False).iloc[0]
+    assert with_c.task_d < .15
+    assert without.task_d > with_c.task_d + .2
+    assert np.isclose(without.share_cohort, 0, atol=1e-9)

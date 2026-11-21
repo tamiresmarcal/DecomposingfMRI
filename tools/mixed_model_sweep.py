@@ -37,14 +37,14 @@ def settings(atlas, w, s):
                        entropy_estimator="miller_madow", distinct_minutes="min", rest_pattern=r"rest\d*")
 
 
-def one(atlas, w, s, overwrite):
+def one(atlas, w, s, overwrite, cohort_term=True):
     t0 = time.time()
     cfg = settings(atlas, w, s)
-    d = ct.mixed_dir(cfg)
+    d = ct.mixed_dir(cfg, cohort_term)
     co = ct.Cohorts(cfg)
     if not overwrite and (d / "meta.json").exists() and json.loads((d / "meta.json").read_text()) == ct._mixed_meta(co):
         return f"{atlas} {w:g} {s}: already there, skipped"
-    ct.mixed_tables(co, recompute=True)
+    ct.mixed_tables(co, recompute=True, cohort_term=cohort_term)
     return f"{atlas} {w:g} {s}: written to {d} ({time.time() - t0:.0f} s)"
 
 
@@ -55,6 +55,9 @@ def main(argv=None):
     ap.add_argument("--states", default=None, help="regex over state-set names (default: all)")
     ap.add_argument("--jobs", type=int, default=1, help="state sets fitted in parallel")
     ap.add_argument("--overwrite", action="store_true")
+    ap.add_argument("--no-cohort-term", dest="cohort_term", action="store_false",
+                    help="fit value ~ 1 + (1|task) + (1|person): no cohort effect, the cohorts' differences "
+                         "carried by the task component (written to mixed_model_nocohort/)")
     a = ap.parse_args(argv)
 
     base = ct.Settings(cohorts=COHORTS)
@@ -69,7 +72,7 @@ def main(argv=None):
     print(f"{len(todo)} state sets, {a.jobs} at a time", flush=True)
     failed = 0
     with ProcessPoolExecutor(max_workers=a.jobs) as ex:
-        futs = {ex.submit(one, *t, a.overwrite): t for t in todo}
+        futs = {ex.submit(one, *t, a.overwrite, a.cohort_term): t for t in todo}
         for i, f in enumerate(as_completed(futs), 1):
             try:
                 print(f"[{i}/{len(todo)}] {f.result()}", flush=True)
