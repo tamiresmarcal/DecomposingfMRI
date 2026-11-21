@@ -938,8 +938,8 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     small / medium shares of variance) or a tuple of your own; None = none.
     pvalue / test: the p-value column(s) right of C (`_tier_panel`): None, "exact" or "stars";
     "tier" (P(tier), default), "difference" (paired t), "tost" (equivalence), "both", "all".
-    transitions: "fit" | "mean" | "both", how the VPC panel summarises the transition structure
-    (one model of the whole structure, or the mean of the individual p(j | i); _task_person_panel).
+    transitions: "structure" | "average" | "both", how the VPC panel summarises the transitions
+    (one model of the whole structure, or the average of the individual p(j | i); _task_person_panel).
     """
     from matplotlib.gridspec import GridSpec
 
@@ -975,7 +975,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
             axo.set_ylabel("occupancy", fontsize=8)
         axm = fig.add_subplot(gA[1, i])
         axm.imshow(T, cmap="Blues", vmin=0, vmax=1)
-        _state_ticks(axm, K, 7)
+        _state_ticks(axm, K, 7, mode="number")       # Figure 3: numbers; the diagram names the states
         axm.set_xlabel("to state j", fontsize=8)
         if i == 0:
             axm.set_ylabel("from state i", fontsize=8)
@@ -1187,14 +1187,15 @@ TRANSITION_LIGHT = "#9cc3f5"
 
 def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=0.01, fs=9, guides=None,
                        transitions="fit"):
-    """transitions: how the transition structure is summarised -- "fit" (one model of the whole
-    structure, transition_fit), "mean" (the mean VPC task and VPC person of the individual p(j | i)
-    drawn in light blue) or "both". Occupancies are labelled by state number here (S3), whatever
+    """transitions: how the transitions are summarised -- "structure" (one model of the whole
+    structure, transition_fit), "average" (the mean VPC task and VPC person of the individual
+    p(j | i) drawn in light blue) or "both" ("fit" / "mean" also accepted). Occupancies are labelled by state number here (S3), whatever
     state_names says: the panel is about variance shares, the diagram beside it names the states."""
     from matplotlib.lines import Line2D
     fig = ax.figure
+    transitions = {"structure": "fit", "average": "mean"}.get(transitions, transitions)
     if transitions not in ("fit", "mean", "both"):
-        raise SystemExit(f'transitions must be "fit", "mean" or "both", got {transitions!r}')
+        raise SystemExit(f'transitions must be "structure", "average" or "both", got {transitions!r}')
     variables = variables or ["transition_fit", *co.dyn, *co.occ]
     if transitions == "mean" and st_transitions is not None:
         variables = [v for v in variables if v != "transition_fit"]
@@ -1231,7 +1232,7 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
     cands = [(dx, dy) for r_ in (28, 45, 65, 85) for dx, dy in
              ((r_, r_ * .5), (r_, -r_ * .5), (-r_, r_ * .5), (-r_, -r_ * .5), (0, r_), (0, -r_), (r_, 0), (-r_, 0))]
     for (xi, yi), (px, py), v in zip(np.c_[x[ok], y[ok]], pts, names[ok]):
-        lab = ("Transitions (mean of p(j | i))" if v == "transitions_mean" else
+        lab = ("Average Transition Values" if v == "transitions_mean" else
                f"Occupancy S{v[4:]}" if str(v).startswith("occ_") else nice(v).replace(" (fit to reference)", ""))
         w, h = 6.2 * len(lab), 12
         for dx, dy in cands:
@@ -1251,11 +1252,12 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
     ax.set_ylabel("VPC person (share of the variance within cohorts)", fontsize=10)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
-    struct = {"fit": "transition structure", "mean": "transitions (mean)", "both": "transition structure / mean"}[transitions]
-    handles = [Line2D([], [], ls="none", marker="o", ms=8, color=c, label=k if k != "transitions" else struct)
+    struct = {"fit": "Transition Structure", "mean": "Average Transition Values",
+              "both": "Transition Structure / Average Transition Values"}[transitions]
+    handles = [Line2D([], [], ls="none", marker="o", ms=8, color=c, label=struct if k == "transitions" else k.title())
                for k, c in FAMILY_COL.items()]
     if st_transitions is not None:
-        handles.insert(1, Line2D([], [], ls="none", marker="o", ms=5, color=TRANSITION_LIGHT, label="transitions p(j | i)"))
+        handles.insert(1, Line2D([], [], ls="none", marker="o", ms=5, color=TRANSITION_LIGHT, label="Transitions p(j | i)"))
     ax.legend(handles=handles, frameon=False, loc="center right")   # off the upper right, where points go
 
 
@@ -1277,11 +1279,13 @@ def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_p
 
 
 # ------------------------------------------------------------------ figure 1: the states in time
-def _state_ticks(ax, K, fs=7):
-    """A K x K transition matrix's axes: S0..S(K-1), or the states' names (state_names) when set."""
-    ax.set_xticks(range(K), [sn.label(k) for k in range(K)], fontsize=fs,
-                  rotation=60 if sn.active() else 0, ha="right" if sn.active() else "center")
-    ax.set_yticks(range(K), [sn.label(k) for k in range(K)], fontsize=fs)
+def _state_ticks(ax, K, fs=7, mode=None):
+    """A K x K transition matrix's axes: S0..S(K-1), or the states' names (state_names) when set;
+    mode="number" keeps the numbers whatever state_names says."""
+    named = sn.active() and mode != "number"
+    ax.set_xticks(range(K), [sn.label(k, mode) for k in range(K)], fontsize=fs,
+                  rotation=60 if named else 0, ha="right" if named else "center")
+    ax.set_yticks(range(K), [sn.label(k, mode) for k in range(K)], fontsize=fs)
 
 
 def state_colours(K):
