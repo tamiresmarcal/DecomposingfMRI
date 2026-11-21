@@ -8,7 +8,8 @@ image of the same cell 4_1_2.png, ...); `# Figure 5a` writes figure_5a.png, `# F
 figure_4_left_half.png. A second cell with the same title gets _b (4_1_b.png). Interactive plotly
 figures are written as .html under the same name. Cells without such a line are left alone.
 A line `SAVE_AS = "4_1_version2"` in the cell names its file instead (None = the default name), so a
-second version can be kept beside the first.
+second version can be kept beside the first. A line `DISPLAY = False` writes the cell's figures
+without showing them (tables and printed text still show).
 
 It listens to what the notebook DISPLAYS (IPython's display publisher), so it catches matplotlib
 figures drawn inline, images shown with display(Image(...)) and plotly's .show() alike, without any
@@ -22,6 +23,7 @@ from pathlib import Path
 
 _TAG = re.compile(r"^\s*#\s*(Plot|Figure)\s+([0-9]+(?:\.[0-9]+)?[a-z]?)\b(,[^(—]*)?", re.I | re.M)
 _SAVE_AS = re.compile(r"""^\s*SAVE_AS\s*=\s*(?:["']([^"']+)["']|None)""", re.M)
+_DISPLAY_OFF = re.compile(r"^\s*DISPLAY\s*=\s*False\b", re.M)
 _state = {"dir": None, "stem": None, "n": 0, "installed": False, "cells": {}}
 
 
@@ -46,6 +48,7 @@ def _next_path(ext: str) -> Path:
 def _pre_run_cell(info):
     src = getattr(info, "raw_cell", "") or ""
     stem = _stem(src)
+    _state["show"] = not (stem and _DISPLAY_OFF.search(src))
     own = _SAVE_AS.search(src) if stem else None
     if own and own[1]:                               # SAVE_AS = "4_1_version2": the cell names its file
         _state["stem"], _state["n"] = Path(own[1]).stem, 0
@@ -88,6 +91,9 @@ def enable(out_dir) -> Path:
                         fig.write_html(_next_path("html"), include_plotlyjs="cdn")
             except Exception as e:                  # saving must never break the notebook
                 print(f"autosave: {e}")
+            figure = isinstance(data, dict) and ("image/png" in data or "application/vnd.plotly.v1+json" in data)
+            if figure and _state["stem"] and not _state.get("show", True):
+                return None                        # DISPLAY = False: written above, not shown
             return original(data, metadata, *args, **kwargs)
 
         pub.publish = publish
