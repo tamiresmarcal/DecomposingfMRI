@@ -311,3 +311,6 @@ config/hcp7t_participants.csv
 # (config/hcp7t_fix.yaml). Named HCP subjects, built on the cluster.
 config/hcp7t_fix_participants.csv
 docs/figure_mockups/
+
+# figures the notebooks write on every run (fmri_decomposition/figures/autosave.py)
+notebooks/figures/
