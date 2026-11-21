@@ -344,7 +344,7 @@ def fig_matrices(co, groups, test="tost", sd=False, title=None, name="4_matrix",
     im = axes[0]["main"].images[0]
     fig.colorbar(im, cax=_cax(fig, axes[len(labels) - 1]["main"])).set_label("p(j | i)")
     for P in axes:
-        P["main"].set_xticks(range(K)); P["main"].set_yticks(range(K)); P["main"].set_xlabel("to state j", fontsize=9)
+        _state_ticks(P["main"], K, 8); P["main"].set_xlabel("to state j", fontsize=9)
         P["main"].set_ylabel("from state i", fontsize=9)
         P["left"].axis("off")
 
@@ -971,9 +971,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
             axo.set_ylabel("occupancy", fontsize=8)
         axm = fig.add_subplot(gA[1, i])
         axm.imshow(T, cmap="Blues", vmin=0, vmax=1)
-        axm.set_xticks(range(K))
-        axm.set_yticks(range(K))
-        axm.tick_params(labelsize=7)
+        _state_ticks(axm, K, 7)
         axm.set_xlabel("to state j", fontsize=8)
         if i == 0:
             axm.set_ylabel("from state i", fontsize=8)
@@ -1255,6 +1253,13 @@ def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_p
 
 
 # ------------------------------------------------------------------ figure 1: the states in time
+def _state_ticks(ax, K, fs=7):
+    """A K x K transition matrix's axes: S0..S(K-1), or the states' names (state_names) when set."""
+    ax.set_xticks(range(K), [sn.label(k) for k in range(K)], fontsize=fs,
+                  rotation=60 if sn.active() else 0, ha="right" if sn.active() else "center")
+    ax.set_yticks(range(K), [sn.label(k) for k in range(K)], fontsize=fs)
+
+
 def state_colours(K):
     return [plt.cm.tab10(k % 10) for k in range(K)]
 

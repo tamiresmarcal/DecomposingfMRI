@@ -616,7 +616,8 @@ def fig_stability(deep, cfg, title):
             arrow = "↑" if (sign[:, v] > 0).all() else "↓" if (sign[:, v] < 0).all() else "↕"
             ax.text(1.01, row, f"{arrow} {in_top[v]}/{len(M)}", transform=ax.get_yaxis_transform(), va="center",
                     fontsize=7, color=INK if in_top[v] == len(M) else MUTED)
-        ax.set_yticks(range(len(top)), [d["names"][v] for v in top], fontsize=7.5)
+        from fmri_decomposition.figures import state_names as sn
+        ax.set_yticks(range(len(top)), [sn.var_label(d["names"][v]) for v in top], fontsize=7.5)
         ax.set_title(f"{task} · {lab}", fontsize=10)
     for ax in axes[-1]:
         ax.set_xlabel("mean |SHAP| (out-of-fold), one dot per fold seed")
