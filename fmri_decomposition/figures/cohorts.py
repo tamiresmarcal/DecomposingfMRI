@@ -1748,7 +1748,7 @@ def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, in
 
 
 def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, guides=(.01, .06), name="vpc_bars",
-                   fs=8, labels="both", max_elements=None, ci=False):
+                   fs=8, labels="both", max_elements=None, ci=False, tests="both"):
     """guide_table drawn: one row per element (y), two horizontal bars under each other -- VPC task
     (dark) and VPC person (light) -- on the VPC axis (x), with the guides as dashed lines.
     Marks right of a bar (or of its interval): * / ** = the component exists (likelihood ratio,
@@ -1758,13 +1758,17 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
     order: ("task", "person") sorts by VPC task then VPC person; ("person", "task") the other way.
     labels: "both" (S3 · name), "number" (S3) or "name" for the states in the element names.
     max_elements: draw only the first N rows of that order. ci: the 95% interval of each VPC as a
-    thin line, where the mixed model gave one."""
+    thin line, where the mixed model gave one. tests: which marks to draw -- "both", "lrt" (the
+    asterisks), "guide" (the dots) or "none"."""
     from matplotlib.lines import Line2D
     lo_g, hi_g = (.01, .06) if guides is True or guides is None else guides
     if dot not in ("below", "above"):
         raise SystemExit('dot must be "below" or "above"')
     if labels not in ("both", "number", "name"):
         raise SystemExit('labels must be "both", "number" or "name"')
+    if tests not in ("both", "lrt", "guide", "none"):
+        raise SystemExit('tests must be "both", "lrt", "guide" or "none"')
+    show_lrt, show_guide = tests in ("both", "lrt"), tests in ("both", "guide")
     t = tab.sort_values([f"VPC {order[0]}", f"VPC {order[1]}"], ascending=True).reset_index(drop=True)
     if max_elements:
         t = t.head(int(max_elements))
@@ -1796,10 +1800,10 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
                 end = max(v, hi_)
             marks = ""
             pl = r.get(f"{pre} LRT {k}", np.nan)
-            if np.isfinite(pl) and pl < .05:
+            if show_lrt and np.isfinite(pl) and pl < .05:
                 marks += "**" if pl < .01 else "*"
             pg = r.get(f"{pre} {k} < {hi_g:g}" if dot == "below" else f"{pre} {k} > {lo_g:g}", np.nan)
-            if np.isfinite(pg) and pg < .05:
+            if show_guide and np.isfinite(pg) and pg < .05:
                 marks += " •" if marks else "•"
             if marks:                                        # just right of the bar / interval, in points
                 ax.annotate(marks, (end, y), xytext=(2, 0), textcoords="offset points", va="center",
@@ -1816,10 +1820,12 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
         ax.spines[sp].set_visible(False)
     side = f"VPC < {hi_g:g}" if dot == "below" else f"VPC > {lo_g:g}"
     hand = [Patch(color=col[order[0]], label=order[0].capitalize()),
-            Patch(color=col[order[1]], label=order[1].capitalize()),
-            Line2D([], [], ls="none", marker="$*$", ms=7, color=hp.INK,
-                   label=f"component exists ({pre} < .05; ** < .01; likelihood ratio)"),
-            Line2D([], [], ls="none", marker="o", ms=3, color=hp.INK, label=f"{side} ({pre} < .05, one-sided)")]
+            Patch(color=col[order[1]], label=order[1].capitalize())]
+    if show_lrt:
+        hand.append(Line2D([], [], ls="none", marker="$*$", ms=7, color=hp.INK,
+                           label=f"component exists ({pre} < .05; ** < .01; likelihood ratio)"))
+    if show_guide:
+        hand.append(Line2D([], [], ls="none", marker="o", ms=3, color=hp.INK, label=f"{side} ({pre} < .05, one-sided)"))
     if ci:
         hand.append(Line2D([], [], color=hp.INK2, lw=.8, label="95% CI"))
     ax.legend(handles=hand, frameon=False, fontsize=fs, loc="lower left", bbox_to_anchor=(0, 1.01), ncol=2,
