@@ -1351,38 +1351,40 @@ def _label_of(co):
     return {d: lab for lab, s in co.cfg.cohorts.items() for d in s["dirs"]}
 
 
-def _need(f: Path, part: str, co):
+def _need(f: Path, part: str, co, atlas=None, window_s=None):
     if not f.exists():
         sp = co.cfg.space
+        atlas = atlas or sp["atlas"]
+        window_s = sp["window_s"] if window_s is None else window_s
         raise SystemExit(f"{f} is not there yet: sbatch --array=0-0 slurm/latent_diagnostics.sbatch {part} -- "
-                         f"--atlas {sp['atlas']} --window-s {_fmt_window(float(sp['window_s']))} "
+                         f"--atlas {atlas} --window-s {_fmt_window(float(window_s))} "
                          f"--states '{sp['states']}'")
     return f
 
 
-def window_stats(co):
+def window_stats(co, atlas=None, window_s=None):
     """(per window, per person) dFC statistics written by `latent_diagnostics.sbatch stats`, cohort
     labels as in cfg.cohorts. Per window: mean |r|, mean r, SD of r over the edges, volumes
     (n_tr_effective). Per (cohort, task, person): edge_var = each edge's variance over that person's
     windows, averaged over edges; n_tr = median volumes per window."""
-    d = diagnostics_dir(co)
+    d = diagnostics_dir(co, atlas, window_s)
     lab = _label_of(co)
     out = []
     for name in ("window_stats.parquet", "person_stats.parquet"):
-        t = pd.read_parquet(_need(d / name, "stats", co))
+        t = pd.read_parquet(_need(d / name, "stats", co, atlas, window_s))
         t["cohort"] = t["cohort"].map(lambda x: lab.get(x, x))
         out.append(t[t["cohort"].isin(co.cfg.cohorts)].reset_index(drop=True))
     return tuple(out)
 
 
 def diagnostic_embeddings(co, variants=("base", "all_rows", "no_scaler", "person_scaled", "nndb_only"),
-                          window_s=None):
+                          window_s=None, atlas=None):
     """The UMAP refits of `latent_diagnostics.sbatch` (one per variant), the same sampled windows in
     each: variant, cohort (label), role, task, sub, window_id, stimulus_start_s, state, x, y, z. A
     variant not yet computed is skipped with a note. window_s: another window size than cfg.space's
     (each is its own sbatch run, --window-s)."""
     import json
-    d = diagnostics_dir(co, window_s=window_s)
+    d = diagnostics_dir(co, atlas=atlas, window_s=window_s)
     lab = _label_of(co)
     parts, meta = [], {}
     for v in variants:
@@ -1390,7 +1392,7 @@ def diagnostic_embeddings(co, variants=("base", "all_rows", "no_scaler", "person
         if not f.exists():
             w = _fmt_window(float(co.cfg.space["window_s"] if window_s is None else window_s))
             print(f"{v} at {w} s: not computed yet (sbatch --array=0-0 slurm/latent_diagnostics.sbatch {v} "
-                  f"-- --atlas {co.cfg.space['atlas']} --window-s {w})")
+                  f"-- --atlas {atlas or co.cfg.space['atlas']} --window-s {w})")
             continue
         t = pd.read_parquet(f).assign(variant=v)
         t["cohort"] = t["cohort"].map(lambda x: lab.get(x, x))
@@ -1674,7 +1676,7 @@ def fit_group(co, fit_on):
     return sorted(co.cfg.cohorts[fit_on]["dirs"]) if fit_on in co.cfg.cohorts else [fit_on]
 
 
-def single_fits(co, fit_on="ds002837", windows=(30, 60, 120, 300), recipes=("only", "all", "old")):
+def single_fits(co, fit_on="ds002837", windows=(30, 60, 120, 300), recipes=("only", "all", "old"), atlas=None):
     """UMAPs fitted on ONE group of cohorts (`fit_on`, see fit_group) at every window size, the
     group's own windows only, as the project's old figures were drawn: where the UMAP saw every
     window (recipes all, old) each window at its fitted position (umap_<stem>_fit.parquet);
@@ -1686,7 +1688,7 @@ def single_fits(co, fit_on="ds002837", windows=(30, 60, 120, 300), recipes=("onl
     lab = _label_of(co)
     parts = []
     for w in windows:
-        d = diagnostics_dir(co, window_s=w)
+        d = diagnostics_dir(co, atlas=atlas, window_s=w)
         for r in recipes:
             stem = f"{tag}_{r}"
             f = d / f"umap_{stem}_fit.parquet"
@@ -1697,7 +1699,7 @@ def single_fits(co, fit_on="ds002837", windows=(30, 60, 120, 300), recipes=("onl
             else:
                 v = f"nndb_{r}" if tag == "nndb" else f"fit_{r}"
                 print(f"{stem} at {w:g} s: sbatch --array=0-0 slurm/latent_diagnostics.sbatch {v} -- --atlas "
-                      f"{co.cfg.space['atlas']} --window-s {w:g} --states {co.cfg.space['states']}"
+                      f"{atlas or co.cfg.space['atlas']} --window-s {w:g} --states {co.cfg.space['states']}"
                       + ("" if tag == "nndb" else f" --fit-cohorts {' '.join(dirs)}"))
                 continue
             t = t[t["cohort"].isin(dirs)].assign(window=float(w), variant=r)
@@ -1722,11 +1724,11 @@ def nndb_fits(co, windows=(30, 60, 120, 300), variants=("nndb_only", "nndb_all",
     return single_fits(co, "ds002837", windows, tuple(v.split("_", 1)[1] for v in variants))
 
 
-def band_check(co):
+def band_check(co, atlas=None, window_s=None):
     """`latent_diagnostics.sbatch band`: per (cohort, task, person, band) mean |r| over windows and
     edge variance over windows, the band as extracted vs every cohort filtered 0.01-0.1 Hz."""
-    d = diagnostics_dir(co)
-    w = pd.read_parquet(_need(d / "band_windows.parquet", "band", co))
+    d = diagnostics_dir(co, atlas, window_s)
+    w = pd.read_parquet(_need(d / "band_windows.parquet", "band", co, atlas, window_s))
     p = pd.read_parquet(d / "band_people.parquet")
     lab = _label_of(co)
     m = w.groupby(["cohort", "task", "sub", "band"], as_index=False)[["mean_abs_r", "sd_r"]].mean()
