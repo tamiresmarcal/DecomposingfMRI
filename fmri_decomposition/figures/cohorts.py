@@ -520,7 +520,7 @@ def fig_latents(co, lat, by="participant", who=None, embedding="umap3", paths=Fa
                 fig.add_trace(dots(h, tcol[t], t, j, group=t, hover=h["sub"] + " · " + t), 1, j)
         elif by == "cluster":
             for k, h in g.groupby(states):
-                fig.add_trace(dots(h, _hex(plt.cm.tab10(int(k) % 10)), sn.label(int(k)), j, group=f"s{int(k)}",
+                fig.add_trace(dots(h, _hex(plt.cm.tab10(int(k) % 10)), sn.label(int(k), "long"), j, group=f"s{int(k)}",
                                    hover=h["sub"] + f" · {sn.label(int(k))}"), 1, j)
         elif by == "single":
             mine = g["sub"] == pick[c]
@@ -1327,9 +1327,9 @@ def fig_state_timeline(co, tl, title="", name="state_timeline", max_people=80, s
     ax2.set_ylabel("share of viewers in each state", fontsize=9)
     for sp in ("top", "right"):
         ax2.spines[sp].set_visible(False)
-    fig.legend(handles=[Patch(color=cols[k], label=sn.label(k)) for k in range(K)], loc="lower center",
+    fig.legend(handles=[Patch(color=cols[k], label=sn.label(k, "long")) for k in range(K)], loc="upper center",
                ncol=K if not sn.active() else min(K, 4),
-               frameon=False, fontsize=9, bbox_to_anchor=(.5, -.04))
+               frameon=False, fontsize=9, bbox_to_anchor=(.5, -.02))
     fig.suptitle(title, x=.02, ha="left", fontsize=12)
     save(fig, name, co.cfg)
     _show(fig)

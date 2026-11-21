@@ -66,10 +66,12 @@ def use_for(root, atlas, window_s, states, version=None, mode: str = "name") -> 
 
 
 def label(k, mode: str | None = None) -> str:
-    """S<k>, its name, or both, as set by use()."""
+    """S<k>, its name, or both, as set by use(); mode="long": "State <k> · <name>" (legends)."""
     k = int(k)
-    mode = mode or _MODE
     name = _NAMES.get(k)
+    if mode == "long":
+        return f"State {k}" + (f" · {name}" if name and _MODE != "number" else "")
+    mode = mode or _MODE
     if mode == "number" or name is None:
         return f"S{k}"
     return name if mode == "name" else f"S{k} · {name}"
