@@ -1743,3 +1743,58 @@ def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, in
         print(f"no P(tier) {sort_by} in these mixed models (fitted before it was added): rerun "
               f"slurm/mixed_model.sbatch with --overwrite")
     return out.sort_values(f"P(tier) {sort_by}", ascending=False).reset_index(drop=True).round(3)
+
+
+def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, guides=(.01, .06), name="vpc_bars",
+                   fs=9):
+    """guide_table drawn: one row per element (y), two horizontal bars under each other -- VPC task
+    (dark) and VPC person (light) -- on the VPC axis (x), with the guides as dashed lines.
+    Marks beside a bar: * / ** = the component exists (likelihood ratio, H0: no task / person
+    variance; q or p < .05 / .01); a dot = the share is significantly on the stated side of a guide:
+    dot="below" -> under the upper guide (H0: VPC >= .06, i.e. small / stable), "above" -> over the
+    lower guide (H0: VPC <= .01, not negligible). use_q: FDR q-values (else raw p).
+    order: ("task", "person") sorts by VPC task then VPC person; ("person", "task") the other way."""
+    from matplotlib.lines import Line2D
+    lo_g, hi_g = (.01, .06) if guides is True or guides is None else guides
+    if dot not in ("below", "above"):
+        raise SystemExit('dot must be "below" or "above"')
+    t = tab.sort_values([f"VPC {order[0]}", f"VPC {order[1]}"], ascending=True).reset_index(drop=True)
+    n = len(t)
+    col = {"task": "#1f4e9c", "person": "#9cc3f5"}
+    fig, ax = plt.subplots(figsize=(8.5, 1.2 + .34 * n))
+    pre = "q" if use_q else "p"
+    for i, r in t.iterrows():
+        for j, k in enumerate(order):                       # the first of `order` on top of its pair
+            y = i + (-.18 if j == 0 else .18)
+            v = r[f"VPC {k}"]
+            if not np.isfinite(v):
+                continue
+            ax.barh(y, v, height=.34, color=col[k], lw=0)
+            x = v + .004
+            pl = r.get(f"{pre} LRT {k}", np.nan)
+            if np.isfinite(pl) and pl < .05:
+                ax.text(x, y, "**" if pl < .01 else "*", va="center", ha="left", fontsize=fs + 1, color=hp.INK)
+                x += .012
+            pg = r.get(f"{pre} {k} < {hi_g:g}" if dot == "below" else f"{pre} {k} > {lo_g:g}", np.nan)
+            if np.isfinite(pg) and pg < .05:
+                ax.plot(x + .004, y, "o", ms=4, color=hp.INK, mfc=hp.INK)
+    for g in (lo_g, hi_g):
+        ax.axvline(g, color="#9b9a95", lw=.8, ls="--", zorder=0)
+    ax.set_yticks(range(n), t["element"], fontsize=fs)
+    ax.set_ylim(n - .5, -.5)                                 # first row on top
+    ax.set_xlabel("Variance Partition Coefficient", fontsize=fs + 1)
+    ax.set_xlim(0, max(.1, np.nanmax(t[["VPC task", "VPC person"]].to_numpy(float)) * 1.15))
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    side = f"VPC < {hi_g:g}" if dot == "below" else f"VPC > {lo_g:g}"
+    ax.legend(handles=[Patch(color=col[order[0]], label=order[0].capitalize()),
+                       Patch(color=col[order[1]], label=order[1].capitalize()),
+                       Line2D([], [], ls="none", marker="$*$", ms=8, color=hp.INK,
+                              label=f"component exists ({pre} < .05; ** < .01; likelihood ratio)"),
+                       Line2D([], [], ls="none", marker="o", ms=4, color=hp.INK,
+                              label=f"{side} ({pre} < .05, one-sided)")],
+              frameon=False, fontsize=fs, loc="lower left", bbox_to_anchor=(0, 1.01), ncol=2,
+              borderaxespad=0)
+    fig.tight_layout()
+    save(fig, name, co.cfg)
+    return fig
