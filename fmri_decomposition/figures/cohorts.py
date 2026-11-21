@@ -1248,8 +1248,11 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
     bb = ax.get_window_extent()
     # labels: for each point, the first candidate offset whose box overlaps no placed label nor point
     placed, pts = [], ax.transData.transform(np.c_[x[ok], y[ok]])
-    cands = [(dx, dy) for r_ in (7, 11, 16, 22) for dx, dy in        # close to the point: no leader line
-             ((r_, 0), (-r_, 0), (r_, r_ * .7), (r_, -r_ * .7), (-r_, r_ * .7), (-r_, -r_ * .7), (0, r_), (0, -r_))]
+    # the default place is right beside the point, no line; only a label that cannot go there moves
+    # (other sides, then further away) and gets a thin line back to its point
+    cands = [(7, 0)] + [(dx, dy) for r_ in (7, 16, 28, 45, 65) for dx, dy in
+                        ((-r_, 0), (r_, r_ * .7), (r_, -r_ * .7), (-r_, r_ * .7), (-r_, -r_ * .7), (0, r_), (0, -r_),
+                         (r_, 0))][1:]
     for (xi, yi), (px, py), v in zip(np.c_[x[ok], y[ok]], pts, names[ok]):
         lab = (summary if v == "transitions_mean" else
                "Transition Structure" if v == "transition_fit" else
@@ -1266,8 +1269,10 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
             if not clash:
                 break
         placed.append(box)
+        moved = (dx, dy) != cands[0]
         ax.annotate(lab, (xi, yi), xytext=(dx, dy), textcoords="offset points", fontsize=fs, color=hp.INK,
-                    ha="left" if dx > 0 else "right" if dx < 0 else "center", va="center")
+                    ha="left" if dx > 0 else "right" if dx < 0 else "center", va="center",
+                    arrowprops=dict(arrowstyle="-", color="#9b9a95", lw=.7, shrinkA=0, shrinkB=4) if moved else None)
     ax.set_xlabel("Task Variance Partition Coefficient", fontsize=10)
     ax.set_ylabel("Person Variance Partition Coefficient", fontsize=10)
     for sp in ("top", "right"):
