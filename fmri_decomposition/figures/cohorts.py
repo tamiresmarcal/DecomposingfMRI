@@ -938,7 +938,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     small / medium shares of variance) or a tuple of your own; None = none.
     pvalue / test: the p-value column(s) right of C (`_tier_panel`): None, "exact" or "stars";
     "tier" (P(tier), default), "difference" (paired t), "tost" (equivalence), "both", "all".
-    transitions: "structure" | "median" | "both", how the VPC panel summarises the transitions
+    transitions: "structure" | "median" | "average" | "both", how the VPC panel summarises the transitions
     (one model of the whole structure, or the median of the individual p(j | i); _task_person_panel).
     """
     from matplotlib.gridspec import GridSpec
@@ -1201,16 +1201,19 @@ TRANSITION_LIGHT = "#9cc3f5"
 def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=0.01, fs=9, guides=None,
                        transitions="fit"):
     """transitions: how the transitions are summarised -- "structure" (one model of the whole
-    structure, transition_fit), "median" (the median VPC task and median VPC person of the
-    individual p(j | i) drawn in light blue) or "both" ("average", "fit" / "mean" also accepted). Occupancies are labelled by state number here (S3), whatever
+    structure, transition_fit), "median" / "average" (the median / mean VPC task and VPC person
+    of the individual p(j | i) drawn in light blue) or "both" (structure + median). Occupancy points
+    are labelled by the state's name (state_names; S<k> without names), the colour says occupancy. Occupancies are labelled by state number here (S3), whatever
     state_names says: the panel is about variance shares, the diagram beside it names the states."""
     from matplotlib.lines import Line2D
     fig = ax.figure
-    transitions = {"structure": "fit", "median": "mean", "average": "mean"}.get(transitions, transitions)
-    if transitions not in ("fit", "mean", "both"):
-        raise SystemExit(f'transitions must be "structure", "median" or "both", got {transitions!r}')
+    transitions = {"structure": "fit", "mean": "average"}.get(transitions, transitions)
+    if transitions not in ("fit", "median", "average", "both"):
+        raise SystemExit(f'transitions must be "structure", "median", "average" or "both", got {transitions!r}')
+    agg = np.nanmean if transitions == "average" else np.nanmedian       # "both": structure + median
+    summary = "Average Transition" if transitions == "average" else "Median Transition"
     variables = variables or ["transition_fit", *co.dyn, *co.occ]
-    if transitions == "mean" and st_transitions is not None:
+    if transitions in ("median", "average") and st_transitions is not None:
         variables = [v for v in variables if v != "transition_fit"]
     t = st.set_index("variable").loc[[v for v in variables if v in set(st["variable"])]].reset_index()
     tc = None
@@ -1222,9 +1225,9 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
                    edgecolor="none", zorder=2)
     x, y = _vpc_within(t, "task").to_numpy(float), _vpc_within(t, "person").to_numpy(float)
     names = list(t["variable"])
-    if transitions in ("mean", "both") and tc is not None and len(tc):   # the light points' median
-        x = np.append(x, np.nanmedian(_vpc_within(tc, "task").to_numpy(float)))
-        y = np.append(y, np.nanmedian(_vpc_within(tc, "person").to_numpy(float)))
+    if transitions != "fit" and tc is not None and len(tc):   # the light points' median / mean
+        x = np.append(x, agg(_vpc_within(tc, "task").to_numpy(float)))
+        y = np.append(y, agg(_vpc_within(tc, "person").to_numpy(float)))
         names.append("transitions_mean")
     names = pd.Series(names)
     ok = np.isfinite(x) & np.isfinite(y)
@@ -1247,9 +1250,10 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
     cands = [(dx, dy) for r_ in (7, 11, 16, 22) for dx, dy in        # close to the point: no leader line
              ((r_, 0), (-r_, 0), (r_, r_ * .7), (r_, -r_ * .7), (-r_, r_ * .7), (-r_, -r_ * .7), (0, r_), (0, -r_))]
     for (xi, yi), (px, py), v in zip(np.c_[x[ok], y[ok]], pts, names[ok]):
-        lab = ("Median Transition Values" if v == "transitions_mean" else
+        lab = (summary if v == "transitions_mean" else
                "Transition Structure" if v == "transition_fit" else
-               f"Occupancy S{v[4:]}" if str(v).startswith("occ_") else nice(v).replace(" (fit to reference)", ""))
+               sn.label(v[4:], "name") if str(v).startswith("occ_") else      # the state's name (colour = occupancy)
+               nice(v).replace(" (fit to reference)", ""))
         w, h = 6.2 * len(lab), 12
         for dx, dy in cands:
             cx, cy = px + dx * fig.dpi / 72, py + dy * fig.dpi / 72
@@ -1267,14 +1271,13 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
     ax.set_ylabel("Variance Partition Coefficient — Person", fontsize=10)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
-    struct = {"fit": "Transition Structure", "mean": "Median Transition Values",
-              "both": "Transition Structure / Median Transition Values"}[transitions]
+    struct = {"fit": "Transition Structure", "median": "Median Transition", "average": "Average Transition",
+              "both": "Transition Structure / Median Transition"}[transitions]
     handles = [Line2D([], [], ls="none", marker="o", ms=8, color=c, label=struct if k == "transitions" else k.title())
                for k, c in FAMILY_COL.items()]
     if st_transitions is not None:
         handles.insert(1, Line2D([], [], ls="none", marker="o", ms=5, color=TRANSITION_LIGHT, label="Transitions p(j | i)"))
-    ax.legend(handles=handles, frameon=False, loc="center right",   # off the upper right, where points go
-              title="Share of the variance within cohorts", title_fontsize=fs, alignment="left")
+    ax.legend(handles=handles, frameon=False, loc="center right")   # off the upper right, where points go
 
 
 def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_person", min_occ=0.01, guides=None,
