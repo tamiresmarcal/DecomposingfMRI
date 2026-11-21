@@ -938,8 +938,8 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     small / medium shares of variance) or a tuple of your own; None = none.
     pvalue / test: the p-value column(s) right of C (`_tier_panel`): None, "exact" or "stars";
     "tier" (P(tier), default), "difference" (paired t), "tost" (equivalence), "both", "all".
-    transitions: "structure" | "average" | "both", how the VPC panel summarises the transitions
-    (one model of the whole structure, or the average of the individual p(j | i); _task_person_panel).
+    transitions: "structure" | "median" | "both", how the VPC panel summarises the transitions
+    (one model of the whole structure, or the median of the individual p(j | i); _task_person_panel).
     """
     from matplotlib.gridspec import GridSpec
 
@@ -958,9 +958,11 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     gs = GridSpec(2, 1, figure=fig, height_ratios=[1, .95], hspace=.12)
     n = len(cohorts)
     gA = gs[0].subgridspec(2, n + 1, height_ratios=[.35, 1], width_ratios=[1] * n + [1.25], hspace=.12, wspace=.35)
+    occ_axes, mat_axes, dyn_axes = [], [], []
     for i, c in enumerate(cohorts):
         T, o = graphs[c]
         axo = fig.add_subplot(gA[0, i])
+        occ_axes.append(axo)
         oc = G[c][co.occ]                                    # 95% CI of the mean over the cohort's people
         h = stats.t.ppf(.975, np.maximum(oc.count() - 1, 1)) * oc.std(ddof=1) / np.sqrt(oc.count())
         axo.bar(range(K), o, color=col[c], width=.7, yerr=h.to_numpy(float),
@@ -974,6 +976,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
         if i == 0:
             axo.set_ylabel("occupancy", fontsize=8)
         axm = fig.add_subplot(gA[1, i])
+        mat_axes.append(axm)
         axm.imshow(T, cmap="Blues", vmin=0, vmax=1)
         _state_ticks(axm, K, 7, mode="number")       # Figure 3: numbers; the diagram names the states
         axm.set_xlabel("to state j", fontsize=8)
@@ -984,6 +987,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     gD = gA[:, n].subgridspec(len(co.dyn) + 1, 1, height_ratios=[1] * len(co.dyn) + [.35], hspace=1.3)
     for r_, v in enumerate(co.dyn):
         axd = fig.add_subplot(gD[r_])
+        dyn_axes.append(axd)
         for j, c in enumerate(cohorts):                       # mean and 95% CI over the cohort's people
             x = G[c][v].dropna()
             h = stats.t.ppf(.975, max(len(x) - 1, 1)) * x.std(ddof=1) / np.sqrt(len(x)) if len(x) > 1 else np.nan
@@ -1018,6 +1022,15 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     for t in fig.findobj(plt.matplotlib.text.Text):              # every text larger, but the diagram's:
         if t.get_gid() != "scaled":                              # its labels were placed at diagram_fs
             t.set_fontsize(t.get_fontsize() * font)
+    # occupancy: from just above its matrix (whose square box leaves a gap) up to the top of the
+    # dynamics column, so the cohorts' titles sit on the line of the first dynamic metric's title
+    fig.canvas.draw()
+    top = dyn_axes[0].get_position().y1 if dyn_axes else None
+    for axo, axm in zip(occ_axes, mat_axes):
+        mp = axm.get_position()
+        y0 = mp.y1 + .015
+        if top is not None and top > y0 + .02:
+            axo.set_position([mp.x0, y0, mp.width, top - y0])
     fig.suptitle(f"Figure 3 · {ht.set_label(cfg.space)}", x=.02, ha="left", fontsize=12)
     save(fig, name, cfg)
     _show(fig)
@@ -1188,14 +1201,14 @@ TRANSITION_LIGHT = "#9cc3f5"
 def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=0.01, fs=9, guides=None,
                        transitions="fit"):
     """transitions: how the transitions are summarised -- "structure" (one model of the whole
-    structure, transition_fit), "average" (the mean VPC task and VPC person of the individual
-    p(j | i) drawn in light blue) or "both" ("fit" / "mean" also accepted). Occupancies are labelled by state number here (S3), whatever
+    structure, transition_fit), "median" (the median VPC task and median VPC person of the
+    individual p(j | i) drawn in light blue) or "both" ("average", "fit" / "mean" also accepted). Occupancies are labelled by state number here (S3), whatever
     state_names says: the panel is about variance shares, the diagram beside it names the states."""
     from matplotlib.lines import Line2D
     fig = ax.figure
-    transitions = {"structure": "fit", "average": "mean"}.get(transitions, transitions)
+    transitions = {"structure": "fit", "median": "mean", "average": "mean"}.get(transitions, transitions)
     if transitions not in ("fit", "mean", "both"):
-        raise SystemExit(f'transitions must be "structure", "average" or "both", got {transitions!r}')
+        raise SystemExit(f'transitions must be "structure", "median" or "both", got {transitions!r}')
     variables = variables or ["transition_fit", *co.dyn, *co.occ]
     if transitions == "mean" and st_transitions is not None:
         variables = [v for v in variables if v != "transition_fit"]
@@ -1209,16 +1222,18 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
                    edgecolor="none", zorder=2)
     x, y = _vpc_within(t, "task").to_numpy(float), _vpc_within(t, "person").to_numpy(float)
     names = list(t["variable"])
-    if transitions in ("mean", "both") and tc is not None and len(tc):   # the light points' mean
-        x = np.append(x, np.nanmean(_vpc_within(tc, "task").to_numpy(float)))
-        y = np.append(y, np.nanmean(_vpc_within(tc, "person").to_numpy(float)))
+    if transitions in ("mean", "both") and tc is not None and len(tc):   # the light points' median
+        x = np.append(x, np.nanmedian(_vpc_within(tc, "task").to_numpy(float)))
+        y = np.append(y, np.nanmedian(_vpc_within(tc, "person").to_numpy(float)))
         names.append("transitions_mean")
     names = pd.Series(names)
     ok = np.isfinite(x) & np.isfinite(y)
     ax.scatter(x[ok], y[ok], s=75, c=[FAMILY_COL[family("transition_fit" if v == "transitions_mean" else v)]
                                       for v in names[ok]], edgecolor="white", zorder=3)
-    xmax = max(.1, np.nanmax(x) * 1.15)
-    ymax = max(.2, np.nanmax(y) * 1.2)
+    allx = np.r_[x, _vpc_within(tc, "task").to_numpy(float)] if tc is not None else x
+    ally = np.r_[y, _vpc_within(tc, "person").to_numpy(float)] if tc is not None else y
+    xmax = max(.1, np.nanmax(allx) * 1.08)                    # every point inside, the light ones too
+    ymax = max(.2, np.nanmax(ally) * 1.1)
     ax.set_xlim(-.01 * xmax, xmax)
     ax.set_ylim(0, ymax)
     if guides:
@@ -1229,10 +1244,10 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
     bb = ax.get_window_extent()
     # labels: for each point, the first candidate offset whose box overlaps no placed label nor point
     placed, pts = [], ax.transData.transform(np.c_[x[ok], y[ok]])
-    cands = [(dx, dy) for r_ in (28, 45, 65, 85) for dx, dy in
-             ((r_, r_ * .5), (r_, -r_ * .5), (-r_, r_ * .5), (-r_, -r_ * .5), (0, r_), (0, -r_), (r_, 0), (-r_, 0))]
+    cands = [(dx, dy) for r_ in (7, 11, 16, 22) for dx, dy in        # close to the point: no leader line
+             ((r_, 0), (-r_, 0), (r_, r_ * .7), (r_, -r_ * .7), (-r_, r_ * .7), (-r_, -r_ * .7), (0, r_), (0, -r_))]
     for (xi, yi), (px, py), v in zip(np.c_[x[ok], y[ok]], pts, names[ok]):
-        lab = ("Average Transition Values" if v == "transitions_mean" else
+        lab = ("Median Transition Values" if v == "transitions_mean" else
                "Transition Structure" if v == "transition_fit" else
                f"Occupancy S{v[4:]}" if str(v).startswith("occ_") else nice(v).replace(" (fit to reference)", ""))
         w, h = 6.2 * len(lab), 12
@@ -1247,19 +1262,19 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
                 break
         placed.append(box)
         ax.annotate(lab, (xi, yi), xytext=(dx, dy), textcoords="offset points", fontsize=fs, color=hp.INK,
-                    ha="left" if dx > 0 else "right" if dx < 0 else "center", va="center",
-                    arrowprops=dict(arrowstyle="-", color="#9b9a95", lw=.7, shrinkA=0, shrinkB=4))
-    ax.set_xlabel("VPC task (share of the variance within cohorts)", fontsize=10)
-    ax.set_ylabel("VPC person (share of the variance within cohorts)", fontsize=10)
+                    ha="left" if dx > 0 else "right" if dx < 0 else "center", va="center")
+    ax.set_xlabel("Variance Partition Coefficient — Task", fontsize=10)
+    ax.set_ylabel("Variance Partition Coefficient — Person", fontsize=10)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
-    struct = {"fit": "Transition Structure", "mean": "Average Transition Values",
-              "both": "Transition Structure / Average Transition Values"}[transitions]
+    struct = {"fit": "Transition Structure", "mean": "Median Transition Values",
+              "both": "Transition Structure / Median Transition Values"}[transitions]
     handles = [Line2D([], [], ls="none", marker="o", ms=8, color=c, label=struct if k == "transitions" else k.title())
                for k, c in FAMILY_COL.items()]
     if st_transitions is not None:
         handles.insert(1, Line2D([], [], ls="none", marker="o", ms=5, color=TRANSITION_LIGHT, label="Transitions p(j | i)"))
-    ax.legend(handles=handles, frameon=False, loc="center right")   # off the upper right, where points go
+    ax.legend(handles=handles, frameon=False, loc="center right",   # off the upper right, where points go
+              title="Share of the variance within cohorts", title_fontsize=fs, alignment="left")
 
 
 def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_person", min_occ=0.01, guides=None,
