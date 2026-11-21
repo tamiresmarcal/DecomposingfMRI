@@ -922,7 +922,8 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
 
 
 def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupancy="each", name="figure3",
-                pvalue=None, test="tier", panel="task_person", st_transitions=None, guides=None):
+                pvalue=None, test="tier", panel="task_person", st_transitions=None, guides=None,
+                transitions="fit"):
     """Manuscript Figure 3 as one figure, rest and movie together (each person's mean of the
     conditions they have; `groups(tasks="all")`).
     A  every cohort: occupancy, p(j | i) and the dynamic metrics (mean, 95% CI);
@@ -936,7 +937,10 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     guides: dashed lines on both axes of the task x person panel, e.g. True = (.01, .06) (Cohen's
     small / medium shares of variance) or a tuple of your own; None = none.
     pvalue / test: the p-value column(s) right of C (`_tier_panel`): None, "exact" or "stars";
-    "tier" (P(tier), default), "difference" (paired t), "tost" (equivalence), "both", "all"."""
+    "tier" (P(tier), default), "difference" (paired t), "tost" (equivalence), "both", "all".
+    transitions: "fit" | "mean" | "both", how the VPC panel summarises the transition structure
+    (one model of the whole structure, or the mean of the individual p(j | i); _task_person_panel).
+    """
     from matplotlib.gridspec import GridSpec
 
     cfg, K = co.cfg, co.cfg.K
@@ -1008,7 +1012,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     if tp:                                       # VPC task x VPC person (mixed model)
         ax.set_box_aspect(3.5 / 3.2 / 1.55)      # as tall as the diagram, 1.55 times as wide
         _task_person_panel(ax, co, st, st_transitions, tier_variables or ["transition_fit", *co.dyn, *occ],
-                           fs=9 / font, guides=guides)   # scaled back up with every text below
+                           fs=9 / font, guides=guides, transitions=transitions)   # scaled back up with every text below
     else:                                        # "tiers": the share due to task, with tiers and stars
         _tier_panel(ax, st, tier_variables or ["transition_fit", *co.dyn, *occ], pvalue, test)
     for t in fig.findobj(plt.matplotlib.text.Text):              # every text larger, but the diagram's:
@@ -1181,11 +1185,21 @@ def _vpc_within(t, k):
 TRANSITION_LIGHT = "#9cc3f5"
 
 
-def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=0.01, fs=9, guides=None):
+def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=0.01, fs=9, guides=None,
+                       transitions="fit"):
+    """transitions: how the transition structure is summarised -- "fit" (one model of the whole
+    structure, transition_fit), "mean" (the mean VPC task and VPC person of the individual p(j | i)
+    drawn in light blue) or "both". Occupancies are labelled by state number here (S3), whatever
+    state_names says: the panel is about variance shares, the diagram beside it names the states."""
     from matplotlib.lines import Line2D
     fig = ax.figure
+    if transitions not in ("fit", "mean", "both"):
+        raise SystemExit(f'transitions must be "fit", "mean" or "both", got {transitions!r}')
     variables = variables or ["transition_fit", *co.dyn, *co.occ]
+    if transitions == "mean" and st_transitions is not None:
+        variables = [v for v in variables if v != "transition_fit"]
     t = st.set_index("variable").loc[[v for v in variables if v in set(st["variable"])]].reset_index()
+    tc = None
     if st_transitions is not None:
         occ = pd.concat([v[co.occ].mean() for v in co._ref_tables()], axis=1).mean(axis=1).to_numpy()
         cells = [c for c in co.cells if occ[int(c.split("->")[0])] >= min_occ]
@@ -1193,8 +1207,15 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
         ax.scatter(_vpc_within(tc, "task"), _vpc_within(tc, "person"), s=18, color=TRANSITION_LIGHT,
                    edgecolor="none", zorder=2)
     x, y = _vpc_within(t, "task").to_numpy(float), _vpc_within(t, "person").to_numpy(float)
+    names = list(t["variable"])
+    if transitions in ("mean", "both") and tc is not None and len(tc):   # the light points' mean
+        x = np.append(x, np.nanmean(_vpc_within(tc, "task").to_numpy(float)))
+        y = np.append(y, np.nanmean(_vpc_within(tc, "person").to_numpy(float)))
+        names.append("transitions_mean")
+    names = pd.Series(names)
     ok = np.isfinite(x) & np.isfinite(y)
-    ax.scatter(x[ok], y[ok], s=75, c=[FAMILY_COL[family(v)] for v in t["variable"][ok]], edgecolor="white", zorder=3)
+    ax.scatter(x[ok], y[ok], s=75, c=[FAMILY_COL[family("transition_fit" if v == "transitions_mean" else v)]
+                                      for v in names[ok]], edgecolor="white", zorder=3)
     xmax = max(.1, np.nanmax(x) * 1.15)
     ymax = max(.2, np.nanmax(y) * 1.2)
     ax.set_xlim(-.01 * xmax, xmax)
@@ -1209,8 +1230,9 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
     placed, pts = [], ax.transData.transform(np.c_[x[ok], y[ok]])
     cands = [(dx, dy) for r_ in (28, 45, 65, 85) for dx, dy in
              ((r_, r_ * .5), (r_, -r_ * .5), (-r_, r_ * .5), (-r_, -r_ * .5), (0, r_), (0, -r_), (r_, 0), (-r_, 0))]
-    for (xi, yi), (px, py), v in zip(np.c_[x[ok], y[ok]], pts, t["variable"][ok]):
-        lab = nice(v).replace(" (fit to reference)", "")
+    for (xi, yi), (px, py), v in zip(np.c_[x[ok], y[ok]], pts, names[ok]):
+        lab = ("Transitions (mean of p(j | i))" if v == "transitions_mean" else
+               f"Occupancy S{v[4:]}" if str(v).startswith("occ_") else nice(v).replace(" (fit to reference)", ""))
         w, h = 6.2 * len(lab), 12
         for dx, dy in cands:
             cx, cy = px + dx * fig.dpi / 72, py + dy * fig.dpi / 72
@@ -1229,14 +1251,16 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
     ax.set_ylabel("VPC person (share of the variance within cohorts)", fontsize=10)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
-    handles = [Line2D([], [], ls="none", marker="o", ms=8, color=c, label=k if k != "transitions" else "transition structure")
+    struct = {"fit": "transition structure", "mean": "transitions (mean)", "both": "transition structure / mean"}[transitions]
+    handles = [Line2D([], [], ls="none", marker="o", ms=8, color=c, label=k if k != "transitions" else struct)
                for k, c in FAMILY_COL.items()]
     if st_transitions is not None:
         handles.insert(1, Line2D([], [], ls="none", marker="o", ms=5, color=TRANSITION_LIGHT, label="transitions p(j | i)"))
     ax.legend(handles=handles, frameon=False, loc="center right")   # off the upper right, where points go
 
 
-def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_person", min_occ=0.01, guides=None):
+def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_person", min_occ=0.01, guides=None,
+                    transitions="fit"):
     """One point per property: x = VPC of the task, y = VPC of the person, both shares of the
     variance within cohorts (`task_variation(combine="mixed")`). Colour = family. Upper left:
     individual and task-invariant; lower right: task-driven and not individual. st_transitions
@@ -1245,7 +1269,7 @@ def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_p
     if "var_person" not in st:
         raise SystemExit('fig_task_person needs task_variation(..., combine="mixed")')
     fig, ax = plt.subplots(figsize=(10, 7))
-    _task_person_panel(ax, co, st, st_transitions, variables, min_occ, guides=guides)
+    _task_person_panel(ax, co, st, st_transitions, variables, min_occ, guides=guides, transitions=transitions)
     fig.suptitle(f"Task vs person · {ht.set_label(co.cfg.space)}", x=.02, ha="left", fontsize=12)
     save(fig, name, co.cfg)
     _show(fig)

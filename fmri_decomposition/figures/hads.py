@@ -680,8 +680,7 @@ def diagram(ax, T, occ, edges, wmax, omax, compare=False, hit_T=None, hit_occ=No
                          color=colour if hit_T[k, k] else base))
         occ_note = note_occ[k] if hit_occ[k] and note_occ is not None and note_occ[k] else None
         from fmri_decomposition.figures import state_names as sn
-        if sn._MODE != "name" or not sn.active():             # the number in the node, unless names only
-            ax.text(*pos[k], str(k), ha="center", va="center", fontsize=7.5 * fs, gid="scaled", color=INK, zorder=6)
+        ax.text(*pos[k], str(k), ha="center", va="center", fontsize=7.5 * fs, gid="scaled", color=INK, zorder=6)
         at, lab = pos[k] * (1 + (r + .36) / np.linalg.norm(pos[k])), pct(occ[k]) + (f" ({occ_note})" if occ_note else "")
         if sn.active():                                       # the state's name above its time in state
             lab = f"{sn._NAMES.get(k, f'S{k}')}\n{lab}"
