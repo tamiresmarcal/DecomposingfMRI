@@ -520,3 +520,15 @@ def test_task_vpc_of_one_cohort():
     one = co.task_variation([v], n_boot=1, combine="mixed", only_cohort=c0).iloc[0]
     assert one.n_tasks == len({t for c, _, t in co.by_task if c == c0})
     assert np.isclose(one.share_cohort, 0, atol=1e-9)
+
+
+def test_task_vpc_gives_the_person_share_an_interval_too():
+    co = _toy_films()
+    v = co.dyn[0]
+    rng = np.random.default_rng(7)
+    for (c, k, t), d in co.by_task.items():
+        d[v] = rng.normal(0, 1, len(d))
+    r = co.task_variation([v], n_boot=1, combine="mixed").iloc[0]
+    tot = r.var_task + r.var_person + r.var_residual
+    assert np.isclose(r.person_d, r.var_person / tot)
+    assert r.person_lo <= r.person_d <= r.person_hi and 0 <= r.person_p_tier <= 1

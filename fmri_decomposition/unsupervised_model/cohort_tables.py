@@ -499,7 +499,8 @@ class StabilityMixin:
         Repeated measures are modelled (HCP, CNeuroMod: the same people in many tasks), cohorts are
         neither averaged nor weighted, and cohort differences are the fixed effect, not the task's.
         95% CI and P(tier): delta method on the logit of the VPC from the REML covariance of the
-        variance parameters (asymptotic; at a variance on its boundary, 0, the CI collapses there).
+        variance parameters, for VPC_task (task_lo / task_hi / task_p_tier) and VPC_person
+        (person_d / person_lo / person_hi / person_p_tier) alike (asymptotic; at a variance on its boundary, 0, the CI collapses there).
         Same columns as task_variation; st.attrs["scale"] = "omega2" (same tiers)."""
         import warnings
         import statsmodels.formula.api as smf
@@ -576,6 +577,22 @@ class StabilityMixin:
                                                    - norm.cdf((lgt(e[band]) - lg) / se_l))
                     else:
                         row["task_lo"], row["task_hi"] = vpc, vpc
+                    # the same for the person's share: VPC_person = pi / D, gradient (-pi, tau + 1) / D^2
+                    vp_ = pi / D
+                    row["person_d"] = vp_
+                    gp = np.array([-pi / D ** 2, (tau + 1) / D ** 2])
+                    sep = float(np.sqrt(max(gp @ cov @ gp, 0)))
+                    if 0 < vp_ < 1 and sep > 0:
+                        lg, se_l = np.log(vp_ / (1 - vp_)), sep / (vp_ * (1 - vp_))
+                        expit = lambda z: 1 / (1 + np.exp(-z))
+                        row["person_lo"], row["person_hi"] = expit(lg - 1.96 * se_l), expit(lg + 1.96 * se_l)
+                        band = int(np.digitize(vp_, cuts))
+                        e = [0.0, *cuts, 1.0]
+                        lgt = lambda x: np.log(x / (1 - x)) if 0 < x < 1 else (-np.inf if x <= 0 else np.inf)
+                        row["person_p_tier"] = float(norm.cdf((lgt(e[band + 1]) - lg) / se_l)
+                                                     - norm.cdf((lgt(e[band]) - lg) / se_l))
+                    else:
+                        row["person_lo"], row["person_hi"] = vp_, vp_
             except Exception as err:                           # a fit that fails stays NaN, with a note
                 row["fit_error"] = f"{type(err).__name__}: {err}"[:300]
             rows.append(row)

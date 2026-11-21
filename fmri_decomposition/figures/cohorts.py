@@ -1654,12 +1654,15 @@ def fig_band_check(co, B, name="band_check", fs=11):
     return fig
 
 
-def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, inside=True):
-    """The task x person panel as a table: every point with its VPC task (95% CI, P(tier): the
-    probability that the VPC lies in its own band, from the same delta-method interval) and VPC
-    person (no interval: the mixed model's REML gives one for the task share only), and in which
-    band of the guides each falls (below .01 / .01-.06 / above .06). inside=True keeps the points
-    with BOTH shares under the upper guide (the lower-left box of the panel); False = every point.
+def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, inside=True, sort_by="task",
+                family_of="all"):
+    """The task x person panel as a table: every point with its VPC task and VPC person, each with
+    its 95% CI and P(tier) (the probability that the VPC lies in its own band of the guides, from
+    the delta-method interval of the mixed model; the person's needs mixed models fitted after it
+    was added -- older caches have no person interval), and the band each falls in.
+    inside=True keeps the points with BOTH shares under the upper guide; False = every point.
+    sort_by: "task" or "person", the P(tier) the rows are ordered by (most certain first).
+    family_of: "all", "occupancy", "dynamics" or "transitions" (structure and p(j | i)).
     Transitions: those of rows of states occupied >= min_occ, as drawn."""
     lo_g, hi_g = (.01, .06) if guides is True or guides is None else guides
     parts = [st.assign(_fam=[family(v) for v in st["variable"]])]
@@ -1667,12 +1670,13 @@ def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, in
         occ = pd.concat([v[co.occ].mean() for v in co._ref_tables()], axis=1).mean(axis=1).to_numpy()
         cells = [c for c in co.cells if occ[int(c.split("->")[0])] >= min_occ]
         tc = st_transitions[st_transitions["variable"].isin(cells)]
-        parts.append(tc.assign(_fam="transition p(j | i)"))
+        parts.append(tc.assign(_fam="transitions"))
     t = pd.concat(parts, ignore_index=True).drop_duplicates("variable")
-    for c in ("task_lo", "task_hi", "task_p_tier"):
+    for c in ("task_lo", "task_hi", "task_p_tier", "person_lo", "person_hi", "person_p_tier"):
         if c not in t:
             t[c] = np.nan
     band = lambda x: np.where(np.isnan(x), "", np.where(x < lo_g, f"< {lo_g:g}", np.where(x < hi_g, f"{lo_g:g}-{hi_g:g}", f">= {hi_g:g}")))
+    ci = lambda a, b_: [f"[{u:.3f}, {w:.3f}]" if np.isfinite(u) else "" for u, w in zip(a, b_)]
 
     def name(v):
         v = str(v)
@@ -1683,11 +1687,21 @@ def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, in
             return f"{sn.label(a, 'both')} → {sn.label(b_, 'both')}"
         return nice(v).replace(" (fit to reference)", "")
     vt, vp = _vpc_within(t, "task").to_numpy(float), _vpc_within(t, "person").to_numpy(float)
-    out = pd.DataFrame({"element": [name(v) for v in t["variable"]], "family": t["_fam"],
-                        "VPC task": vt, "task 95% CI": [f"[{a:.3f}, {b_:.3f}]" if np.isfinite(a) else ""
-                                                        for a, b_ in zip(t["task_lo"], t["task_hi"])],
-                        "P(tier)": t["task_p_tier"].to_numpy(float), "VPC person": vp,
-                        "task band": band(vt), "person band": band(vp)})
+    out = pd.DataFrame({"element": [name(v) for v in t["variable"]],
+                        "family": t["_fam"],
+                        "VPC task": vt, "task 95% CI": ci(t["task_lo"], t["task_hi"]),
+                        "P(tier) task": t["task_p_tier"].to_numpy(float), "task band": band(vt),
+                        "VPC person": vp, "person 95% CI": ci(t["person_lo"], t["person_hi"]),
+                        "P(tier) person": t["person_p_tier"].to_numpy(float), "person band": band(vp)})
+    if family_of != "all":
+        if family_of not in ("occupancy", "dynamics", "transitions"):
+            raise SystemExit(f'family_of must be "all", "occupancy", "dynamics" or "transitions", got {family_of!r}')
+        out = out[out["family"] == family_of]
     if inside:
         out = out[(out["VPC task"] < hi_g) & (out["VPC person"] < hi_g)]
-    return out.sort_values(["VPC task", "VPC person"]).reset_index(drop=True).round(3)
+    if sort_by not in ("task", "person"):
+        raise SystemExit(f'sort_by must be "task" or "person", got {sort_by!r}')
+    if out[f"P(tier) {sort_by}"].isna().all():
+        print(f"no P(tier) {sort_by} in these mixed models (fitted before it was added): rerun "
+              f"slurm/mixed_model.sbatch with --overwrite")
+    return out.sort_values(f"P(tier) {sort_by}", ascending=False).reset_index(drop=True).round(3)
