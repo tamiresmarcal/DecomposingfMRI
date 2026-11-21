@@ -472,7 +472,7 @@ def test_variance_partition_figure_and_table():
     fig = cp.fig_variance_partition(co, st, list(co.dyn), st_transitions=stc, cohort=False)
     assert len(fig.axes) == 2
     fig = cp.fig_figure3(co, st, list(co.dyn), st_transitions=stc)            # bottom right: task x person
-    assert fig.axes[-1].get_xlabel().startswith("VPC task")
+    assert fig.axes[-1].get_xlabel().startswith("Variance Partition Coefficient — Task")
     fig = cp.fig_task_person(co, st, st_transitions=stc, variables=list(co.dyn))
     assert len(fig.axes[0].texts) == len(co.dyn)
     tab = cp.variance_table(co, st, list(co.dyn))
