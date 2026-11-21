@@ -1233,6 +1233,7 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
              ((r_, r_ * .5), (r_, -r_ * .5), (-r_, r_ * .5), (-r_, -r_ * .5), (0, r_), (0, -r_), (r_, 0), (-r_, 0))]
     for (xi, yi), (px, py), v in zip(np.c_[x[ok], y[ok]], pts, names[ok]):
         lab = ("Average Transition Values" if v == "transitions_mean" else
+               "Transition Structure" if v == "transition_fit" else
                f"Occupancy S{v[4:]}" if str(v).startswith("occ_") else nice(v).replace(" (fit to reference)", ""))
         w, h = 6.2 * len(lab), 12
         for dx, dy in cands:
