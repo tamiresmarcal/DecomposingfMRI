@@ -1016,7 +1016,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     if tp:                                       # VPC task x VPC person (mixed model)
         ax.set_box_aspect(3.5 / 3.2 / 1.55)      # as tall as the diagram, 1.55 times as wide
         _task_person_panel(ax, co, st, st_transitions, tier_variables or ["transition_fit", *co.dyn, *occ],
-                           fs=9 / font, guides=guides, transitions=transitions)   # scaled back up with every text below
+                           fs=9 / font, guides=guides, transitions=transitions, grow=font)   # scaled back up below
     else:                                        # "tiers": the share due to task, with tiers and stars
         _tier_panel(ax, st, tier_variables or ["transition_fit", *co.dyn, *occ], pvalue, test)
     for t in fig.findobj(plt.matplotlib.text.Text):              # every text larger, but the diagram's:
@@ -1200,7 +1200,7 @@ TRANSITION_LIGHT = "#9cc3f5"
 
 
 def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=0.01, fs=9, guides=None,
-                       transitions="fit"):
+                       transitions="fit", grow=1.0):
     """transitions: how the transitions are summarised -- "structure" (one model of the whole
     structure, transition_fit), "median" / "average" (the median / mean VPC task and VPC person
     of the individual p(j | i) drawn in light blue) or "both" (structure + median). Occupancy points
@@ -1248,31 +1248,40 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
     bb = ax.get_window_extent()
     # labels: for each point, the first candidate offset whose box overlaps no placed label nor point
     placed, pts = [], ax.transData.transform(np.c_[x[ok], y[ok]])
-    # the default place is right beside the point, no line; only a label that cannot go there moves
-    # (other sides, then further away) and gets a thin line back to its point
-    cands = [(7, 0)] + [(dx, dy) for r_ in (7, 16, 28, 45, 65) for dx, dy in
-                        ((-r_, 0), (r_, r_ * .7), (r_, -r_ * .7), (-r_, r_ * .7), (-r_, -r_ * .7), (0, r_), (0, -r_),
-                         (r_, 0))][1:]
+    renderer = fig.canvas.get_renderer()
+    dot = 5 * fig.dpi / 72                                 # a point's radius, in pixels
+    # the default place is right beside the point, no line; a label that cannot go there tries the
+    # nearest free place (8 directions, growing distance) and gets a thin line back to its point.
+    # Boxes are MEASURED at the size the text ends up at (grow: fig_figure3 enlarges every text after)
+    cands = [(6, 0)] + [(r_ * cx, r_ * cy) for r_ in (6, 10, 15, 21, 28, 36, 46, 58, 72)
+                        for cx, cy in ((1, .8), (1, -.8), (-1, 0), (-1, .8), (-1, -.8), (0, 1), (0, -1), (1, 0))][1:]
     for (xi, yi), (px, py), v in zip(np.c_[x[ok], y[ok]], pts, names[ok]):
         lab = (summary if v == "transitions_mean" else
                "Transition Structure" if v == "transition_fit" else
                sn.label(v[4:], "name") if str(v).startswith("occ_") else      # the state's name (colour = occupancy)
                nice(v).replace(" (fit to reference)", ""))
-        w, h = 6.2 * len(lab), 12
+        t = ax.annotate(lab, (xi, yi), xytext=(0, 0), textcoords="offset points", fontsize=fs * grow, va="center")
+        choice = cands[0]
         for dx, dy in cands:
-            cx, cy = px + dx * fig.dpi / 72, py + dy * fig.dpi / 72
-            box = (cx - (0 if dx > 0 else w if dx < 0 else w / 2), cy - h / 2,
-                   cx + (w if dx > 0 else 0 if dx < 0 else w / 2), cy + h / 2)
-            clash = any(not (box[2] < b[0] or box[0] > b[2] or box[3] < b[1] or box[1] > b[3]) for b in placed)
-            clash |= any(box[0] - 6 < qx < box[2] + 6 and box[1] - 6 < qy < box[3] + 6 for qx, qy in pts)
-            clash |= box[0] < bb.x0 + 8 or box[1] < bb.y0 + 8 or box[2] > bb.x1 or box[3] > bb.y1   # off the axes
+            t.set_position((dx, dy))
+            t.set_ha("left" if dx > 0 else "right" if dx < 0 else "center")
+            b = t.get_window_extent(renderer)
+            box = (b.x0, b.y0, b.x1, b.y1)
+            clash = any(not (box[2] < q[0] or box[0] > q[2] or box[3] < q[1] or box[1] > q[3]) for q in placed)
+            clash |= any(box[0] - dot < qx < box[2] + dot and box[1] - dot < qy < box[3] + dot for qx, qy in pts)
+            clash |= box[0] < bb.x0 + 4 or box[1] < bb.y0 + 4 or box[2] > bb.x1 or box[3] > bb.y1   # off the axes
             if not clash:
+                choice = (dx, dy)
                 break
-        placed.append(box)
-        moved = (dx, dy) != cands[0]
-        ax.annotate(lab, (xi, yi), xytext=(dx, dy), textcoords="offset points", fontsize=fs, color=hp.INK,
-                    ha="left" if dx > 0 else "right" if dx < 0 else "center", va="center",
-                    arrowprops=dict(arrowstyle="-", color="#9b9a95", lw=.7, shrinkA=0, shrinkB=4) if moved else None)
+        t.remove()
+        dx, dy = choice
+        t = ax.annotate(lab, (xi, yi), xytext=(dx, dy), textcoords="offset points", fontsize=fs * grow, color=hp.INK,
+                        ha="left" if dx > 0 else "right" if dx < 0 else "center", va="center",
+                        arrowprops=(dict(arrowstyle="-", color="#9b9a95", lw=.7, shrinkA=0, shrinkB=4)
+                                    if choice != cands[0] else None))
+        b = t.get_window_extent(renderer)
+        placed.append((b.x0, b.y0, b.x1, b.y1))
+        t.set_fontsize(fs)                                   # back to the size the caller will scale
     ax.set_xlabel("Task Variance Partition Coefficient", fontsize=10)
     ax.set_ylabel("Person Variance Partition Coefficient", fontsize=10)
     for sp in ("top", "right"):
@@ -1643,3 +1652,42 @@ def fig_band_check(co, B, name="band_check", fs=11):
     fig.tight_layout()
     save(fig, name, co.cfg)
     return fig
+
+
+def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, inside=True):
+    """The task x person panel as a table: every point with its VPC task (95% CI, P(tier): the
+    probability that the VPC lies in its own band, from the same delta-method interval) and VPC
+    person (no interval: the mixed model's REML gives one for the task share only), and in which
+    band of the guides each falls (below .01 / .01-.06 / above .06). inside=True keeps the points
+    with BOTH shares under the upper guide (the lower-left box of the panel); False = every point.
+    Transitions: those of rows of states occupied >= min_occ, as drawn."""
+    lo_g, hi_g = (.01, .06) if guides is True or guides is None else guides
+    parts = [st.assign(_fam=[family(v) for v in st["variable"]])]
+    if st_transitions is not None:
+        occ = pd.concat([v[co.occ].mean() for v in co._ref_tables()], axis=1).mean(axis=1).to_numpy()
+        cells = [c for c in co.cells if occ[int(c.split("->")[0])] >= min_occ]
+        tc = st_transitions[st_transitions["variable"].isin(cells)]
+        parts.append(tc.assign(_fam="transition p(j | i)"))
+    t = pd.concat(parts, ignore_index=True).drop_duplicates("variable")
+    for c in ("task_lo", "task_hi", "task_p_tier"):
+        if c not in t:
+            t[c] = np.nan
+    band = lambda x: np.where(np.isnan(x), "", np.where(x < lo_g, f"< {lo_g:g}", np.where(x < hi_g, f"{lo_g:g}-{hi_g:g}", f">= {hi_g:g}")))
+
+    def name(v):
+        v = str(v)
+        if v.startswith("occ_"):
+            return f"Occupancy · {sn.label(v[4:], 'both')}"
+        if "->" in v:
+            a, b_ = v.split("->")
+            return f"{sn.label(a, 'both')} → {sn.label(b_, 'both')}"
+        return nice(v).replace(" (fit to reference)", "")
+    vt, vp = _vpc_within(t, "task").to_numpy(float), _vpc_within(t, "person").to_numpy(float)
+    out = pd.DataFrame({"element": [name(v) for v in t["variable"]], "family": t["_fam"],
+                        "VPC task": vt, "task 95% CI": [f"[{a:.3f}, {b_:.3f}]" if np.isfinite(a) else ""
+                                                        for a, b_ in zip(t["task_lo"], t["task_hi"])],
+                        "P(tier)": t["task_p_tier"].to_numpy(float), "VPC person": vp,
+                        "task band": band(vt), "person band": band(vp)})
+    if inside:
+        out = out[(out["VPC task"] < hi_g) & (out["VPC person"] < hi_g)]
+    return out.sort_values(["VPC task", "VPC person"]).reset_index(drop=True).round(3)

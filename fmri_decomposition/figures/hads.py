@@ -644,7 +644,8 @@ def away(direction):
 
 def box(xy, text, fs=1.0):
     """A label's box in data units, (x, y, half width, half height), for ~6.5 pt text (x fs) on a ~4.6 in panel."""
-    return (xy[0], xy[1], (.5 * len(text) * .042 + .02) * fs, .05 * fs)
+    lines = str(text).split("\n")                      # several lines: the longest sets the width
+    return (xy[0], xy[1], (.5 * max(map(len, lines)) * .042 + .02) * fs, .05 * len(lines) * fs)
 
 def clear_of(b, centres, radii, boxes):
     """True if label box b touches no state's circle and no label already placed."""
@@ -683,7 +684,8 @@ def diagram(ax, T, occ, edges, wmax, omax, compare=False, hit_T=None, hit_occ=No
         ax.text(*pos[k], str(k), ha="center", va="center", fontsize=7.5 * fs, gid="scaled", color=INK, zorder=6)
         at, lab = pos[k] * (1 + (r + .36) / np.linalg.norm(pos[k])), pct(occ[k]) + (f" ({occ_note})" if occ_note else "")
         if sn.active():                                       # the state's name above its time in state
-            lab = f"{sn._NAMES.get(k, f'S{k}')}\n{lab}"
+            import textwrap                                   # a long name on two lines, not one long one
+            lab = f"{textwrap.fill(sn._NAMES.get(k, f'S{k}'), 16)}\n{lab}"
         ax.text(*at, lab, ha="center", va="center", fontsize=6.5 * fs, gid="scaled", color=colour if occ_note else INK2, zorder=6)
         placed.append(box(at, lab, fs / room))                           # time in state, beside it
         if hit_T[k, k] and note_T is not None and note_T[k, k]:   # a loop's change: from its outer
