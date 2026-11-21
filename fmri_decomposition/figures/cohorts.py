@@ -1022,15 +1022,16 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     for t in fig.findobj(plt.matplotlib.text.Text):              # every text larger, but the diagram's:
         if t.get_gid() != "scaled":                              # its labels were placed at diagram_fs
             t.set_fontsize(t.get_fontsize() * font)
-    # occupancy: from just above its matrix (whose square box leaves a gap) up to the top of the
-    # dynamics column, so the cohorts' titles sit on the line of the first dynamic metric's title
+    # occupancy: as tall as its matrix, its top on the top of the dynamics column (the cohorts' titles
+    # on the line of the first dynamic metric's title); the space left goes between the two
     fig.canvas.draw()
     top = dyn_axes[0].get_position().y1 if dyn_axes else None
     for axo, axm in zip(occ_axes, mat_axes):
         mp = axm.get_position()
-        y0 = mp.y1 + .015
-        if top is not None and top > y0 + .02:
-            axo.set_position([mp.x0, y0, mp.width, top - y0])
+        if top is not None:
+            h = min(mp.height, top - mp.y1 - .015)          # never into the matrix
+            if h > .02:
+                axo.set_position([mp.x0, top - h, mp.width, h])
     fig.suptitle(f"Figure 3 · {ht.set_label(cfg.space)}", x=.02, ha="left", fontsize=12)
     save(fig, name, cfg)
     _show(fig)
