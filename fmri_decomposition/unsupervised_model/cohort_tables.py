@@ -348,7 +348,7 @@ class StabilityMixin:
         return out
 
     def task_variation(self, variables=None, n_boot=2000, seed=0, ci="jackknife", combine="random",
-                       min_people=3, cohort_term=True):
+                       min_people=3, cohort_term=True, only_cohort=None):
         """How much each property depends on the TASK: every task of every cohort, rest included as
         one task (`films(rest=True)`, so the halves of an episode are one task). One row per variable.
 
@@ -424,6 +424,11 @@ class StabilityMixin:
             return om, means, om_c
 
         if combine == "mixed":
+            if only_cohort is not None:               # one cohort: no cohort term to speak of
+                L = L[L["_c"] == only_cohort]
+                if L.empty:
+                    raise SystemExit(f"no rows for cohort {only_cohort!r}; cohorts: {sorted(self.cfg.cohorts)}")
+                cohort_term = False
             return self._task_vpc(L, variables, min_people, ci=bool(n_boot), cohort_term=cohort_term)
         om, means, om_c = omega(np.ones(len(L)))
         c_names = list(pd.unique(pd.Series(g_lab).str.split("|").str[0]))      # c_of_g's order
@@ -1189,10 +1194,12 @@ def available_sets(root, cohorts, modelling_version=None):
 MIXED_SETTINGS = ("entropy_estimator", "distinct_minutes", "min_out_transitions", "rest_pattern", "film_merge")
 
 
-def mixed_dir(cfg: Settings, cohort_term=True) -> Path:
-    """<outputs>/modelling/version=<v>/unsupervised_model/mixed_model[_nocohort]/atlas=/window_s=/states=."""
+def mixed_dir(cfg: Settings, cohort_term=True, only_cohort=None) -> Path:
+    """<outputs>/modelling/version=<v>/unsupervised_model/mixed_model[_nocohort | _cohort-<c>]/atlas=/window_s=/states=."""
     sp = cfg.space
-    return (unsupervised_root(cfg.root, cfg.modelling_version) / ("mixed_model" if cohort_term else "mixed_model_nocohort")
+    kind = (f"mixed_model_cohort-{only_cohort}" if only_cohort else
+            "mixed_model" if cohort_term else "mixed_model_nocohort")
+    return (unsupervised_root(cfg.root, cfg.modelling_version) / kind
             / f"atlas={_key(sp['atlas'])}" / f"window_s={_key(_fmt_window(sp['window_s']))}"
             / f"states={_key(sp['states'])}")
 
@@ -1201,17 +1208,19 @@ def _mixed_meta(co) -> dict:
     return {"cohorts": sorted(co.cfg.cohorts), **{k: str(getattr(co.cfg, k)) for k in MIXED_SETTINGS}}
 
 
-def mixed_tables(co, n_boot=1, recompute=False, save=True, min_occ=0.01, fit_missing=True, cohort_term=True):
+def mixed_tables(co, n_boot=1, recompute=False, save=True, min_occ=0.01, fit_missing=True, cohort_term=True,
+                 only_cohort=None):
     """(properties, transitions): task_variation(combine="mixed") for the transition structure,
     occupancy profile, dynamic metrics and occupancies, and for the transition structure and every
     transition p(j | i). Read from `mixed_dir` when there (written by tools/mixed_model_sweep.py /
     slurm/mixed_model.sbatch); a cache made with other settings is still read, with a warning naming
     what differs (recompute=True refits). When absent: fitted here and written there, or, with
     fit_missing=False, an error saying to run the sbatch. cohort_term=False: the model without the
-    cohort effect (_task_vpc), its own cache (mixed_model_nocohort/)."""
+    cohort effect (_task_vpc), its own cache (mixed_model_nocohort/). only_cohort="camcan": the model
+    fitted on that cohort alone, value ~ 1 + (1 | task) + (1 | person) (mixed_model_cohort-camcan/)."""
     import json
     import warnings
-    d = mixed_dir(co.cfg, cohort_term)
+    d = mixed_dir(co.cfg, cohort_term, only_cohort)
     files = d / "vpc_properties.csv", d / "vpc_transitions.csv"
     meta = _mixed_meta(co)
     if not recompute and all(f.exists() for f in files):
@@ -1231,10 +1240,12 @@ def mixed_tables(co, n_boot=1, recompute=False, save=True, min_occ=0.01, fit_mis
         raise SystemExit(f"no mixed models in {d}: run `sbatch slurm/mixed_model.sbatch -- --atlas "
                          f"{co.cfg.space['atlas']} --window-s {co.cfg.space['window_s']:g} --states "
                          f"'{co.cfg.space['states']}'" + ("" if cohort_term else " --no-cohort-term")
+                         + (f" --cohort {only_cohort}" if only_cohort else "")
                          + "`, or call mixed_tables(co, fit_missing=True) to fit here")
     props = co.task_variation(["transition_fit", "occupancy_fit", "dynamics_fit", *co.dyn, *co.occ], n_boot=n_boot,
-                              combine="mixed", cohort_term=cohort_term)
-    cells = co.task_variation(["transition_fit", *co.cells], n_boot=n_boot, combine="mixed", cohort_term=cohort_term)
+                              combine="mixed", cohort_term=cohort_term, only_cohort=only_cohort)
+    cells = co.task_variation(["transition_fit", *co.cells], n_boot=n_boot, combine="mixed", cohort_term=cohort_term,
+                              only_cohort=only_cohort)
     if save:
         d.mkdir(parents=True, exist_ok=True)
         props.to_csv(files[0], index=False)

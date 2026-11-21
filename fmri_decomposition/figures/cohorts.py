@@ -1267,8 +1267,8 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
         placed.append(box)
         ax.annotate(lab, (xi, yi), xytext=(dx, dy), textcoords="offset points", fontsize=fs, color=hp.INK,
                     ha="left" if dx > 0 else "right" if dx < 0 else "center", va="center")
-    ax.set_xlabel("Variance Partition Coefficient — Task", fontsize=10)
-    ax.set_ylabel("Variance Partition Coefficient — Person", fontsize=10)
+    ax.set_xlabel("Task Variance Partition Coefficient", fontsize=10)
+    ax.set_ylabel("Person Variance Partition Coefficient", fontsize=10)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
     struct = {"fit": "Transition Structure", "median": "Median Transition", "average": "Average Transition",
@@ -1277,11 +1277,11 @@ def _task_person_panel(ax, co, st, st_transitions=None, variables=None, min_occ=
                for k, c in FAMILY_COL.items()]
     if st_transitions is not None:
         handles.insert(1, Line2D([], [], ls="none", marker="o", ms=5, color=TRANSITION_LIGHT, label="Transitions p(j | i)"))
-    ax.legend(handles=handles, frameon=False, loc="center right")   # off the upper right, where points go
+    ax.legend(handles=handles, frameon=False, loc="upper right")
 
 
 def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_person", min_occ=0.01, guides=None,
-                    transitions="fit"):
+                    transitions="fit", title=None):
     """One point per property: x = VPC of the task, y = VPC of the person, both shares of the
     variance within cohorts (`task_variation(combine="mixed")`). Colour = family. Upper left:
     individual and task-invariant; lower right: task-driven and not individual. st_transitions
@@ -1291,7 +1291,7 @@ def fig_task_person(co, st, st_transitions=None, variables=None, name="task_vs_p
         raise SystemExit('fig_task_person needs task_variation(..., combine="mixed")')
     fig, ax = plt.subplots(figsize=(10, 7))
     _task_person_panel(ax, co, st, st_transitions, variables, min_occ, guides=guides, transitions=transitions)
-    fig.suptitle(f"Task vs person · {ht.set_label(co.cfg.space)}", x=.02, ha="left", fontsize=12)
+    fig.suptitle(title or f"Task vs person · {ht.set_label(co.cfg.space)}", x=.02, ha="left", fontsize=12)
     save(fig, name, co.cfg)
     _show(fig)
     return fig

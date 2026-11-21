@@ -37,14 +37,14 @@ def settings(atlas, w, s):
                        entropy_estimator="miller_madow", distinct_minutes="min", rest_pattern=r"rest\d*")
 
 
-def one(atlas, w, s, overwrite, cohort_term=True):
+def one(atlas, w, s, overwrite, cohort_term=True, only_cohort=None):
     t0 = time.time()
     cfg = settings(atlas, w, s)
-    d = ct.mixed_dir(cfg, cohort_term)
+    d = ct.mixed_dir(cfg, cohort_term, only_cohort)
     co = ct.Cohorts(cfg)
     if not overwrite and (d / "meta.json").exists() and json.loads((d / "meta.json").read_text()) == ct._mixed_meta(co):
         return f"{atlas} {w:g} {s}: already there, skipped"
-    ct.mixed_tables(co, recompute=True, cohort_term=cohort_term)
+    ct.mixed_tables(co, recompute=True, cohort_term=cohort_term, only_cohort=only_cohort)
     return f"{atlas} {w:g} {s}: written to {d} ({time.time() - t0:.0f} s)"
 
 
@@ -58,6 +58,8 @@ def main(argv=None):
     ap.add_argument("--no-cohort-term", dest="cohort_term", action="store_false",
                     help="fit value ~ 1 + (1|task) + (1|person): no cohort effect, the cohorts' differences "
                          "carried by the task component (written to mixed_model_nocohort/)")
+    ap.add_argument("--cohort", default=None, nargs="+",
+                    help="fit on these cohorts one at a time, each alone (mixed_model_cohort-<c>/), e.g. camcan hcp7t_fix")
     a = ap.parse_args(argv)
 
     base = ct.Settings(cohorts=COHORTS)
@@ -72,7 +74,8 @@ def main(argv=None):
     print(f"{len(todo)} state sets, {a.jobs} at a time", flush=True)
     failed = 0
     with ProcessPoolExecutor(max_workers=a.jobs) as ex:
-        futs = {ex.submit(one, *t, a.overwrite, a.cohort_term): t for t in todo}
+        jobs = [(*t, c) for t in todo for c in (a.cohort or [None])]
+        futs = {ex.submit(one, *j[:3], a.overwrite, a.cohort_term, j[3]): j for j in jobs}
         for i, f in enumerate(as_completed(futs), 1):
             try:
                 print(f"[{i}/{len(todo)}] {f.result()}", flush=True)

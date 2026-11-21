@@ -472,7 +472,7 @@ def test_variance_partition_figure_and_table():
     fig = cp.fig_variance_partition(co, st, list(co.dyn), st_transitions=stc, cohort=False)
     assert len(fig.axes) == 2
     fig = cp.fig_figure3(co, st, list(co.dyn), st_transitions=stc)            # bottom right: task x person
-    assert fig.axes[-1].get_xlabel().startswith("Variance Partition Coefficient — Task")
+    assert fig.axes[-1].get_xlabel().startswith("Task Variance Partition Coefficient")
     fig = cp.fig_task_person(co, st, st_transitions=stc, variables=list(co.dyn))
     assert len(fig.axes[0].texts) == len(co.dyn)
     tab = cp.variance_table(co, st, list(co.dyn))
@@ -507,3 +507,16 @@ def test_task_vpc_without_the_cohort_term_absorbs_the_cohorts():
     assert with_c.task_d < .15
     assert without.task_d > with_c.task_d + .2
     assert np.isclose(without.share_cohort, 0, atol=1e-9)
+
+
+def test_task_vpc_of_one_cohort():
+    """only_cohort: the model on that cohort's rows alone; a task effect planted in it is found."""
+    co = _toy_films()
+    v = co.dyn[0]
+    rng = np.random.default_rng(6)
+    c0 = sorted({c for c, _, _ in co.by_task})[0]
+    for (c, k, t), d in co.by_task.items():
+        d[v] = rng.normal(0, 1, len(d)) + (2.0 * hash(t) % 3 if c == c0 else 0)
+    one = co.task_variation([v], n_boot=1, combine="mixed", only_cohort=c0).iloc[0]
+    assert one.n_tasks == len({t for c, _, t in co.by_task if c == c0})
+    assert np.isclose(one.share_cohort, 0, atol=1e-9)
