@@ -1862,7 +1862,7 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
 def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), rule="both", diagram_fs=1.6,
                         name="stable_diagrams"):
     """Figure 3's state diagram twice -- task (left) and person (right) -- with the transitions and
-    occupancies that pass the tests in green: rule="both" = the dot (VPC on the stated side of the
+    occupancies that pass the tests in the blue of the Median Transition point: rule="both" = the dot (VPC on the stated side of the
     guide, one-sided) AND the star (VPC > 0, likelihood ratio), "dot" or "star" alone; p or q < .05.
     tab: guide_table(..., inside=False) so every element is tested. A passing transition outside
     Figure 3's strongest arrows is drawn too."""
@@ -1878,7 +1878,7 @@ def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), rul
     off = [(a, b) for a in range(K) for b in range(K) if a != b]
     top = set(sorted(off, key=lambda e: -T_ref[e])[:cfg.edge_top])
     fig, axes = plt.subplots(1, 2, figsize=(11, 5.6))
-    green = "#2e9e4f"
+    green = FAMILY_COL["transitions"]                   # the blue of the Median Transition point
     for ax, k in zip(axes, ("task", "person")):
         g = tab.get(f"{pre} {k} < {hi_g:g}" if dot == "below" else f"{pre} {k} > {lo_g:g}")
         l = tab.get(f"{pre} LRT {k}")
