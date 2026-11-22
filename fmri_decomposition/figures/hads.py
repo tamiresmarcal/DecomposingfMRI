@@ -599,7 +599,7 @@ def fig_predicted(deep, cfg, title):
     save(fig, "E2_1_predicted", cfg)
     plt.show()
 
-def fig_stability(deep, cfg, title):
+def fig_stability(deep, cfg, title, xlabel="mean |SHAP| (out-of-fold), one dot per fold seed"):
     """E2.2: each panel's top_vars variables (average over seeds): one dot per seed, bar = average.
     Right: the direction (↑ higher values push the prediction up, ↓ down, ↕ the seeds disagree)
     and how many seeds rank it in their own top_vars."""
@@ -620,7 +620,7 @@ def fig_stability(deep, cfg, title):
         ax.set_yticks(range(len(top)), [sn.var_label(d["names"][v]) for v in top], fontsize=7.5)
         ax.set_title(f"{task} · {lab}", fontsize=10)
     for ax in axes[-1]:
-        ax.set_xlabel("mean |SHAP| (out-of-fold), one dot per fold seed")
+        ax.set_xlabel(xlabel)
     fig.legend(handles=[Patch(color=BLOCK_COLOUR[b], alpha=.45, label=b) for b in BLOCK_COLOUR] +
                        [Line2D([], [], ls="none", label=f"↑/↓ = direction in every seed (↕ = they disagree); "
                                                         f"k/{len(cfg.seeds_stab)} = seeds ranking it top {cfg.top_vars}")],
