@@ -791,10 +791,12 @@ def dynamics_column(ax, dyn, side, colour, fs=1.0, icon=1.0, gap=1.0, pt=.01, aw
                     color=c, gid="scaled")
         y -= block + d
 
-def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None, fs=None, icon=None, gap=None, away=None):
+def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None, fs=None, icon=None, gap=None, away=None,
+              grey_compared=True):
     """Rows = Normal, then each phenotype; columns = tasks. pooled[(task, group)] = (p(j | i), occ, n).
     refs[(task, group)] = the panel it is compared with (its items in marks are highlighted in
-    colours[(task, group)]); a panel without a ref is drawn as it is. dyn (Study.dynamics_marks) adds
+    colours[(task, group)]); a panel without a ref is drawn as it is. grey_compared: the compared
+    panels' other arrows in light grey (False: the same dark grey as Normal's). dyn (Study.dynamics_marks) adds
     each panel's dynamics as a column of symbols: left of the first task, right of the others. Every panel draws the Normal
     group's edge_top strongest arrows of every task, plus its own highlighted ones, on ONE width scale."""
     fs = cfg.font_scale if fs is None else fs                  # the diagrams' own text, scaled here
@@ -842,7 +844,7 @@ def fig_graph(pooled, marks, cfg, refs, colours, title, meaning, name, dyn=None,
             continue
         # against another group, the rest goes grey; against the same group in the other task, it
         # stays dark: the Normal diagram is still itself, only its changes are marked
-        diagram(axes[i, j], T, occ, edges, wmax, omax, compare=ref[1] != g, hit_T=hT, hit_occ=hO, note_T=nT,
+        diagram(axes[i, j], T, occ, edges, wmax, omax, compare=grey_compared and ref[1] != g, hit_T=hT, hit_occ=hO, note_T=nT,
                 note_occ=nO, colour=colours[t, g], fs=fs, room=room)
         vs = ref[0] if ref[1] == g else ref[1]
         axes[i, j].set_title(f"{t} · {who} (n={n}) vs {vs}", fontsize=9.5)
