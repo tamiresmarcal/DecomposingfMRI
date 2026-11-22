@@ -1020,6 +1020,11 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
         hit_T, hit_occ = _stable_hits(tab, "task", K, guides, use_q, stable_level)
         hp.diagram(ax, T_ref, o_ref, sorted(set(edges) | {e for e in off if hit_T[e]}), 1.0, 1.0,
                    hit_T=hit_T, hit_occ=hit_occ, colour=FAMILY_COL["transitions"], fs=diagram_fs, room=diagram_fs)
+        hi_g = .06 if guides is True or guides is None else guides[1]
+        blue = FAMILY_COL["transitions"]
+        ax.legend(handles=[Patch(fc=matplotlib_rgba(blue, .3), ec=blue,
+                                 label=f"Stable across tasks: VPC task < {hi_g:g} ({'q' if use_q else 'p'} < {stable_level:g}, one-sided)")],
+                  loc="upper center", bbox_to_anchor=(.5, 0), frameon=False, fontsize=9)
     else:
         hp.diagram(ax, T_ref, o_ref, edges, 1.0, 1.0, fs=diagram_fs)
     co.diagram_p_min = min(T_ref[e] for e in edges)       # for the legend: the thinnest arrow drawn
