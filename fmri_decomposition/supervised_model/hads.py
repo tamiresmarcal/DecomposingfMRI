@@ -148,6 +148,7 @@ class Settings:
     stable_min: float = 0.8
     min_d: float = 0.2
     label_pp: int | None = None
+    change_unit: str = "percent"     # the labels on the graphs: "percent" (relative change, +2 pp on .10 = +20%) | "pp"
     dynamics_show: list = field(default_factory=lambda: ["switch_rate", "mean_dwell_s", "entropy_rate_bits",
                                                         "dispersion", "n_distinct_transitions"])
     fc_arm: str = "edges"                             # E1: the fcm arm (edges = the hypothesis, global = its control)
@@ -289,6 +290,14 @@ def direction(X, S):
     rx, rs = rx - rx.mean(0), rs - rs.mean(0)
     den = np.sqrt((rx ** 2).sum(0) * (rs ** 2).sum(0))
     return np.divide((rx * rs).sum(0), den, out=np.zeros(X.shape[1]), where=den > 0)
+
+def rel(change, ref):
+    """A change relative to its reference value as a % label; '' when it rounds to 0 or ref is 0."""
+    if not ref or not np.isfinite(ref):
+        return ""
+    r = 100 * change / ref
+    return f"{r:+.0f}%" if round(r) else ""
+
 
 def pp(change):
     """A change in probability as a pp label; '' when it rounds to 0."""
@@ -896,6 +905,14 @@ class Study:
                                 d.loc[m, [f"occ_{k}" for k in range(K)]].to_numpy(float).mean(0), int(m.sum()))
         return out
 
+    def _ref_value(self, pooled, ref, block, variable):
+        """The reference panel's value of a graph variable (what a change is relative to)."""
+        Tr, orr, _ = pooled[ref]
+        if block == "cells":
+            i, j = map(int, variable.split("->"))
+            return Tr[i, j]
+        return orr[int(variable.split("_")[1])]
+
     def _change(self, pooled, panel, ref, block, variable):
         T, occ, _ = pooled[panel]
         Tr, orr, _ = pooled[ref]
@@ -906,10 +923,16 @@ class Study:
         return occ[k] - orr[k]
 
     def _notes(self, marks):
-        """The pp label of each highlighted item; with label_pp, only the largest per panel."""
+        """The label of each highlighted item -- cfg.change_unit: "percent" (relative to the reference
+        value) or "pp"; with label_pp, only the largest per panel."""
         if marks.empty:
             return marks.assign(note="")
-        marks["note"] = [pp(x) if h else "" for x, h in zip(marks["change"], marks["hit"])]
+        if self.cfg.change_unit not in ("percent", "pp"):
+            raise SystemExit('change_unit must be "percent" or "pp"')
+        if self.cfg.change_unit == "percent" and "ref_value" in marks:
+            marks["note"] = [rel(x, r) if h else "" for x, r, h in zip(marks["change"], marks["ref_value"], marks["hit"])]
+        else:
+            marks["note"] = [pp(x) if h else "" for x, h in zip(marks["change"], marks["hit"])]
         if self.cfg.label_pp:
             big = marks[marks["hit"]].groupby(["task", "group"])["change"].transform(
                 lambda x: x.abs().rank(ascending=False, method="first") <= self.cfg.label_pp)
@@ -934,13 +957,14 @@ class Study:
         def add(panel, ref, v):
             for r in v[v["hit"] & v["block"].isin(GRAPH)].itertuples():
                 rows.append(dict(task=panel[0], group=panel[1], block=r.block, variable=r.variable,
-                                 x=r.x, p_fdr=r.p_fdr, change=self._change(pooled, panel, ref, r.block, r.variable), hit=True))
+                                 x=r.x, p_fdr=r.p_fdr, change=self._change(pooled, panel, ref, r.block, r.variable),
+                                 ref_value=self._ref_value(pooled, ref, r.block, r.variable), hit=True))
 
         add((t1, "Normal"), (t0, "Normal"), paired)
         for task in self.cfg.tasks:
             for lab in self.cfg.targets:
                 add((task, lab), (task, "Normal"), grp[(grp["task"] == task) & (grp["phenotype"] == lab)])
-        cols = ["task", "group", "block", "variable", "x", "p_fdr", "change", "hit"]
+        cols = ["task", "group", "block", "variable", "x", "p_fdr", "change", "ref_value", "hit"]
         return self._notes(pd.DataFrame(rows, columns=cols))
 
     def dynamics_marks(self, space, paired, grp, variables=None):
@@ -1150,9 +1174,10 @@ class Study:
                     rows.append(dict(task=task, group=lab, block=dd["blocks"][v], variable=name, rank=rank[name],
                                      mean_abs_shap=np.abs(dd["S"][:, v]).mean(), direction="↑" if sign[v] > 0 else "↓",
                                      seeds_in_top=stable[v], cohen_d=cohen, change=change,
+                                     ref_value=self._ref_value(pooled, (task, "Normal"), dd["blocks"][v], name),
                                      hit=stable[v] >= c.stable_min and abs(cohen) >= c.min_d and round(100 * change) != 0))
         cols = ["task", "group", "block", "variable", "rank", "mean_abs_shap", "direction", "seeds_in_top",
-                "cohen_d", "change", "hit"]
+                "cohen_d", "change", "ref_value", "hit"]
         return self._notes(pd.DataFrame(rows, columns=cols))
 
 
