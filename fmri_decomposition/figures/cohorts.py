@@ -1859,15 +1859,17 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
     return fig
 
 
-def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), rule="both", diagram_fs=1.6,
+def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), rule="and", diagram_fs=1.6,
                         name="stable_diagrams"):
     """Figure 3's state diagram twice -- task (left) and person (right) -- with the transitions and
-    occupancies that pass the tests in the blue of the Median Transition point: rule="both" = the dot (VPC on the stated side of the
-    guide, one-sided) AND the star (VPC > 0, likelihood ratio), "dot" or "star" alone; p or q < .05.
+    occupancies that pass the tests in the blue of the Median Transition point: rule="and" = the dot (VPC on the
+    stated side of the guide, one-sided) AND the star (VPC > 0, likelihood ratio); "or" = either one;
+    "dot" or "star" alone; p or q < .05.
     tab: guide_table(..., inside=False) so every element is tested. A passing transition outside
     Figure 3's strongest arrows is drawn too."""
-    if rule not in ("both", "dot", "star"):
-        raise SystemExit('rule must be "both", "dot" or "star"')
+    rule = "and" if rule == "both" else rule
+    if rule not in ("and", "or", "dot", "star"):
+        raise SystemExit('rule must be "and", "or", "dot" or "star"')
     lo_g, hi_g = (.01, .06) if guides is True or guides is None else guides
     pre = "q" if use_q else "p"
     cfg, K = co.cfg, co.cfg.K
@@ -1884,7 +1886,7 @@ def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), rul
         l = tab.get(f"{pre} LRT {k}")
         g = (g < .05).to_numpy() if g is not None else np.zeros(len(tab), bool)
         l = (l < .05).to_numpy() if l is not None else np.zeros(len(tab), bool)
-        ok = {"both": g & l, "dot": g, "star": l}[rule]
+        ok = {"and": g & l, "or": g | l, "dot": g, "star": l}[rule]
         hit_T, hit_occ = np.zeros((K, K), bool), np.zeros(K, bool)
         for v, p_ in zip(tab["variable"].astype(str), ok):
             if not p_:
@@ -1899,7 +1901,8 @@ def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), rul
                    fs=diagram_fs, room=diagram_fs)
         ax.set_title(f"Stable across {k}s" if k == "task" else "Stable across people", fontsize=11)
     side = f"VPC < {hi_g:g}" if dot == "below" else f"VPC > {lo_g:g}"
-    what = {"both": f"{side} (one-sided) and VPC > 0 (likelihood ratio)", "dot": f"{side} (one-sided)",
+    what = {"and": f"{side} (one-sided) and VPC > 0 (likelihood ratio)",
+            "or": f"{side} (one-sided) or VPC > 0 (likelihood ratio)", "dot": f"{side} (one-sided)",
             "star": "VPC > 0 (likelihood ratio)"}[rule]
     fig.legend(handles=[Patch(fc=matplotlib_rgba(green, .3), ec=green, label=f"passes: {what}, {pre} < .05")],
                loc="lower center", frameon=False, fontsize=9)
