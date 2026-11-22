@@ -1454,7 +1454,7 @@ def fig_state_detail(co, F, M, tl, state, n_regions=18, n_traces=3, title="", na
 
 
 def fig_state_course(co, F, M, tl, state, n_traces=3, colours=None, layout="panel", share_ratio=2.0,
-                     share_colour=hp.GREY, title=None, name=None):
+                     share_colour="#b9b8b2", title=None, name=None):
     """One reference state over the film, without the matrix: the n_traces regions most active in
     `state` (by M, the whole film; any number up to all the atlas's regions), one panel each, their
     activation (mean over viewers, band = SD), with the share of viewers in `state` at each moment:
@@ -1486,7 +1486,7 @@ def fig_state_course(co, F, M, tl, state, n_traces=3, colours=None, layout="pane
         ax = axes[i]
         if not below:                                    # the earlier version: the share behind
             axs = ax.twinx()
-            axs.fill_between(share.index, share.to_numpy(), step="post", color=share_colour, alpha=.5, lw=0)
+            axs.fill_between(share.index, share.to_numpy(), step="post", color="#d9d8d3", lw=0)
             axs.set_ylim(0, 1)
             axs.set_ylabel(lab if i == n // 2 else "", fontsize=8, color="#8a8984")
             axs.tick_params(labelsize=7, colors="#8a8984")
