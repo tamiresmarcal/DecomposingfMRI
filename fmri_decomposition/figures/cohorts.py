@@ -923,7 +923,7 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
 
 def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupancy="each", name="figure3",
                 pvalue=None, test="tier", panel="task_person", st_transitions=None, guides=None,
-                transitions="fit"):
+                transitions="fit", diagram="stable", stable_level=.05, use_q=True):
     """Manuscript Figure 3 as one figure, rest and movie together (each person's mean of the
     conditions they have; `groups(tasks="all")`).
     A  every cohort: occupancy, p(j | i) and the dynamic metrics (mean, 95% CI);
@@ -940,6 +940,10 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     "tier" (P(tier), default), "difference" (paired t), "tost" (equivalence), "both", "all".
     transitions: "structure" | "median" | "average" | "both", how the VPC panel summarises the transitions
     (one model of the whole structure, or the median of the individual p(j | i); _task_person_panel).
+    diagram: "stable" (default) = the diagram of Plot 5.0e's "stable across tasks": the transitions and
+    occupancies with VPC task significantly < the upper guide (one-sided, q -- p with use_q=False --
+    < stable_level) in the Median Transition blue, passing arrows outside the strongest drawn too;
+    "original" = the plain diagram.
     """
     from matplotlib.gridspec import GridSpec
 
@@ -1009,7 +1013,15 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     tp = panel == "task_person" and "var_person" in st
     gB = gs[1].subgridspec(1, 2, width_ratios=[1.55, 1] if tp else [1, 1], wspace=.12 if tp else .3)
     ax = fig.add_subplot(gB[1] if tp else gB[0])
-    hp.diagram(ax, T_ref, o_ref, edges, 1.0, 1.0, fs=diagram_fs)
+    if diagram not in ("stable", "original"):
+        raise SystemExit('diagram must be "stable" or "original"')
+    if diagram == "stable" and "var_person" in st:
+        tab = guide_table(co, st, st_transitions=st_transitions, guides=guides, inside=False)
+        hit_T, hit_occ = _stable_hits(tab, "task", K, guides, use_q, stable_level)
+        hp.diagram(ax, T_ref, o_ref, sorted(set(edges) | {e for e in off if hit_T[e]}), 1.0, 1.0,
+                   hit_T=hit_T, hit_occ=hit_occ, colour=FAMILY_COL["transitions"], fs=diagram_fs, room=diagram_fs)
+    else:
+        hp.diagram(ax, T_ref, o_ref, edges, 1.0, 1.0, fs=diagram_fs)
     co.diagram_p_min = min(T_ref[e] for e in edges)       # for the legend: the thinnest arrow drawn
     ax = fig.add_subplot(gB[0] if tp else gB[1])
     occ = co.occ if occupancy == "each" else ["occupancy_fit"]
@@ -1851,6 +1863,25 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
     return fig
 
 
+def _stable_hits(tab, k, K, guides=(.01, .06), use_q=True, level=.05, dot="below"):
+    """(hit_T, hit_occ): the transitions / occupancies whose VPC `k` is significantly under the upper
+    guide (dot="below") or over the lower ("above"), p or q < level."""
+    lo_g, hi_g = (.01, .06) if guides is True or guides is None else guides
+    pre = "q" if use_q else "p"
+    g = tab.get(f"{pre} {k} < {hi_g:g}" if dot == "below" else f"{pre} {k} > {lo_g:g}")
+    ok = (g < level).to_numpy() if g is not None else np.zeros(len(tab), bool)
+    hit_T, hit_occ = np.zeros((K, K), bool), np.zeros(K, bool)
+    for v, p_ in zip(tab["variable"].astype(str), ok):
+        if not p_:
+            continue
+        if v.startswith("occ_") and v[4:].isdigit():
+            hit_occ[int(v[4:])] = True
+        elif "->" in v:
+            a, b = (int(x) for x in v.split("->"))
+            hit_T[a, b] = True
+    return hit_T, hit_occ
+
+
 def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), level=.05, diagram_fs=1.6,
                         name="stable_diagrams"):
     """Figure 3's state diagram twice -- task (left) and person (right) -- with the transitions and
@@ -1870,17 +1901,7 @@ def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), lev
     fig, axes = plt.subplots(1, 2, figsize=(11, 5.6))
     green = FAMILY_COL["transitions"]                   # the blue of the Median Transition point
     for ax, k in zip(axes, ("task", "person")):
-        g = tab.get(f"{pre} {k} < {hi_g:g}" if dot == "below" else f"{pre} {k} > {lo_g:g}")
-        ok = (g < level).to_numpy() if g is not None else np.zeros(len(tab), bool)
-        hit_T, hit_occ = np.zeros((K, K), bool), np.zeros(K, bool)
-        for v, p_ in zip(tab["variable"].astype(str), ok):
-            if not p_:
-                continue
-            if v.startswith("occ_") and v[4:].isdigit():
-                hit_occ[int(v[4:])] = True
-            elif "->" in v:
-                a, b = (int(x) for x in v.split("->"))
-                hit_T[a, b] = True
+        hit_T, hit_occ = _stable_hits(tab, k, K, guides, use_q, level, dot)
         edges = sorted(top | {(a, b) for a, b in off if hit_T[a, b]})
         hp.diagram(ax, T_ref, o_ref, edges, 1.0, 1.0, hit_T=hit_T, hit_occ=hit_occ, colour=green,
                    fs=diagram_fs, room=diagram_fs)
