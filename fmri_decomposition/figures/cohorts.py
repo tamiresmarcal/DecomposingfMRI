@@ -1671,7 +1671,7 @@ def _bh(p):
 
 
 def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, inside=True, sort_by="task",
-                family_of="all"):
+                family_of="all", show="both"):
     """The task x person panel as a table: every point with its VPC task and VPC person, each with
     its 95% CI and P(tier) (the probability that the VPC lies in its own band of the guides, from
     the delta-method interval of the mixed model; the person's needs mixed models fitted after it
@@ -1679,7 +1679,8 @@ def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, in
     "p task < .06" (one-sided Wald on the logit, H0: VPC >= .06), "p task > .01" (H0: VPC <= .01),
     "p LRT task" (H0: no task component; likelihood ratio, mixed models fitted after it was added),
     the same for person, each with its BH-FDR q over the rows shown.
-    inside=True keeps the points with BOTH shares under the upper guide; False = every point.
+    inside=True keeps the points under the upper guide in the shares of `show`: "both" (task AND
+    person, two dimensions), "task" or "person" (that one only); False = every point.
     sort_by: "task" or "person", the P(tier) the rows are ordered by (most certain first).
     family_of: "all", "occupancy", "dynamics" or "transitions" (structure and p(j | i)).
     Transitions: those of rows of states occupied >= min_occ, as drawn."""
@@ -1737,8 +1738,14 @@ def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, in
         if family_of not in ("occupancy", "dynamics", "transitions"):
             raise SystemExit(f'family_of must be "all", "occupancy", "dynamics" or "transitions", got {family_of!r}')
         out = out[out["family"] == family_of]
+    if show not in ("both", "task", "person"):
+        raise SystemExit(f'show must be "both", "task" or "person", got {show!r}')
     if inside:
-        out = out[(out["VPC task"] < hi_g) & (out["VPC person"] < hi_g)]
+        dims = ("task", "person") if show == "both" else (show,)
+        keep = np.ones(len(out), bool)
+        for k in dims:
+            keep &= (out[f"VPC {k}"] < hi_g).to_numpy()
+        out = out[keep]
     if sort_by not in ("task", "person"):
         raise SystemExit(f'sort_by must be "task" or "person", got {sort_by!r}')
     if out[f"P(tier) {sort_by}"].isna().all():
