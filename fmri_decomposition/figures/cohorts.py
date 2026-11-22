@@ -1755,45 +1755,42 @@ def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, in
 
 
 def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, guides=(.01, .06), name="vpc_bars",
-                   fs=8, labels="both", max_elements=None, ci=False, tests="both", show="both",
+                   fs=8, labels="both", max_elements=None, ci=False, stars="two", show="both",
                    marked="none"):
     """guide_table drawn: one row per element (y), two horizontal bars under each other -- VPC task
     (dark) and VPC person (light) -- on the VPC axis (x), with the guides as dashed lines.
-    Marks right of a bar (or of its interval), dot first: * / ** = VPC > 0 (likelihood-ratio test,
-    H0: no task / person variance; q or p < .05 / .01); a dot = the share is significantly on the
-    stated side of a guide: dot="below" -> under the upper guide (H0: VPC >= .06, small / stable),
-    "above" -> over the lower guide (H0: VPC <= .01, not negligible). use_q: FDR q-values (else p).
+    Asterisks right of a bar (or of its interval): the share is significantly on the stated side of
+    a guide (one-sided Wald on the logit): dot="below" -> under the upper guide (H0: VPC >= .06,
+    small / stable), "above" -> over the lower guide (H0: VPC <= .01, not negligible).
+    stars: "two" (* q < .05, ** q < .01), "one" (* q < .05 only) or "none". use_q: FDR q (else p).
     order: ("task", "person") sorts by VPC task then VPC person; ("person", "task") the other way.
     labels: "both" (S3 · name), "number" (S3) or "name" for the states in the element names.
     max_elements: draw only the first N rows of that order. ci: the 95% interval of each VPC as a
-    thin line, where the mixed model gave one. tests: which marks to draw -- "both", "lrt" (the
-    asterisks), "guide" (the dots) or "none". show: the bars drawn -- "both", "task" or "person".
-    marked: keep only the rows whose drawn bar(s) (every one of `show`) carry a mark -- "dot",
-    "star" (* or **), "both" (dot and star) or "none" (no filter)."""
+    thin line, where the mixed model gave one. show: the bars drawn -- "both", "task" or "person".
+    marked: keep only the rows whose drawn bar(s) (every one of `show`) pass -- "*" (< .05),
+    "**" (< .01) or "none" (no filter)."""
     from matplotlib.lines import Line2D
     lo_g, hi_g = (.01, .06) if guides is True or guides is None else guides
     if dot not in ("below", "above"):
         raise SystemExit('dot must be "below" or "above"')
     if labels not in ("both", "number", "name"):
         raise SystemExit('labels must be "both", "number" or "name"')
-    if tests not in ("both", "lrt", "guide", "none"):
-        raise SystemExit('tests must be "both", "lrt", "guide" or "none"')
+    if stars not in ("two", "one", "none"):
+        raise SystemExit('stars must be "two", "one" or "none"')
     if show not in ("both", "task", "person"):
         raise SystemExit('show must be "both", "task" or "person"')
     drawn = list(order) if show == "both" else [show]
-    show_lrt, show_guide = tests in ("both", "lrt"), tests in ("both", "guide")
     pre = "q" if use_q else "p"
+    col_of = lambda k: f"{pre} {k} < {hi_g:g}" if dot == "below" else f"{pre} {k} > {lo_g:g}"
     t = tab.sort_values([f"VPC {order[0]}", f"VPC {order[1]}"], ascending=True).reset_index(drop=True)
-    if marked not in ("none", "dot", "star", "both"):
-        raise SystemExit('marked must be "none", "dot", "star" or "both"')
+    if marked not in ("none", "*", "**"):
+        raise SystemExit('marked must be "none", "*" or "**"')
     if marked != "none":
+        cut = .05 if marked == "*" else .01
         keep = np.ones(len(t), bool)
         for k in drawn:
-            g = t.get(f"{pre} {k} < {hi_g:g}" if dot == "below" else f"{pre} {k} > {lo_g:g}")
-            l = t.get(f"{pre} LRT {k}")
-            g = (g < .05).to_numpy() if g is not None else np.zeros(len(t), bool)
-            l = (l < .05).to_numpy() if l is not None else np.zeros(len(t), bool)
-            keep &= {"dot": g, "star": l, "both": g & l}[marked]
+            g = t.get(col_of(k))
+            keep &= (g < cut).to_numpy() if g is not None else np.zeros(len(t), bool)
         t = t[keep].reset_index(drop=True)
     if max_elements:
         t = t.head(int(max_elements))
@@ -1824,12 +1821,9 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
                 ax.plot([lo_, hi_], [y, y], color=hp.INK2, lw=.8, zorder=3)
                 end = max(v, hi_)
             marks = ""
-            pg = r.get(f"{pre} {k} < {hi_g:g}" if dot == "below" else f"{pre} {k} > {lo_g:g}", np.nan)
-            if show_guide and np.isfinite(pg) and pg < .05:
-                marks += "•"
-            pl = r.get(f"{pre} LRT {k}", np.nan)
-            if show_lrt and np.isfinite(pl) and pl < .05:
-                marks += (" " if marks else "") + ("**" if pl < .01 else "*")
+            pg = r.get(col_of(k), np.nan)
+            if stars != "none" and np.isfinite(pg) and pg < .05:
+                marks = "**" if stars == "two" and pg < .01 else "*"
             if marks:                                        # just right of the bar / interval, in points
                 ax.annotate(marks, (end, y), xytext=(2, 0), textcoords="offset points", va="center",
                             ha="left", fontsize=fs, color=hp.INK)
@@ -1845,11 +1839,9 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
         ax.spines[sp].set_visible(False)
     side = f"VPC < {hi_g:g}" if dot == "below" else f"VPC > {lo_g:g}"
     hand = [Patch(color=col[k], label=k.capitalize()) for k in drawn]
-    if show_guide:
-        hand.append(Line2D([], [], ls="none", marker="o", ms=3, color=hp.INK, label=f"{side} ({pre} < .05, one-sided)"))
-    if show_lrt:
+    if stars != "none":
         hand.append(Line2D([], [], ls="none", marker="$*$", ms=7, color=hp.INK,
-                           label=f"VPC > 0 ({pre} < .05; ** < .01; likelihood-ratio test)"))
+                           label=f"{side} ({pre} < .05" + ("; ** < .01" if stars == "two" else "") + ", one-sided)"))
     if ci:
         hand.append(Line2D([], [], color=hp.INK2, lw=.8, label="95% CI"))
     ax.legend(handles=hand, frameon=False, fontsize=fs, loc="lower left", bbox_to_anchor=(0, 1.01), ncol=2,
@@ -1859,17 +1851,13 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
     return fig
 
 
-def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), rule="and", diagram_fs=1.6,
+def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), level=.05, diagram_fs=1.6,
                         name="stable_diagrams"):
     """Figure 3's state diagram twice -- task (left) and person (right) -- with the transitions and
-    occupancies that pass the tests in the blue of the Median Transition point: rule="and" = the dot (VPC on the
-    stated side of the guide, one-sided) AND the star (VPC > 0, likelihood ratio); "or" = either one;
-    "dot" or "star" alone; p or q < .05.
+    occupancies that pass the tests in the blue of the Median Transition point: the VPC significantly on the stated side
+    of the guide (one-sided; dot="below": VPC < .06, stable), p or q < level (.05 = *, .01 = **).
     tab: guide_table(..., inside=False) so every element is tested. A passing transition outside
     Figure 3's strongest arrows is drawn too."""
-    rule = "and" if rule == "both" else rule
-    if rule not in ("and", "or", "dot", "star"):
-        raise SystemExit('rule must be "and", "or", "dot" or "star"')
     lo_g, hi_g = (.01, .06) if guides is True or guides is None else guides
     pre = "q" if use_q else "p"
     cfg, K = co.cfg, co.cfg.K
@@ -1883,10 +1871,7 @@ def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), rul
     green = FAMILY_COL["transitions"]                   # the blue of the Median Transition point
     for ax, k in zip(axes, ("task", "person")):
         g = tab.get(f"{pre} {k} < {hi_g:g}" if dot == "below" else f"{pre} {k} > {lo_g:g}")
-        l = tab.get(f"{pre} LRT {k}")
-        g = (g < .05).to_numpy() if g is not None else np.zeros(len(tab), bool)
-        l = (l < .05).to_numpy() if l is not None else np.zeros(len(tab), bool)
-        ok = {"and": g & l, "or": g | l, "dot": g, "star": l}[rule]
+        ok = (g < level).to_numpy() if g is not None else np.zeros(len(tab), bool)
         hit_T, hit_occ = np.zeros((K, K), bool), np.zeros(K, bool)
         for v, p_ in zip(tab["variable"].astype(str), ok):
             if not p_:
@@ -1901,10 +1886,8 @@ def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), rul
                    fs=diagram_fs, room=diagram_fs)
         ax.set_title(f"Stable across {k}s" if k == "task" else "Stable across people", fontsize=11)
     side = f"VPC < {hi_g:g}" if dot == "below" else f"VPC > {lo_g:g}"
-    what = {"and": f"{side} (one-sided) and VPC > 0 (likelihood ratio)",
-            "or": f"{side} (one-sided) or VPC > 0 (likelihood ratio)", "dot": f"{side} (one-sided)",
-            "star": "VPC > 0 (likelihood ratio)"}[rule]
-    fig.legend(handles=[Patch(fc=matplotlib_rgba(green, .3), ec=green, label=f"passes: {what}, {pre} < .05")],
+    what = f"{side} (one-sided)"
+    fig.legend(handles=[Patch(fc=matplotlib_rgba(green, .3), ec=green, label=f"{what}, {pre} < {level:g}")],
                loc="lower center", frameon=False, fontsize=9)
     fig.tight_layout(rect=(0, .05, 1, 1))
     save(fig, name, co.cfg)
