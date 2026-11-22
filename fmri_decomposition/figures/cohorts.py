@@ -1755,7 +1755,8 @@ def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, in
 
 
 def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, guides=(.01, .06), name="vpc_bars",
-                   fs=8, labels="both", max_elements=None, ci=False, tests="both", show="both"):
+                   fs=8, labels="both", max_elements=None, ci=False, tests="both", show="both",
+                   marked="none"):
     """guide_table drawn: one row per element (y), two horizontal bars under each other -- VPC task
     (dark) and VPC person (light) -- on the VPC axis (x), with the guides as dashed lines.
     Marks right of a bar (or of its interval), dot first: * / ** = VPC > 0 (likelihood-ratio test,
@@ -1766,7 +1767,9 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
     labels: "both" (S3 · name), "number" (S3) or "name" for the states in the element names.
     max_elements: draw only the first N rows of that order. ci: the 95% interval of each VPC as a
     thin line, where the mixed model gave one. tests: which marks to draw -- "both", "lrt" (the
-    asterisks), "guide" (the dots) or "none". show: the bars drawn -- "both", "task" or "person"."""
+    asterisks), "guide" (the dots) or "none". show: the bars drawn -- "both", "task" or "person".
+    marked: keep only the rows whose drawn bar(s) (every one of `show`) carry a mark -- "dot",
+    "star" (* or **), "both" (dot and star) or "none" (no filter)."""
     from matplotlib.lines import Line2D
     lo_g, hi_g = (.01, .06) if guides is True or guides is None else guides
     if dot not in ("below", "above"):
@@ -1779,7 +1782,19 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
         raise SystemExit('show must be "both", "task" or "person"')
     drawn = list(order) if show == "both" else [show]
     show_lrt, show_guide = tests in ("both", "lrt"), tests in ("both", "guide")
+    pre = "q" if use_q else "p"
     t = tab.sort_values([f"VPC {order[0]}", f"VPC {order[1]}"], ascending=True).reset_index(drop=True)
+    if marked not in ("none", "dot", "star", "both"):
+        raise SystemExit('marked must be "none", "dot", "star" or "both"')
+    if marked != "none":
+        keep = np.ones(len(t), bool)
+        for k in drawn:
+            g = t.get(f"{pre} {k} < {hi_g:g}" if dot == "below" else f"{pre} {k} > {lo_g:g}")
+            l = t.get(f"{pre} LRT {k}")
+            g = (g < .05).to_numpy() if g is not None else np.zeros(len(t), bool)
+            l = (l < .05).to_numpy() if l is not None else np.zeros(len(t), bool)
+            keep &= {"dot": g, "star": l, "both": g & l}[marked]
+        t = t[keep].reset_index(drop=True)
     if max_elements:
         t = t.head(int(max_elements))
     n = len(t)
@@ -1794,7 +1809,7 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
         return nice(v).replace(" (fit to reference)", "")
     names = [label_of(v) for v in t["variable"]] if "variable" in t else list(t["element"])
     col = {"task": "#1f4e9c", "person": "#9cc3f5"}
-    fig, ax = plt.subplots(figsize=(7.5, .9 + .2 * n))
+    fig, ax = plt.subplots(figsize=(7.5, max(1.8, .9 + .2 * n)))
     pre = "q" if use_q else "p"
     for i, r in t.iterrows():
         for j, k in enumerate(drawn):                       # the first of `order` on top of its pair
