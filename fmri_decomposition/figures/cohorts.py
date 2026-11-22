@@ -1748,10 +1748,10 @@ def guide_table(co, st, st_transitions=None, guides=(.01, .06), min_occ=0.01, in
 
 
 def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, guides=(.01, .06), name="vpc_bars",
-                   fs=8, labels="both", max_elements=None, ci=False, tests="both"):
+                   fs=8, labels="both", max_elements=None, ci=False, tests="both", show="both"):
     """guide_table drawn: one row per element (y), two horizontal bars under each other -- VPC task
     (dark) and VPC person (light) -- on the VPC axis (x), with the guides as dashed lines.
-    Marks right of a bar (or of its interval): * / ** = the component exists (likelihood ratio,
+    Marks right of a bar (or of its interval), dot first: * / ** = VPC > 0 (likelihood-ratio test,
     H0: no task / person variance; q or p < .05 / .01); a dot = the share is significantly on the
     stated side of a guide: dot="below" -> under the upper guide (H0: VPC >= .06, small / stable),
     "above" -> over the lower guide (H0: VPC <= .01, not negligible). use_q: FDR q-values (else p).
@@ -1759,7 +1759,7 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
     labels: "both" (S3 · name), "number" (S3) or "name" for the states in the element names.
     max_elements: draw only the first N rows of that order. ci: the 95% interval of each VPC as a
     thin line, where the mixed model gave one. tests: which marks to draw -- "both", "lrt" (the
-    asterisks), "guide" (the dots) or "none"."""
+    asterisks), "guide" (the dots) or "none". show: the bars drawn -- "both", "task" or "person"."""
     from matplotlib.lines import Line2D
     lo_g, hi_g = (.01, .06) if guides is True or guides is None else guides
     if dot not in ("below", "above"):
@@ -1768,6 +1768,9 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
         raise SystemExit('labels must be "both", "number" or "name"')
     if tests not in ("both", "lrt", "guide", "none"):
         raise SystemExit('tests must be "both", "lrt", "guide" or "none"')
+    if show not in ("both", "task", "person"):
+        raise SystemExit('show must be "both", "task" or "person"')
+    drawn = list(order) if show == "both" else [show]
     show_lrt, show_guide = tests in ("both", "lrt"), tests in ("both", "guide")
     t = tab.sort_values([f"VPC {order[0]}", f"VPC {order[1]}"], ascending=True).reset_index(drop=True)
     if max_elements:
@@ -1787,24 +1790,24 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
     fig, ax = plt.subplots(figsize=(7.5, .9 + .2 * n))
     pre = "q" if use_q else "p"
     for i, r in t.iterrows():
-        for j, k in enumerate(order):                       # the first of `order` on top of its pair
-            y = i + (-.19 if j == 0 else .19)
+        for j, k in enumerate(drawn):                       # the first of `order` on top of its pair
+            y = i if len(drawn) == 1 else i + (-.19 if j == 0 else .19)
             v = r[f"VPC {k}"]
             if not np.isfinite(v):
                 continue
-            ax.barh(y, v, height=.36, color=col[k], lw=0)
+            ax.barh(y, v, height=.36 if len(drawn) == 2 else .6, color=col[k], lw=0)
             end = v
             lo_, hi_ = r.get(f"{k}_lo", np.nan), r.get(f"{k}_hi", np.nan)
             if ci and np.isfinite(lo_) and np.isfinite(hi_) and hi_ > lo_:
                 ax.plot([lo_, hi_], [y, y], color=hp.INK2, lw=.8, zorder=3)
                 end = max(v, hi_)
             marks = ""
-            pl = r.get(f"{pre} LRT {k}", np.nan)
-            if show_lrt and np.isfinite(pl) and pl < .05:
-                marks += "**" if pl < .01 else "*"
             pg = r.get(f"{pre} {k} < {hi_g:g}" if dot == "below" else f"{pre} {k} > {lo_g:g}", np.nan)
             if show_guide and np.isfinite(pg) and pg < .05:
-                marks += " •" if marks else "•"
+                marks += "•"
+            pl = r.get(f"{pre} LRT {k}", np.nan)
+            if show_lrt and np.isfinite(pl) and pl < .05:
+                marks += (" " if marks else "") + ("**" if pl < .01 else "*")
             if marks:                                        # just right of the bar / interval, in points
                 ax.annotate(marks, (end, y), xytext=(2, 0), textcoords="offset points", va="center",
                             ha="left", fontsize=fs, color=hp.INK)
@@ -1813,19 +1816,18 @@ def fig_guide_bars(co, tab, order=("task", "person"), dot="below", use_q=True, g
     ax.set_yticks(range(n), names, fontsize=fs)
     ax.set_ylim(n - .5, -.5)                                 # first row on top
     ax.set_xlabel("Variance Partition Coefficient", fontsize=fs + 1)
-    cols = ["VPC task", "VPC person"] + (["task_hi", "person_hi"] if ci and "task_hi" in t else [])
+    cols = [f"VPC {k}" for k in drawn] + ([f"{k}_hi" for k in drawn] if ci and "task_hi" in t else [])
     ax.set_xlim(0, max(.1, np.nanmax(t[cols].to_numpy(float)) * 1.12))
     ax.tick_params(axis="x", labelsize=fs)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
     side = f"VPC < {hi_g:g}" if dot == "below" else f"VPC > {lo_g:g}"
-    hand = [Patch(color=col[order[0]], label=order[0].capitalize()),
-            Patch(color=col[order[1]], label=order[1].capitalize())]
-    if show_lrt:
-        hand.append(Line2D([], [], ls="none", marker="$*$", ms=7, color=hp.INK,
-                           label=f"component exists ({pre} < .05; ** < .01; likelihood ratio)"))
+    hand = [Patch(color=col[k], label=k.capitalize()) for k in drawn]
     if show_guide:
         hand.append(Line2D([], [], ls="none", marker="o", ms=3, color=hp.INK, label=f"{side} ({pre} < .05, one-sided)"))
+    if show_lrt:
+        hand.append(Line2D([], [], ls="none", marker="$*$", ms=7, color=hp.INK,
+                           label=f"VPC > 0 ({pre} < .05; ** < .01; likelihood-ratio test)"))
     if ci:
         hand.append(Line2D([], [], color=hp.INK2, lw=.8, label="95% CI"))
     ax.legend(handles=hand, frameon=False, fontsize=fs, loc="lower left", bbox_to_anchor=(0, 1.01), ncol=2,
