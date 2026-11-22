@@ -574,11 +574,18 @@ class Study:
             print(f"{name}: read {p}")
             return joblib.load(p) if pickle else pd.read_parquet(p)
         if getattr(self, "cache_only", False):
+            if isinstance(key, tuple) and len(key) >= 5:
+                a_, w_, st_, m_, arm_ = key[:5]
+                w_ = f"{float(w_):g}"
+                cmd = (f"sbatch slurm/predictive_cache.sbatch -- --space {a_},{w_},{st_} --model {m_} "
+                       f"--arm \"{arm_}\" --skip shares transfer contrib")
+            else:
+                cmd = ("sbatch slurm/predictive_cache.sbatch -- --space ATLAS,WINDOW_S,STATES --model MODEL "
+                       "--arm \"ARM\"")
             raise SystemExit(
                 f"{name} is not cached for this choice ({key[:5] if isinstance(key, tuple) else ''}...) and this "
                 f"Study is cache_only: it is fitted by the cluster job, not in a notebook kernel (which may not "
-                f"even have `shap`). Run, with the notebook's parameters:\n  sbatch slurm/predictive_cache.sbatch "
-                f"-- --space ATLAS,WINDOW_S,STATES --model MODEL --arm \"ARM\"\nthen rerun this cell.")
+                f"even have `shap`). Run:\n  {cmd}\nthen rerun this cell.")
         t0 = time.time()
         out = compute()
         p.parent.mkdir(parents=True, exist_ok=True)
