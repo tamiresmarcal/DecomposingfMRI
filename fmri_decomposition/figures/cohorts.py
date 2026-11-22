@@ -1453,6 +1453,65 @@ def fig_state_detail(co, F, M, tl, state, n_regions=18, n_traces=3, title="", na
     return fig
 
 
+def fig_state_course(co, F, M, tl, state, n_traces=3, colours=None, layout="stacked", share_ratio=2.0,
+                     share_colour="#b9b8b2", title=None, name=None):
+    """One reference state over the film, without the matrix. Bottom (large): the share of viewers in
+    `state` at each moment. Above: the n_traces regions most active in `state` (by M, the whole
+    film), their activation (mean over viewers, band = SD), on the same time axis.
+    colours: a list of colours (one per region, cycled) or a matplotlib colormap name; None = Set2.
+    layout: "stacked" (one panel per region) or "overlay" (every region in one panel).
+    share_ratio: the share panel's height against one region panel (stacked) or the overlay panel."""
+    if layout not in ("stacked", "overlay"):
+        raise SystemExit('layout must be "stacked" or "overlay"')
+    top = list(M.loc[state].sort_values(ascending=False).index[:n_traces])
+    g = F.groupby("t")[top]
+    mean, sd = g.mean(), g.std()
+    share = tl.assign(on=tl["state"] == state).groupby("stimulus_start_s")["on"].mean()
+    if colours is None:
+        colours = [plt.cm.Set2(i) for i in range(len(top))]
+    elif isinstance(colours, str):
+        cm = plt.get_cmap(colours)
+        colours = [cm(i / max(len(top) - 1, 1)) if cm.N > 20 else cm(i) for i in range(len(top))]
+    tr_cols = [colours[i % len(colours)] for i in range(len(top))]
+    n_top = len(top) if layout == "stacked" else 1
+    ratios = [1] * n_top + [share_ratio]
+    fig = plt.figure(figsize=(11, 1.6 * n_top + 1.6 * share_ratio + .8))
+    gs = fig.add_gridspec(n_top + 1, 1, height_ratios=ratios, hspace=.18)
+    axes = [fig.add_subplot(gs[i, 0]) for i in range(n_top + 1)]
+    for ax in axes[1:]:
+        ax.sharex(axes[0])
+    xlim = (mean.index.min(), mean.index.max())
+    for i, r in enumerate(top):
+        ax = axes[i if layout == "stacked" else 0]
+        ax.plot(mean.index, mean[r], color=tr_cols[i], lw=1.3, label=r)
+        ax.fill_between(mean.index, mean[r] - sd[r], mean[r] + sd[r], color=tr_cols[i],
+                        alpha=.22 if layout == "stacked" else .12, lw=0)
+        if layout == "stacked":
+            ax.set_title(r, fontsize=9, loc="left", color=tr_cols[i])
+    for ax in axes[:-1]:
+        ax.axhline(0, color="#9b9a95", lw=.6, zorder=0)
+        ax.set_ylabel("activation (z)", fontsize=8)
+        ax.tick_params(labelsize=7, labelbottom=False)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+    if layout == "overlay":
+        axes[0].legend(frameon=False, fontsize=8, ncol=len(top), loc="lower left", bbox_to_anchor=(0, 1))
+    ax = axes[-1]
+    ax.fill_between(share.index, share.to_numpy(), step="post", color=share_colour, lw=0)
+    ax.plot(share.index, share.to_numpy(), drawstyle="steps-post", color=hp.INK2, lw=.6)
+    ax.set_ylim(0, max(.05, float(share.max()) * 1.1))
+    ax.set_ylabel(f"share of viewers\nin {sn.label(state, 'long')}", fontsize=9)
+    ax.set_xlabel("film time (s)", fontsize=9)
+    ax.tick_params(labelsize=8)
+    ax.set_xlim(*xlim)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    fig.suptitle(title or f"Reference state: {sn.label(state, 'long')}", x=.02, ha="left", fontsize=12)
+    save(fig, name or f"state_course_S{state}", co.cfg)
+    _show(fig)
+    return fig
+
+
 # ------------------------------------------------------------------ latent-space diagnostics (notebook 08)
 VARIANT_NAMES = {"official": "official fit", "official_z": "official fit, z-scored per person after",
                  "base": "z-score per edge, UMAP on 30k windows (as the official)",
