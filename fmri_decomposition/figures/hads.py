@@ -59,14 +59,14 @@ def _size(cfg, w, h):
     return (w * cfg.fig_scale, h * cfg.fig_scale)
 
 # what the figures call things; every other lowercase word starts with a capital (pretty)
-NAMES = {"bstm": "BSTM", "fcm": "FC Model", "cells": "Brain States Transitions",
+NAMES = {"bstm": "BS Model", "fcm": "FC Model", "cells": "Brain States Transitions",
          "occupancy": "Brain States Occupancy", "dynamics": "Brain States Dynamics",
          "hgb": "HGB", "lgbm": "LGBM", "fdr": "FDR", "shap": "SHAP", "cv": "CV", "hads": "HADS", "sd": "SD"}
 KEEP = {"vs", "pp", "s", "bits", "x", "p", "n", "i", "j", "stay"}         # units and symbols stay as they are
 _WORD = re.compile(r"(?<![\w\[])([a-z][a-z]*)(?![\w])")
 
 def pretty(text):
-    """A figure's text with the report's names: bstm -> BSTM, cells -> Brain States Transitions, ...,
+    """A figure's text with the report's names: bstm -> BS Model, cells -> Brain States Transitions, ...,
     and every other plain lowercase word capitalised. Variable names (switch_rate), set names
     (HMM1_pca3_8), arm options ([cond]) and math ($...$) are left alone."""
     if not text or "$" in text:
@@ -484,7 +484,7 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None,
             ax.set_xlabel(share_label or
                           "share of mean |SHAP| (out-of-fold), one dot per fold seed",
                           fontsize=8)
-            ax.set_title(f"bstm · what the {model} model uses ({lab})", fontsize=9)
+            ax.set_title(f"BS Model · what the {model} model uses ({lab})", fontsize=9)
     fig.legend(handles=[Line2D([], [], ls="none", marker=marker[t], ms=7, color=colour[t], label=t) for t in tasks] +
                        ([Patch(color=BLOCK_COLOUR[b], label=b) for b in order] if shares is not None else []) +
                        ([Patch(color=MUTED, alpha=.35, label=f"{model} on Age + Sex only (the baseline) ± sd")]
