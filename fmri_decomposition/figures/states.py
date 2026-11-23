@@ -403,9 +403,10 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
     X = sm[brains.parc.columns].to_numpy(float)
     K = len(X)
     H = 5.6 * K + 1.6
-    fig = plt.figure(figsize=(16 + 8.5 * len(panels), H), facecolor="white")
-    gs = GridSpec(K, 2 + len(panels), figure=fig,
-                  width_ratios=[2.2, 9.0] + [7.5 if p != "yeo7" else 6.5 for p in panels],
+    fig = plt.figure(figsize=(16 + 2.5 * font_scale + 8.5 * len(panels), H), facecolor="white")
+    gap = 2.5 * font_scale                     # an empty column: the first panel's bar names stay off the brains
+    gs = GridSpec(K, 3 + len(panels), figure=fig,
+                  width_ratios=[2.2, 9.0, gap] + [7.5 if p != "yeo7" else 6.5 for p in panels],
                   left=0.01, right=0.985, top=1 - 1.9 / H, bottom=0.5 / H, wspace=0.55 * font_scale, hspace=0.32 * font_scale)
     n_sub = None if subjects is None else subjects["subject"].nunique()
     # Subcortical slices only when the atlas has something there: yeo7 and the
@@ -439,7 +440,7 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
             ax.set_axis_off()
 
         state = sm.index[i]
-        for c, fam in enumerate(panels, start=2):
+        for c, fam in enumerate(panels, start=3):
             res = results[fam]
             nm = np.array(res["names"])
             if subjects is not None:
