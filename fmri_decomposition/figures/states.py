@@ -390,7 +390,7 @@ def _label(name: str, fam: str) -> str:
 
 def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7", "behavioural"),
                   top=7, subjects: pd.DataFrame | None = None, measure="mean activation",
-                  title_note="", positive_only=(), split=None, font_scale=1.0):
+                  title_note="", positive_only=(), split=None, font_scale=1.0, panel_gap=3.0):
     """One row per state (font_scale multiplies every text of the figure; the gaps between
     panels grow with it): brain in 2 x 3 (L lat · R lat · axial / L med · R med ·
     coronal), then one ranked bar chart per panel family. Bars are the mean r
@@ -403,9 +403,12 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
     X = sm[brains.parc.columns].to_numpy(float)
     K = len(X)
     H = 5.6 * K + 1.6
-    fig = plt.figure(figsize=(16 + 8.5 * len(panels), H), facecolor="white")
-    gs = GridSpec(K, 2 + len(panels), figure=fig,
-                  width_ratios=[2.2, 9.0] + [7.5 if p != "yeo7" else 6.5 for p in panels],
+    fig = plt.figure(figsize=(16 + 8.5 * len(panels) + panel_gap * (len(panels) - 1), H), facecolor="white")
+    # between two bar panels an empty column, so the next panel's names stay off the bars before them
+    widths = [2.2, 9.0]
+    for j, p in enumerate(panels):
+        widths += ([panel_gap] if j else []) + [7.5 if p != "yeo7" else 6.5]
+    gs = GridSpec(K, len(widths), figure=fig, width_ratios=widths,
                   left=0.01, right=0.985, top=1 - 1.9 / H, bottom=0.5 / H, wspace=0.55 * font_scale, hspace=0.32 * font_scale)
     n_sub = None if subjects is None else subjects["subject"].nunique()
     # Subcortical slices only when the atlas has something there: yeo7 and the
@@ -465,7 +468,7 @@ def states_figure(atlas, sm, names, results, brains, out: Path, *, panels=("yeo7
             colors = ([rm.YEO7_COLORS[j] for j in order] if fam == "yeo7" else
                       ["#8a8984"] * len(order) if pos else      # one sign: colour adds nothing
                       [DIVERGING[5] if v >= 0 else DIVERGING[1] for v in m[order]])
-            ax = fig.add_subplot(gs[i, c])
+            ax = fig.add_subplot(gs[i, 2 + 2 * (c - 2)])
             ax.barh(y, m[order], xerr=None if sd is None else sd[order], color=colors,
                     height=.7, edgecolor="white", lw=1.5,
                     error_kw=dict(ecolor=INK2, elinewidth=2, capsize=4))
@@ -741,7 +744,7 @@ def load_results(atlas_dir: Path, families) -> tuple[pd.DataFrame, dict, dict]:
 def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
          data: Path | None = None, cards: bool = False, overview: bool = False,
          panels=("yeo7", "behavioural"), top: int = 7, positive_only=(), split=None,
-         font_scale: float = 1.0) -> list:
+         font_scale: float = 1.0, panel_gap: float = 3.0) -> list:
     """Draw every atlas under `run_dir`; return the figure paths.
 
     `families` picks the non-behavioural panels; `bn_levels` ("domain",
@@ -749,6 +752,8 @@ def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
     (n_pos, n_neg) -- every bar panel but Yeo 7 shows the n_pos most positive
     and the n_neg most negative r instead of the `top` largest |r|; None =
     the `top` largest |r|. `font_scale`: every text of the states figure x this.
+    `panel_gap`: the empty space between two bar panels (e.g. Yeo 7 | BrainMap), in width units
+    (a bar panel is 6.5-7.5; 0 = none).
     """
     run_dir = Path(run_dir)
     atlases = atlases or sorted(p.name for p in run_dir.iterdir() if (p / "correlations.csv").exists())
@@ -779,7 +784,7 @@ def draw(run_dir, atlases=None, families=None, bn_levels=("subcategory",), *,
         subjects = pd.read_parquet(subj_path) if subj_path.exists() else None
         out = d / "states_figure.png"
         states_figure(atlas, sm, names, results, brains, out, panels=panels, top=top,
-                      positive_only=tuple(positive_only), split=split, font_scale=font_scale,
+                      positive_only=tuple(positive_only), split=split, font_scale=font_scale, panel_gap=panel_gap,
                       subjects=subjects, measure=measure,
                       title_note="  (simulated states)" if prov["states"] == "simulate" else "")
         paths.append(out)
