@@ -422,7 +422,7 @@ def cell_names(n_states: int) -> list[str]:
 
 def subject_transitions(g: pd.DataFrame, state_col: str, n_states: int,
                         stride_s: float, indep_factor: int,
-                        entropy_estimator: str = "plugin") -> dict:
+                        entropy_estimator: str = "miller_madow") -> dict:
     """One subject x task -> ONE row: every cell, then the features.
 
     `g` must already be sorted by window_id. A run boundary is not a
@@ -624,7 +624,7 @@ def _within_k_band(states: list[str], k_of: dict, min_k: int, max_k: int):
 
 def process(root: Path, atlas: str, window_s, cohort: str, task: str,
             state_col: str, n_overlaps: int, overwrite: bool,
-            entropy_estimator: str = "plugin") -> dict:
+            entropy_estimator: str = "miller_madow") -> dict:
     out_dir = transitions_root(root, atlas, window_s, state_col, cohort, task)
     out_path = out_dir / "subjects.parquet"
     if not overwrite and out_path.exists():
@@ -759,7 +759,7 @@ def run(args) -> int:
         for cohort, task in sorted(set(zip(grp["cohort"], grp["task"]))):
             e = process(root, atlas, w, cohort, task, st, args.n_overlaps,
                         args.overwrite,
-                        getattr(args, "entropy_estimator", "plugin"))
+                        getattr(args, "entropy_estimator", "miller_madow"))
             entries.append(e)
             cell = f"{cohort}/{task}"
             if e["status"] == "skipped":
@@ -826,9 +826,10 @@ def add_arguments(p) -> None:
                         "recorded in modelling/version=<v>/version.json and a "
                         "run whose composition differs is refused.")
     p.add_argument("--entropy-estimator", choices=ENTROPY_ESTIMATORS,
-                   default="plugin",
-                   help="entropy_rate_bits: plug-in (default, as every table "
-                        "so far) or Miller-Madow bias-corrected. Readers can "
+                   default="miller_madow",
+                   help="entropy_rate_bits: Miller-Madow bias-corrected (default, "
+                        "what the manuscript reports) or plug-in (the tables "
+                        "written before this default changed). Readers can "
                         "also recompute it from existing tables "
                         "(entropy_from_table), so no rerun is needed to switch.")
     p.add_argument("--overwrite", action="store_true")

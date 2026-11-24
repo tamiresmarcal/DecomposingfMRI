@@ -669,7 +669,7 @@ def pool_tasks(d: "pd.DataFrame", n_states: int, log=print,
             "n_distinct_transitions": int((M > 0).sum()),
             "switch_rate": n_change / tot_tr if tot_tr else np.nan,
             "self_transition_rate": 1 - n_change / tot_tr if tot_tr else np.nan,
-            "entropy_rate_bits": _entropy_rate(M),
+            "entropy_rate_bits": _entropy_rate(M, "miller_madow"),   # as the tables (transitions default)
             "switches_per_min": (sw.sum() / (w.sum() * s / 60)
                                  if np.isfinite(s) and w.sum() else np.nan),
             "mean_dwell_s": (w.sum() / episodes * s

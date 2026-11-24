@@ -11,6 +11,24 @@ Two situations it covers, because they are the same sequence:
 
 ---
 
+## PENDING RE-RUN: entropy rate, Miller--Madow (do not forget)
+
+The manuscript reports the entropy rate **Miller--Madow corrected** everywhere. Since
+2026-11-24 that is the default of `transitions` (`--entropy-estimator miller_madow`) and of the
+transfer's pooled HCP tables. The notebooks already recompute it on read; the **stored**
+transition tables, and everything fitted from them, still hold the plug-in value. Next cycle,
+in this order (the existing tables are only replaced with `--overwrite`):
+
+```bash
+sbatch slurm/brain_states_transitions.sbatch -- --atlas yeo7 --window-s -1 --overwrite
+```
+
+then `select-bstm` / `select-fcm` (slurm/model_selection.sbatch), the transfer
+(slurm/transfer.sbatch) and the predictive caches of notebook 07
+(slurm/predictive_cache.sbatch), and re-read Figure 4 / the Results 1.3 numbers.
+
+---
+
 ## 0. The mental model
 
 Six stages. Each reads the one before and writes its own directory under
