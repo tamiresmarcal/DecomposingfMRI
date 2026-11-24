@@ -11,7 +11,8 @@ One row per feature x cohort x condition (rest | movie): n, mean, s.d. and the 5
 exactly as in notebook 05 (Figure 3): transition counts summed over that person's scans and runs,
 p(j | i) from the pooled counts, entropy rate Miller--Madow corrected, distinct transitions
 rarefied to the shortest scan. Features: the dynamic metrics, the occupancy of every state and
-every transition probability p(j | i). Read-only on everything else.
+every transition probability p(j | i). "All cohorts" pools every participant of every cohort
+(each once per condition) beside the cohort rows. Read-only on everything else.
 """
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ COHORTS = {"ds002837": dict(dirs=["ds002837"], role="train"),
            "cneuromod": dict(dirs=["cneuromod"], role="train"),
            "camcan": dict(dirs=["camcan", "camcan_rest"], role="projected"),
            "hcp7t_fix": dict(dirs=["hcp7t_fix"], role="projected")}
-COHORT_NAME = {"ds002837": "NNDb", "cneuromod": "CNeuroMod", "camcan": "Cam-CAN", "hcp7t_fix": "HCP 7T"}
+COHORT_NAME = {"all": "All cohorts", "ds002837": "NNDb", "cneuromod": "CNeuroMod", "camcan": "Cam-CAN", "hcp7t_fix": "HCP 7T"}
 PCTS = (5, 25, 50, 75, 95)
 
 
@@ -61,7 +62,12 @@ def main() -> int:
     co = ct.Cohorts(cfg)
     feats = [*co.dyn, *co.occ, *co.cells]
     rows = []
-    for (cohort, cond), d in co.data.items():
+    groups = dict(co.data)
+    for cond in ("rest", "movie"):              # every cohort together: each participant once
+        parts = [d for (c, k), d in co.data.items() if k == cond]
+        if parts:
+            groups[("all", cond)] = pd.concat(parts)
+    for (cohort, cond), d in groups.items():
         for v in feats:
             if v not in d:
                 continue
@@ -72,7 +78,8 @@ def main() -> int:
             rows.append(dict(feature=feature_name(v), variable=v,
                              family=("dynamics" if v in co.dyn else "occupancy" if v in co.occ
                                      else "transition p(j|i)"),
-                             cohort=COHORT_NAME.get(cohort, cohort), role=COHORTS[cohort]["role"],
+                             cohort=COHORT_NAME.get(cohort, cohort),
+                             role=COHORTS[cohort]["role"] if cohort in COHORTS else "all",
                              condition=cond, n=len(x), mean=x.mean(), sd=x.std(ddof=1) if len(x) > 1 else np.nan,
                              **{f"p{p}": v_ for p, v_ in zip(PCTS, q)}))
     t = pd.DataFrame(rows)
