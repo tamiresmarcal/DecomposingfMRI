@@ -404,12 +404,16 @@ def fig_factors(rows, cfg):
         plt.show()
 
 def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None,
-                    share_label=None, show=True, name="E1_performance", baseline=True):
+                    share_label=None, show=True, name="E1_performance", baseline=True,
+                    pairs=None, pair_set="all", use_q=True):
     """E1: one model, one panel per phenotype; x = bstm | fcm, colour = task, a line per task
     from bstm to fcm; mean ± sd over the fold seeds (and each seed as a dot, from `seeds`), over
     that model's Age + Sex baseline. legend = the label of each tree (what was selected).
     Underneath (shares, Study.block_shares): what the bstm model uses, one row per variable type
-    and task, bar = mean share of its |SHAP|, dots = each fold seed."""
+    and task, bar = mean share of its |SHAP|, dots = each fold seed.
+    pairs (transfer_tables.paired_transfer_test): a bracket with * (< .05) / ** (< .01) joins two
+    points whose paired difference passes (q, or p with use_q=False); pair_set="all" (every pair
+    tested) or "questions" (BS vs FC within a task, and rest vs movie within a model)."""
     tasks, trees = list(cfg.tasks), ["bstm", "fcm"]
     colour, marker = dict(zip(tasks, TASK_COLOURS)), dict(zip(tasks, TASK_MARKERS))
     order = ["covariates", "cells", "occupancy", "dynamics"]
@@ -447,6 +451,29 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None,
             last = h["mean"].last_valid_index()
             if last is not None:
                 ends.append([h.loc[last, "mean"], x[trees.index(last)] + .12, task])
+        if pairs is not None and len(pairs):                   # paired tests: a bracket per passing pair
+            if pair_set not in ("all", "questions"):
+                raise SystemExit('pair_set must be "all" or "questions"')
+            col = "q" if use_q and "q" in pairs else "p"
+            pr = pairs[(pairs["phenotype"] == lab) & (pairs[col] < .05)]
+            if pair_set == "questions":
+                pr = pr[(pr["task_a"] == pr["task_b"]) | (pr["tree_a"] == pr["tree_b"])]
+            xpos = lambda tree, task: trees.index(tree) + (tasks.index(task) - (len(tasks) - 1) / 2) * .1
+            top = float(np.nanmax(p["mean"] + p["std"])) if len(p) else 0.0
+            span = float(np.nanmax(p["mean"] + p["std"]) - np.nanmin(p["mean"] - p["std"])) if len(p) else 1.0
+            step = .09 * span
+            pr = pr.assign(w=[abs(xpos(a, b) - xpos(c, d)) for a, b, c, d in
+                              zip(pr["tree_a"], pr["task_a"], pr["tree_b"], pr["task_b"])]).sort_values("w")
+            for i, r in enumerate(pr.itertuples()):            # narrow brackets low, wide ones above
+                if r.task_a not in tasks or r.task_b not in tasks:
+                    continue
+                xa, xb = sorted([xpos(r.tree_a, r.task_a), xpos(r.tree_b, r.task_b)])
+                y = top + step * (i + .6)
+                ax.plot([xa, xa, xb, xb], [y - .3 * step, y, y, y - .3 * step], color=INK2, lw=.9,
+                        zorder=4, clip_on=False)
+                ax.text((xa + xb) / 2, y, "**" if getattr(r, col) < .01 else "*", ha="center",
+                        va="bottom", fontsize=11, color=INK, zorder=4)
+                ax.plot([xa], [y + step], alpha=0)             # room above, for autoscale
         ax.autoscale_view()
         gap = .05 * np.diff(ax.get_ylim())[0]                  # names never closer than this
         ends.sort()
@@ -489,7 +516,10 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None,
                        ([Patch(color=BLOCK_COLOUR[b], label=b) for b in order] if shares is not None else []) +
                        ([Patch(color=MUTED, alpha=.35, label=f"{model} on Age + Sex only (the baseline) ± sd")]
                         if baseline else []) +
-                       [Line2D([], [], ls="none", label=f"{tree} = {legend[tree]}") for tree in trees],
+                       [Line2D([], [], ls="none", label=f"{tree} = {legend[tree]}") for tree in trees] +
+                       ([Line2D([], [], ls="none", label="brackets: paired bootstrap over the same participants, "
+                                + ("* q" if use_q else "* p") + " < .05, ** < .01")]
+                        if pairs is not None and len(pairs) else []),
                loc="lower center", ncol=4, fontsize=7.5)
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
     layout(fig, cfg, rect=(0, .1, 1, .96))
