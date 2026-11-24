@@ -1702,35 +1702,49 @@ def transfer_predictions(train: Study, test: Study, best, fc_arm: str = "edges",
 
 
 def paired_transfer_test(pred: "pd.DataFrame", n_boot: int = 2000, seed: int = 0,
-                         alpha: float = .05) -> "pd.DataFrame":
-    """BS vs FC on the SAME test participants: delta rho = rho(bstm) - rho(fcm), with a paired
-    percentile bootstrap over participants (both models scored on each resample).
+                         alpha: float = .05, pairs: str = "all") -> "pd.DataFrame":
+    """Two transferred models compared on the SAME test participants: delta rho = rho(a) - rho(b),
+    with a paired percentile bootstrap over participants (both scored on each resample).
 
-    `pred`: transfer_predictions (one row per participant, model and panel, with `sub`). Per
-    (phenotype, task), the two models are joined on `sub`, so a participant one model lacks is
-    left out of both. p is two-sided: twice the share of resamples on the other side of zero."""
+    `pred`: transfer_predictions (one row per participant, model and panel, with `sub`). A model is
+    a (tree, task) -- e.g. BS movie, FC rest; in HCP the same people did both tasks, so a BS movie
+    vs FC rest comparison is paired too. pairs="all": every pair of models within a phenotype (6
+    with two trees x two tasks); "tree": BS vs FC within each task only. Participants are matched
+    on `sub`. p two-sided (twice the share of resamples across zero); q = BH-FDR over every row."""
+    from itertools import combinations
     if "sub" not in pred or pred["sub"].isna().all():
         raise SystemExit("the predictions carry no subject ids (`sub`): they were cached before "
                          "the paired test existed -- recompute them (predictive_cache.sbatch).")
     rng = np.random.default_rng(seed)
+    name = {"bstm": "BS", "fcm": "FC"}
     rows = []
-    for (ph, task), g in pred.groupby(["phenotype", "task"]):
-        b = g[g["tree"] == "bstm"].set_index("sub")
-        f = g[g["tree"] == "fcm"].set_index("sub")
-        both = b.index.intersection(f.index)
-        if len(both) < 10:
-            continue
-        y = b.loc[both, "y"].to_numpy(float)
-        pb, pf = b.loc[both, "pred"].to_numpy(float), f.loc[both, "pred"].to_numpy(float)
-        rb, rf = stats.spearmanr(pb, y).statistic, stats.spearmanr(pf, y).statistic
-        n = len(y)
-        d = np.empty(n_boot)
-        for k in range(n_boot):
-            i = rng.integers(0, n, n)
-            d[k] = stats.spearmanr(pb[i], y[i]).statistic - stats.spearmanr(pf[i], y[i]).statistic
-        d = d[np.isfinite(d)]
-        lo, hi = np.percentile(d, [100 * alpha / 2, 100 * (1 - alpha / 2)])
-        p = min(1.0, 2 * min((d <= 0).mean(), (d >= 0).mean()))
-        rows.append(dict(phenotype=ph, task=task, n=n, rho_bs=rb, rho_fc=rf, delta=rb - rf,
-                         lo=lo, hi=hi, p=p))
-    return pd.DataFrame(rows)
+    for ph, g in pred.groupby("phenotype"):
+        models = {(t, k): d.drop_duplicates("sub").set_index("sub")
+                  for (t, k), d in g.groupby(["tree", "task"])}
+        combos = [(a, b) for a, b in combinations(sorted(models), 2)
+                  if pairs == "all" or (a[1] == b[1] and a[0] != b[0])]
+        for a, b in combos:
+            A, B = models[a], models[b]
+            both = A.index.intersection(B.index)
+            if len(both) < 10:
+                continue
+            ya, yb = A.loc[both, "y"].to_numpy(float), B.loc[both, "y"].to_numpy(float)
+            pa, pb = A.loc[both, "pred"].to_numpy(float), B.loc[both, "pred"].to_numpy(float)
+            ra, rb = stats.spearmanr(pa, ya).statistic, stats.spearmanr(pb, yb).statistic
+            n = len(both)
+            d = np.empty(n_boot)
+            for k in range(n_boot):
+                i = rng.integers(0, n, n)
+                d[k] = stats.spearmanr(pa[i], ya[i]).statistic - stats.spearmanr(pb[i], yb[i]).statistic
+            d = d[np.isfinite(d)]
+            lo, hi = np.percentile(d, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+            p = min(1.0, 2 * min((d <= 0).mean(), (d >= 0).mean()))
+            rows.append(dict(phenotype=ph, a=f"{name.get(a[0], a[0])} {a[1]}",
+                             b=f"{name.get(b[0], b[0])} {b[1]}", tree_a=a[0], task_a=a[1],
+                             tree_b=b[0], task_b=b[1], n=n, rho_a=ra, rho_b=rb, delta=ra - rb,
+                             lo=lo, hi=hi, p=p))
+    out = pd.DataFrame(rows)
+    if len(out):
+        from statsmodels.stats.multitest import multipletests
+        out["q"] = multipletests(out["p"], method="fdr_bh")[1]
+    return out
