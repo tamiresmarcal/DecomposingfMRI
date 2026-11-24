@@ -145,7 +145,7 @@ class Settings:
     shap_seed: int = 0
     seeds_stab: list = field(default_factory=lambda: [0, 1, 2, 3, 4])
     highlight_top: int | float | str | None = 8   # model_marks: top N | "all" | share of |SHAP| (0-1)
-    stable_min: float = 0.8
+    stable_min: float | None = 0.8      # model_marks: share of seeds in the top; None = no stability filter
     min_d: float = 0.2
     label_pp: int | None = None
     change_unit: str = "percent"     # the labels on the graphs: "percent" (relative change, +2 pp on .10 = +20%) | "pp"
@@ -1189,7 +1189,8 @@ class Study:
                                      mean_abs_shap=np.abs(dd["S"][:, v]).mean(), direction="↑" if sign[v] > 0 else "↓",
                                      seeds_in_top=stable[v], cohen_d=cohen, change=change,
                                      ref_value=self._ref_value(pooled, (task, "Normal"), dd["blocks"][v], name),
-                                     hit=stable[v] >= c.stable_min and abs(cohen) >= c.min_d and round(100 * change) != 0))
+                                     hit=(c.stable_min is None or stable[v] >= c.stable_min)
+                                         and abs(cohen) >= c.min_d and round(100 * change) != 0))
         cols = ["task", "group", "block", "variable", "rank", "mean_abs_shap", "direction", "seeds_in_top",
                 "cohen_d", "change", "ref_value", "hit"]
         return self._notes(pd.DataFrame(rows, columns=cols))
