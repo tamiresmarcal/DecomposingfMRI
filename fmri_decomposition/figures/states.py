@@ -626,6 +626,8 @@ def reference_matrix(atlas: str = "harvardoxford", rows: str = "yeo7", cols: str
         stem = Path(f"{stem}_{Path(states_table).parent.parent.name}")   # which state set
     if cluster:
         stem = Path(f"{stem}_clustered-{cluster}")
+    if null != "moran":                                      # e.g. _burt beside the Moran matrix
+        stem = Path(f"{stem}_{null}")
     tab = pd.DataFrame(r, index=rn, columns=cn)
     pd.concat({"r": tab, "p_null": pd.DataFrame(res["p"], index=rn, columns=cn),
                "q_fdr": pd.DataFrame(q, index=rn, columns=cn)}, axis=0).to_csv(f"{stem}.csv")

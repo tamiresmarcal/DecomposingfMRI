@@ -533,6 +533,8 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
     if str(behavioural_csv).startswith("neurosynth") and taxonomy != "brainmap" and \
             {"behavioural", "behavioural_domain"} & set(families):
         label += f"_{taxonomy}"
+    if null != "moran":                       # e.g. _burt: never overwrite the Moran run
+        label += f"_{null}"
     if behavioural_csv in BRAINMAP_OPTIONS and \
             {"behavioural", "behavioural_domain"} & set(families):
         label += f"_{behavioural_csv}db"      # never overwrite the Neurosynth run
@@ -554,6 +556,16 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
         parcel = {f: parc.parcellate(m.voxels) for f, m in refs.items()}
         comps = {n: parcel["yeo7"][k] for k, n in enumerate(rm.YEO7)}
         comps.update({g: parc.parcellate(v) for g, v in subcort.items()})
+        # Yeo 2011 is a CORTICAL parcellation: every network is 0 in every subcortical parcel, so
+        # leaving those parcels in makes a state strong in the amygdala count AGAINST the limbic
+        # network. They are blanked (NaN) for this family only: `correlate` and the surrogates drop
+        # a parcel a map has no value for, so the group r, its null and the per-subject r all run
+        # over the cortical parcels -- as reference_matrix does whenever Yeo 7 is a side.
+        yeo_cortical = "yeo7" in parcel and "network" in spec.labels
+        if yeo_cortical:
+            sub = spec.labels["network"].to_numpy() != "cortical"
+            parcel["yeo7"] = np.asarray(parcel["yeo7"], float).copy()
+            parcel["yeo7"][:, sub] = np.nan
         sm, subj = load_states(states, atlas, parc, comps, seed, output_root, window_s, cohorts,
                                labels_atlas=labels_atlas if labels_atlas != atlas else None)
         measure = sm.attrs.get("measure", "mean activation")
@@ -587,7 +599,7 @@ def compute(states: str = "simulate", atlases=ATLASES, families=FAMILIES, *,
                              "simulated": refs[f].simulated} for f in families},
             "null": (f"{null}, {n_nulls} surrogates" if parc.n >= rm.MIN_PARCELS_FOR_NULL
                      else f"none ({parc.n} parcels: a description, not a sample)"),
-            "null_method": null, "seed": seed,
+            "null_method": null, "seed": seed, "yeo7_cortical_only": bool(yeo_cortical),
         }, indent=2, ensure_ascii=False))
         if verbose:
             print(f"[{atlas}] {parc.n} parcels ({src}) -> {d}")
