@@ -9,9 +9,11 @@
 # Output: notebooks/figures/04_burt/{4_0,4_1,4_2,4_2_2}.png, and the tables in a
 # contextualization/<run>_burt/ directory. The Moran run and figures are not touched.
 #
-# COST: brainsmash fits a variogram per surrogate, ~5 min per reference map for 10,000
-# surrogates at ~100 parcels. The tables test ~95 maps (molecular, Yeo 7, networks14, BrainMap
-# domains and subcategories) and the matrices ~75 more: about 15 h on one core.
+# COST: ~20 ms per variogram-matched surrogate; ~170 reference maps x 10,000 surrogates is
+# ~10 h of CPU. The surrogates are independent, so they run in parallel over every core of the
+# allocation (refmaps.burt_surrogates, one process per core): with 32 cores the nulls take
+# ~20-25 min, plus the loading of the maps -- about 1 h in all. More cores, faster still
+# (--cpus-per-task=48 or 64 where the nodes have them).
 #
 # NEEDS brainsmash in the pylibs folder the notebooks use, once:
 #   apptainer exec $SIF python -m pip install --no-deps \
@@ -19,9 +21,9 @@
 
 #SBATCH --job-name=fmridecomp_neurobio_burt
 #SBATCH --account=rpp-aevans-ab
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --time=36:00:00
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=48G
+#SBATCH --time=03:00:00
 #SBATCH --output=slurm_logs/neurobio_burt_%j.out
 #SBATCH --error=slurm_logs/neurobio_burt_%j.err
 
@@ -41,8 +43,11 @@ if [[ -z "${FMRIDECOMP_REFMAPS:-}" || ! -d "${FMRIDECOMP_REFMAPS}" ]]; then
 fi
 export APPTAINERENV_FMRIDECOMP_REFMAPS="$FMRIDECOMP_REFMAPS"
 [[ -n "${FMRIDECOMP_OUTPUTS:-}" ]] && export APPTAINERENV_FMRIDECOMP_OUTPUTS="$FMRIDECOMP_OUTPUTS"
-export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}" MKL_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}"
-export OPENBLAS_NUM_THREADS="${SLURM_CPUS_PER_TASK:-1}" PYTHONUNBUFFERED=1 APPTAINERENV_PYTHONUNBUFFERED=1
+# parallelism = processes (one per core) for the surrogates, so one BLAS thread each
+export FMRIDECOMP_NULL_JOBS="${SLURM_CPUS_PER_TASK:-1}" APPTAINERENV_FMRIDECOMP_NULL_JOBS="${SLURM_CPUS_PER_TASK:-1}"
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+export APPTAINERENV_OMP_NUM_THREADS=1 APPTAINERENV_MKL_NUM_THREADS=1 APPTAINERENV_OPENBLAS_NUM_THREADS=1
+export PYTHONUNBUFFERED=1 APPTAINERENV_PYTHONUNBUFFERED=1
 
 SIF="${SIF:-${FMRIDECOMP_SIF_SHAP:-/project/6008063/tamires/singularity/fmri_decomp_stage45_shap.sif}}"
 PYLIBS="${PYLIBS:-/project/6008063/tamires/singularity/pylibs}"

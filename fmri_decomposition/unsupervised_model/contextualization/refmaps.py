@@ -1058,6 +1058,55 @@ def _moran_surrogates(x: np.ndarray, D: np.ndarray, n: int, rng) -> np.ndarray:
     return x.mean() + (signs * a) @ V.T
 
 
+def _burt_batch(x: np.ndarray, D: np.ndarray, n: int, seed: int) -> np.ndarray:
+    """n variogram-matched surrogates of one map (one worker's share)."""
+    import numpy as _np
+    if not hasattr(_np, "row_stack"):   # brainsmash 0.11 still calls it; numpy >= 2.4 dropped it
+        _np.row_stack = _np.vstack
+    from brainsmash.mapgen.base import Base
+    return _np.atleast_2d(Base(x=x, D=D, seed=seed, resample=True)(n=n))
+
+
+def null_jobs() -> int:
+    """Workers for the Burt null: FMRIDECOMP_NULL_JOBS, else the SLURM allocation, else 1."""
+    import os
+    for k in ("FMRIDECOMP_NULL_JOBS", "SLURM_CPUS_PER_TASK"):
+        if os.environ.get(k):
+            return max(1, int(os.environ[k]))
+    return 1
+
+
+def burt_surrogates(parcel_maps: np.ndarray, centroids: np.ndarray, n: int, seed: int = 0,
+                    n_jobs: int | None = None, batch: int = 250) -> np.ndarray:
+    """(M, P) -> (n, M, P) variogram-matched surrogates, in parallel.
+
+    Every surrogate is independent, so the work is cut into (map, block of `batch` surrogates)
+    tasks spread over `n_jobs` processes (default null_jobs()): with 32 cores a family of 50 maps
+    x 10,000 surrogates is ~2,000 tasks, and the wall time falls about 30-fold. Each task has its
+    own seed (seed, map, block), so the result does not depend on the number of workers."""
+    from joblib import Parallel, delayed
+    from scipy.spatial.distance import cdist
+
+    n_jobs = n_jobs or null_jobs()
+    M, P = parcel_maps.shape
+    out = np.full((n, M, P), np.nan)
+    tasks = []
+    for m in range(M):
+        x = parcel_maps[m]
+        ok = np.isfinite(x)
+        if ok.sum() < MIN_PARCELS_FOR_NULL or np.nanstd(x) == 0:
+            continue
+        D = cdist(centroids[ok], centroids[ok])
+        for b0 in range(0, n, batch):
+            tasks.append((m, ok, b0, min(batch, n - b0), x[ok], D))
+    res = Parallel(n_jobs=n_jobs, batch_size=1)(
+        delayed(_burt_batch)(x, D, k, seed + 100_003 * m + b0) for m, _, b0, k, x, D in tasks)
+    for (m, ok, b0, k, _, _), r in zip(tasks, res):
+        block = out[b0:b0 + k, m]                 # a view: (k, P)
+        block[:, ok] = r
+    return out
+
+
 def surrogates(parcel_maps: np.ndarray, centroids: np.ndarray, n: int,
                seed: int = 0, method: str = "moran") -> np.ndarray:
     """(M, P) -> (n, M, P) surrogates that keep each map's spatial autocorrelation.
@@ -1107,11 +1156,15 @@ def null_test(states: np.ndarray, parcel_maps: np.ndarray, centroids: np.ndarray
     if n <= 0 or parcel_maps.shape[1] < MIN_PARCELS_FOR_NULL:
         nan = np.full_like(r, np.nan)
         return {"r": r, "p": nan, "q": nan}
+    # Burt: every surrogate drawn at once, in parallel (burt_surrogates); then scored by chunks
+    # as before, which is what bounds the memory of `correlate`.
+    S = burt_surrogates(parcel_maps, centroids, n, seed) if method == "burt" else None
     exceed = np.zeros(r.shape)
     valid = np.ones(r.shape, dtype=bool)
     for k, start in enumerate(range(0, n, chunk)):
         m = min(chunk, n - start)
-        null = correlate(states, surrogates(parcel_maps, centroids, m, seed + 7919 * k, method))
+        null = correlate(states, S[start:start + m] if S is not None else
+                         surrogates(parcel_maps, centroids, m, seed + 7919 * k, method))
         valid &= np.isfinite(null).all(0)
         exceed += (np.abs(null) >= np.abs(r)[None]).sum(0)
     p = (1 + exceed) / (1 + n)
