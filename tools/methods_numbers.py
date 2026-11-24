@@ -3,7 +3,7 @@
 
     source slurm/env.sh
     apptainer exec --bind /project,/scratch,/home --pwd $PWD $FMRIDECOMP_SIF45 \
-        python3 tools/methods_numbers.py --states HMM2_umap3_8
+        python3 tools/methods_numbers.py   # yeo7, window -1, ThresholdCluster_umap3_8 by default
 
 Read-only: nothing under outputs/ is written or moved. Each block is
 independent, so a missing tree prints why and the rest still runs.
@@ -163,6 +163,25 @@ def the_transitions(root, a):
 
 
 @guarded
+def the_rarefaction(root, a):
+    header("5c. RAREFACTION  -> minutes the distinct transitions are rarefied to [B4]")
+    from fmri_decomposition.unsupervised_model.cohort_tables import _scan_minutes
+    base = transitions_root(root, a.atlas, a.window_s, a.states, version=a.version)
+    rows = []
+    for f in sorted(base.rglob("subjects.parquet")):
+        d = pd.read_parquet(f)
+        m = _scan_minutes(d)
+        rows.append(dict(cohort=hive(f, "cohort"), min_minutes=round(float(m.min()), 2),
+                         median_minutes=round(float(m.median()), 2)))
+    if not rows:
+        raise FileNotFoundError(f"nothing under {base}")
+    t = pd.DataFrame(rows).groupby("cohort").agg(min_minutes=("min_minutes", "min"),
+                                                 median_minutes=("median_minutes", "median"))
+    print(t.to_string())
+    print(f"\n  shortest scan (notebook 05, distinct_minutes='min'): {t['min_minutes'].min():.2f} min")
+
+
+@guarded
 def the_camcan_hads(root, a):
     header("5b. CAM-CAN WITH HADS  -> n in the clinical analyses [B1]")
     from fmri_decomposition.supervised_model import hads as ht
@@ -196,7 +215,9 @@ def the_maps(root, a):
     for f in found:
         p = json.loads(f.read_text())
         print(f"  {f.relative_to(base)}")
-        print(f"     states={p.get('states')}  null={p.get('null')}")
+        print(f"     states={p.get('states')}  null={p.get('null')}  "
+              f"cohorts={p.get('cohorts')}  labels_atlas={p.get('labels_atlas')}  "
+              f"yeo7 cortical only={p.get('yeo7_cortical_only', False)}")
 
 
 @guarded
@@ -225,9 +246,9 @@ def main(argv=None) -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--output-root", default=None)
-    p.add_argument("--atlas", default="harvardoxford")
-    p.add_argument("--window-s", default="30")
-    p.add_argument("--states", default="HMM2_umap3_8")
+    p.add_argument("--atlas", default="yeo7")
+    p.add_argument("--window-s", default="-1")
+    p.add_argument("--states", default="ThresholdCluster_umap3_8")
     p.add_argument("--version", default=None,
                    help="modelling version (default: $FMRIDECOMP_MODELLING_VERSION, else v0)")
     a = p.parse_args(argv)
@@ -248,6 +269,7 @@ def main(argv=None) -> None:
     the_samples(root, a)
     the_pca(root, a)
     the_transitions(root, a)
+    the_rarefaction(root, a)
     the_camcan_hads(root, a)
     the_maps(root, a)
     the_models(root, a)

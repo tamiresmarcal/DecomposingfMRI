@@ -84,7 +84,12 @@ def span_s(starts: pd.Series, window_s: float) -> float:
     A gap left by censored windows inside the run is counted, so this is the
     span of the run that entered the analysis, not the sum of kept windows."""
     s = starts.dropna()
-    return float(s.max() - s.min() + window_s) if len(s) else 0.0
+    if not len(s):
+        return 0.0
+    if window_s <= 0:                       # per-TR frames (window_s = -1): one TR after the last onset
+        steps = pd.Series(sorted(s.unique())).diff().dropna()
+        window_s = float(steps[steps > 0].median()) if len(steps) else 0.0
+    return float(s.max() - s.min() + window_s)
 
 
 def hours(g: pd.DataFrame, window_s: float, condition: str) -> dict:
@@ -233,15 +238,35 @@ def to_latex(t: pd.DataFrame) -> str:
     cols = [("cohort", "Cohort"), ("condition", "Condition"),
             ("unsupervised", "Unsupervised"), ("supervised", "Supervised"),
             ("tasks", "Runs"), ("TR_s", "TR (s)"), ("scanned", "Scanned"),
-            ("excluded", "Excluded"), ("final", "Final $n$"),
+            ("excluded", "Excluded"), ("final", "Final"),
             ("windows", "Windows"), ("scanned_h", "Scan (h)"),
             ("stimulus_h", "Stimulus (h)"), ("mean_fd", "Mean FD (s.d.), mm")]
-    cols = [(k, h) for k, h in cols if k in t]
+    per_tr = str(t.attrs.get("window_s")) in ("-1", "-1.0")
+    unit = ("Frames: time points (TRs) entering the brain-state analysis."
+            if per_tr else f"Windows: {t.attrs.get('window_s')}-s windows entering the "
+                           r"brain-state analysis.")
+    cols = [(k, ("Frames" if per_tr and k == "windows" else h)) for k, h in cols if k in t]
+    keys = [k for k, _ in cols]
+    group = [k for k in ("scanned", "excluded", "final") if k in keys]
+    # two header rows: "Number of participants" over Scanned / Excluded / Final
+    top, sub, rules, j = [], [], [], 0
+    while j < len(cols):
+        k, h = cols[j]
+        if group and k == group[0]:
+            top.append(r"\multicolumn{%d}{c}{Number of participants}" % len(group))
+            sub += [hh for kk, hh in cols[j:j + len(group)]]
+            rules.append(r"\cmidrule(lr){%d-%d}" % (j + 1, j + len(group)))
+            j += len(group)
+            continue
+        top.append(h)
+        sub.append("")
+        j += 1
+    head = ([" & ".join(top) + r" \\", "".join(rules), " & ".join(sub) + r" \\"] if group
+            else [" & ".join(h for _, h in cols) + r" \\"])
     lines = [r"\begin{table}[h]", r"\centering\small",
              r"\caption{Samples, acquisition and quality control. "
-             + t.attrs.get("policy_text", "") +
-             f" Windows: {t.attrs.get('window_s')}-s windows entering the "
-             r"brain-state analysis. Unsupervised: role in the estimation of "
+             + t.attrs.get("policy_text", "") + " " + unit +
+             r" Unsupervised: role in the estimation of "
              r"brain states (train, used to fit the model; projected, "
              r"labelled by the fitted model only). Supervised: role in the "
              r"brain state transition model (discovery, cross-validated "
@@ -249,7 +274,7 @@ def to_latex(t: pd.DataFrame) -> str:
              r"\label{tab:samples}",
              r"\resizebox{\textwidth}{!}{%",
              r"\begin{tabular}{" + "l" * 4 + "r" * (len(cols) - 4) + "}",
-             r"\toprule", " & ".join(h for _, h in cols) + r" \\", r"\midrule"]
+             r"\toprule", *head, r"\midrule"]
     for _, r in t.iterrows():
         def fmt(k):
             if k == "windows":
@@ -290,7 +315,7 @@ def main(argv=None) -> None:
     print(f"\nTOTALS (abstract): {t.attrs['unique_participants']} unique "
           f"participants; {t['scanned_h'].sum():.1f} h scanned; "
           f"{t['stimulus_h'].sum():.1f} h of distinct stimuli "
-          f"({int(t['windows'].sum()):,} windows)")
+          f"({int(t['windows'].sum()):,} {'frames' if str(a.window_s).startswith('-') else 'windows'})")
     print(f"\ncensor policy: {t.attrs['policy']}\n"
           f"wrote {out.with_suffix('.csv')} and {out.with_suffix('.tex')}")
 
