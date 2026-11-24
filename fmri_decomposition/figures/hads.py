@@ -1181,15 +1181,18 @@ def group_differences(st, space, grp):
 
 
 def fig_group_differences(gd, cfg, top_n=None, stars="q", min_d=0.2, name="group_differences",
-                          show=True):
+                          show=True, only_marked=False):
     """Every brain-state variable, phenotype group vs Normal: one figure per phenotype, columns =
     tasks; horizontal bars = Cohen's d (colour = variable type), sorted; * / ** = q (or p) < .05 /
     .01 of the covariate-adjusted test; dashed lines at +-min_d (the Figure 5 threshold).
-    top_n: only the top_n largest |d| per panel (None = every variable)."""
+    top_n: only the top_n largest |d| per panel (None = every variable). only_marked: only the
+    variables with a star (q, or p, < .05). d > 0: higher in the symptom group than in controls."""
     from fmri_decomposition.figures import state_names as sn
     tasks, figs = list(cfg.tasks), []
     for lab in cfg.targets:
         panels = {t: gd[(gd["phenotype"] == lab) & (gd["task"] == t)].dropna(subset=["d"]) for t in tasks}
+        if only_marked:
+            panels = {t: v[v[stars] < .05] for t, v in panels.items()}
         if top_n:
             panels = {t: v.loc[v["d"].abs().nlargest(top_n).index] for t, v in panels.items()}
         n = max([len(v) for v in panels.values()] + [1])
@@ -1208,7 +1211,7 @@ def fig_group_differences(gd, cfg, top_n=None, stars="q", min_d=0.2, name="group
             ax.set_yticks(y, [sn.var_label(x) if not str(x).startswith(("switch", "mean_", "entropy",
                               "dispersion", "n_", "switches")) else x for x in v["variable"]], fontsize=7)
             ax.set_ylim(-.7, max(len(v), 1) - .3)
-            ax.set_xlabel("Cohen's d vs Normal")
+            ax.set_xlabel("Cohen's d vs Normal  (← lower in the group · higher in the group →)")
             nn = (f" (n = {int(v['n_group'].iloc[0])} vs {int(v['n_normal'].iloc[0])})" if len(v) else "")
             ax.set_title(f"{t} · {lab}{nn}", fontsize=10)
             for sp in ("top", "right"):
