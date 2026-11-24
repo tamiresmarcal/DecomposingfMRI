@@ -242,10 +242,10 @@ def to_latex(t: pd.DataFrame) -> str:
             ("mean_fd", "Mean FD (s.d.), mm"), ("stimulus_h", "Stimulus (h)"),
             ("scanned_h", "Scan (h)"), ("windows", "Windows")]
     per_tr = str(t.attrs.get("window_s")) in ("-1", "-1.0")
-    unit = ("Frames: time points (TRs) entering the brain-state analysis."
+    unit = ("Volumes: time points (TRs) entering the brain-state analysis."
             if per_tr else f"Windows: {t.attrs.get('window_s')}-s windows entering the "
                            r"brain-state analysis.")
-    cols = [(k, ("Frames" if per_tr and k == "windows" else h)) for k, h in cols if k in t]
+    cols = [(k, ("Volumes" if per_tr and k == "windows" else h)) for k, h in cols if k in t]
     keys = [k for k, _ in cols]
     # two header rows: "Model use" over Unsupervised / Supervised, "Number of participants"
     # over Scanned / Excluded / Final
