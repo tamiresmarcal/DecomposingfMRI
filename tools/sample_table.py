@@ -239,8 +239,8 @@ def to_latex(t: pd.DataFrame) -> str:
             ("unsupervised", "Unsupervised"), ("supervised", "Supervised"),
             ("scanned", "Scanned"), ("excluded", "Excluded"), ("final", "Final"),
             ("condition", "Condition"), ("tasks", "Runs"), ("TR_s", "TR (s)"),
-            ("stimulus_h", "Stimulus (h)"), ("scanned_h", "Scan (h)"),
-            ("windows", "Windows"), ("mean_fd", "Mean FD (s.d.), mm")]
+            ("mean_fd", "Mean FD (s.d.), mm"), ("stimulus_h", "Stimulus (h)"),
+            ("scanned_h", "Scan (h)"), ("windows", "Windows")]
     per_tr = str(t.attrs.get("window_s")) in ("-1", "-1.0")
     unit = ("Frames: time points (TRs) entering the brain-state analysis."
             if per_tr else f"Windows: {t.attrs.get('window_s')}-s windows entering the "

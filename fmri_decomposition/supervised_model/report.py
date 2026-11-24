@@ -129,7 +129,7 @@ def transfer_shares_cached(train, test, space, arm, model):
 
 def transfer_predictions_cached(train, test, best, fc_arm="edges"):
     from fmri_decomposition.supervised_model import transfer_tables as tt
-    key = ("pred", best["atlas"], float(best["window_s"]), best["states"], best["arm"], best["model"], fc_arm)
+    key = ("pred_sub", best["atlas"], float(best["window_s"]), best["states"], best["arm"], best["model"], fc_arm)
     return cached(train, "transfer_predictions", key, lambda: tt.transfer_predictions(train, test, best, fc_arm=fc_arm))
 
 

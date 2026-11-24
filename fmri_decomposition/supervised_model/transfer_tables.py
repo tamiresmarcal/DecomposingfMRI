@@ -422,7 +422,8 @@ def transfer_rows(train: Study, test: Study, arms=None, models=None,
                                         arm=arm, model=model, atlas=s.atlas,
                                         states=s.states, window_s=s.window_s,
                                         y=np.asarray(yte, float),
-                                        pred=np.asarray(pred, float)))
+                                        pred=np.asarray(pred, float),
+                                        sub=getattr(test, "_last_subs", None)))
                         sc, lo, hi = bootstrap_ci(yte, pred, n_boot, seed)
                         # a model that predicts ONE value for everyone has
                         # ranked nobody: Spearman is undefined and the score is
@@ -1228,7 +1229,8 @@ def fcm_transfer_rows(train: Study, test: Study, atlases=None,
                                         arm=arm, model=model, atlas=atlas,
                                         states="(static FC)", window_s=float("nan"),
                                         y=np.asarray(yte[ok_te], float),
-                                        pred=np.asarray(pred, float)))
+                                        pred=np.asarray(pred, float),
+                                        sub=np.asarray(ste, dtype=str)[ok_te]))
                         sc, lo, hi = bootstrap_ci(yte[ok_te], pred, n_boot, seed)
                         rows.append({
                             "atlas": atlas, "window_s": np.nan,
@@ -1692,7 +1694,43 @@ def transfer_predictions(train: Study, test: Study, best, fc_arm: str = "edges",
         out.append(pd.DataFrame({
             "tree": g["tree"], "task": g["task"], "phenotype": g["phenotype"],
             "arm": g["arm"], "model": g["model"],
+            "sub": g.get("sub") if g.get("sub") is not None else np.full(len(g["y"]), None),
             "y": g["y"], "pred": g["pred"]}))
     if not out:
         raise SystemExit("no predictions were collected.")
     return pd.concat(out, ignore_index=True)
+
+
+def paired_transfer_test(pred: "pd.DataFrame", n_boot: int = 2000, seed: int = 0,
+                         alpha: float = .05) -> "pd.DataFrame":
+    """BS vs FC on the SAME test participants: delta rho = rho(bstm) - rho(fcm), with a paired
+    percentile bootstrap over participants (both models scored on each resample).
+
+    `pred`: transfer_predictions (one row per participant, model and panel, with `sub`). Per
+    (phenotype, task), the two models are joined on `sub`, so a participant one model lacks is
+    left out of both. p is two-sided: twice the share of resamples on the other side of zero."""
+    if "sub" not in pred or pred["sub"].isna().all():
+        raise SystemExit("the predictions carry no subject ids (`sub`): they were cached before "
+                         "the paired test existed -- recompute them (predictive_cache.sbatch).")
+    rng = np.random.default_rng(seed)
+    rows = []
+    for (ph, task), g in pred.groupby(["phenotype", "task"]):
+        b = g[g["tree"] == "bstm"].set_index("sub")
+        f = g[g["tree"] == "fcm"].set_index("sub")
+        both = b.index.intersection(f.index)
+        if len(both) < 10:
+            continue
+        y = b.loc[both, "y"].to_numpy(float)
+        pb, pf = b.loc[both, "pred"].to_numpy(float), f.loc[both, "pred"].to_numpy(float)
+        rb, rf = stats.spearmanr(pb, y).statistic, stats.spearmanr(pf, y).statistic
+        n = len(y)
+        d = np.empty(n_boot)
+        for k in range(n_boot):
+            i = rng.integers(0, n, n)
+            d[k] = stats.spearmanr(pb[i], y[i]).statistic - stats.spearmanr(pf[i], y[i]).statistic
+        d = d[np.isfinite(d)]
+        lo, hi = np.percentile(d, [100 * alpha / 2, 100 * (1 - alpha / 2)])
+        p = min(1.0, 2 * min((d <= 0).mean(), (d >= 0).mean()))
+        rows.append(dict(phenotype=ph, task=task, n=n, rho_bs=rb, rho_fc=rf, delta=rb - rf,
+                         lo=lo, hi=hi, p=p))
+    return pd.DataFrame(rows)

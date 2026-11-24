@@ -144,7 +144,7 @@ class Settings:
     graph_arms: list = field(default_factory=lambda: ["all [joint]", "all [cond]"])
     shap_seed: int = 0
     seeds_stab: list = field(default_factory=lambda: [0, 1, 2, 3, 4])
-    highlight_top: int = 8
+    highlight_top: int | float | str | None = 8   # model_marks: top N | "all" | share of |SHAP| (0-1)
     stable_min: float = 0.8
     min_d: float = 0.2
     label_pp: int | None = None
@@ -816,6 +816,7 @@ class Study:
         names = list(cov.columns) + [x for cs in cols.values() for x in cs]
         blocks = ["covariates"] * cov.shape[1] + [b for b, cs in cols.items() for _ in cs]
         X = np.column_stack([cov.to_numpy(), d[names[cov.shape[1]:]].to_numpy(float)])
+        self._last_subs = d["sub"].astype(str).to_numpy()   # the rows of X, for pairing predictions
         return X, d[lab].to_numpy(float), names, blocks
 
     def shares(self):
@@ -1148,6 +1149,18 @@ class Study:
                tuple(seeds), tuple(c.covariates))
         return self._cached("full", key, compute, pickle=True)
 
+    def _n_top(self, importance) -> int:
+        """How many graph features model_marks considers, from cfg.highlight_top:
+        an int (the top N by mean |SHAP|), None or "all" (every graph feature), or a float in
+        (0, 1) (the smallest top set whose mean |SHAP| reaches that share of the graph's total)."""
+        h, m = self.cfg.highlight_top, len(importance)
+        if h is None or h == "all":
+            return m
+        if isinstance(h, float) and 0 < h < 1:
+            w = np.sort(np.asarray(importance, float))[::-1]
+            return int(min(m, np.searchsorted(np.cumsum(w) / w.sum(), h) + 1))
+        return int(min(m, h))
+
     def model_marks(self, space, deep, pooled):
         """E3: the model's top `highlight_top` graph variables by mean |SHAP| (shap_seed). Red when
         it is also in the top for >= stable_min of the seeds, and the group differs from Normal
@@ -1163,9 +1176,10 @@ class Study:
                 rank = {dd["names"][v]: r + 1 for r, v in enumerate(order)}
                 graph = [v for v in range(len(dd["names"])) if dd["blocks"][v] in GRAPH]
                 M = dd["by_seed"][:, graph]
-                stable = dict(zip(graph, (np.argsort(np.argsort(-M, axis=1), axis=1) < c.highlight_top).mean(0)))
+                top = self._n_top(np.abs(dd["S"][:, graph]).mean(0))
+                stable = dict(zip(graph, (np.argsort(np.argsort(-M, axis=1), axis=1) < top).mean(0)))
                 sign = direction(dd["X"], dd["S"])
-                for v in [v for v in order if v in stable][:c.highlight_top]:
+                for v in [v for v in order if v in stable][:top]:
                     name = dd["names"][v]
                     a, b = per_subject.loc[m[lab], name], per_subject.loc[m["Normal"], name]
                     sd = np.sqrt(((len(a) - 1) * a.var() + (len(b) - 1) * b.var()) / (len(a) + len(b) - 2))
