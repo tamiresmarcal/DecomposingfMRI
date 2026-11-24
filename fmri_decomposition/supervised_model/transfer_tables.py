@@ -1701,29 +1701,47 @@ def transfer_predictions(train: Study, test: Study, best, fc_arm: str = "edges",
     return pd.concat(out, ignore_index=True)
 
 
+def _pair_combos(keys, pairs):
+    """Pairs of (tree, task) models, each ORIENTED by the hypothesis: BS before FC, and movie
+    before rest within a model. pairs="all": every pair; "questions": BS vs FC within a task and
+    movie vs rest within a model (no crossed pairs)."""
+    from itertools import combinations
+    if pairs not in ("all", "questions"):
+        raise SystemExit('pairs must be "all" or "questions"')
+    rank_tree = {"bstm": 0, "fcm": 1}
+    rank_task = lambda t: 0 if str(t).lower().startswith("movie") else 1
+    out = []
+    for a, b in combinations(sorted(keys), 2):
+        if pairs == "questions" and a[0] != b[0] and a[1] != b[1]:
+            continue
+        a, b = sorted((a, b), key=lambda k: (rank_tree.get(k[0], 9), rank_task(k[1])))
+        out.append((a, b))
+    return out
+
+
 def paired_transfer_test(pred: "pd.DataFrame", n_boot: int = 2000, seed: int = 0,
-                         alpha: float = .05, pairs: str = "all") -> "pd.DataFrame":
+                         alpha: float = .05, pairs: str = "all",
+                         alternative: str = "two-sided") -> "pd.DataFrame":
     """Two transferred models compared on the SAME test participants: delta rho = rho(a) - rho(b),
     with a paired percentile bootstrap over participants (both scored on each resample).
 
-    `pred`: transfer_predictions (one row per participant, model and panel, with `sub`). A model is
-    a (tree, task) -- e.g. BS movie, FC rest; in HCP the same people did both tasks, so a BS movie
-    vs FC rest comparison is paired too. pairs="all": every pair of models within a phenotype (6
-    with two trees x two tasks); "tree": BS vs FC within each task only. Participants are matched
-    on `sub`. p two-sided (twice the share of resamples across zero); q = BH-FDR over every row."""
-    from itertools import combinations
+    A model is a (tree, task); in HCP the same people did both tasks, so BS movie vs FC rest is
+    paired too. Each pair is oriented by the hypothesis (a = BS over FC; a = movie over rest within
+    a model). pairs: "all" | "questions" (see _pair_combos). alternative: "two-sided" (p = twice
+    the share of resamples across zero) or "hypothesis" (one-sided, H1: a > b). q = BH-FDR over the
+    pairs tested, so testing fewer pairs costs less correction."""
     if "sub" not in pred or pred["sub"].isna().all():
         raise SystemExit("the predictions carry no subject ids (`sub`): they were cached before "
                          "the paired test existed -- recompute them (predictive_cache.sbatch).")
+    if alternative not in ("two-sided", "hypothesis"):
+        raise SystemExit('alternative must be "two-sided" or "hypothesis"')
     rng = np.random.default_rng(seed)
     name = {"bstm": "BS", "fcm": "FC"}
     rows = []
     for ph, g in pred.groupby("phenotype"):
         models = {(t, k): d.drop_duplicates("sub").set_index("sub")
                   for (t, k), d in g.groupby(["tree", "task"])}
-        combos = [(a, b) for a, b in combinations(sorted(models), 2)
-                  if pairs == "all" or (a[1] == b[1] and a[0] != b[0])]
-        for a, b in combos:
+        for a, b in _pair_combos(models, pairs):
             A, B = models[a], models[b]
             both = A.index.intersection(B.index)
             if len(both) < 10:
@@ -1738,7 +1756,8 @@ def paired_transfer_test(pred: "pd.DataFrame", n_boot: int = 2000, seed: int = 0
                 d[k] = stats.spearmanr(pa[i], ya[i]).statistic - stats.spearmanr(pb[i], yb[i]).statistic
             d = d[np.isfinite(d)]
             lo, hi = np.percentile(d, [100 * alpha / 2, 100 * (1 - alpha / 2)])
-            p = min(1.0, 2 * min((d <= 0).mean(), (d >= 0).mean()))
+            p = ((d <= 0).mean() if alternative == "hypothesis"
+                 else min(1.0, 2 * min((d <= 0).mean(), (d >= 0).mean())))
             rows.append(dict(phenotype=ph, a=f"{name.get(a[0], a[0])} {a[1]}",
                              b=f"{name.get(b[0], b[0])} {b[1]}", tree_a=a[0], task_a=a[1],
                              tree_b=b[0], task_b=b[1], n=n, rho_a=ra, rho_b=rb, delta=ra - rb,
@@ -1748,3 +1767,22 @@ def paired_transfer_test(pred: "pd.DataFrame", n_boot: int = 2000, seed: int = 0
         from statsmodels.stats.multitest import multipletests
         out["q"] = multipletests(out["p"], method="fdr_bh")[1]
     return out
+
+
+def ci_overlap_pairs(perf: "pd.DataFrame", pairs: str = "all") -> "pd.DataFrame":
+    """No extra test: a pair is marked when the two models' own 95% bootstrap intervals (the
+    error bars' lo / hi) do not overlap -- a conservative reading of the bars already drawn.
+    Same columns as paired_transfer_test, with q = 0.049 (non-overlap) or 1, so fig_performance
+    draws one * per marked pair."""
+    name = {"bstm": "BS", "fcm": "FC"}
+    rows = []
+    for ph, g in perf.groupby("phenotype"):
+        models = {(r.tree, r.task): r for r in g.itertuples()}
+        for a, b in _pair_combos(models, pairs):
+            A, B = models[a], models[b]
+            apart = A.lo > B.hi or B.lo > A.hi
+            rows.append(dict(phenotype=ph, a=f"{name.get(a[0], a[0])} {a[1]}",
+                             b=f"{name.get(b[0], b[0])} {b[1]}", tree_a=a[0], task_a=a[1],
+                             tree_b=b[0], task_b=b[1], rho_a=A.score, rho_b=B.score,
+                             delta=A.score - B.score, p=np.nan, q=.049 if apart else 1.0))
+    return pd.DataFrame(rows)

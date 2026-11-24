@@ -405,7 +405,7 @@ def fig_factors(rows, cfg):
 
 def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None,
                     share_label=None, show=True, name="E1_performance", baseline=True,
-                    pairs=None, pair_set="all", use_q=True):
+                    pairs=None, pair_set="all", use_q=True, pair_label=None):
     """E1: one model, one panel per phenotype; x = bstm | fcm, colour = task, a line per task
     from bstm to fcm; mean ± sd over the fold seeds (and each seed as a dot, from `seeds`), over
     that model's Age + Sex baseline. legend = the label of each tree (what was selected).
@@ -517,8 +517,9 @@ def fig_performance(perf, cfg, title, legend, model, seeds=None, shares=None,
                        ([Patch(color=MUTED, alpha=.35, label=f"{model} on Age + Sex only (the baseline) ± sd")]
                         if baseline else []) +
                        [Line2D([], [], ls="none", label=f"{tree} = {legend[tree]}") for tree in trees] +
-                       ([Line2D([], [], ls="none", label="brackets: paired bootstrap over the same participants, "
-                                + ("* q" if use_q else "* p") + " < .05, ** < .01")]
+                       ([Line2D([], [], ls="none", label=pair_label or (
+                           "brackets: paired bootstrap over the same participants, "
+                           + ("* q" if use_q else "* p") + " < .05, ** < .01"))]
                         if pairs is not None and len(pairs) else []),
                loc="lower center", ncol=4, fontsize=7.5)
     fig.suptitle(title, x=.01, ha="left", fontsize=10)
