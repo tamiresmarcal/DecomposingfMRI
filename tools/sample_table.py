@@ -54,7 +54,7 @@ LABELS = {"ds002837": "NNDb", "cneuromod": "CNeuroMod Friends",
 #: Each cohort's role in the SUPERVISED analysis (the unsupervised role --
 #: train or projected -- is read from the latents). A cohort not listed takes
 #: no part in the supervised models.
-SUPERVISED_ROLES = {"camcan": "training", "hcp7t_fix": "external test"}
+SUPERVISED_ROLES = {"camcan": "train", "hcp7t_fix": "external test"}
 
 
 def hive(path: Path, key: str) -> str:
@@ -235,33 +235,39 @@ def to_latex(t: pd.DataFrame) -> str:
             return "--"
         return str(v).replace("_", r"\_").replace("&", r"\&")
 
-    cols = [("cohort", "Cohort"), ("condition", "Condition"),
+    cols = [("cohort", "Cohort"),
             ("unsupervised", "Unsupervised"), ("supervised", "Supervised"),
-            ("tasks", "Runs"), ("TR_s", "TR (s)"), ("scanned", "Scanned"),
-            ("excluded", "Excluded"), ("final", "Final"),
-            ("windows", "Windows"), ("scanned_h", "Scan (h)"),
-            ("stimulus_h", "Stimulus (h)"), ("mean_fd", "Mean FD (s.d.), mm")]
+            ("scanned", "Scanned"), ("excluded", "Excluded"), ("final", "Final"),
+            ("condition", "Condition"), ("tasks", "Runs"), ("TR_s", "TR (s)"),
+            ("stimulus_h", "Stimulus (h)"), ("scanned_h", "Scan (h)"),
+            ("windows", "Windows"), ("mean_fd", "Mean FD (s.d.), mm")]
     per_tr = str(t.attrs.get("window_s")) in ("-1", "-1.0")
     unit = ("Frames: time points (TRs) entering the brain-state analysis."
             if per_tr else f"Windows: {t.attrs.get('window_s')}-s windows entering the "
                            r"brain-state analysis.")
     cols = [(k, ("Frames" if per_tr and k == "windows" else h)) for k, h in cols if k in t]
     keys = [k for k, _ in cols]
-    group = [k for k in ("scanned", "excluded", "final") if k in keys]
-    # two header rows: "Number of participants" over Scanned / Excluded / Final
+    # two header rows: "Model use" over Unsupervised / Supervised, "Number of participants"
+    # over Scanned / Excluded / Final
+    groups = [(g, [k for k in ks if k in keys]) for g, ks in
+              (("Model use", ("unsupervised", "supervised")),
+               ("Number of participants", ("scanned", "excluded", "final")))]
+    groups = [(g, ks) for g, ks in groups if ks]
     top, sub, rules, j = [], [], [], 0
     while j < len(cols):
         k, h = cols[j]
-        if group and k == group[0]:
-            top.append(r"\multicolumn{%d}{c}{Number of participants}" % len(group))
-            sub += [hh for kk, hh in cols[j:j + len(group)]]
-            rules.append(r"\cmidrule(lr){%d-%d}" % (j + 1, j + len(group)))
-            j += len(group)
+        g = next(((name, ks) for name, ks in groups if ks[0] == k), None)
+        if g:
+            n_ = len(g[1])
+            top.append(r"\multicolumn{%d}{c}{%s}" % (n_, g[0]))
+            sub += [hh for _, hh in cols[j:j + n_]]
+            rules.append(r"\cmidrule(lr){%d-%d}" % (j + 1, j + n_))
+            j += n_
             continue
         top.append(h)
         sub.append("")
         j += 1
-    head = ([" & ".join(top) + r" \\", "".join(rules), " & ".join(sub) + r" \\"] if group
+    head = ([" & ".join(top) + r" \\", "".join(rules), " & ".join(sub) + r" \\"] if groups
             else [" & ".join(h for _, h in cols) + r" \\"])
     lines = [r"\begin{table}[h]", r"\centering\small",
              r"\caption{Samples, acquisition and quality control. "
@@ -269,11 +275,12 @@ def to_latex(t: pd.DataFrame) -> str:
              r" Unsupervised: role in the estimation of "
              r"brain states (train, used to fit the model; projected, "
              r"labelled by the fitted model only). Supervised: role in the "
-             r"brain state transition model (training, models trained on all "
+             r"brain state transition model (train, models trained on all "
              r"participants; external test, out-of-cohort transfer).}",
              r"\label{tab:samples}",
              r"\resizebox{\textwidth}{!}{%",
-             r"\begin{tabular}{" + "l" * 4 + "r" * (len(cols) - 4) + "}",
+             r"\begin{tabular}{" + "".join("l" if k in ("cohort", "unsupervised", "supervised", "condition")
+                                            else "r" for k, _ in cols) + "}",
              r"\toprule", *head, r"\midrule"]
     for _, r in t.iterrows():
         def fmt(k):
