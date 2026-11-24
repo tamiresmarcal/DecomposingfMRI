@@ -54,7 +54,7 @@ LABELS = {"ds002837": "NNDb", "cneuromod": "CNeuroMod Friends",
 #: Each cohort's role in the SUPERVISED analysis (the unsupervised role --
 #: train or projected -- is read from the latents). A cohort not listed takes
 #: no part in the supervised models.
-SUPERVISED_ROLES = {"camcan": "discovery", "hcp7t_fix": "external test"}
+SUPERVISED_ROLES = {"camcan": "training", "hcp7t_fix": "external test"}
 
 
 def hive(path: Path, key: str) -> str:
@@ -269,8 +269,8 @@ def to_latex(t: pd.DataFrame) -> str:
              r" Unsupervised: role in the estimation of "
              r"brain states (train, used to fit the model; projected, "
              r"labelled by the fitted model only). Supervised: role in the "
-             r"brain state transition model (discovery, cross-validated "
-             r"models; external test, out-of-cohort transfer).}",
+             r"brain state transition model (training, models trained on all "
+             r"participants; external test, out-of-cohort transfer).}",
              r"\label{tab:samples}",
              r"\resizebox{\textwidth}{!}{%",
              r"\begin{tabular}{" + "l" * 4 + "r" * (len(cols) - 4) + "}",
