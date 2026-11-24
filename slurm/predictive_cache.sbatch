@@ -17,7 +17,7 @@
 #SBATCH --account=rpp-aevans-ab
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
-#SBATCH --time=24:00:00
+#SBATCH --time=08:00:00
 #SBATCH --output=slurm_logs/predictive_cache_%j.out
 #SBATCH --error=slurm_logs/predictive_cache_%j.err
 
