@@ -1786,3 +1786,76 @@ def ci_overlap_pairs(perf: "pd.DataFrame", pairs: str = "all") -> "pd.DataFrame"
                              tree_b=b[0], task_b=b[1], rho_a=A.score, rho_b=B.score,
                              delta=A.score - B.score, p=np.nan, q=.049 if apart else 1.0))
     return pd.DataFrame(rows)
+
+
+def dependent_rho_test(pred: "pd.DataFrame", method: str = "steiger", pairs: str = "questions",
+                       alternative: str = "hypothesis", n_perm: int = 10000, seed: int = 0,
+                       alpha: float = .05) -> "pd.DataFrame":
+    """Two transferred models compared WITHOUT a bootstrap, on the observed correlations.
+
+    In the test cohort both models predict the SAME score of the SAME people (in HCP the ASR score
+    is one per person, rest and movie alike), so every pair is a comparison of two dependent,
+    overlapping correlations, rho(a, y) vs rho(b, y), whose dependence is rho(a, b). Spearman =
+    Pearson on ranks, so the ranks enter the Pearson-based formulas.
+      method="steiger": Steiger's Z (1980), in Meng, Rosenthal & Rubin's form (1992);
+      method="zou": Zou's (2007) confidence interval for the difference (p from the same Z);
+      method="permutation": exchange the two models' predictions within each participant at
+        random (n_perm times) -- exact under H0 that the two models predict alike.
+    Pairs oriented and chosen as in paired_transfer_test; q = BH-FDR over the pairs tested."""
+    if method not in ("steiger", "zou", "permutation"):
+        raise SystemExit('method must be "steiger", "zou" or "permutation"')
+    if "sub" not in pred or pred["sub"].isna().all():
+        raise SystemExit("the predictions carry no subject ids (`sub`): recompute them "
+                         "(predictive_cache.sbatch).")
+    rng = np.random.default_rng(seed)
+    name = {"bstm": "BS", "fcm": "FC"}
+    z_crit = stats.norm.ppf(1 - alpha / 2)
+    rows = []
+    for ph, g in pred.groupby("phenotype"):
+        models = {(t, k): d.drop_duplicates("sub").set_index("sub")
+                  for (t, k), d in g.groupby(["tree", "task"])}
+        for a, b in _pair_combos(models, pairs):
+            A, B = models[a], models[b]
+            both = A.index.intersection(B.index)
+            if len(both) < 10:
+                continue
+            y = A.loc[both, "y"].to_numpy(float)
+            pa, pb = A.loc[both, "pred"].to_numpy(float), B.loc[both, "pred"].to_numpy(float)
+            ry, ra_, rb_ = (stats.rankdata(x) for x in (y, pa, pb))
+            r1, r2 = np.corrcoef(ra_, ry)[0, 1], np.corrcoef(rb_, ry)[0, 1]
+            r12 = np.corrcoef(ra_, rb_)[0, 1]
+            n = len(both)
+            # Meng, Rosenthal & Rubin (1992)
+            z1, z2 = np.arctanh(r1), np.arctanh(r2)
+            rm2 = (r1 ** 2 + r2 ** 2) / 2
+            f = min(1.0, (1 - r12) / (2 * (1 - rm2)))
+            h = (1 - f * rm2) / (1 - rm2)
+            Z = (z1 - z2) * np.sqrt((n - 3) / (2 * (1 - r12) * h))
+            lo = hi = np.nan
+            if method == "permutation":
+                obs = r1 - r2
+                d = np.empty(n_perm)
+                for k in range(n_perm):
+                    s = rng.random(n) < .5
+                    xa, xb = np.where(s, rb_, ra_), np.where(s, ra_, rb_)
+                    d[k] = np.corrcoef(xa, ry)[0, 1] - np.corrcoef(xb, ry)[0, 1]
+                p = ((1 + (d >= obs).sum()) / (1 + n_perm) if alternative == "hypothesis"
+                     else (1 + (np.abs(d) >= abs(obs)).sum()) / (1 + n_perm))
+            else:
+                p = (stats.norm.sf(Z) if alternative == "hypothesis" else 2 * stats.norm.sf(abs(Z)))
+                if method == "zou":                  # Zou (2007), overlapping correlations
+                    l1, u1 = np.tanh(z1 - z_crit / np.sqrt(n - 3)), np.tanh(z1 + z_crit / np.sqrt(n - 3))
+                    l2, u2 = np.tanh(z2 - z_crit / np.sqrt(n - 3)), np.tanh(z2 + z_crit / np.sqrt(n - 3))
+                    c = (((r12 - .5 * r1 * r2) * (1 - r1 ** 2 - r2 ** 2 - r12 ** 2) + r12 ** 3)
+                         / ((1 - r1 ** 2) * (1 - r2 ** 2)))
+                    lo = r1 - r2 - np.sqrt((r1 - l1) ** 2 + (u2 - r2) ** 2 - 2 * c * (r1 - l1) * (u2 - r2))
+                    hi = r1 - r2 + np.sqrt((u1 - r1) ** 2 + (r2 - l2) ** 2 - 2 * c * (u1 - r1) * (r2 - l2))
+            rows.append(dict(phenotype=ph, a=f"{name.get(a[0], a[0])} {a[1]}",
+                             b=f"{name.get(b[0], b[0])} {b[1]}", tree_a=a[0], task_a=a[1],
+                             tree_b=b[0], task_b=b[1], n=n, rho_a=r1, rho_b=r2, rho_ab=r12,
+                             delta=r1 - r2, lo=lo, hi=hi, z=Z, p=p, method=method))
+    out = pd.DataFrame(rows)
+    if len(out):
+        from statsmodels.stats.multitest import multipletests
+        out["q"] = multipletests(out["p"], method="fdr_bh")[1]
+    return out
