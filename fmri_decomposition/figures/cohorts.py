@@ -921,9 +921,35 @@ def _tier_panel(ax, st, variables, pvalue=None, test="tier", separators=False, s
         _p_columns(ax, t, y, pvalue, _tests(test), x0=1.36 if means else 1.07, headers=headers)
 
 
+def preferred_edges(graphs, T_ref, o_ref, rule="above_chance_all", top=12):
+    """The arrows of a state diagram: (i, j) pairs, i != j.
+
+    rule="top": the `top` largest p(j | i) of the reference (the former default).
+    rule="above_chance": transitions preferred over chance in the reference -- once the
+      participant leaves state i, the probability of going to j, p(j | i) / (1 - p(i | i)), exceeds
+      what j's share of time predicts, occ_j / (1 - occ_i) (a ratio > 1).
+    rule="above_chance_all": the same, in EVERY cohort (graphs: {cohort: (p(j | i), occupancy)}),
+      so an arrow is a preference the cohorts share, not one carried by a single cohort."""
+    K = len(o_ref)
+    off = [(a, b) for a in range(K) for b in range(K) if a != b]
+    if rule == "top":
+        return sorted(sorted(off, key=lambda e: -T_ref[e])[:top])
+
+    def ratio(T, o, a, b):
+        leave, rest = 1 - T[a, a], 1 - o[a]
+        return (T[a, b] / leave) / (o[b] / rest) if leave > 0 and rest > 0 and o[b] > 0 else np.nan
+
+    if rule == "above_chance":
+        return [e for e in off if ratio(T_ref, o_ref, *e) > 1]
+    if rule == "above_chance_all":
+        return [e for e in off if all(ratio(T, o, *e) > 1 for T, o in graphs.values())]
+    raise SystemExit('edge rule must be "top", "above_chance" or "above_chance_all"')
+
+
 def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupancy="each", name="figure3",
                 pvalue=None, test="tier", panel="task_person", st_transitions=None, guides=None,
-                transitions="fit", diagram="stable", stable_level=.05, use_q=True):
+                transitions="fit", diagram="stable", stable_level=.05, use_q=True,
+                edge_rule="above_chance_all"):
     """Manuscript Figure 3 as one figure, rest and movie together (each person's mean of the
     conditions they have; `groups(tasks="all")`).
     A  every cohort: occupancy, p(j | i) and the dynamic metrics (mean, 95% CI);
@@ -944,6 +970,9 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     occupancies with VPC task significantly < the upper guide (one-sided, q -- p with use_q=False --
     < stable_level) in the Median Transition blue, passing arrows outside the strongest drawn too;
     "original" = the plain diagram.
+    edge_rule: which arrows the diagram draws (preferred_edges): "above_chance_all" (default,
+    transitions preferred over chance in every cohort), "above_chance" (in the mean of the
+    cohorts) or "top" (the cfg.edge_top most likely).
     """
     from matplotlib.gridspec import GridSpec
 
@@ -955,7 +984,7 @@ def fig_figure3(co, st, tier_variables=None, font=1.45, diagram_fs=2.0, occupanc
     T_ref = np.mean([g[0] for g in graphs.values()], axis=0)
     o_ref = np.mean([g[1] for g in graphs.values()], axis=0)
     off = [(a, b) for a in range(K) for b in range(K) if a != b]
-    edges = sorted(sorted(off, key=lambda e: -T_ref[e])[:cfg.edge_top])
+    edges = preferred_edges({c: g[:2] for c, g in graphs.items()}, T_ref, o_ref, edge_rule, cfg.edge_top)
     agree = co.agreement(co.dyn, groups=G)
 
     fig = plt.figure(figsize=(17, 15))
@@ -1952,7 +1981,7 @@ def _stable_hits(tab, k, K, guides=(.01, .06), use_q=True, level=.05, dot="below
 
 
 def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), level=.05, diagram_fs=1.6,
-                        name="stable_diagrams"):
+                        name="stable_diagrams", edge_rule="above_chance_all"):
     """Figure 3's state diagram twice -- task (left) and person (right) -- with the transitions and
     occupancies that pass the tests in the blue of the Median Transition point: the VPC significantly on the stated side
     of the guide (one-sided; dot="below": VPC < .06, stable), p or q < level (.05 = *, .01 = **).
@@ -1966,7 +1995,7 @@ def fig_stable_diagrams(co, tab, use_q=True, dot="below", guides=(.01, .06), lev
     T_ref = np.mean([g[0] for g in graphs.values()], axis=0)
     o_ref = np.mean([g[1] for g in graphs.values()], axis=0)
     off = [(a, b) for a in range(K) for b in range(K) if a != b]
-    top = set(sorted(off, key=lambda e: -T_ref[e])[:cfg.edge_top])
+    top = set(preferred_edges({c: g[:2] for c, g in graphs.items()}, T_ref, o_ref, edge_rule, cfg.edge_top))
     fig, axes = plt.subplots(1, 2, figsize=(11, 5.6))
     green = FAMILY_COL["transitions"]                   # the blue of the Median Transition point
     for ax, k in zip(axes, ("task", "person")):
