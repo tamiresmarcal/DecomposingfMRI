@@ -1152,3 +1152,74 @@ def fig_scatter(pred, cfg, title, name="E1b_scatter", jitter=.18, n_boot=500):
     layout(fig, cfg)
     save(fig, name, cfg)
     plt.show()
+
+
+def group_differences(st, space, grp):
+    """One row per (task, phenotype, variable): Cohen's d of the phenotype group vs Normal (pooled
+    SD, unadjusted), with the covariate-adjusted test of Study.group_tests (p, and q = BH-FDR within
+    each task x phenotype). Cells as p(j | i), occupancy and dynamics -- what the diagrams show."""
+    from fmri_decomposition.supervised_model.hads import conditional
+    rows = []
+    for task in st.cfg.tasks:
+        tab = st.table(space, task)
+        m = st.groups(tab)
+        dc = conditional(tab, space["K"]).reset_index(drop=True)
+        for lab in st.cfg.targets:
+            g = grp[(grp["task"] == task) & (grp["phenotype"] == lab)]
+            for r in g.itertuples():
+                if r.variable not in dc:
+                    continue
+                a = dc.loc[m[lab], r.variable].astype(float).dropna()
+                b = dc.loc[m["Normal"], r.variable].astype(float).dropna()
+                if len(a) < 2 or len(b) < 2:
+                    continue
+                sd = np.sqrt(((len(a) - 1) * a.var() + (len(b) - 1) * b.var()) / (len(a) + len(b) - 2))
+                rows.append(dict(task=task, phenotype=lab, block=r.block, variable=r.variable,
+                                 d=(a.mean() - b.mean()) / sd if sd > 0 else np.nan,
+                                 p=r.p, q=r.p_fdr, n_group=len(a), n_normal=len(b)))
+    return pd.DataFrame(rows)
+
+
+def fig_group_differences(gd, cfg, top_n=None, stars="q", min_d=0.2, name="group_differences",
+                          show=True):
+    """Every brain-state variable, phenotype group vs Normal: one figure per phenotype, columns =
+    tasks; horizontal bars = Cohen's d (colour = variable type), sorted; * / ** = q (or p) < .05 /
+    .01 of the covariate-adjusted test; dashed lines at +-min_d (the Figure 5 threshold).
+    top_n: only the top_n largest |d| per panel (None = every variable)."""
+    from fmri_decomposition.figures import state_names as sn
+    tasks, figs = list(cfg.tasks), []
+    for lab in cfg.targets:
+        panels = {t: gd[(gd["phenotype"] == lab) & (gd["task"] == t)].dropna(subset=["d"]) for t in tasks}
+        if top_n:
+            panels = {t: v.loc[v["d"].abs().nlargest(top_n).index] for t, v in panels.items()}
+        n = max([len(v) for v in panels.values()] + [1])
+        fig, axes = plt.subplots(1, len(tasks), figsize=(7 * len(tasks), .9 + .17 * n), squeeze=False)
+        for ax, t in zip(axes[0], tasks):
+            v = panels[t].sort_values("d")
+            y = np.arange(len(v))
+            ax.barh(y, v["d"], color=[BLOCK_COLOUR.get(b, GREY) for b in v["block"]], height=.75, lw=0)
+            for yy, (dd, s) in enumerate(zip(v["d"], v[stars])):
+                if np.isfinite(s) and s < .05:
+                    ax.text(dd + (.01 if dd >= 0 else -.01), yy, "**" if s < .01 else "*", va="center",
+                            ha="left" if dd >= 0 else "right", fontsize=8, color=INK)
+            for x in (-min_d, min_d):
+                ax.axvline(x, color=MUTED, lw=.8, ls="--")
+            ax.axvline(0, color=INK2, lw=.6)
+            ax.set_yticks(y, [sn.var_label(x) if not str(x).startswith(("switch", "mean_", "entropy",
+                              "dispersion", "n_", "switches")) else x for x in v["variable"]], fontsize=7)
+            ax.set_ylim(-.7, max(len(v), 1) - .3)
+            ax.set_xlabel("Cohen's d vs Normal")
+            nn = (f" (n = {int(v['n_group'].iloc[0])} vs {int(v['n_normal'].iloc[0])})" if len(v) else "")
+            ax.set_title(f"{t} · {lab}{nn}", fontsize=10)
+            for sp in ("top", "right"):
+                ax.spines[sp].set_visible(False)
+        fig.legend(handles=[Patch(color=BLOCK_COLOUR[b], label=b) for b in ("cells", "occupancy", "dynamics")]
+                   + [Line2D([], [], ls="none", label=f"* {stars} < .05, ** < .01 (adjusted for the covariates, "
+                                                      f"FDR within panel); dashed: |d| = {min_d}")],
+                   loc="lower center", ncol=4, fontsize=8)
+        fig.tight_layout(rect=(0, .04, 1, 1))
+        save(fig, f"{name}_{lab}", cfg)
+        if show:
+            plt.show()
+        figs.append(fig)
+    return figs
